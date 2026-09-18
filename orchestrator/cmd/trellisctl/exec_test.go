@@ -54,8 +54,8 @@ func TestExecCommandWritesStreamsAndPreservesExitStatus(t *testing.T) {
 	if stdout.String() != "stdout" {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
-	if stderr.String() != "stderr" {
-		t.Fatalf("stderr = %q", stderr.String())
+	if got := stderr.String(); !strings.HasPrefix(got, "stderr") || !strings.Contains(got, "remote command exited with status 7") {
+		t.Fatalf("stderr = %q", got)
 	}
 }
 
