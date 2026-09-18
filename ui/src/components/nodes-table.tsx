@@ -90,6 +90,7 @@ export function NodesTable() {
             {nodes.map((node) => {
               const labels = Object.entries(node.labels ?? {});
               const volumes = node.volumes ?? [];
+              const capabilities = node.capabilities ?? [];
               return (
                 <tr key={node.id} className="align-top transition-colors hover:bg-muted/30">
                   <td className="px-4 py-3">
@@ -106,7 +107,7 @@ export function NodesTable() {
                     <p className="mt-0.5 tabular-nums text-xs text-muted-foreground">{formatBytes(node.memory)}</p>
                   </td>
                   <td className="max-w-sm px-4 py-3">
-                    {labels.length === 0 && volumes.length === 0 ? (
+                    {labels.length === 0 && volumes.length === 0 && capabilities.length === 0 ? (
                       <span className="text-muted-foreground">—</span>
                     ) : (
                       <div className="space-y-2">
@@ -122,6 +123,11 @@ export function NodesTable() {
                         {volumes.length > 0 && (
                           <p className="text-xs text-muted-foreground">
                             Volumes: {volumes.join(", ")}
+                          </p>
+                        )}
+                        {capabilities.length > 0 && (
+                          <p className="text-xs text-muted-foreground">
+                            Capabilities: {capabilities.join(", ")}
                           </p>
                         )}
                       </div>

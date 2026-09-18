@@ -391,7 +391,7 @@ func (h *Handler) handleRegisterNode(c *echo.Context) error {
 	}
 	if err := h.server.RegisterNode(c.Request().Context(), &NodeRegistration{
 		ID: request.ID, Host: request.Host, Port: request.Port, CPU: request.CPU, Memory: request.Memory,
-		OS: request.OS, Arch: request.Arch, Labels: request.Labels, Volumes: request.Volumes,
+		OS: request.OS, Arch: request.Arch, Labels: request.Labels, Volumes: request.Volumes, Capabilities: request.Capabilities,
 		WireGuardPublicKey: request.WireGuardPublicKey, WireGuardEndpoint: request.WireGuardEndpoint,
 	}); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "unable to register node")
@@ -411,7 +411,7 @@ func (h *Handler) handleHeartbeat(c *echo.Context) error {
 	if err := c.Bind(&request); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 	}
-	if err := h.server.Heartbeat(c.Request().Context(), id, request.Allocations, request.Version, request.Volumes); err != nil {
+	if err := h.server.Heartbeat(c.Request().Context(), id, request.Allocations, request.Version, request.Volumes, request.Capabilities); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "unable to process heartbeat")
 	}
 	return c.JSON(http.StatusOK, h.server.HeartbeatResponse(id))
@@ -586,7 +586,7 @@ func (h *Handler) convertNode(node *Node) *api.NodeResponse {
 	return &api.NodeResponse{
 		ID: node.ID, Host: node.Host, Port: node.Port, Status: api.NodeStatusResponse(node.Status),
 		LastHeartbeat: node.LastHeartbeat, CPU: node.CPU, Memory: node.Memory, OS: node.OS, Arch: node.Arch, Labels: node.Labels,
-		Volumes: node.Volumes, Version: node.Version,
+		Volumes: node.Volumes, Capabilities: node.Capabilities, Version: node.Version,
 	}
 }
 

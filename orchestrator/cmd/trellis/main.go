@@ -18,6 +18,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	goruntime "runtime"
@@ -39,6 +40,7 @@ import (
 	containerruntime "github.com/clofour/trellis/internal/runtime"
 	secretstore "github.com/clofour/trellis/internal/secrets"
 	"github.com/clofour/trellis/internal/server"
+	"github.com/clofour/trellis/internal/spec"
 	"github.com/clofour/trellis/internal/state"
 	"github.com/clofour/trellis/internal/storage"
 	"github.com/clofour/trellis/internal/tlsutil"
@@ -321,6 +323,7 @@ func run(parent context.Context, cfg *config) error {
 		memory = int64(sysinfo.Totalram) * int64(sysinfo.Unit)
 	}
 	ag.SetResources(goruntime.NumCPU()*1000, memory, goruntime.GOOS, goruntime.GOARCH)
+	ag.SetCapabilities(detectNodeCapabilities(cfg.Runtime))
 	if len(cfg.Labels) > 0 {
 		labels, err := parseLabels(cfg.Labels)
 		if err != nil {
@@ -414,6 +417,31 @@ func run(parent context.Context, cfg *config) error {
 			}
 		}
 	}
+}
+
+func detectNodeCapabilities(runtimeName string) []spec.NodeCapability {
+	if runtimeName == "injected" {
+		return []spec.NodeCapability{spec.CapabilityRunsc, spec.CapabilityNamespaceNetworking}
+	}
+	var capabilities []spec.NodeCapability
+	if _, err := exec.LookPath("runsc"); err == nil {
+		if config, err := os.ReadFile("/etc/containerd/config.toml"); err == nil && bytes.Contains(config, []byte("io.containerd.runsc.v1")) {
+			capabilities = append(capabilities, spec.CapabilityRunsc)
+		}
+	}
+	if goruntime.GOOS == "linux" && commandsAvailable("wg", "ip", "iptables") {
+		capabilities = append(capabilities, spec.CapabilityNamespaceNetworking)
+	}
+	return capabilities
+}
+
+func commandsAvailable(commands ...string) bool {
+	for _, command := range commands {
+		if _, err := exec.LookPath(command); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func waitForRaftSync(ctx context.Context, store *state.RaftStore) error {

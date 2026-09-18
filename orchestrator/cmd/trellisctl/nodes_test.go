@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/clofour/trellis/internal/api"
+	"github.com/clofour/trellis/internal/spec"
 	"github.com/google/uuid"
 )
 
@@ -66,6 +67,7 @@ func TestPrintNodeStatusShowsPlacementMetadata(t *testing.T) {
 		Arch:          "amd64",
 		Labels:        map[string]string{"zone": "a", "storage": "fast"},
 		Volumes:       []string{"data", "cache"},
+		Capabilities:  []spec.NodeCapability{spec.CapabilityRunsc},
 		Version:       "v0.1.0",
 	}
 	var out bytes.Buffer
@@ -81,6 +83,7 @@ func TestPrintNodeStatusShowsPlacementMetadata(t *testing.T) {
 		"  storage=fast",
 		"  zone=a",
 		"Volume registrations:\n  cache\n  data",
+		"Capabilities:\n  runtime.runsc",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("status output missing %q:\n%s", want, text)

@@ -12,6 +12,7 @@ export interface Node {
   arch?: string;
   labels?: Record<string, string>;
   volumes?: string[];
+  capabilities?: string[];
 }
 
 export interface PortMapping {
@@ -21,6 +22,7 @@ export interface PortMapping {
 
 export type AllocationPhase =
   | "placed"
+  | "pending"
   | "starting"
   | "running"
   | "stopping"

@@ -20,7 +20,7 @@ The API uses the same resource vocabulary as the [Trellis user model](../public/
 |---|---|---|
 | `GET` | `/metrics` | Prometheus metrics. |
 | `GET` | `/v1/auth/whoami` | Return the current credential kind, scope, access, namespace, and available provenance metadata. |
-| `GET` | `/v1/nodes` | List node capacity/status; requires cluster scope. |
+| `GET` | `/v1/nodes` | List node capacity, discovered capabilities, and status; requires cluster scope. |
 | `POST` / `DELETE` | `/v1/nodes/{id}/drain` | Drain or undrain; requires `cluster/write`. |
 | `GET`, `POST` | `/v1/jobs` | List jobs or submit `{"spec": JobSpec}`. |
 | `POST` | `/v1/jobs/plan` | Validate and calculate the authoritative semantic plan for a `JobSpec`. |
@@ -64,7 +64,7 @@ A namespace credential is authorized only for its stored namespace regardless of
 
 ## Bootstrap and cluster-internal endpoints
 
-`POST /v1/credentials`, `GET /v1/backup`, `POST /v1/backup/restore`, `POST /v1/nodes`, `POST /v1/nodes/{id}/heartbeat`, `POST /v1/raft/join`, `DELETE /v1/raft/members/{id}`, and `POST /v1/raft/leadership-transfer` require the bootstrap credential. Agent port 8127 exposes internal allocation operations authenticated with the node bootstrap credential. These cluster-internal APIs are not a substitute for ordinary scoped operator access.
+`POST /v1/credentials`, `GET /v1/backup`, `POST /v1/backup/restore`, `POST /v1/nodes`, `POST /v1/nodes/{id}/heartbeat`, `POST /v1/raft/join`, `DELETE /v1/raft/members/{id}`, and `POST /v1/raft/leadership-transfer` require the bootstrap credential. Node registration and heartbeats include discovered capabilities. The scheduler derives requirements from workload runtime and networking fields; a pending allocation whose eligible nodes lack a required feature reports `missing_capability` and names the feature in its diagnostic message. Agent port 8127 exposes internal allocation operations authenticated with the node bootstrap credential. These cluster-internal APIs are not a substitute for ordinary scoped operator access.
 
 ## Example
 

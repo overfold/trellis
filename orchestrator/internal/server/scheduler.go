@@ -19,6 +19,7 @@ type PlacementIntent struct {
 	Allocations   []*Allocation
 	Tasks         []spec.TaskSpec
 	Constraints   []spec.ConstraintSpec
+	RequiredCapabilities []spec.NodeCapability
 	// VolumeOwners maps namespace/name volume registrations to their owning node.
 	// Schedule mutates the map when it places the first allocation for a volume.
 	VolumeOwners map[string]uuid.UUID
@@ -70,7 +71,7 @@ func Schedule(intent *PlacementIntent) []Placement {
 			}
 		}
 		for _, node := range nodes {
-			if node.Status != NodeStatusHealthy || !nodeMatchesConstraints(node, intent.Constraints) || !nodeHasTaskVolumes(node.ID, intent.Namespace, intent.Tasks, intent.VolumeOwners) {
+			if node.Status != NodeStatusHealthy || !nodeMatchesConstraints(node, intent.Constraints) || !nodeHasTaskVolumes(node.ID, intent.Namespace, intent.Tasks, intent.VolumeOwners) || !nodeHasCapabilities(node, intent.RequiredCapabilities) {
 				continue
 			}
 			if (node.CPU > 0 && usedCPU[node.ID]+reqCPU > node.CPU) || (node.Memory > 0 && usedMemory[node.ID]+reqMemory > node.Memory) {
@@ -105,6 +106,15 @@ func Schedule(intent *PlacementIntent) []Placement {
 	}
 
 	return result
+}
+
+func nodeHasCapabilities(node *Node, required []spec.NodeCapability) bool {
+	for _, capability := range required {
+		if !slices.Contains(node.Capabilities, capability) {
+			return false
+		}
+	}
+	return true
 }
 
 func volumeRegistrationKey(namespace, name string) string { return namespace + "/" + name }

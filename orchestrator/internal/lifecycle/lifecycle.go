@@ -9,6 +9,8 @@ import (
 type Phase string
 
 const (
+	// PhasePending describes an allocation waiting for a compatible node.
+	PhasePending Phase = "pending"
 	// PhasePlaced describes an allocation accepted for placement.
 	PhasePlaced Phase = "placed"
 	// PhaseStarting and the following values describe subsequent execution states.
@@ -38,6 +40,7 @@ const (
 )
 
 var transitions = map[Phase]map[Phase]bool{
+	PhasePending:  {PhasePlaced: true, PhaseStopping: true},
 	PhasePlaced:   {PhaseStarting: true, PhaseStopping: true, PhaseFailed: true, PhaseLost: true},
 	PhaseStarting: {PhaseRunning: true, PhaseStopping: true, PhaseFailed: true, PhaseLost: true},
 	PhaseRunning:  {PhaseStopping: true, PhaseFailed: true, PhaseLost: true},

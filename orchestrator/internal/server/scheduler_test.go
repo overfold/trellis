@@ -25,6 +25,16 @@ func TestScheduleBalancesAndSkipsUnhealthyNodes(t *testing.T) {
 	}
 }
 
+func TestScheduleRequiresNodeCapabilities(t *testing.T) {
+	runsc := &Node{ID: uuid.New(), Status: NodeStatusHealthy, Capabilities: []spec.NodeCapability{spec.CapabilityRunsc}}
+	plain := &Node{ID: uuid.New(), Status: NodeStatusHealthy}
+
+	placements := Schedule(&PlacementIntent{Count: 1, Nodes: []*Node{plain, runsc}, RequiredCapabilities: []spec.NodeCapability{spec.CapabilityRunsc}})
+	if len(placements) != 1 || placements[0].NodeID != runsc.ID {
+		t.Fatalf("placements = %#v, want runsc node", placements)
+	}
+}
+
 func TestScheduleRequiresRegisteredNamespaceVolumeOwner(t *testing.T) {
 	a := &Node{ID: uuid.New(), Status: NodeStatusHealthy}
 	b := &Node{ID: uuid.New(), Status: NodeStatusHealthy}

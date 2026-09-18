@@ -3,8 +3,9 @@ package lifecycle
 import "testing"
 
 func TestTransitions(t *testing.T) {
-	phases := []Phase{PhasePlaced, PhaseStarting, PhaseRunning, PhaseStopping, PhaseStopped, PhaseFailed, PhaseLost}
+	phases := []Phase{PhasePending, PhasePlaced, PhaseStarting, PhaseRunning, PhaseStopping, PhaseStopped, PhaseFailed, PhaseLost}
 	allowed := map[Phase]map[Phase]bool{
+		PhasePending:  {PhasePlaced: true, PhaseStopping: true},
 		PhasePlaced:   {PhaseStarting: true, PhaseStopping: true, PhaseFailed: true, PhaseLost: true},
 		PhaseStarting: {PhaseRunning: true, PhaseStopping: true, PhaseFailed: true, PhaseLost: true},
 		PhaseRunning:  {PhaseStopping: true, PhaseFailed: true, PhaseLost: true},

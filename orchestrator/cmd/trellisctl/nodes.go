@@ -195,14 +195,28 @@ func printNodeStatus(w interface{ Write([]byte) (int, error) }, node api.NodeRes
 	volumes := append([]string(nil), node.Volumes...)
 	sort.Strings(volumes)
 	if len(volumes) == 0 {
-		_, err := fmt.Fprintln(w, "Volume registrations: none")
+		if _, err := fmt.Fprintln(w, "Volume registrations: none"); err != nil {
+			return err
+		}
+	} else {
+		if _, err := fmt.Fprintln(w, "Volume registrations:"); err != nil {
+			return err
+		}
+		for _, volume := range volumes {
+			if _, err := fmt.Fprintf(w, "  %s\n", volume); err != nil {
+				return err
+			}
+		}
+	}
+	if len(node.Capabilities) == 0 {
+		_, err := fmt.Fprintln(w, "Capabilities: none")
 		return err
 	}
-	if _, err := fmt.Fprintln(w, "Volume registrations:"); err != nil {
+	if _, err := fmt.Fprintln(w, "Capabilities:"); err != nil {
 		return err
 	}
-	for _, volume := range volumes {
-		if _, err := fmt.Fprintf(w, "  %s\n", volume); err != nil {
+	for _, capability := range node.Capabilities {
+		if _, err := fmt.Fprintf(w, "  %s\n", capability); err != nil {
 			return err
 		}
 	}

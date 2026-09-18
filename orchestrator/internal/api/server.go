@@ -47,6 +47,7 @@ type NodeResponse struct {
 	Arch          string             `json:"arch,omitempty"`
 	Labels        map[string]string  `json:"labels,omitempty"`
 	Volumes       []string           `json:"volumes,omitempty"`
+	Capabilities  []spec.NodeCapability `json:"capabilities,omitempty"`
 	Version       string             `json:"version,omitempty"`
 }
 
@@ -64,6 +65,7 @@ type NodeRegistrationRequest struct {
 	Arch               string            `json:"arch"`
 	Labels             map[string]string `json:"labels,omitempty"`
 	Volumes            []string          `json:"volumes,omitempty"`
+	Capabilities       []spec.NodeCapability `json:"capabilities,omitempty"`
 	WireGuardPublicKey string            `json:"wireguard_public_key,omitempty"`
 	WireGuardEndpoint  string            `json:"wireguard_endpoint,omitempty"`
 }
@@ -79,6 +81,7 @@ type HeartbeatRequest struct {
 	Timestamp   time.Time          `json:"timestamp"`
 	Allocations []AllocationStatus `json:"allocations,omitempty"`
 	Volumes     []string           `json:"volumes,omitempty"`
+	Capabilities []spec.NodeCapability `json:"capabilities,omitempty"`
 	Version     string             `json:"version,omitempty"`
 }
 

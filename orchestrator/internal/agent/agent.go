@@ -194,6 +194,11 @@ func (a *Agent) SetResources(cpu int, memory int64, osName, arch string) {
 	a.nodeInfo.CPU, a.nodeInfo.Memory, a.nodeInfo.OS, a.nodeInfo.Arch = cpu, memory, osName, arch
 }
 
+// SetCapabilities configures the features this node has verified locally.
+func (a *Agent) SetCapabilities(capabilities []spec.NodeCapability) {
+	a.nodeInfo.Capabilities = append([]spec.NodeCapability(nil), capabilities...)
+}
+
 // SetLabels configures node scheduling labels.
 func (a *Agent) SetLabels(labels map[string]string) {
 	a.nodeInfo.Labels = labels
@@ -1052,6 +1057,7 @@ func (a *Agent) runHeartbeatLoop(ctx context.Context) {
 				Timestamp:   time.Now(),
 				Allocations: actual,
 				Volumes:     a.volumes.AvailableHostVolumes(),
+				Capabilities: a.nodeInfo.Capabilities,
 				Version:     a.version,
 			})
 			if err != nil {

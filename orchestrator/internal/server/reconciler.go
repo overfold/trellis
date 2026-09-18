@@ -116,6 +116,11 @@ func (s *Server) Reconcile(ctx context.Context) {
 	for _, allocation := range s.allocations {
 		allocation.mu.Lock()
 		job := s.jobs[jobKey(allocation.Namespace, allocation.JobName)]
+		if allocation.Phase == lifecycle.PhasePending {
+			valid = append(valid, allocation)
+			allocation.mu.Unlock()
+			continue
+		}
 		if allocation.Phase == lifecycle.PhaseStopped || allocation.Phase == lifecycle.PhaseFailed || allocation.Phase == lifecycle.PhaseLost {
 			allocation.mu.Unlock()
 			continue
@@ -179,11 +184,14 @@ func (s *Server) Reconcile(ctx context.Context) {
 		namespace := job.Spec.Namespace
 		for _, group := range job.Spec.TaskGroups {
 			var current []*Allocation
+			var pending []*Allocation
 			var draining []*Allocation
 			for _, alloc := range valid {
 				if alloc.Namespace == namespace && alloc.JobName == jobName && alloc.TaskGroupName == group.Name {
 					if alloc.Draining {
 						draining = append(draining, alloc)
+					} else if alloc.Phase == lifecycle.PhasePending {
+						pending = append(pending, alloc)
 					} else {
 						current = append(current, alloc)
 					}
@@ -225,14 +233,30 @@ func (s *Server) Reconcile(ctx context.Context) {
 					}
 				}
 			}
-			placements := Schedule(&PlacementIntent{Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Count: deficit, Nodes: s.nodePointers(), Allocations: valid, Tasks: group.Tasks, Constraints: group.Constraints, VolumeOwners: volumeOwners})
-			for _, placement := range placements {
+			requiredCapabilities := spec.GroupRequiredCapabilities(&group)
+			placements := Schedule(&PlacementIntent{Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Count: deficit, Nodes: s.nodePointers(), Allocations: valid, Tasks: group.Tasks, Constraints: group.Constraints, RequiredCapabilities: requiredCapabilities, VolumeOwners: volumeOwners})
+			for i, placement := range placements {
 				node := s.nodes[placement.NodeID]
+				if i < len(pending) {
+					allocation := pending[i]
+					allocation.Node = node
+					_ = allocation.Transition(lifecycle.PhasePlaced, now, "", "")
+					actions = append(actions, Action{Type: ActionStart, Allocation: allocation})
+					continue
+				}
 				name := fmt.Sprintf("%s-%s-%s-%s", namespace, jobName, group.Name, uuid.NewString()[:8])
 				allocation := &Allocation{ID: name, Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Tasks: group.Tasks, Node: node, Generation: 1, JobRevision: job.Revision, Phase: lifecycle.PhasePlaced, Health: lifecycle.HealthUnknown, Diagnostic: lifecycle.Diagnostic{CreatedAt: now, TransitionedAt: now}}
 				actions = append(actions, Action{Type: ActionStart, Allocation: allocation})
 				newAllocations = append(newAllocations, allocation)
 				valid = append(valid, allocation)
+			}
+			if len(placements) == 0 && len(pending) == 0 && len(requiredCapabilities) > 0 && noCompatibleCapabilityNode(s.nodePointers(), group.Constraints, group.Tasks, volumeOwners, namespace, requiredCapabilities) {
+				for i := 0; i < deficit; i++ {
+					name := fmt.Sprintf("%s-%s-%s-%s", namespace, jobName, group.Name, uuid.NewString()[:8])
+					allocation := &Allocation{ID: name, Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Tasks: group.Tasks, Generation: 1, JobRevision: job.Revision, Phase: lifecycle.PhasePending, Health: lifecycle.HealthUnknown, Diagnostic: lifecycle.Diagnostic{CreatedAt: now, TransitionedAt: now, Reason: "missing_capability", Message: fmt.Sprintf("no eligible node supports required capabilities: %s", strings.Join(capabilityNames(requiredCapabilities), ", "))}}
+					newAllocations = append(newAllocations, allocation)
+					valid = append(valid, allocation)
+				}
 			}
 		}
 	}
@@ -252,6 +276,15 @@ func (s *Server) Reconcile(ctx context.Context) {
 			return
 		}
 	}
+	for _, allocation := range newAllocations {
+		if allocation.Phase != lifecycle.PhasePending {
+			continue
+		}
+		if err := s.state.PutAllocation(ctx, allocation); err != nil {
+			s.log.Error("persist pending allocation", "allocation", allocation.ID, "error", err)
+			return
+		}
+	}
 	if len(newAllocations) > 0 {
 		s.mu.Lock()
 		s.allocations = append(s.allocations, newAllocations...)
@@ -264,6 +297,28 @@ func (s *Server) Reconcile(ctx context.Context) {
 		}
 	}
 	s.refreshCatalog()
+}
+
+func noCompatibleCapabilityNode(nodes []*Node, constraints []spec.ConstraintSpec, tasks []spec.TaskSpec, volumeOwners map[string]uuid.UUID, namespace string, required []spec.NodeCapability) bool {
+	hasCandidate := false
+	for _, node := range nodes {
+		if node.Status != NodeStatusHealthy || !nodeMatchesConstraints(node, constraints) || !nodeHasTaskVolumes(node.ID, namespace, tasks, volumeOwners) {
+			continue
+		}
+		hasCandidate = true
+		if nodeHasCapabilities(node, required) {
+			return false
+		}
+	}
+	return hasCandidate
+}
+
+func capabilityNames(capabilities []spec.NodeCapability) []string {
+	names := make([]string, len(capabilities))
+	for i, capability := range capabilities {
+		names[i] = string(capability)
+	}
+	return names
 }
 
 func (s *Server) nodePointers() []*Node {

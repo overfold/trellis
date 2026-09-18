@@ -143,6 +143,7 @@ type NodeInfo struct {
 	Arch               string
 	Labels             map[string]string
 	Volumes            []string
+	Capabilities       []spec.NodeCapability
 	WireGuardPublicKey string
 	WireGuardEndpoint  string
 }
@@ -153,6 +154,7 @@ type Heartbeat struct {
 	Timestamp   time.Time              `json:"timestamp"`
 	Allocations []api.AllocationStatus `json:"allocations,omitempty"`
 	Volumes     []string               `json:"volumes,omitempty"`
+	Capabilities []spec.NodeCapability `json:"capabilities,omitempty"`
 	Version     string                 `json:"version,omitempty"`
 }
 
@@ -233,6 +235,7 @@ func (s *ServerClient) RegisterNode(ctx context.Context, nodeInfo *NodeInfo) (*a
 		Arch:               nodeInfo.Arch,
 		Labels:             nodeInfo.Labels,
 		Volumes:            nodeInfo.Volumes,
+		Capabilities:       nodeInfo.Capabilities,
 		WireGuardPublicKey: nodeInfo.WireGuardPublicKey,
 		WireGuardEndpoint:  nodeInfo.WireGuardEndpoint,
 	}
@@ -358,6 +361,7 @@ func (s *ServerClient) SendHeartbeat(ctx context.Context, id uuid.UUID, heartbea
 		Timestamp:   heartbeat.Timestamp,
 		Allocations: heartbeat.Allocations,
 		Volumes:     heartbeat.Volumes,
+		Capabilities: heartbeat.Capabilities,
 		Version:     heartbeat.Version,
 	}
 	url := fmt.Sprintf("%s/v1/nodes/%s/heartbeat", s.address(), id)
