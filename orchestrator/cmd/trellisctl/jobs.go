@@ -112,7 +112,7 @@ func NewJobsApplyCmd() *cobra.Command {
 		},
 	}
 	flags := cmd.Flags()
-	flags.StringVar(&path, "file", "trellis.yaml", "YAML job manifest path (deprecated when SOURCE is provided)")
+	flags.StringVar(&path, "file", "trellis.yaml", "YAML job manifest path")
 	flags.BoolVar(&check, "check", false, "Validate the manifest locally without contacting a cluster")
 	flags.BoolVar(&dryRun, "dry-run", false, "Validate and show the plan without changing the cluster")
 	flags.BoolVarP(&wait, "wait", "w", false, "Wait until desired job capacity is healthy")
