@@ -699,7 +699,7 @@ func (a *Agent) ExecAllocation(ctx context.Context, allocID, task string, comman
 }
 
 // CreateExecSession starts a persistent interactive terminal in an allocation task.
-func (a *Agent) CreateExecSession(ctx context.Context, allocID, task string, command []string, cols, rows uint32) (*api.ExecSessionResponse, error) {
+func (a *Agent) CreateExecSession(ctx context.Context, allocID, task string, command []string, term string, cols, rows uint32) (*api.ExecSessionResponse, error) {
 	a.mu.RLock()
 	var containerID, taskName string
 	for _, alloc := range a.allocations {
@@ -713,10 +713,7 @@ func (a *Agent) CreateExecSession(ctx context.Context, allocID, task string, com
 	if containerID == "" {
 		return nil, fmt.Errorf("%w: %s", ErrAllocationNotFound, allocID)
 	}
-	if len(command) == 0 {
-		command = []string{"/bin/sh"}
-	}
-	terminal, err := a.runtime.StartTerminal(ctx, containerID, command, cols, rows)
+	terminal, err := a.runtime.StartTerminal(ctx, containerID, command, term, cols, rows)
 	if err != nil {
 		return nil, fmt.Errorf("start terminal in container %s: %w", containerID, err)
 	}
