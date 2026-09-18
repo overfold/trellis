@@ -76,7 +76,7 @@ type ContainerRuntime interface {
 	// and exit code. The command must not require a terminal.
 	ExecOutput(ctx context.Context, containerID string, command []string) (stdout []byte, stderr []byte, exitCode int, err error)
 	// StartTerminal starts an interactive TTY-backed process inside a container.
-	StartTerminal(ctx context.Context, containerID string, command []string, cols, rows uint32) (TerminalSession, error)
+	StartTerminal(ctx context.Context, containerID string, command []string, term string, cols, rows uint32) (TerminalSession, error)
 	// Metrics returns a point-in-time resource usage snapshot for a container.
 	Metrics(ctx context.Context, containerID string) (*ContainerMetrics, error)
 	Inspect(ctx context.Context, containerID string) (*ContainerInfo, error)
