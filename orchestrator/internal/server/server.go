@@ -971,46 +971,105 @@ func (s *Server) ListJobRevisions(ctx context.Context, namespace, name string) (
 	return result, nil
 }
 
-// ExecAllocation runs a command in an allocation task container.
-func (s *Server) ExecAllocation(ctx context.Context, namespace, id, task string, command []string) (*api.ExecResponse, error) {
+func (s *Server) allocationAgentAddress(namespace, id string) (string, []spec.TaskSpec, error) {
 	s.mu.RLock()
-	var found *Allocation
+	defer s.mu.RUnlock()
 	for _, alloc := range s.allocations {
 		if alloc.ID == id && alloc.Namespace == namespace {
-			found = alloc
-			break
+			if alloc.Node == nil {
+				return "", nil, fmt.Errorf("allocation not found")
+			}
+			return fmt.Sprintf("%s:%d", alloc.Node.Host, alloc.Node.Port), append([]spec.TaskSpec(nil), alloc.Tasks...), nil
 		}
 	}
-	if found == nil || found.Node == nil {
-		s.mu.RUnlock()
-		return nil, fmt.Errorf("allocation not found")
-	}
-	address := fmt.Sprintf("%s:%d", found.Node.Host, found.Node.Port)
-	tasks := append([]spec.TaskSpec(nil), found.Tasks...)
-	s.mu.RUnlock()
+	return "", nil, fmt.Errorf("allocation not found")
+}
 
+func resolveExecTask(id, task string, tasks []spec.TaskSpec) (string, error) {
 	if task == "" {
 		switch len(tasks) {
 		case 1:
-			task = tasks[0].Name
+			return tasks[0].Name, nil
 		case 0:
+			return "", nil
 		default:
-			return nil, fmt.Errorf("%w: allocation %s has multiple tasks; specify task", ErrTaskSelection, id)
-		}
-	} else if len(tasks) > 0 {
-		found := false
-		for _, t := range tasks {
-			if t.Name == task {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return nil, fmt.Errorf("%w: allocation %s has no task %q", ErrTaskSelection, id, task)
+			return "", fmt.Errorf("%w: allocation %s has multiple tasks; specify task", ErrTaskSelection, id)
 		}
 	}
+	if len(tasks) > 0 {
+		for _, candidate := range tasks {
+			if candidate.Name == task {
+				return task, nil
+			}
+		}
+		return "", fmt.Errorf("%w: allocation %s has no task %q", ErrTaskSelection, id, task)
+	}
+	return task, nil
+}
 
+// ExecAllocation runs a command in an allocation task container.
+func (s *Server) ExecAllocation(ctx context.Context, namespace, id, task string, command []string) (*api.ExecResponse, error) {
+	address, tasks, err := s.allocationAgentAddress(namespace, id)
+	if err != nil {
+		return nil, err
+	}
+	task, err = resolveExecTask(id, task, tasks)
+	if err != nil {
+		return nil, err
+	}
 	return s.client.ExecAllocation(ctx, address, id, task, command)
+}
+
+// CreateExecSession starts a persistent interactive terminal in an allocation task.
+func (s *Server) CreateExecSession(ctx context.Context, namespace, id string, request *api.ExecSessionCreateRequest) (*api.ExecSessionResponse, error) {
+	address, tasks, err := s.allocationAgentAddress(namespace, id)
+	if err != nil {
+		return nil, err
+	}
+	request.Task, err = resolveExecTask(id, request.Task, tasks)
+	if err != nil {
+		return nil, err
+	}
+	if len(request.Command) == 0 {
+		request.Command = []string{"/bin/sh"}
+	}
+	return s.client.CreateExecSession(ctx, address, id, request)
+}
+
+// WriteExecSession sends input to an interactive allocation terminal.
+func (s *Server) WriteExecSession(ctx context.Context, namespace, id, sessionID string, request *api.ExecSessionInputRequest) error {
+	address, _, err := s.allocationAgentAddress(namespace, id)
+	if err != nil {
+		return err
+	}
+	return s.client.WriteExecSession(ctx, address, id, sessionID, request)
+}
+
+// ReadExecSession reads output from an interactive allocation terminal.
+func (s *Server) ReadExecSession(ctx context.Context, namespace, id, sessionID string, offset int64) (*api.ExecSessionOutputResponse, error) {
+	address, _, err := s.allocationAgentAddress(namespace, id)
+	if err != nil {
+		return nil, err
+	}
+	return s.client.ReadExecSession(ctx, address, id, sessionID, offset)
+}
+
+// ResizeExecSession changes an interactive allocation terminal's dimensions.
+func (s *Server) ResizeExecSession(ctx context.Context, namespace, id, sessionID string, request *api.ExecSessionResizeRequest) error {
+	address, _, err := s.allocationAgentAddress(namespace, id)
+	if err != nil {
+		return err
+	}
+	return s.client.ResizeExecSession(ctx, address, id, sessionID, request)
+}
+
+// CloseExecSession terminates an interactive allocation terminal.
+func (s *Server) CloseExecSession(ctx context.Context, namespace, id, sessionID string) error {
+	address, _, err := s.allocationAgentAddress(namespace, id)
+	if err != nil {
+		return err
+	}
+	return s.client.CloseExecSession(ctx, address, id, sessionID)
 }
 
 // AllocationMetrics returns resource usage for all tasks in an allocation.
