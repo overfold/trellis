@@ -182,6 +182,28 @@ Following needs exactly one task stream. Combine the short allocation reference 
 trellisctl jobs logs web --allocation a1b2c3d4 --task app --follow
 ```
 
+## Run commands and open an allocation terminal
+
+`trellisctl exec` targets a Trellis allocation directly. Without a TTY it runs one command, writes the remote stdout/stderr to the matching local streams, and returns the remote exit status:
+
+```sh
+trellisctl exec a1b2c3d4 -- /app/bin/migrate --check
+```
+
+When the allocation contains multiple tasks, select one explicitly:
+
+```sh
+trellisctl exec --task app a1b2c3d4 -- /app/bin/status
+```
+
+For an interactive container terminal, add `-it` (or `--tty --stdin`) and provide the shell or program to start:
+
+```sh
+trellisctl exec -it --task app a1b2c3d4 -- /bin/sh
+```
+
+Trellis deliberately does not choose a shell for the caller, so the command after `--` is always required. TTY mode uses the persistent exec-session API, forwards terminal bytes in both directions, restores the local terminal on exit, and tracks local terminal-size changes. The remote `TERM` value defaults to the local `TERM`, then `xterm-256color` when the local environment does not provide one; override it with `--term` when needed.
+
 ## Delete and wait for removal
 
 ```sh
@@ -245,7 +267,7 @@ trellisctl namespaces list --output json
 trellisctl nodes status worker-2 -o json
 ```
 
-`jobs logs` remains a log byte stream, while `jobs apply`, `jobs status --watch`, `jobs delete`, node mutation commands, backup operations, and context mutation commands remain human/action workflows rather than pretending to produce a stable JSON document.
+`jobs logs` remains a log byte stream and `exec` remains a command/terminal stream, while `jobs apply`, `jobs status --watch`, `jobs delete`, node mutation commands, backup operations, and context mutation commands remain human/action workflows rather than pretending to produce a stable JSON document.
 
 Explicit `--server-addr`, `--token`, `--namespace`, TLS flags, and `TRELLIS_*` environment variables override saved context values. Named contexts are therefore an interactive convenience, not a hidden requirement for automation.
 
