@@ -233,7 +233,8 @@ type ExecResponse struct {
 // ExecSessionCreateRequest starts an interactive TTY session in an allocation task.
 type ExecSessionCreateRequest struct {
 	Task    string   `json:"task,omitempty"`
-	Command []string `json:"command,omitempty"`
+	Command []string `json:"command"`
+	Term    string   `json:"term,omitempty"`
 	Cols    uint32   `json:"cols,omitempty"`
 	Rows    uint32   `json:"rows,omitempty"`
 }
