@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -492,6 +493,179 @@ func (c *ContainerdRuntime) ExecOutput(ctx context.Context, containerID string, 
 	}
 
 	return outBuf.Bytes(), errBuf.Bytes(), int(code), nil
+}
+
+const terminalOutputLimit = 2 * 1024 * 1024
+
+type terminalOutputBuffer struct {
+	mu   sync.Mutex
+	base int64
+	data []byte
+}
+
+func (b *terminalOutputBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.data = append(b.data, p...)
+	if len(b.data) > terminalOutputLimit {
+		drop := len(b.data) - terminalOutputLimit
+		b.data = append([]byte(nil), b.data[drop:]...)
+		b.base += int64(drop)
+	}
+	return len(p), nil
+}
+
+func (b *terminalOutputBuffer) read(offset int64) ([]byte, int64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if offset < b.base {
+		offset = b.base
+	}
+	end := b.base + int64(len(b.data))
+	if offset > end {
+		offset = end
+	}
+	start := int(offset - b.base)
+	return append([]byte(nil), b.data[start:]...), end
+}
+
+type containerdTerminalSession struct {
+	stdin   *io.PipeWriter
+	output  *terminalOutputBuffer
+	process containerd.Process
+
+	mu       sync.RWMutex
+	exited   bool
+	exitCode *int
+}
+
+func (s *containerdTerminalSession) Write(p []byte) (int, error) {
+	s.mu.RLock()
+	exited := s.exited
+	s.mu.RUnlock()
+	if exited {
+		return 0, io.ErrClosedPipe
+	}
+	return s.stdin.Write(p)
+}
+
+func (s *containerdTerminalSession) Read(offset int64) ([]byte, int64, bool, *int, error) {
+	data, next := s.output.read(offset)
+	s.mu.RLock()
+	exited := s.exited
+	var code *int
+	if s.exitCode != nil {
+		copyCode := *s.exitCode
+		code = &copyCode
+	}
+	s.mu.RUnlock()
+	return data, next, exited, code, nil
+}
+
+func (s *containerdTerminalSession) Resize(ctx context.Context, cols, rows uint32) error {
+	if cols == 0 || rows == 0 {
+		return fmt.Errorf("terminal dimensions must be greater than zero")
+	}
+	s.mu.RLock()
+	exited := s.exited
+	s.mu.RUnlock()
+	if exited {
+		return nil
+	}
+	return s.process.Resize(ctx, cols, rows)
+}
+
+func (s *containerdTerminalSession) Close(ctx context.Context) error {
+	_ = s.stdin.Close()
+	s.mu.RLock()
+	exited := s.exited
+	s.mu.RUnlock()
+	if exited {
+		return nil
+	}
+	if err := s.process.Kill(ctx, syscall.SIGKILL); err != nil && !errdefs.IsNotFound(err) {
+		return err
+	}
+	return nil
+}
+
+// StartTerminal starts an interactive TTY-backed process in a container.
+func (c *ContainerdRuntime) StartTerminal(ctx context.Context, containerID string, command []string, cols, rows uint32) (TerminalSession, error) {
+	if len(command) == 0 {
+		return nil, fmt.Errorf("terminal command is required")
+	}
+	ctx = context.WithoutCancel(c.withNamespace(ctx))
+
+	container, err := c.client.LoadContainer(ctx, containerID)
+	if err != nil {
+		return nil, fmt.Errorf("loading container %s: %w", containerID, err)
+	}
+	task, err := container.Task(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("getting task for %s: %w", containerID, err)
+	}
+
+	processSpec := &specs.Process{Args: command, Cwd: "/", Terminal: true}
+	if containerSpec, specErr := container.Spec(ctx); specErr == nil && containerSpec.Process != nil {
+		processSpec.Env = containerSpec.Process.Env
+		processSpec.User = containerSpec.Process.User
+		if containerSpec.Process.Cwd != "" {
+			processSpec.Cwd = containerSpec.Process.Cwd
+		}
+	}
+
+	stdinReader, stdinWriter := io.Pipe()
+	output := &terminalOutputBuffer{}
+	creator := cio.NewCreator(cio.WithStreams(stdinReader, output, nil), cio.WithTerminal)
+	execID := fmt.Sprintf("terminal-%d", time.Now().UnixNano())
+	process, err := task.Exec(ctx, execID, processSpec, creator)
+	if err != nil {
+		_ = stdinReader.Close()
+		_ = stdinWriter.Close()
+		return nil, fmt.Errorf("constructing terminal exec for %s: %w", containerID, err)
+	}
+	exitCh, err := process.Wait(ctx)
+	if err != nil {
+		_ = stdinReader.Close()
+		_ = stdinWriter.Close()
+		_, _ = process.Delete(ctx)
+		return nil, fmt.Errorf("waiting on terminal exec for %s: %w", containerID, err)
+	}
+	if err := process.Start(ctx); err != nil {
+		_ = stdinReader.Close()
+		_ = stdinWriter.Close()
+		_, _ = process.Delete(ctx)
+		return nil, fmt.Errorf("starting terminal exec for %s: %w", containerID, err)
+	}
+	if cols > 0 && rows > 0 {
+		if err := process.Resize(ctx, cols, rows); err != nil {
+			_ = process.Kill(ctx, syscall.SIGKILL)
+			_ = stdinReader.Close()
+			_ = stdinWriter.Close()
+			_, _ = process.Delete(ctx)
+			return nil, fmt.Errorf("resize terminal exec for %s: %w", containerID, err)
+		}
+	}
+
+	session := &containerdTerminalSession{
+		stdin: stdinWriter, output: output, process: process,
+	}
+	go func() {
+		status := <-exitCh
+		code, _, resultErr := status.Result()
+		session.mu.Lock()
+		session.exited = true
+		if resultErr == nil {
+			value := int(code)
+			session.exitCode = &value
+		}
+		session.mu.Unlock()
+		_ = stdinWriter.Close()
+		_ = stdinReader.Close()
+		_, _ = process.Delete(ctx)
+	}()
+
+	return session, nil
 }
 
 // Metrics returns a point-in-time resource usage snapshot for a container.
