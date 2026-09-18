@@ -170,7 +170,9 @@ func fetchGitHubManifestFile(ctx context.Context, repository githubManifestSourc
 	if err != nil {
 		return nil, fmt.Errorf("fetch %s: %w", githubManifestLabel(repository, name), err)
 	}
-	defer response.Body.Close()
+	defer func() {
+		_ = response.Body.Close()
+	}()
 
 	if response.StatusCode == http.StatusNotFound {
 		return nil, errRemoteManifestNotFound
