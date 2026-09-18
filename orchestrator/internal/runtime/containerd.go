@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -591,7 +590,7 @@ func (s *containerdTerminalSession) Close(ctx context.Context) error {
 }
 
 // StartTerminal starts an interactive TTY-backed process in a container.
-func (c *ContainerdRuntime) StartTerminal(ctx context.Context, containerID string, command []string, cols, rows uint32) (TerminalSession, error) {
+func (c *ContainerdRuntime) StartTerminal(ctx context.Context, containerID string, command []string, term string, cols, rows uint32) (TerminalSession, error) {
 	if len(command) == 0 {
 		return nil, fmt.Errorf("terminal command is required")
 	}
@@ -614,15 +613,15 @@ func (c *ContainerdRuntime) StartTerminal(ctx context.Context, containerID strin
 			processSpec.Cwd = containerSpec.Process.Cwd
 		}
 	}
-	hasTerm := false
-	for _, value := range processSpec.Env {
-		if strings.HasPrefix(value, "TERM=") {
-			hasTerm = true
-			break
+	if term != "" {
+		env := make([]string, 0, len(processSpec.Env)+1)
+		for _, value := range processSpec.Env {
+			if len(value) >= 5 && value[:5] == "TERM=" {
+				continue
+			}
+			env = append(env, value)
 		}
-	}
-	if !hasTerm {
-		processSpec.Env = append(processSpec.Env, "TERM=xterm-256color")
+		processSpec.Env = append(env, "TERM="+term)
 	}
 
 	stdinReader, stdinWriter := io.Pipe()
