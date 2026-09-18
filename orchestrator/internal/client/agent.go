@@ -110,6 +110,53 @@ func (s *AgentClient) ExecAllocation(ctx context.Context, address, allocID, task
 	}, nil
 }
 
+// CreateExecSession starts an interactive terminal in an allocation task via an agent.
+func (s *AgentClient) CreateExecSession(ctx context.Context, address, allocID string, request *api.ExecSessionCreateRequest) (*api.ExecSessionResponse, error) {
+	var response api.ExecSessionResponse
+	err := s.client.request(ctx, http.MethodPost, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(allocID)+"/exec/sessions", request, &response)
+	if err != nil {
+		return nil, fmt.Errorf("create exec session: %w", err)
+	}
+	return &response, nil
+}
+
+// WriteExecSession sends terminal input to an allocation task via an agent.
+func (s *AgentClient) WriteExecSession(ctx context.Context, address, allocID, sessionID string, request *api.ExecSessionInputRequest) error {
+	err := s.client.request(ctx, http.MethodPost, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(allocID)+"/exec/sessions/"+url.PathEscape(sessionID)+"/input", request, nil)
+	if err != nil {
+		return fmt.Errorf("write exec session: %w", err)
+	}
+	return nil
+}
+
+// ReadExecSession reads terminal output from an allocation task via an agent.
+func (s *AgentClient) ReadExecSession(ctx context.Context, address, allocID, sessionID string, offset int64) (*api.ExecSessionOutputResponse, error) {
+	var response api.ExecSessionOutputResponse
+	path := normalizeBaseURL(address) + "/v1/allocations/" + url.PathEscape(allocID) + "/exec/sessions/" + url.PathEscape(sessionID) + "/output?offset=" + strconv.FormatInt(offset, 10)
+	if err := s.client.request(ctx, http.MethodGet, path, nil, &response); err != nil {
+		return nil, fmt.Errorf("read exec session: %w", err)
+	}
+	return &response, nil
+}
+
+// ResizeExecSession changes terminal dimensions via an agent.
+func (s *AgentClient) ResizeExecSession(ctx context.Context, address, allocID, sessionID string, request *api.ExecSessionResizeRequest) error {
+	err := s.client.request(ctx, http.MethodPost, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(allocID)+"/exec/sessions/"+url.PathEscape(sessionID)+"/resize", request, nil)
+	if err != nil {
+		return fmt.Errorf("resize exec session: %w", err)
+	}
+	return nil
+}
+
+// CloseExecSession terminates an interactive terminal via an agent.
+func (s *AgentClient) CloseExecSession(ctx context.Context, address, allocID, sessionID string) error {
+	err := s.client.request(ctx, http.MethodDelete, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(allocID)+"/exec/sessions/"+url.PathEscape(sessionID), nil, nil)
+	if err != nil {
+		return fmt.Errorf("close exec session: %w", err)
+	}
+	return nil
+}
+
 // AllocationMetrics fetches resource usage for an allocation's tasks from an agent.
 func (s *AgentClient) AllocationMetrics(ctx context.Context, address, allocID string) (api.AllocationMetricsListResponse, error) {
 	var response []api.AgentTaskMetrics
