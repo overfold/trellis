@@ -59,6 +59,33 @@ trellisctl namespaces list
 
 A namespace-scoped credential sees only its own namespace. A cluster-scoped credential sees the known desired-job namespaces across the cluster. Applying a job to a new valid namespace is still allowed; after the job exists, that namespace appears in discovery. Use `--output json` when automation needs the array directly.
 
+## Apply manifest sources
+
+`jobs apply` accepts a local manifest path or a GitHub repository as its optional positional source:
+
+```sh
+trellisctl jobs apply ./trellis.yaml
+trellisctl jobs apply github.com/overfold/example-app
+trellisctl jobs apply https://github.com/overfold/example-app
+```
+
+For a GitHub repository, `trellisctl` looks for `trellis.yml` at the repository root and falls back to `trellis.yaml`. The repository's default branch is used unless a ref is pinned:
+
+```sh
+trellisctl jobs apply github.com/overfold/example-app@v1.4.0
+trellisctl jobs apply https://github.com/overfold/example-app/tree/v1.4.0
+```
+
+Pin a tag or commit when reproducibility matters. Public repositories need no GitHub credentials. For private repositories, set `GH_TOKEN` or `GITHUB_TOKEN` to a token that can read the repository. Remote manifests use exactly the same parser, validator, plan, and apply path as local manifests; the control plane still receives the canonical job model rather than YAML or a repository URL.
+
+The existing explicit `--file` form remains supported:
+
+```sh
+trellisctl jobs apply --file trellis.yaml
+```
+
+Do not combine a positional source with `--file`.
+
 ## Check and preview a manifest
 
 Local validation is a mode of `apply`; it does not modify or contact the cluster:
