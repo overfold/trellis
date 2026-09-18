@@ -52,6 +52,19 @@ func TestJobsCommandSurface(t *testing.T) {
 	}
 }
 
+
+func TestJobsApplyRejectsSourceAndFile(t *testing.T) {
+	cmd := NewJobsApplyCmd()
+	cmd.SetArgs([]string{"github.com/overfold/example-app"})
+	if err := cmd.Flags().Set("file", "trellis.yaml"); err != nil {
+		t.Fatal(err)
+	}
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "SOURCE and --file cannot be used together") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestPrintJobPlanFormatsHumanDurations(t *testing.T) {
 	previousOutput := config.Output
 	config.Output = "table"
