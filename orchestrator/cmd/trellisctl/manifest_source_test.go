@@ -41,6 +41,13 @@ func TestParseGitHubManifestSource(t *testing.T) {
 			wantRemote: true,
 			want:       githubManifestSource{Owner: "overfold", Repo: "bower", Ref: "main"},
 		},
+		{
+			name:       "case insensitive host",
+			input:      "https://GitHub.com/overfold/bower",
+			wantRemote: true,
+			want:       githubManifestSource{Owner: "overfold", Repo: "bower"},
+		},
+		{name: "empty pinned ref", input: "github.com/overfold/bower@", wantErr: "ref must not be empty"},
 		{name: "insecure github", input: "http://github.com/overfold/bower", wantErr: "must use https"},
 		{name: "unsupported remote", input: "https://example.com/trellis.yml", wantErr: "only GitHub repository URLs are supported"},
 		{name: "blob URL", input: "https://github.com/overfold/bower/blob/main/trellis.yml", wantErr: "repository root or /tree/REF"},
