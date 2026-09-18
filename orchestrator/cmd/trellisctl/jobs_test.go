@@ -52,7 +52,6 @@ func TestJobsCommandSurface(t *testing.T) {
 	}
 }
 
-
 func TestJobsApplyRejectsSourceAndFile(t *testing.T) {
 	cmd := NewJobsApplyCmd()
 	cmd.SetArgs([]string{"github.com/overfold/example-app"})
