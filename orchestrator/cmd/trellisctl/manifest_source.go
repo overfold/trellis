@@ -60,24 +60,21 @@ func readManifestSource(ctx context.Context, source string) ([]byte, string, err
 
 func parseGitHubManifestSource(source string) (githubManifestSource, bool, error) {
 	candidate := strings.TrimSpace(source)
-	if strings.HasPrefix(candidate, "github.com/") || strings.HasPrefix(candidate, "www.github.com/") {
+	lowerCandidate := strings.ToLower(candidate)
+	if strings.HasPrefix(lowerCandidate, "github.com/") || strings.HasPrefix(lowerCandidate, "www.github.com/") {
 		candidate = "https://" + candidate
-	}
-	if !strings.HasPrefix(candidate, "https://github.com/") &&
-		!strings.HasPrefix(candidate, "https://www.github.com/") &&
-		!strings.HasPrefix(candidate, "http://github.com/") &&
-		!strings.HasPrefix(candidate, "http://www.github.com/") {
-		if strings.Contains(candidate, "://") {
-			return githubManifestSource{}, false, fmt.Errorf("unsupported remote manifest source %q: only GitHub repository URLs are supported", source)
-		}
+	} else if !strings.Contains(candidate, "://") {
 		return githubManifestSource{}, false, nil
 	}
 
 	parsed, err := url.Parse(candidate)
 	if err != nil {
-		return githubManifestSource{}, false, fmt.Errorf("parse GitHub repository URL %q: %w", source, err)
+		return githubManifestSource{}, false, fmt.Errorf("parse remote manifest source %q: %w", source, err)
 	}
-	if parsed.Scheme != "https" {
+	if !strings.EqualFold(parsed.Hostname(), "github.com") && !strings.EqualFold(parsed.Hostname(), "www.github.com") {
+		return githubManifestSource{}, false, fmt.Errorf("unsupported remote manifest source %q: only GitHub repository URLs are supported", source)
+	}
+	if !strings.EqualFold(parsed.Scheme, "https") {
 		return githubManifestSource{}, false, fmt.Errorf("GitHub repository URL must use https: %q", source)
 	}
 	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
@@ -104,12 +101,17 @@ func parseGitHubManifestSource(source string) (githubManifestSource, bool, error
 		return githubManifestSource{}, false, fmt.Errorf("GitHub source must point to a repository root or /tree/REF: %q", source)
 	}
 
+	hadInlineRef := false
 	if at := strings.LastIndex(repoPart, "@"); at >= 0 {
+		hadInlineRef = true
 		if ref != "" {
 			return githubManifestSource{}, false, fmt.Errorf("GitHub source cannot specify a ref twice: %q", source)
 		}
 		ref = repoPart[at+1:]
 		repoPart = repoPart[:at]
+	}
+	if hadInlineRef && ref == "" {
+		return githubManifestSource{}, false, fmt.Errorf("GitHub repository ref must not be empty: %q", source)
 	}
 	repo := strings.TrimSuffix(repoPart, ".git")
 	if owner == "" || repo == "" {
@@ -118,10 +120,6 @@ func parseGitHubManifestSource(source string) (githubManifestSource, bool, error
 	if strings.Contains(owner, "@") || strings.Contains(repo, "@") {
 		return githubManifestSource{}, false, fmt.Errorf("invalid GitHub repository source %q", source)
 	}
-	if ref == "" && strings.HasSuffix(repoPart, "@") {
-		return githubManifestSource{}, false, fmt.Errorf("GitHub repository ref must not be empty: %q", source)
-	}
-
 	return githubManifestSource{Owner: owner, Repo: repo, Ref: ref}, true, nil
 }
 
