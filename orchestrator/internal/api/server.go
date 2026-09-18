@@ -230,6 +230,39 @@ type ExecResponse struct {
 	ExitCode int    `json:"exit_code"`
 }
 
+// ExecSessionCreateRequest starts an interactive TTY session in an allocation task.
+type ExecSessionCreateRequest struct {
+	Task    string   `json:"task,omitempty"`
+	Command []string `json:"command"`
+	Term    string   `json:"term,omitempty"`
+	Cols    uint32   `json:"cols,omitempty"`
+	Rows    uint32   `json:"rows,omitempty"`
+}
+
+// ExecSessionResponse identifies a live interactive exec session.
+type ExecSessionResponse struct {
+	ID string `json:"id"`
+}
+
+// ExecSessionInputRequest appends terminal input bytes encoded as base64.
+type ExecSessionInputRequest struct {
+	DataBase64 string `json:"data_base64"`
+}
+
+// ExecSessionResizeRequest updates the terminal dimensions.
+type ExecSessionResizeRequest struct {
+	Cols uint32 `json:"cols"`
+	Rows uint32 `json:"rows"`
+}
+
+// ExecSessionOutputResponse returns terminal bytes since a byte offset.
+type ExecSessionOutputResponse struct {
+	DataBase64 string `json:"data_base64,omitempty"`
+	NextOffset int64  `json:"next_offset"`
+	Exited     bool   `json:"exited"`
+	ExitCode   *int   `json:"exit_code,omitempty"`
+}
+
 // EventType identifies the kind of a cluster event.
 type EventType string
 

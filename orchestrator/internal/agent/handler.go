@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,6 +33,11 @@ func (h *Handler) Register(e *echo.Echo) {
 	v1.DELETE("/allocations/:id", h.handleDelete)
 	v1.GET("/allocations/:id/logs", h.handleLogs)
 	v1.POST("/allocations/:id/exec", h.handleExec)
+	v1.POST("/allocations/:id/exec/sessions", h.handleCreateExecSession)
+	v1.POST("/allocations/:id/exec/sessions/:session/input", h.handleExecSessionInput)
+	v1.GET("/allocations/:id/exec/sessions/:session/output", h.handleExecSessionOutput)
+	v1.POST("/allocations/:id/exec/sessions/:session/resize", h.handleExecSessionResize)
+	v1.DELETE("/allocations/:id/exec/sessions/:session", h.handleExecSessionClose)
 	v1.GET("/allocations/:id/metrics", h.handleMetrics)
 }
 
@@ -147,6 +153,99 @@ func (h *Handler) handleExec(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 	return c.JSON(http.StatusOK, result)
+}
+
+func (h *Handler) handleCreateExecSession(c *echo.Context) error {
+	var request api.ExecSessionCreateRequest
+	if err := c.Bind(&request); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	}
+	if len(request.Command) == 0 {
+		return echo.NewHTTPError(http.StatusBadRequest, "command is required")
+	}
+	if request.Cols == 0 {
+		request.Cols = 80
+	}
+	if request.Rows == 0 {
+		request.Rows = 24
+	}
+	if request.Cols > 1000 || request.Rows > 1000 {
+		return echo.NewHTTPError(http.StatusBadRequest, "terminal dimensions are too large")
+	}
+	result, err := h.agent.CreateExecSession(c.Request().Context(), c.Param("id"), request.Task, request.Command, request.Term, request.Cols, request.Rows)
+	if err != nil {
+		if errors.Is(err, ErrAllocationNotFound) {
+			return echo.NewHTTPError(http.StatusNotFound, err.Error())
+		}
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	return c.JSON(http.StatusCreated, result)
+}
+
+func (h *Handler) handleExecSessionInput(c *echo.Context) error {
+	var request api.ExecSessionInputRequest
+	if err := c.Bind(&request); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	}
+	data, err := base64.StdEncoding.DecodeString(request.DataBase64)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "data_base64 must contain valid base64")
+	}
+	if len(data) > 64*1024 {
+		return echo.NewHTTPError(http.StatusRequestEntityTooLarge, "terminal input chunk is too large")
+	}
+	if err := h.agent.WriteExecSession(c.Param("id"), c.Param("session"), data); err != nil {
+		if errors.Is(err, ErrExecSessionNotFound) {
+			return echo.NewHTTPError(http.StatusNotFound, err.Error())
+		}
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
+func (h *Handler) handleExecSessionOutput(c *echo.Context) error {
+	offset, err := strconv.ParseInt(c.QueryParam("offset"), 10, 64)
+	if c.QueryParam("offset") == "" {
+		offset, err = 0, nil
+	}
+	if err != nil || offset < 0 {
+		return echo.NewHTTPError(http.StatusBadRequest, "offset must be a non-negative integer")
+	}
+	result, err := h.agent.ReadExecSession(c.Param("id"), c.Param("session"), offset)
+	if err != nil {
+		if errors.Is(err, ErrExecSessionNotFound) {
+			return echo.NewHTTPError(http.StatusNotFound, err.Error())
+		}
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (h *Handler) handleExecSessionResize(c *echo.Context) error {
+	var request api.ExecSessionResizeRequest
+	if err := c.Bind(&request); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	}
+	if request.Cols == 0 || request.Rows == 0 || request.Cols > 1000 || request.Rows > 1000 {
+		return echo.NewHTTPError(http.StatusBadRequest, "terminal dimensions must be between 1 and 1000")
+	}
+	if err := h.agent.ResizeExecSession(c.Request().Context(), c.Param("id"), c.Param("session"), request.Cols, request.Rows); err != nil {
+		if errors.Is(err, ErrExecSessionNotFound) {
+			return echo.NewHTTPError(http.StatusNotFound, err.Error())
+		}
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
+func (h *Handler) handleExecSessionClose(c *echo.Context) error {
+	if err := h.agent.CloseExecSession(c.Request().Context(), c.Param("id"), c.Param("session")); err != nil {
+		if errors.Is(err, ErrExecSessionNotFound) {
+			return echo.NewHTTPError(http.StatusNotFound, err.Error())
+		}
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	return c.NoContent(http.StatusNoContent)
 }
 
 func (h *Handler) handleMetrics(c *echo.Context) error {

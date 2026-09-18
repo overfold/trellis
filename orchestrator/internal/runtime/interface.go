@@ -54,6 +54,15 @@ type ContainerMetrics struct {
 	MemoryUsageBytes int64
 }
 
+// TerminalSession is a live TTY-backed process running inside a container.
+// Implementations must support concurrent output reads and input writes.
+type TerminalSession interface {
+	Write([]byte) (int, error)
+	Read(offset int64) (data []byte, nextOffset int64, exited bool, exitCode *int, err error)
+	Resize(ctx context.Context, cols, rows uint32) error
+	Close(ctx context.Context) error
+}
+
 // ContainerRuntime defines the operations required by an allocation runtime.
 type ContainerRuntime interface {
 	Pull(ctx context.Context, image string) error
@@ -66,6 +75,8 @@ type ContainerRuntime interface {
 	// ExecOutput runs a command in a container and returns its stdout, stderr,
 	// and exit code. The command must not require a terminal.
 	ExecOutput(ctx context.Context, containerID string, command []string) (stdout []byte, stderr []byte, exitCode int, err error)
+	// StartTerminal starts an interactive TTY-backed process inside a container.
+	StartTerminal(ctx context.Context, containerID string, command []string, term string, cols, rows uint32) (TerminalSession, error)
 	// Metrics returns a point-in-time resource usage snapshot for a container.
 	Metrics(ctx context.Context, containerID string) (*ContainerMetrics, error)
 	Inspect(ctx context.Context, containerID string) (*ContainerInfo, error)

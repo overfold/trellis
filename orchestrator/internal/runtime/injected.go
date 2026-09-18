@@ -119,6 +119,65 @@ func (r *InjectedRuntime) ExecOutput(context.Context, string, []string) ([]byte,
 	return nil, nil, 0, nil
 }
 
+type injectedTerminalSession struct {
+	mu       sync.Mutex
+	data     []byte
+	exited   bool
+	exitCode *int
+}
+
+func (s *injectedTerminalSession) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.exited {
+		return 0, io.ErrClosedPipe
+	}
+	s.data = append(s.data, p...)
+	return len(p), nil
+}
+
+func (s *injectedTerminalSession) Read(offset int64) ([]byte, int64, bool, *int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > int64(len(s.data)) {
+		offset = int64(len(s.data))
+	}
+	data := append([]byte(nil), s.data[int(offset):]...)
+	var code *int
+	if s.exitCode != nil {
+		value := *s.exitCode
+		code = &value
+	}
+	return data, int64(len(s.data)), s.exited, code, nil
+}
+
+func (s *injectedTerminalSession) Resize(context.Context, uint32, uint32) error { return nil }
+
+func (s *injectedTerminalSession) Close(context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.exited {
+		value := 0
+		s.exitCode = &value
+		s.exited = true
+	}
+	return nil
+}
+
+// StartTerminal creates an in-memory interactive session for integration tests.
+func (r *InjectedRuntime) StartTerminal(_ context.Context, id string, _ []string, _ string, _, _ uint32) (TerminalSession, error) {
+	r.mu.Lock()
+	_, ok := r.state.Containers[id]
+	r.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("container %s not found", id)
+	}
+	return &injectedTerminalSession{}, nil
+}
+
 // Metrics returns zero metrics for an injected container.
 func (r *InjectedRuntime) Metrics(context.Context, string) (*ContainerMetrics, error) {
 	return &ContainerMetrics{}, nil

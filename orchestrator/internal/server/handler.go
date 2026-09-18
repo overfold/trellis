@@ -139,6 +139,11 @@ func (h *Handler) Register(e *echo.Echo) {
 	v1.GET("/allocations/:id/events", h.handleAllocationEvents)
 	v1.GET("/allocations/:id/logs", h.handleAllocationLogs)
 	v1.POST("/allocations/:id/exec", h.handleExecAllocation)
+	v1.POST("/allocations/:id/exec/sessions", h.handleCreateExecSession)
+	v1.POST("/allocations/:id/exec/sessions/:session/input", h.handleExecSessionInput)
+	v1.GET("/allocations/:id/exec/sessions/:session/output", h.handleExecSessionOutput)
+	v1.POST("/allocations/:id/exec/sessions/:session/resize", h.handleExecSessionResize)
+	v1.DELETE("/allocations/:id/exec/sessions/:session", h.handleExecSessionClose)
 	v1.GET("/allocations/:id/metrics", h.handleAllocationMetrics)
 	v1.GET("/events", h.handleEvents)
 	v1.GET("/internal/discovery", h.handleListDiscovery)
@@ -632,6 +637,95 @@ func (h *Handler) handleExecAllocation(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusNotFound, err.Error())
 	}
 	return c.JSON(http.StatusOK, result)
+}
+
+func (h *Handler) handleCreateExecSession(c *echo.Context) error {
+	if err := requireWrite(c, "interactive exec requires write authorization"); err != nil {
+		return err
+	}
+	var request api.ExecSessionCreateRequest
+	if err := c.Bind(&request); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	}
+	if len(request.Command) == 0 {
+		return echo.NewHTTPError(http.StatusBadRequest, "command is required")
+	}
+	if request.Cols == 0 {
+		request.Cols = 80
+	}
+	if request.Rows == 0 {
+		request.Rows = 24
+	}
+	if request.Cols > 1000 || request.Rows > 1000 {
+		return echo.NewHTTPError(http.StatusBadRequest, "terminal dimensions are too large")
+	}
+	result, err := h.server.CreateExecSession(c.Request().Context(), requestNamespace(c), c.Param("id"), &request)
+	if errors.Is(err, ErrTaskSelection) {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+	if err != nil {
+		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+	}
+	return c.JSON(http.StatusCreated, result)
+}
+
+func (h *Handler) handleExecSessionInput(c *echo.Context) error {
+	if err := requireWrite(c, "interactive exec requires write authorization"); err != nil {
+		return err
+	}
+	var request api.ExecSessionInputRequest
+	if err := c.Bind(&request); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	}
+	if err := h.server.WriteExecSession(c.Request().Context(), requestNamespace(c), c.Param("id"), c.Param("session"), &request); err != nil {
+		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
+func (h *Handler) handleExecSessionOutput(c *echo.Context) error {
+	if err := requireWrite(c, "interactive exec requires write authorization"); err != nil {
+		return err
+	}
+	offset, err := strconv.ParseInt(c.QueryParam("offset"), 10, 64)
+	if c.QueryParam("offset") == "" {
+		offset, err = 0, nil
+	}
+	if err != nil || offset < 0 {
+		return echo.NewHTTPError(http.StatusBadRequest, "offset must be a non-negative integer")
+	}
+	result, err := h.server.ReadExecSession(c.Request().Context(), requestNamespace(c), c.Param("id"), c.Param("session"), offset)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (h *Handler) handleExecSessionResize(c *echo.Context) error {
+	if err := requireWrite(c, "interactive exec requires write authorization"); err != nil {
+		return err
+	}
+	var request api.ExecSessionResizeRequest
+	if err := c.Bind(&request); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	}
+	if request.Cols == 0 || request.Rows == 0 || request.Cols > 1000 || request.Rows > 1000 {
+		return echo.NewHTTPError(http.StatusBadRequest, "terminal dimensions must be between 1 and 1000")
+	}
+	if err := h.server.ResizeExecSession(c.Request().Context(), requestNamespace(c), c.Param("id"), c.Param("session"), &request); err != nil {
+		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
+func (h *Handler) handleExecSessionClose(c *echo.Context) error {
+	if err := requireWrite(c, "interactive exec requires write authorization"); err != nil {
+		return err
+	}
+	if err := h.server.CloseExecSession(c.Request().Context(), requestNamespace(c), c.Param("id"), c.Param("session")); err != nil {
+		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+	}
+	return c.NoContent(http.StatusNoContent)
 }
 
 func (h *Handler) handleAllocationMetrics(c *echo.Context) error {

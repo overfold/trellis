@@ -29,6 +29,10 @@ The API uses the same resource vocabulary as the [Trellis user model](../public/
 | `GET` | `/v1/allocations?label=key:value` | List/filter allocations. |
 | `GET` | `/v1/allocations/{id}/events` | Lifecycle event array. |
 | `GET` | `/v1/allocations/{id}/logs?task=NAME&tail=100&follow=true` | Plain-text logs for one task in an allocation. |
+| `POST` | `/v1/allocations/{id}/exec` | Run one non-interactive command and capture stdout/stderr; requires write access. |
+| `POST` | `/v1/allocations/{id}/exec/sessions` | Start an ephemeral interactive TTY session; requires write access. |
+| `POST` / `GET` / `DELETE` | `/v1/allocations/{id}/exec/sessions/{session}/...` | Write input, read output, resize, or close an interactive TTY session; requires write access. |
+| `GET` | `/v1/allocations/{id}/metrics` | Current per-task CPU and memory usage. |
 | `PUT` | `/v1/namespaces/{ns}/secrets/{name}` | Set a secret; requires `cluster/write`. |
 | `GET` | `/v1/namespaces/{ns}/secrets[/{name}]` | List/get secret metadata only; requires cluster scope. |
 | `DELETE` | `/v1/namespaces/{ns}/secrets/{name}` | Delete a secret; requires `cluster/write`. |
@@ -50,6 +54,9 @@ A bootstrap credential reports `kind: "bootstrap"`, `scope: "cluster"`, and `acc
 `GET /v1/namespaces` is discovery, not namespace lifecycle management. For cluster-scoped or bootstrap callers it returns the sorted unique namespace names currently referenced by desired jobs. A namespace-scoped caller receives only its own namespace. Applying a valid job to a previously unseen namespace does not require a separate namespace-creation call; after that desired job exists, the name becomes discoverable.
 
 For allocation logs, `task` selects the task name from the allocation's task group. It may be omitted when the allocation has exactly one task; a multi-task allocation returns `400` until the caller selects one. The allocation ID is the Trellis allocation identity, not an agent/container runtime ID.
+
+Interactive exec sessions use the same task-selection rule. Create a session with `POST /v1/allocations/{id}/exec/sessions` and a body such as `{"task":"web","command":["/bin/sh"],"term":"xterm-256color","cols":120,"rows":32}`. `command` is required; Trellis does not choose a shell for the client. `term` is optional and, when present, is carried into the OCI process as `TERM`; Trellis does not assume a terminal type. The response is `{"id":"..."}`. Terminal bytes are transported as base64: send `{"data_base64":"..."}` to `.../{session}/input`, poll `.../{session}/output?offset=N` for `data_base64`, `next_offset`, `exited`, and optional `exit_code`, send `{"cols":120,"rows":32}` to `.../{session}/resize`, and `DELETE` the session when finished. Sessions are node-local, ephemeral diagnostics state: they are not persisted in Raft and end when the process, allocation, or explicit session closes.
+
 
 Secret write body: `{"value_base64":"...","expected_version":1}`; omit `expected_version` for unconditional update. Lists are JSON arrays. Non-2xx responses are errors; clients must tolerate reconciliation-driven changes between reads.
 
