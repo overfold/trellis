@@ -52,13 +52,13 @@ type Agent struct {
 	mu         sync.RWMutex
 }
 
-// Allocation contains agent-local allocation state.
 type execSession struct {
 	AllocationID string
 	Task         string
 	Terminal     runtime.TerminalSession
 }
 
+// Allocation contains agent-local allocation state.
 type Allocation struct {
 	ID              string
 	AllocationID    string
