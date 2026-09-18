@@ -168,7 +168,7 @@ func (s *injectedTerminalSession) Close(context.Context) error {
 }
 
 // StartTerminal creates an in-memory interactive session for integration tests.
-func (r *InjectedRuntime) StartTerminal(_ context.Context, id string, _ []string, _, _ uint32) (TerminalSession, error) {
+func (r *InjectedRuntime) StartTerminal(_ context.Context, id string, _ []string, _ string, _, _ uint32) (TerminalSession, error) {
 	r.mu.Lock()
 	_, ok := r.state.Containers[id]
 	r.mu.Unlock()
