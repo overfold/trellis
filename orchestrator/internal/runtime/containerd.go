@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -607,11 +608,21 @@ func (c *ContainerdRuntime) StartTerminal(ctx context.Context, containerID strin
 
 	processSpec := &specs.Process{Args: command, Cwd: "/", Terminal: true}
 	if containerSpec, specErr := container.Spec(ctx); specErr == nil && containerSpec.Process != nil {
-		processSpec.Env = containerSpec.Process.Env
+		processSpec.Env = append([]string(nil), containerSpec.Process.Env...)
 		processSpec.User = containerSpec.Process.User
 		if containerSpec.Process.Cwd != "" {
 			processSpec.Cwd = containerSpec.Process.Cwd
 		}
+	}
+	hasTerm := false
+	for _, value := range processSpec.Env {
+		if strings.HasPrefix(value, "TERM=") {
+			hasTerm = true
+			break
+		}
+	}
+	if !hasTerm {
+		processSpec.Env = append(processSpec.Env, "TERM=xterm-256color")
 	}
 
 	stdinReader, stdinWriter := io.Pipe()
