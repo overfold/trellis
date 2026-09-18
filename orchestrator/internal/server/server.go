@@ -1030,9 +1030,6 @@ func (s *Server) CreateExecSession(ctx context.Context, namespace, id string, re
 	if err != nil {
 		return nil, err
 	}
-	if len(request.Command) == 0 {
-		request.Command = []string{"/bin/sh"}
-	}
 	return s.client.CreateExecSession(ctx, address, id, request)
 }
 
