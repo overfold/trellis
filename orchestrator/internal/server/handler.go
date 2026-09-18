@@ -647,6 +647,9 @@ func (h *Handler) handleCreateExecSession(c *echo.Context) error {
 	if err := c.Bind(&request); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 	}
+	if len(request.Command) == 0 {
+		return echo.NewHTTPError(http.StatusBadRequest, "command is required")
+	}
 	if request.Cols == 0 {
 		request.Cols = 80
 	}
