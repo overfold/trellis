@@ -160,6 +160,9 @@ func (h *Handler) handleCreateExecSession(c *echo.Context) error {
 	if err := c.Bind(&request); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 	}
+	if len(request.Command) == 0 {
+		return echo.NewHTTPError(http.StatusBadRequest, "command is required")
+	}
 	if request.Cols == 0 {
 		request.Cols = 80
 	}
@@ -169,7 +172,7 @@ func (h *Handler) handleCreateExecSession(c *echo.Context) error {
 	if request.Cols > 1000 || request.Rows > 1000 {
 		return echo.NewHTTPError(http.StatusBadRequest, "terminal dimensions are too large")
 	}
-	result, err := h.agent.CreateExecSession(c.Request().Context(), c.Param("id"), request.Task, request.Command, request.Cols, request.Rows)
+	result, err := h.agent.CreateExecSession(c.Request().Context(), c.Param("id"), request.Task, request.Command, request.Term, request.Cols, request.Rows)
 	if err != nil {
 		if errors.Is(err, ErrAllocationNotFound) {
 			return echo.NewHTTPError(http.StatusNotFound, err.Error())
