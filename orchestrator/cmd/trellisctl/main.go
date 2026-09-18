@@ -69,6 +69,7 @@ func newRootCmd() *cobra.Command {
 
 	root.AddCommand(NewContextCmd())
 	root.AddCommand(NewJobsCmd())
+	root.AddCommand(NewExecCmd())
 	root.AddCommand(NewNamespacesCmd())
 	root.AddCommand(NewNodesCmd())
 	root.AddCommand(NewSecretsCmd())
