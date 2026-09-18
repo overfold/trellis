@@ -24,6 +24,64 @@ type ServerClient struct {
 	mu      sync.RWMutex
 }
 
+// ExecAllocation runs a non-interactive command in an allocation task.
+func (s *ServerClient) ExecAllocation(ctx context.Context, id, task string, command []string) (*api.ExecResponse, error) {
+	request := api.ExecRequest{Task: task, Command: command}
+	var response api.ExecResponse
+	path := fmt.Sprintf("%s/v1/allocations/%s/exec", s.address(), url.PathEscape(id))
+	if err := s.client.request(ctx, http.MethodPost, path, &request, &response); err != nil {
+		return nil, fmt.Errorf("exec allocation: %w", err)
+	}
+	return &response, nil
+}
+
+// CreateExecSession starts an interactive terminal in an allocation task.
+func (s *ServerClient) CreateExecSession(ctx context.Context, id string, request *api.ExecSessionCreateRequest) (*api.ExecSessionResponse, error) {
+	var response api.ExecSessionResponse
+	path := fmt.Sprintf("%s/v1/allocations/%s/exec/sessions", s.address(), url.PathEscape(id))
+	if err := s.client.request(ctx, http.MethodPost, path, request, &response); err != nil {
+		return nil, fmt.Errorf("create exec session: %w", err)
+	}
+	return &response, nil
+}
+
+// WriteExecSession appends terminal input to an interactive allocation session.
+func (s *ServerClient) WriteExecSession(ctx context.Context, id, sessionID string, request *api.ExecSessionInputRequest) error {
+	path := fmt.Sprintf("%s/v1/allocations/%s/exec/sessions/%s/input", s.address(), url.PathEscape(id), url.PathEscape(sessionID))
+	if err := s.client.request(ctx, http.MethodPost, path, request, nil); err != nil {
+		return fmt.Errorf("write exec session: %w", err)
+	}
+	return nil
+}
+
+// ReadExecSession reads terminal output produced since offset.
+func (s *ServerClient) ReadExecSession(ctx context.Context, id, sessionID string, offset int64) (*api.ExecSessionOutputResponse, error) {
+	var response api.ExecSessionOutputResponse
+	path := fmt.Sprintf("%s/v1/allocations/%s/exec/sessions/%s/output?offset=%d", s.address(), url.PathEscape(id), url.PathEscape(sessionID), offset)
+	if err := s.client.request(ctx, http.MethodGet, path, nil, &response); err != nil {
+		return nil, fmt.Errorf("read exec session: %w", err)
+	}
+	return &response, nil
+}
+
+// ResizeExecSession changes the dimensions of an interactive allocation terminal.
+func (s *ServerClient) ResizeExecSession(ctx context.Context, id, sessionID string, request *api.ExecSessionResizeRequest) error {
+	path := fmt.Sprintf("%s/v1/allocations/%s/exec/sessions/%s/resize", s.address(), url.PathEscape(id), url.PathEscape(sessionID))
+	if err := s.client.request(ctx, http.MethodPost, path, request, nil); err != nil {
+		return fmt.Errorf("resize exec session: %w", err)
+	}
+	return nil
+}
+
+// CloseExecSession terminates an interactive allocation terminal.
+func (s *ServerClient) CloseExecSession(ctx context.Context, id, sessionID string) error {
+	path := fmt.Sprintf("%s/v1/allocations/%s/exec/sessions/%s", s.address(), url.PathEscape(id), url.PathEscape(sessionID))
+	if err := s.client.request(ctx, http.MethodDelete, path, nil, nil); err != nil {
+		return fmt.Errorf("close exec session: %w", err)
+	}
+	return nil
+}
+
 // AllocationLogs streams logs for an allocation.
 func (s *ServerClient) AllocationLogs(ctx context.Context, id string, follow bool, tail int) (io.ReadCloser, error) {
 	return s.client.stream(ctx, fmt.Sprintf("%s/v1/allocations/%s/logs?follow=%t&tail=%d", s.address(), url.PathEscape(id), follow, tail))

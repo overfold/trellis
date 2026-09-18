@@ -44,6 +44,10 @@ type fileConfig struct {
 
 func main() {
 	if err := newRootCmd().Execute(); err != nil {
+		var exitErr *execExitError
+		if errors.As(err, &exitErr) && exitErr.code > 0 && exitErr.code <= 255 {
+			os.Exit(exitErr.code)
+		}
 		os.Exit(1)
 	}
 }
@@ -69,6 +73,7 @@ func newRootCmd() *cobra.Command {
 
 	root.AddCommand(NewContextCmd())
 	root.AddCommand(NewJobsCmd())
+	root.AddCommand(NewExecCmd())
 	root.AddCommand(NewNamespacesCmd())
 	root.AddCommand(NewNodesCmd())
 	root.AddCommand(NewSecretsCmd())
