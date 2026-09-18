@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"os"
 	"text/tabwriter"
 	"time"
 
@@ -36,10 +35,11 @@ func NewJobsApplyCmd() *cobra.Command {
 	var timeout time.Duration
 	var interval time.Duration
 	cmd := &cobra.Command{
-		Use:   "apply",
+		Use:   "apply [SOURCE]",
+		Args:  cobra.MaximumNArgs(1),
 		Short: "Apply a YAML job manifest",
-		Long:  "Apply a YAML job manifest. Use --check for local validation, --dry-run to preview semantic changes, or --wait to follow the resulting revision until desired capacity is healthy.",
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		Long:  "Apply a YAML job manifest from a local file or GitHub repository. A GitHub repository is expected to contain trellis.yml or trellis.yaml at its root. Use --check for local validation, --dry-run to preview semantic changes, or --wait to follow the resulting revision until desired capacity is healthy.",
+		RunE: func(cmd *cobra.Command, args []string) error {
 			if check && dryRun {
 				return fmt.Errorf("--check and --dry-run cannot be used together")
 			}
@@ -49,7 +49,14 @@ func NewJobsApplyCmd() *cobra.Command {
 			if dryRun && wait {
 				return fmt.Errorf("--dry-run and --wait cannot be used together")
 			}
-			job, err := readJobManifest(path)
+			source := path
+			if len(args) == 1 {
+				if cmd.Flags().Changed("file") {
+					return fmt.Errorf("SOURCE and --file cannot be used together")
+				}
+				source = args[0]
+			}
+			job, err := readJobManifest(cmd.Context(), source)
 			if err != nil {
 				return err
 			}
@@ -105,7 +112,7 @@ func NewJobsApplyCmd() *cobra.Command {
 		},
 	}
 	flags := cmd.Flags()
-	flags.StringVar(&path, "file", "trellis.yaml", "YAML job manifest path")
+	flags.StringVar(&path, "file", "trellis.yaml", "YAML job manifest path (deprecated when SOURCE is provided)")
 	flags.BoolVar(&check, "check", false, "Validate the manifest locally without contacting a cluster")
 	flags.BoolVar(&dryRun, "dry-run", false, "Validate and show the plan without changing the cluster")
 	flags.BoolVarP(&wait, "wait", "w", false, "Wait until desired job capacity is healthy")
@@ -265,21 +272,6 @@ func NewJobsDeleteCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&timeout, "timeout", 2*time.Minute, "Maximum time to wait (0 means no timeout)")
 	cmd.Flags().DurationVar(&interval, "interval", time.Second, "Polling interval while waiting")
 	return cmd
-}
-
-func readJobManifest(path string) (*spec.JobSpec, error) {
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read file %s: %w", path, err)
-	}
-	job, err := spec.ParseYAML(content)
-	if err != nil {
-		return nil, fmt.Errorf("parse job manifest: %w", err)
-	}
-	if err := spec.Validate(job); err != nil {
-		return nil, fmt.Errorf("validate job manifest: %w", err)
-	}
-	return job, nil
 }
 
 func ensureActiveNamespace(job *spec.JobSpec) error {
