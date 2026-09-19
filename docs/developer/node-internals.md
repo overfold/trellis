@@ -6,7 +6,7 @@ The server submits one allocation containing all tasks in a group. The agent val
 
 ## Runtime abstraction
 
-`ContainerRuntime` provides create/start/stop/remove/status/list/log operations. `ManagedRuntime` adds lifecycle management. The containerd implementation creates OCI containers, applies task environment/resources/mounts/ports/runtime selection, and streams logs. `runc` is normal OCI execution; `runsc` requires a matching containerd runtime installation. `InjectedRuntime` and its fault file exist for deterministic tests and must not host real workloads.
+`ContainerRuntime` provides create/start/stop/remove/status/list/log and exec operations. `ManagedRuntime` adds lifecycle management. The containerd implementation creates OCI containers, applies task environment/resources/mounts/ports/runtime selection, and streams logs. Exec processes inherit the container's OCI environment, user, and working directory so one-shot commands, script health checks, and interactive terminals share the task process context. `runc` is normal OCI execution; `runsc` requires a matching containerd runtime installation. `InjectedRuntime` and its fault file exist for deterministic tests and must not host real workloads.
 
 ## Ports and health
 
