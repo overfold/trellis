@@ -146,6 +146,8 @@ type NodeInfo struct {
 	Capabilities       []spec.NodeCapability
 	WireGuardPublicKey string
 	WireGuardEndpoint  string
+	WireGuardPortBase  int
+	WireGuardPortCount int
 }
 
 // Heartbeat contains the state periodically reported by a node.
@@ -238,6 +240,8 @@ func (s *ServerClient) RegisterNode(ctx context.Context, nodeInfo *NodeInfo) (*a
 		Capabilities:       nodeInfo.Capabilities,
 		WireGuardPublicKey: nodeInfo.WireGuardPublicKey,
 		WireGuardEndpoint:  nodeInfo.WireGuardEndpoint,
+		WireGuardPortBase:  nodeInfo.WireGuardPortBase,
+		WireGuardPortCount: nodeInfo.WireGuardPortCount,
 	}
 	var responseData api.NodeRegistrationResponse
 
