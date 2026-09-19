@@ -52,6 +52,9 @@ func (s *StateController) PutNetworkPortRegistration(ctx context.Context, regist
 }
 
 func (s *Server) ensureNetworkPortRegistrations(ctx context.Context, namespaces []string) (map[string]int, error) {
+	if len(namespaces) == 0 {
+		return map[string]int{}, nil
+	}
 	s.networkPortMu.Lock()
 	defer s.networkPortMu.Unlock()
 
