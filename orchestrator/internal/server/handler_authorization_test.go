@@ -20,8 +20,8 @@ func scopedRequest(t *testing.T, method, target, body string, scope auth.AccessS
 }
 
 func TestPlanRejectsAPIAccessAboveCallerAuthority(t *testing.T) {
-	clusterWrite := `{"spec":{"name":"demo","namespace":"team","task_groups":[{"name":"web","count":1,"api_access":{"scope":"cluster","access":"write"},"tasks":[{"name":"app","image":"example.invalid/app:1"}]}]}}`
-	namespaceWrite := `{"spec":{"name":"demo","namespace":"team","task_groups":[{"name":"web","count":1,"api_access":{"scope":"namespace","access":"write"},"tasks":[{"name":"app","image":"example.invalid/app:1"}]}]}}`
+	clusterWrite := `{"spec":{"name":"demo","namespace":"team","task_groups":[{"name":"web","count":1,"api_access":{"scope":"cluster","access":"write"},"tasks":[{"name":"app","image":"example.invalid/app:1","networking":{"mode":"host"}}]}]}}`
+	namespaceWrite := `{"spec":{"name":"demo","namespace":"team","task_groups":[{"name":"web","count":1,"api_access":{"scope":"namespace","access":"write"},"tasks":[{"name":"app","image":"example.invalid/app:1","networking":{"mode":"host"}}]}]}}`
 
 	tests := []struct {
 		name      string
@@ -59,7 +59,7 @@ func TestPlanRejectsAPIAccessAboveCallerAuthority(t *testing.T) {
 }
 
 func TestApplyRejectsAPIAccessAboveCallerAuthority(t *testing.T) {
-	body := `{"spec":{"name":"demo","namespace":"team","task_groups":[{"name":"web","count":1,"api_access":{"scope":"cluster","access":"write"},"tasks":[{"name":"app","image":"example.invalid/app:1"}]}]}}`
+	body := `{"spec":{"name":"demo","namespace":"team","task_groups":[{"name":"web","count":1,"api_access":{"scope":"cluster","access":"write"},"tasks":[{"name":"app","image":"example.invalid/app:1","networking":{"mode":"host"}}]}]}}`
 	control := &Server{}
 	e := echo.New()
 	NewHandler(control).Register(e)
