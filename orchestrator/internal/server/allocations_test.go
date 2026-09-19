@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/clofour/trellis/internal/api"
 	"github.com/clofour/trellis/internal/lifecycle"
 	"github.com/clofour/trellis/internal/spec"
 	"github.com/google/uuid"
@@ -163,3 +164,65 @@ func TestAllocationEvents(t *testing.T) {
 		t.Fatal("expected not-found for unknown allocation")
 	}
 }
+
+func TestAllocationEndpointUsesObservedNetworkAddress(t *testing.T) {
+	node := &Node{ID: uuid.MustParse("44444444-4444-4444-4444-444444444444"), Host: "node-a"}
+	allocation := &Allocation{
+		Namespace:     "demo",
+		JobName:       "web",
+		TaskGroupName: "web",
+		ID:            "demo-web-1",
+		Node:          node,
+		Address:       "10.86.213.2",
+		Ports:         []api.PortMapping{{ContainerPort: 80}},
+		Generation:    1,
+		JobRevision:   1,
+		Phase:         lifecycle.PhaseRunning,
+		Health:        lifecycle.HealthHealthy,
+	}
+	s := &Server{
+		jobs: map[string]*Job{
+			jobKey("demo", "web"): {
+				Spec: &spec.JobSpec{Namespace: "demo", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "web", Count: 1}}},
+				Revision: 1,
+			},
+		},
+		allocations: []*Allocation{allocation},
+		catalog:     catalog.New(),
+	}
+
+	listed := s.ListAllocations("demo", nil)
+	if len(listed) != 1 || listed[0].Address != "10.86.213.2" {
+		t.Fatalf("allocation endpoint = %#v, want observed namespace address", listed)
+	}
+	status, ok := s.GetJob("demo", "web")
+	if !ok || len(status.Allocations) != 1 || status.Allocations[0].Address != "10.86.213.2" || len(status.Allocations[0].Ports) != 1 {
+		t.Fatalf("job status endpoint = %#v, want observed address and ports", status)
+	}
+
+	s.refreshCatalog()
+	services := s.ListServices("demo", nil)
+	if len(services) != 1 || services[0].Address != "10.86.213.2" {
+		t.Fatalf("catalog endpoint = %#v, want observed namespace address", services)
+	}
+}
+
+func TestAllocationEndpointFallsBackToNodeForHostNetworking(t *testing.T) {
+	allocation := &Allocation{
+		Namespace: "demo",
+		JobName: "web",
+		TaskGroupName: "web",
+		ID: "demo-web-1",
+		Node: &Node{ID: uuid.MustParse("55555555-5555-5555-5555-555555555555"), Host: "node-a"},
+		Generation: 1,
+		Phase: lifecycle.PhaseRunning,
+		Health: lifecycle.HealthHealthy,
+	}
+	s := &Server{allocations: []*Allocation{allocation}}
+
+	listed := s.ListAllocations("demo", nil)
+	if len(listed) != 1 || listed[0].Address != "node-a" {
+		t.Fatalf("allocation endpoint = %#v, want node fallback", listed)
+	}
+}
+
