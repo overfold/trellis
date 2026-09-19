@@ -82,7 +82,7 @@ After the daemon starts, verify membership from any operator context:
 trellisctl nodes list
 ```
 
-A joining node must use the bootstrap credential; minting an ordinary operator/workload token does not create or join a cluster.
+A joining node uses the bootstrap credential only for enrollment. Trellis consumes it after the node receives its unique certificate and removes it from the daemon configuration; it is not a standing node or agent credential. Minting an ordinary operator/workload token does not create or join a cluster.
 
 ## Mint operator credentials
 

@@ -15,6 +15,7 @@ import (
 	"github.com/clofour/trellis/internal/plan"
 	secretstore "github.com/clofour/trellis/internal/secrets"
 	"github.com/clofour/trellis/internal/spec"
+	"github.com/clofour/trellis/internal/tlsutil"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -32,6 +33,9 @@ const NamespaceContextKey contextKey = "trellis-namespace"
 
 // AdminContextKey stores bootstrap cluster-administrator status in a request context.
 const AdminContextKey contextKey = "trellis-admin"
+
+// NodeContextKey stores the immutable node identity authenticated by mTLS.
+const NodeContextKey contextKey = "trellis-node"
 
 type requestAuthorization struct {
 	root      bool
@@ -61,6 +65,14 @@ func requestNamespace(c *echo.Context) string {
 
 func requireRoot(c *echo.Context, message string) error {
 	if !authorization(c).root {
+		return echo.NewHTTPError(http.StatusForbidden, message)
+	}
+	return nil
+}
+
+func requireNode(c *echo.Context, id uuid.UUID, message string) error {
+	caller, ok := c.Request().Context().Value(NodeContextKey).(uuid.UUID)
+	if !ok || caller != id {
 		return echo.NewHTTPError(http.StatusForbidden, message)
 	}
 	return nil
@@ -382,12 +394,12 @@ func (h *Handler) handleListNodes(c *echo.Context) error {
 }
 
 func (h *Handler) handleRegisterNode(c *echo.Context) error {
-	if err := requireRoot(c, "node registration requires the bootstrap cluster credential"); err != nil {
-		return err
-	}
 	var request api.NodeRegistrationRequest
 	if err := c.Bind(&request); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	}
+	if err := requireNode(c, request.ID, "node registration requires that node's certificate"); err != nil {
+		return err
 	}
 	if err := h.server.RegisterNode(c.Request().Context(), &NodeRegistration{
 		ID: request.ID, Host: request.Host, Port: request.Port, CPU: request.CPU, Memory: request.Memory,
@@ -401,16 +413,19 @@ func (h *Handler) handleRegisterNode(c *echo.Context) error {
 }
 
 func (h *Handler) handleHeartbeat(c *echo.Context) error {
-	if err := requireRoot(c, "node heartbeats require the bootstrap cluster credential"); err != nil {
-		return err
-	}
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
+	if err := requireNode(c, id, "heartbeats require that node's certificate"); err != nil {
+		return err
+	}
 	var request api.HeartbeatRequest
 	if err := c.Bind(&request); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	}
+	if request.NodeID != uuid.Nil && request.NodeID != id {
+		return echo.NewHTTPError(http.StatusForbidden, "heartbeat node ID does not match authenticated node")
 	}
 	if err := h.server.Heartbeat(c.Request().Context(), id, request.Allocations, request.Version, request.Volumes, request.Capabilities); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "unable to process heartbeat")
@@ -509,8 +524,10 @@ func (h *Handler) handleListAllocations(c *echo.Context) error {
 }
 
 func (h *Handler) handleListDiscovery(c *echo.Context) error {
-	if err := requireRoot(c, "internal discovery requires the bootstrap cluster credential"); err != nil {
-		return err
+	if _, node := c.Request().Context().Value(NodeContextKey).(uuid.UUID); !node {
+		if err := requireRoot(c, "internal discovery requires an authenticated node or administrator"); err != nil {
+			return err
+		}
 	}
 	var filter *catalog.ListFilter
 	job, label := c.QueryParam("job"), c.QueryParam("label")
@@ -525,9 +542,6 @@ func (h *Handler) handleListDiscovery(c *echo.Context) error {
 }
 
 func (h *Handler) handleRaftJoin(c *echo.Context) error {
-	if err := requireRoot(c, "Raft membership changes require the bootstrap cluster credential"); err != nil {
-		return err
-	}
 	var request api.RaftJoinRequest
 	if err := c.Bind(&request); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
@@ -535,17 +549,36 @@ func (h *Handler) handleRaftJoin(c *echo.Context) error {
 	if request.ID == "" || request.RaftAddress == "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "id and raft_address are required")
 	}
+	if caller, authenticated := c.Request().Context().Value(NodeContextKey).(uuid.UUID); !authenticated {
+		if err := requireRoot(c, "cluster enrollment requires an enrollment credential"); err != nil {
+			return err
+		}
+		nodeID, err := uuid.Parse(request.NodeID)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, "node_id is required for enrollment")
+		}
+		caCert, caKey, err := h.server.ClusterCA()
+		if err != nil {
+			return echo.NewHTTPError(http.StatusServiceUnavailable, "cluster CA unavailable")
+		}
+		cert, key, err := tlsutil.GenerateNodeCert([]byte(caCert), []byte(caKey), nodeID.String(), request.ID)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "unable to issue node certificate")
+		}
+		return c.JSON(http.StatusOK, api.RaftJoinResponse{CACert: caCert, Cert: string(cert), Key: string(key)})
+	} else if request.NodeID != "" {
+		nodeID, err := uuid.Parse(request.NodeID)
+		if err != nil || caller != nodeID {
+			return echo.NewHTTPError(http.StatusForbidden, "enrollment identity does not match node certificate")
+		}
+	}
 	if h.server.joiner == nil {
 		return echo.NewHTTPError(http.StatusServiceUnavailable, "cluster join not available")
 	}
 	if err := h.server.joiner.AddVoter(request.ID, request.RaftAddress); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
-	caCert, caKey, err := h.server.ClusterCA()
-	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "cluster CA unavailable")
-	}
-	return c.JSON(http.StatusOK, api.RaftJoinResponse{CACert: caCert, CAKey: caKey})
+	return c.NoContent(http.StatusOK)
 }
 
 func (h *Handler) handleRaftMemberRemove(c *echo.Context) error {

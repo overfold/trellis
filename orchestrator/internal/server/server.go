@@ -436,10 +436,10 @@ func (s *Server) InitWithToken(ctx context.Context, configuredToken string) (str
 				return "", fmt.Errorf("load local cluster token: %w", err)
 			}
 		}
-		if token == "" || !validateToken(cluster, token) {
+		if token != "" && !validateToken(cluster, token) {
 			return "", fmt.Errorf("cluster token is missing or does not match cluster")
 		}
-		s.client = client.NewAgentClient(token, s.clientTLS)
+		s.client = client.NewAgentClient("", s.clientTLS)
 		s.controlEpoch = cluster.ControlEpoch
 		return "", nil
 	}
@@ -472,7 +472,7 @@ func (s *Server) InitWithToken(ctx context.Context, configuredToken string) (str
 
 	s.cluster = cluster
 	s.controlEpoch = cluster.ControlEpoch
-	s.client = client.NewAgentClient(token, s.clientTLS)
+	s.client = client.NewAgentClient("", s.clientTLS)
 
 	return token, nil
 }
@@ -491,6 +491,17 @@ func (s *Server) ClusterCA() (certPEM, keyPEM string, err error) {
 		return "", "", fmt.Errorf("load CA key: %w", err)
 	}
 	return certPEM, keyPEM, nil
+}
+
+// ClusterCACert returns the public cluster certificate. Every node retains the
+// public trust anchor, while only the original enrollment authority retains the
+// private signing key.
+func (s *Server) ClusterCACert() (string, error) {
+	var certPEM string
+	if err := s.storage.Get("tls/ca-cert", &certPEM); err != nil {
+		return "", fmt.Errorf("load CA cert: %w", err)
+	}
+	return certPEM, nil
 }
 
 func validateToken(cluster *Cluster, token string) bool {

@@ -50,6 +50,23 @@ func TestSplitAddress(t *testing.T) {
 	}
 }
 
+func TestDiscardEnrollmentCredential(t *testing.T) {
+	path := t.TempDir() + "/trellis.yaml"
+	if err := os.WriteFile(path, []byte("cluster: demo\nbootstrap_token: secret\njoin: node-a:8128\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := discardEnrollmentCredential(path); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(raw), "cluster: demo\njoin: node-a:8128\n"; got != want {
+		t.Fatalf("config = %q, want %q", got, want)
+	}
+}
+
 func TestControlPlaneFollowerProxiesToLeader(t *testing.T) {
 	leader := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer workload-token" {

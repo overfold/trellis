@@ -16,7 +16,7 @@ func generateTestMaterials(t *testing.T) *Materials {
 	if err != nil {
 		t.Fatal(err)
 	}
-	nodeCert, nodeKey, err := GenerateNodeCert(caCert, caKey)
+	nodeCert, nodeKey, err := GenerateNodeCert(caCert, caKey, "test-node")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,7 @@ func TestGenerateNodeCert(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	certPEM, keyPEM, err := GenerateNodeCert(caCert, caKey)
+	certPEM, keyPEM, err := GenerateNodeCert(caCert, caKey, "test-node")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +196,7 @@ func TestGenerateNodeCertExtraSANs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	certPEM, _, err := GenerateNodeCert(caCert, caKey, "10.19.0.5:8128", "myhost:8127")
+	certPEM, _, err := GenerateNodeCert(caCert, caKey, "test-node", "10.19.0.5:8128", "myhost:8127")
 	if err != nil {
 		t.Fatal(err)
 	}

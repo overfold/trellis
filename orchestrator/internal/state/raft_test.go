@@ -26,7 +26,7 @@ func init() {
 
 func testTLSConfig(t *testing.T) *tls.Config {
 	t.Helper()
-	cert, key, err := tlsutil.GenerateNodeCert(testCACert, testCAKey)
+	cert, key, err := tlsutil.GenerateNodeCert(testCACert, testCAKey, "test-node")
 	if err != nil {
 		t.Fatal(err)
 	}

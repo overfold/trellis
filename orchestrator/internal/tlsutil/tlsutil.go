@@ -62,7 +62,9 @@ func GenerateCA() (certPEM, keyPEM []byte, err error) {
 // GenerateNodeCert generates a node certificate signed by the cluster CA.
 // Extra SANs may be passed as "host:port" or bare host strings; the host
 // portion is added as an IP SAN or DNS SAN as appropriate.
-func GenerateNodeCert(caCertPEM, caKeyPEM []byte, extraSANs ...string) (certPEM, keyPEM []byte, err error) {
+// nodeID is the immutable identity asserted by this certificate. It is kept in
+// the subject rather than inferred from a mutable advertised address.
+func GenerateNodeCert(caCertPEM, caKeyPEM []byte, nodeID string, extraSANs ...string) (certPEM, keyPEM []byte, err error) {
 	caBlock, _ := pem.Decode(caCertPEM)
 	if caBlock == nil {
 		return nil, nil, fmt.Errorf("decode CA certificate PEM")
@@ -102,7 +104,7 @@ func GenerateNodeCert(caCertPEM, caKeyPEM []byte, extraSANs ...string) (certPEM,
 	}
 	template := &x509.Certificate{
 		SerialNumber: serial,
-		Subject:      pkix.Name{Organization: []string{"Trellis Node"}},
+		Subject:      pkix.Name{Organization: []string{"Trellis Node"}, CommonName: nodeID},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(5 * 365 * 24 * time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,

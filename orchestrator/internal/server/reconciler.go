@@ -492,7 +492,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 			if request.NetworkPlan != nil {
 				request.NetworkPlan.APIPort = apiPort
 			}
-			if caCert, _, caErr := s.ClusterCA(); caErr == nil && caCert != "" {
+			if caCert, caErr := s.ClusterCACert(); caErr == nil && caCert != "" {
 				request.EnvOverrides["TRELLIS_CA_CERT"] = caCert
 			}
 		}

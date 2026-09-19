@@ -202,13 +202,16 @@ type ServiceListResponse = []ServiceEntry
 // RaftJoinRequest identifies a server joining the Raft cluster.
 type RaftJoinRequest struct {
 	ID          string `json:"id"`
+	NodeID      string `json:"node_id"`
 	RaftAddress string `json:"raft_address"`
 }
 
-// RaftJoinResponse returns cluster TLS materials to a joining server.
+// RaftJoinResponse returns the joining node's unique TLS materials. The
+// cluster CA private key is never returned to a joining node.
 type RaftJoinResponse struct {
 	CACert string `json:"ca_cert"`
-	CAKey  string `json:"ca_key"`
+	Cert   string `json:"cert"`
+	Key    string `json:"key"`
 }
 
 // JobRevisionResponse describes one persisted revision of a job.

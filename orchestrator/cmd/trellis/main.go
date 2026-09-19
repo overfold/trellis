@@ -46,6 +46,7 @@ import (
 	"github.com/clofour/trellis/internal/tlsutil"
 	"github.com/clofour/trellis/internal/version"
 	"github.com/google/uuid"
+	"github.com/hashicorp/raft"
 	"github.com/labstack/echo/v5"
 	"github.com/labstack/echo/v5/middleware"
 	"github.com/prometheus/client_golang/prometheus"
@@ -124,7 +125,7 @@ func main() {
 func run(parent context.Context, cfg *config) error {
 	ctx, stop := signal.NotifyContext(parent, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	if cfg.ClusterToken == "" {
+	if cfg.ClusterToken == "" && cfg.Join == "" {
 		return fmt.Errorf("bootstrap_token or --bootstrap-token is required")
 	}
 	if cfg.WireGuardPort < 1 || cfg.WireGuardPort > 65535 {
@@ -167,7 +168,7 @@ func run(parent context.Context, cfg *config) error {
 		return fmt.Errorf("init local storage: %w", err)
 	}
 
-	tlsMaterials, err := loadOrBootstrapTLS(ctx, log, cfg, local)
+	tlsMaterials, err := loadOrBootstrapTLS(ctx, log, cfg, local, id)
 	if err != nil {
 		return fmt.Errorf("TLS bootstrap: %w", err)
 	}
@@ -178,9 +179,8 @@ func run(parent context.Context, cfg *config) error {
 	}
 	runFile := localconfig.DefaultPath
 	if writeErr := localconfig.Write(runFile, &localconfig.Config{
-		ServerAddr:   net.JoinHostPort("localhost", strconv.Itoa(serverPort)),
-		ClusterToken: cfg.ClusterToken,
-		CACert:       string(tlsMaterials.CACert),
+		ServerAddr: net.JoinHostPort("localhost", strconv.Itoa(serverPort)),
+		CACert:     string(tlsMaterials.CACert),
 	}); writeErr != nil {
 		log.Warn("could not write local connection file", "path", runFile, "error", writeErr)
 	} else {
@@ -222,6 +222,10 @@ func run(parent context.Context, cfg *config) error {
 		if err := joinClusterRaft(ctx, log, cfg.Join, cfg.ClusterToken, cfg.ServerAdvertise, raftStore.LocalAddr(), clientTLS); err != nil {
 			return fmt.Errorf("join cluster: %w", err)
 		}
+		if err := discardEnrollmentCredential(cfg.ConfigFile); err != nil {
+			log.Warn("could not remove consumed enrollment credential", "error", err)
+		}
+		cfg.ClusterToken = ""
 	}
 	// Raft construction and joining are asynchronous. Reading the local FSM
 	// before it has applied the leader's committed log can make an existing
@@ -296,7 +300,7 @@ func run(parent context.Context, cfg *config) error {
 	}()
 	healthMgr := health.NewHealthManager(log, runtimeClient, nil)
 	restartCtl := agent.NewAllocationReconciler(runtimeClient, nil)
-	leaderClient := client.NewServerClient(cfg.ClusterToken, "", clientTLS)
+	leaderClient := client.NewServerClient("", "", clientTLS)
 	volumeManager := agent.NewVolumeManager(cfg.DataDir)
 	ag := agent.NewAgent(log, runtimeClient, healthMgr, restartCtl, agent.NewPortManager(runtimeClient, 0, 0, 0), volumeManager, leaderClient, id)
 	ag.SetVersion(version.Current())
@@ -379,7 +383,7 @@ func run(parent context.Context, cfg *config) error {
 	}()
 
 	agentHTTP := echo.New()
-	agentHTTP.Use(middleware.Recover(), clusterAuthMiddleware(cfg.ClusterToken))
+	agentHTTP.Use(middleware.Recover(), leaderAgentAuthMiddleware(raftStore.Raft()))
 	agent.NewHandler(ag).Register(agentHTTP)
 	go func() {
 		if err := (echo.StartConfig{Address: cfg.AgentListen, TLSConfig: agentServerTLS, GracefulTimeout: shutdownTime}).Start(ctx, agentHTTP); err != nil && ctx.Err() == nil {
@@ -560,7 +564,7 @@ func loadSecretsKey(path, configuredID string) ([]byte, string, error) {
 	return key, keyID, nil
 }
 
-func loadOrBootstrapTLS(ctx context.Context, log *slog.Logger, cfg *config, local *storage.LocalStorage) (*tlsutil.Materials, error) {
+func loadOrBootstrapTLS(ctx context.Context, log *slog.Logger, cfg *config, local *storage.LocalStorage, nodeID uuid.UUID) (*tlsutil.Materials, error) {
 	if cfg.CACert != "" {
 		return loadTLSFromFiles(cfg)
 	}
@@ -569,17 +573,12 @@ func loadOrBootstrapTLS(ctx context.Context, log *slog.Logger, cfg *config, loca
 		return m, nil
 	}
 	if cfg.Join != "" {
-		resp, err := joinClusterTLS(ctx, log, cfg.Join, cfg.ClusterToken, cfg.ServerAdvertise, cfg.RaftAdvertise)
+		resp, err := joinClusterTLS(ctx, log, cfg.Join, cfg.ClusterToken, cfg.ServerAdvertise, nodeID.String(), cfg.RaftAdvertise)
 		if err != nil {
 			return nil, fmt.Errorf("join cluster for TLS: %w", err)
 		}
 		caCert := []byte(resp.CACert)
-		caKey := []byte(resp.CAKey)
-		nodeCert, nodeKey, err := tlsutil.GenerateNodeCert(caCert, caKey, cfg.ServerAdvertise, cfg.AgentAdvertise)
-		if err != nil {
-			return nil, fmt.Errorf("generate node cert: %w", err)
-		}
-		m := &tlsutil.Materials{CACert: caCert, CAKey: caKey, Cert: nodeCert, Key: nodeKey}
+		m := &tlsutil.Materials{CACert: caCert, Cert: []byte(resp.Cert), Key: []byte(resp.Key)}
 		if err := saveTLSToStorage(local, m); err != nil {
 			return nil, fmt.Errorf("save TLS materials: %w", err)
 		}
@@ -590,7 +589,7 @@ func loadOrBootstrapTLS(ctx context.Context, log *slog.Logger, cfg *config, loca
 	if err != nil {
 		return nil, fmt.Errorf("generate CA: %w", err)
 	}
-	nodeCert, nodeKey, err := tlsutil.GenerateNodeCert(caCert, caKey, cfg.ServerAdvertise, cfg.AgentAdvertise)
+	nodeCert, nodeKey, err := tlsutil.GenerateNodeCert(caCert, caKey, nodeID.String(), cfg.ServerAdvertise, cfg.AgentAdvertise)
 	if err != nil {
 		return nil, fmt.Errorf("generate node cert: %w", err)
 	}
@@ -623,11 +622,8 @@ func loadTLSFromFiles(cfg *config) (*tlsutil.Materials, error) {
 }
 
 func loadTLSFromStorage(local *storage.LocalStorage) (*tlsutil.Materials, error) {
-	var caCert, caKey, cert, key string
+	var caCert, cert, key string
 	if err := local.Get("tls/ca-cert", &caCert); err != nil {
-		return nil, err
-	}
-	if err := local.Get("tls/ca-key", &caKey); err != nil {
 		return nil, err
 	}
 	if err := local.Get("tls/node-cert", &cert); err != nil {
@@ -638,7 +634,6 @@ func loadTLSFromStorage(local *storage.LocalStorage) (*tlsutil.Materials, error)
 	}
 	return &tlsutil.Materials{
 		CACert: []byte(caCert),
-		CAKey:  []byte(caKey),
 		Cert:   []byte(cert),
 		Key:    []byte(key),
 	}, nil
@@ -648,8 +643,10 @@ func saveTLSToStorage(local *storage.LocalStorage, m *tlsutil.Materials) error {
 	if err := local.Put("tls/ca-cert", string(m.CACert)); err != nil {
 		return err
 	}
-	if err := local.Put("tls/ca-key", string(m.CAKey)); err != nil {
-		return err
+	if len(m.CAKey) > 0 {
+		if err := local.Put("tls/ca-key", string(m.CAKey)); err != nil {
+			return err
+		}
 	}
 	if err := local.Put("tls/node-cert", string(m.Cert)); err != nil {
 		return err
@@ -657,8 +654,8 @@ func saveTLSToStorage(local *storage.LocalStorage, m *tlsutil.Materials) error {
 	return local.Put("tls/node-key", string(m.Key))
 }
 
-func joinClusterTLS(ctx context.Context, log *slog.Logger, joinAddr, clusterToken, serverID, raftAddr string) (*api.RaftJoinResponse, error) {
-	body, err := json.Marshal(api.RaftJoinRequest{ID: serverID, RaftAddress: raftAddr})
+func joinClusterTLS(ctx context.Context, log *slog.Logger, joinAddr, clusterToken, serverID, nodeID, raftAddr string) (*api.RaftJoinResponse, error) {
+	body, err := json.Marshal(api.RaftJoinRequest{ID: serverID, NodeID: nodeID, RaftAddress: raftAddr})
 	if err != nil {
 		return nil, err
 	}
@@ -674,7 +671,9 @@ func joinClusterTLS(ctx context.Context, log *slog.Logger, joinAddr, clusterToke
 	for i := 0; ; i++ {
 		req, _ := http.NewRequestWithContext(ctx, "POST", base+"/v1/raft/join", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+clusterToken)
+		if clusterToken != "" {
+			req.Header.Set("Authorization", "Bearer "+clusterToken)
+		}
 		resp, err := httpClient.Do(req)
 		if err == nil {
 			respBody, _ := io.ReadAll(resp.Body)
@@ -716,7 +715,6 @@ func joinClusterRaft(ctx context.Context, log *slog.Logger, joinAddr, clusterTok
 	for i := 0; ; i++ {
 		req, _ := http.NewRequestWithContext(ctx, "POST", base+"/v1/raft/join", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+clusterToken)
 		resp, err := httpClient.Do(req)
 		if err == nil {
 			_, _ = io.ReadAll(resp.Body)
@@ -828,39 +826,70 @@ func newHTTPTransport(tlsConfig *tls.Config) *http.Transport {
 	}
 }
 
-func clusterAuthMiddleware(token string) echo.MiddlewareFunc {
-	return middleware.KeyAuthWithConfig(middleware.KeyAuthConfig{KeyLookup: "header:Authorization:Bearer ", Validator: func(_ *echo.Context, key string, _ middleware.ExtractorSource) (bool, error) {
-		return subtle.ConstantTimeCompare([]byte(key), []byte(token)) == 1, nil
-	}})
-}
-
 func leaderAuthMiddleware(bootstrapToken string, tokenManager *auth.TokenManager) echo.MiddlewareFunc {
-	return middleware.KeyAuthWithConfig(middleware.KeyAuthConfig{
-		KeyLookup: "header:Authorization:Bearer ",
-		Skipper: func(c *echo.Context) bool {
-			return c.Request().URL.Path == "/metrics"
-		},
-		Validator: func(c *echo.Context, key string, _ middleware.ExtractorSource) (bool, error) {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c *echo.Context) error {
+			if c.Request().URL.Path == "/metrics" {
+				return next(c)
+			}
+			key := strings.TrimPrefix(c.Request().Header.Get("Authorization"), "Bearer ")
 			if subtle.ConstantTimeCompare([]byte(key), []byte(bootstrapToken)) == 1 {
 				principal := auth.BootstrapPrincipal()
 				ctx := context.WithValue(c.Request().Context(), server.AdminContextKey, true)
 				ctx = context.WithValue(ctx, server.PrincipalContextKey, principal)
 				c.SetRequest(c.Request().WithContext(ctx))
-				return true, nil
+				return next(c)
 			}
 			principal, err := tokenManager.ValidateToken(c.Request().Context(), key)
-			if err != nil {
-				return false, nil
-			}
 			if principal != nil {
 				ctx := context.WithValue(c.Request().Context(), server.NamespaceContextKey, auth.EncodeScope(principal.Scope, principal.Access, principal.Namespace))
 				ctx = context.WithValue(ctx, server.PrincipalContextKey, *principal)
 				c.SetRequest(c.Request().WithContext(ctx))
-				return true, nil
+				return next(c)
 			}
-			return false, nil
-		},
-	})
+			if nodeID, ok := tlsNodeID(c.Request()); ok {
+				ctx := context.WithValue(c.Request().Context(), server.NodeContextKey, nodeID)
+				c.SetRequest(c.Request().WithContext(ctx))
+				return next(c)
+			}
+			_ = err
+			return echo.NewHTTPError(http.StatusUnauthorized, "invalid API credential")
+		}
+	}
+}
+
+// leaderAgentAuthMiddleware authorizes commands only from the certificate
+// presented by the node Raft currently reports as leader. A certificate proves
+// node identity; it is not standing agent authority.
+func leaderAgentAuthMiddleware(r *raft.Raft) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c *echo.Context) error {
+			if c.Request().TLS == nil {
+				return echo.NewHTTPError(http.StatusUnauthorized, "node certificate required")
+			}
+			certs := c.Request().TLS.PeerCertificates
+			if len(certs) == 0 {
+				return echo.NewHTTPError(http.StatusUnauthorized, "node certificate required")
+			}
+			leader, _ := r.LeaderWithID()
+			if leader == "" {
+				return echo.NewHTTPError(http.StatusServiceUnavailable, "Raft leader unavailable")
+			}
+			host, _, err := net.SplitHostPort(string(leader))
+			if err != nil || certs[0].VerifyHostname(host) != nil {
+				return echo.NewHTTPError(http.StatusForbidden, "caller is not the current Raft leader")
+			}
+			return next(c)
+		}
+	}
+}
+
+func tlsNodeID(r *http.Request) (uuid.UUID, bool) {
+	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+		return uuid.Nil, false
+	}
+	id, err := uuid.Parse(r.TLS.PeerCertificates[0].Subject.CommonName)
+	return id, err == nil
 }
 
 func splitAddress(address string) (string, int, error) {
@@ -905,4 +934,27 @@ func acquireNodeID(dataDir string) (uuid.UUID, error) {
 		return uuid.Nil, fmt.Errorf("write node ID: %w", err)
 	}
 	return id, nil
+}
+
+// discardEnrollmentCredential removes the bootstrap credential from the
+// daemon's YAML configuration once the node has its own certificate. It leaves
+// comments and every other setting intact. Flag- and environment-supplied
+// enrollment credentials are process-only and require no cleanup.
+func discardEnrollmentCredential(configFile string) error {
+	if configFile == "" {
+		return nil
+	}
+	raw, err := os.ReadFile(configFile)
+	if err != nil {
+		return err
+	}
+	lines := strings.Split(string(raw), "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "bootstrap_token:") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return os.WriteFile(configFile, []byte(strings.Join(kept, "\n")), 0o600)
 }
