@@ -63,7 +63,7 @@ func TestHandleQuery(t *testing.T) {
 	r := NewResolver(nil, &mockLookup{services: &services}, "trellis")
 	r.refresh(context.Background())
 
-	query := buildQuery("web.acme.trellis.", 1, 1)
+	query := buildQuery("web.acme.trellis.")
 	resp := r.handleQuery(query)
 	if resp == nil {
 		t.Fatal("expected response")
@@ -85,7 +85,7 @@ func TestHandleQueryNXDomain(t *testing.T) {
 	r := NewResolver(nil, &mockLookup{services: &api.ServiceListResponse{}}, "trellis")
 	r.refresh(context.Background())
 
-	query := buildQuery("missing.acme.trellis.", 1, 1)
+	query := buildQuery("missing.acme.trellis.")
 	resp := r.handleQuery(query)
 	if resp == nil {
 		t.Fatal("expected response")
@@ -124,7 +124,7 @@ func TestResolveIgnoresEmptyAddresses(t *testing.T) {
 	}
 }
 
-func buildQuery(name string, qtype, qclass uint16) []byte {
+func buildQuery(name string) []byte {
 	var buf []byte
 
 	header := make([]byte, 12)
@@ -135,8 +135,8 @@ func buildQuery(name string, qtype, qclass uint16) []byte {
 	buf = append(buf, encodeName(name)...)
 
 	trailer := make([]byte, 4)
-	binary.BigEndian.PutUint16(trailer[0:2], qtype)
-	binary.BigEndian.PutUint16(trailer[2:4], qclass)
+	binary.BigEndian.PutUint16(trailer[0:2], 1)
+	binary.BigEndian.PutUint16(trailer[2:4], 1)
 	buf = append(buf, trailer...)
 
 	return buf
@@ -182,7 +182,7 @@ func TestForwardsExternalQueriesToUpstream(t *testing.T) {
 	}()
 
 	r := NewResolver(nil, &mockLookup{services: &api.ServiceListResponse{}}, "trellis", upstream.LocalAddr().String())
-	resp := r.handleQuery(buildQuery("example.com.", 1, 1))
+	resp := r.handleQuery(buildQuery("example.com."))
 	if resp == nil {
 		t.Fatal("expected forwarded response")
 	}
@@ -193,7 +193,7 @@ func TestForwardsExternalQueriesToUpstream(t *testing.T) {
 
 func TestExternalQueryWithoutUpstreamReturnsServfail(t *testing.T) {
 	r := NewResolver(nil, &mockLookup{services: &api.ServiceListResponse{}}, "trellis")
-	resp := r.handleQuery(buildQuery("example.com.", 1, 1))
+	resp := r.handleQuery(buildQuery("example.com."))
 	if resp == nil {
 		t.Fatal("expected SERVFAIL response")
 	}
