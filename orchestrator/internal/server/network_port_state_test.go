@@ -3,6 +3,9 @@ package server
 import (
 	"context"
 	"testing"
+	"time"
+
+	"github.com/google/uuid"
 )
 
 func TestEnsureNetworkPortRegistrationsAreStableAndUnique(t *testing.T) {
@@ -36,5 +39,25 @@ func TestEnsureNetworkPortRegistrationsRejectsExhaustion(t *testing.T) {
 	}
 	if _, err := s.ensureNetworkPortRegistrations(context.Background(), []string{"acme", "globex"}); err == nil {
 		t.Fatal("expected namespace WireGuard port range exhaustion")
+	}
+}
+
+
+func TestRegisterNodeRejectsMismatchedWireGuardPortCount(t *testing.T) {
+	s := &Server{
+		state:              NewStateController(memoryStore{}, "test"),
+		nodes:              map[uuid.UUID]*Node{},
+		wireGuardPortCount: 256,
+		now:                time.Now,
+	}
+	err := s.RegisterNode(context.Background(), &NodeRegistration{
+		ID:                 uuid.New(),
+		WireGuardPublicKey: "public-key",
+		WireGuardEndpoint:  "node-a:51820",
+		WireGuardPortBase:  51820,
+		WireGuardPortCount: 64,
+	})
+	if err == nil {
+		t.Fatal("expected mismatched WireGuard port count to be rejected")
 	}
 }
