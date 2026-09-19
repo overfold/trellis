@@ -491,6 +491,17 @@ func (s *Server) ListNodes() []Node {
 
 // RegisterNode adds or updates a cluster node.
 func (s *Server) RegisterNode(ctx context.Context, nodeRegistration *NodeRegistration) error {
+	if nodeRegistration.WireGuardPublicKey != "" || nodeRegistration.WireGuardEndpoint != "" || nodeRegistration.WireGuardPortBase != 0 || nodeRegistration.WireGuardPortCount != 0 {
+		if nodeRegistration.WireGuardPublicKey == "" || nodeRegistration.WireGuardEndpoint == "" {
+			return fmt.Errorf("WireGuard registration requires a public key and endpoint")
+		}
+		if nodeRegistration.WireGuardPortCount != s.wireGuardPortCount {
+			return fmt.Errorf("WireGuard port count %d does not match cluster count %d", nodeRegistration.WireGuardPortCount, s.wireGuardPortCount)
+		}
+		if nodeRegistration.WireGuardPortBase < 1 || nodeRegistration.WireGuardPortBase+nodeRegistration.WireGuardPortCount-1 > 65535 {
+			return fmt.Errorf("WireGuard port range is outside 1-65535")
+		}
+	}
 	s.mu.RLock()
 	status := NodeStatusHealthy
 	if existing := s.nodes[nodeRegistration.ID]; existing != nil && existing.Status == NodeStatusDraining {
