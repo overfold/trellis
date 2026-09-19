@@ -24,15 +24,25 @@ func TestNamespaceNodeSubnetIsStableAndNamespaceScoped(t *testing.T) {
 
 func TestNetworkPlanUsesRegisteredPeerIdentity(t *testing.T) {
 	targetID, peerID := uuid.New(), uuid.New()
-	s := &Server{networkPool: netip.MustParsePrefix("10.64.0.0/10"), nodes: map[uuid.UUID]*Node{}}
-	target := &Node{ID: targetID}
+	s := &Server{
+		networkPool:  netip.MustParsePrefix("10.64.0.0/10"),
+		networkPorts: map[string]int{"acme": 3},
+		nodes:        map[uuid.UUID]*Node{},
+	}
+	target := &Node{ID: targetID, WireGuardPortBase: 51820, WireGuardPortCount: 256}
 	s.nodes[targetID] = target
-	s.nodes[peerID] = &Node{ID: peerID, WireGuardPublicKey: "peer-key", WireGuardEndpoint: "node-b:51820"}
+	s.nodes[peerID] = &Node{
+		ID: peerID, WireGuardPublicKey: "peer-key", WireGuardEndpoint: "node-b:51820",
+		WireGuardPortBase: 51820, WireGuardPortCount: 256,
+	}
 	plan, err := s.networkPlan("acme", target)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plan.Peers) != 1 || plan.Peers[0].PublicKey != "peer-key" || plan.Peers[0].Endpoint != "node-b:51820" {
+	if plan.ListenPort != 51823 {
+		t.Fatalf("listen port = %d, want 51823", plan.ListenPort)
+	}
+	if len(plan.Peers) != 1 || plan.Peers[0].PublicKey != "peer-key" || plan.Peers[0].Endpoint != "node-b:51823" {
 		t.Fatalf("unexpected plan: %#v", plan)
 	}
 }
