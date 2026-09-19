@@ -80,7 +80,7 @@ export function resolveDashboardNamespace(request: Request):
     !getConfiguredNamespaces().includes(namespace)
   ) {
     return {
-      error: `Namespace ${JSON.stringify(namespace)} is not configured for this dashboard`,
+      error: `Namespace ${JSON.stringify(namespace)} is not configured for this Console`,
     };
   }
   return { namespace };

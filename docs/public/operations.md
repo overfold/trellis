@@ -74,7 +74,7 @@ curl -fsSL https://raw.githubusercontent.com/clofour/trellis/main/scripts/setup.
 
 Normal installer-created clusters derive the secrets key ID from the shared key, so no additional argument is needed. If the existing cluster explicitly sets `secrets_key_id` in its node configuration, pass that same value with `--secrets-key-id ID` (or `TRELLIS_SECRETS_KEY_ID`) on the joining node.
 
-The installer shows the complete plan before making changes; choose **Customize** to change it interactively. `--advertise HOST` overrides address auto-detection when peers cannot reach the detected private address. Namespace networking and gVisor/runsc are installed by default on fresh nodes; `--without-networking` and `--without-gvisor` are the automation opt-outs. The dashboard remains opt-in through **Customize**, `--with-dashboard`, or `--dashboard-write`. Delete the temporary transferred copies after setup succeeds.
+The installer shows the complete plan before making changes; choose **Customize** to change it interactively. `--advertise HOST` overrides address auto-detection when peers cannot reach the detected private address. Namespace networking and gVisor/runsc are installed by default on fresh nodes; `--without-networking` and `--without-gvisor` are the automation opt-outs. The Trellis Console remains opt-in through **Customize**, `--with-dashboard`, or `--dashboard-write`. Delete the temporary transferred copies after setup succeeds.
 
 After the daemon starts, verify membership from any operator context:
 
@@ -86,7 +86,7 @@ A joining node must use the bootstrap credential; minting an ordinary operator/w
 
 ## Mint operator credentials
 
-The installer creates one normal `cluster/write` credential for the installing user, but operators often need narrower credentials for another human, a read-only dashboard, or automation. `trellisctl credentials create` is the explicit administrative workflow for that.
+The installer creates one normal `cluster/write` credential for the installing user, but operators often need narrower credentials for another human, a read-only Console, or automation. `trellisctl credentials create` is the explicit administrative workflow for that.
 
 Credential minting requires the **bootstrap** credential. On an installed Trellis node, running the command as root automatically uses the root-readable local node connection, so the bootstrap value does not need to be copied into shell history:
 
@@ -131,7 +131,7 @@ curl -fsSL https://raw.githubusercontent.com/clofour/trellis/main/scripts/upgrad
 
 It downloads and verifies the new release before touching the running daemon. In a multi-node cluster it drains the local node and waits for its local allocations to stop; Trellis only stops draining allocations after healthy replacement capacity exists. The script then swaps the binaries, refreshes the installer-owned systemd unit, starts the daemon, and verifies both the service and control-plane API. If the new daemon does not become healthy, the previous binaries and unit are restored and the node is undrained.
 
-After a successful core upgrade, the script refreshes a dashboard that was installed and recorded by the setup lifecycle state, then undrains the node. A service that was already stopped remains stopped. Single-node clusters skip evacuation because there is nowhere to move their allocations.
+After a successful core upgrade, the script refreshes a Console that was installed and recorded by the setup lifecycle state, then undrains the node. A service that was already stopped remains stopped. Single-node clusters skip evacuation because there is nowhere to move their allocations.
 
 ## Uninstall a node
 

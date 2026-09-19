@@ -1,6 +1,6 @@
 # Core concepts
 
-Start with the [Trellis user model](user-model.md) for the vocabulary shared by manifests, the CLI, dashboard, and examples. This page explains how those user-facing concepts behave.
+Start with the [Trellis user model](user-model.md) for the vocabulary shared by manifests, the CLI, Trellis Console, and examples. This page explains how those user-facing concepts behave.
 
 ## Cluster and nodes
 

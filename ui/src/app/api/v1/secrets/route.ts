@@ -13,7 +13,7 @@ export async function GET(request: NextRequest) {
   const namespace = selected.namespace;
   if (!namespace) {
     return NextResponse.json(
-      { error: "A non-empty dashboard namespace is required for secret management" },
+      { error: "A non-empty Console namespace is required for secret management" },
       { status: 400 },
     );
   }

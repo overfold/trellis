@@ -122,6 +122,7 @@ type JobRegistrationRequest struct {
 
 // JobStatusResponse summarizes the desired and observed state of a job.
 type JobStatusResponse struct {
+	Namespace   string                `json:"namespace"`
 	Name        string               `json:"name"`
 	Revision    int                  `json:"revision"`
 	Desired     int                  `json:"desired"`

@@ -10,9 +10,9 @@ You need a Debian or Ubuntu x86-64 machine with `sudo`. The installer can instal
 curl -fsSL https://raw.githubusercontent.com/clofour/trellis/main/scripts/setup.sh | sudo bash
 ```
 
-The default plan is the feature-complete beginner path: create a new single-node cluster, auto-detect a reachable node address, install the namespace-networking dependencies and gVisor/runsc, and leave the dashboard disabled. The plan is shown before anything changes. Press Enter to install it, or choose **Customize** to change the cluster mode, address, networking, gVisor, or dashboard access. You do not need to discover command-line flags just to make a different first-install choice.
+The default plan is the feature-complete beginner path: create a new single-node cluster, auto-detect a reachable node address, install the namespace-networking dependencies and gVisor/runsc, and leave the Trellis Console disabled. The plan is shown before anything changes. Press Enter to install it, or choose **Customize** to change the cluster mode, address, networking, gVisor, or Console access. You do not need to discover command-line flags just to make a different first-install choice.
 
-For automation, the same choices are available as flags. `--without-networking` and `--without-gvisor` opt out of the two default capabilities, while `--with-dashboard` or `--dashboard-write` enable the dashboard.
+For automation, the same choices are available as flags. `--without-networking` and `--without-gvisor` opt out of the two default capabilities, while `--with-dashboard` or `--dashboard-write` enable the Trellis Console.
 
 The installer uses a root-only bootstrap credential for node/cluster bootstrap, then mints a normal `cluster/write` operator credential and saves a `local` context for the user who invoked `sudo`. Routine `trellisctl` commands therefore do **not** need `sudo` and do not receive the bootstrap credential.
 
@@ -97,9 +97,9 @@ trellisctl jobs list
 
 You have now completed the full workload lifecycle: install → connect → deploy → inspect → update → logs → remove.
 
-## Optional: dashboard
+## Optional: Trellis Console
 
-If you installed the dashboard through **Customize** or with `--with-dashboard`, open `http://NODE_ADDRESS:3000`. The default dashboard mode uses a real `cluster/read` credential, not the bootstrap token. Choosing read/write access (or using `--dashboard-write`) instead uses `cluster/write` and enables mutation controls. In either mode the dashboard stays close to `trellisctl`: it edits the same YAML, asks the control plane for the same semantic plan, and exposes Trellis resources rather than adding application-platform abstractions.
+If you installed the Console through **Customize** or with `--with-dashboard`, open `http://NODE_ADDRESS:3000`. The default Console mode uses a real `cluster/read` credential, not the bootstrap token. Choosing read/write access (or using `--dashboard-write`) instead uses `cluster/write` and enables mutation controls. In either mode the Console stays close to `trellisctl`: it edits the same YAML, asks the control plane for the same semantic plan, and exposes Trellis resources rather than adding application-platform abstractions.
 
 ## Troubleshooting
 

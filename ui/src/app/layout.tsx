@@ -24,8 +24,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Trellis",
-  description: "Trellis cluster dashboard",
+  title: "Trellis Console",
+  description: "Low-level operator console for Trellis",
 };
 
 export default function RootLayout({

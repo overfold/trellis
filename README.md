@@ -2,19 +2,19 @@
 
 Trellis is a container scheduler built on containerd. It sits in the space between rolling your own deployment scripts and adopting Kubernetes — a real orchestrator for container workloads, without the operational complexity.
 
-Every project that ships software ends up rebuilding the same infrastructure: workload placement, health checks, rolling updates, port reservation. Tools like Coolify improve the developer experience, but at their core they are not orchestrators. Kubernetes is a full orchestrator, but it brings significant complexity that many workloads simply do not need. Trellis is closer to Nomad in spirit: a lightweight, focused scheduler you can understand and operate yourself.
+Every project that ships software ends up rebuilding the same infrastructure: workload placement, health checks, rolling updates, port reservation. Higher-level application platforms can improve the developer experience, but they are not orchestrators. Kubernetes is a full orchestrator, but it brings significant complexity that many workloads simply do not need. Trellis is closer to Nomad in spirit: a lightweight, focused scheduler you can understand and operate yourself.
 
 Every machine runs the same `trellis` daemon. Raft consensus elects one node to serve the control-plane API and reconcile jobs, while every node continues to run allocations and participate in the next election.
 
 ## Quick start
 
-The setup script downloads the latest release binaries, configures a systemd service, and creates a single-node cluster. It supports Linux x64 and requires root access. The normal plan auto-detects the node address, installs containerd when it is missing, and makes namespace networking and gVisor available out of the box. The dashboard remains disabled by default because it exposes an additional service and credential.
+The setup script downloads the latest release binaries, configures a systemd service, and creates a single-node cluster. It supports Linux x64 and requires root access. The normal plan auto-detects the node address, installs containerd when it is missing, and makes namespace networking and gVisor available out of the box. The Trellis Console remains disabled by default because it exposes an additional service and credential.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/clofour/trellis/main/scripts/setup.sh | sudo bash
 ```
 
-The installer shows the complete plan before changing the machine. Press Enter to use it, or choose **Customize** to change cluster mode, node address, namespace networking, gVisor, or dashboard access without hunting for command-line flags.
+The installer shows the complete plan before changing the machine. Press Enter to use it, or choose **Customize** to change cluster mode, node address, namespace networking, gVisor, or Console access without hunting for command-line flags.
 
 Or clone the repository and run the script directly:
 
@@ -55,9 +55,9 @@ cluster
             └── allocations (runtime instances)
 ```
 
-The first-party CLI and dashboard let humans author **YAML job manifests**. They convert that representation into Trellis's canonical JSON job model before contacting the control plane. Applying desired state creates or advances a job revision; Trellis then creates runtime **allocations** to satisfy the desired task-group replicas. Allocation **lifecycle** and **health** are separate concepts.
+The first-party CLI and Trellis Console let humans author **YAML job manifests**. They convert that representation into Trellis's canonical JSON job model before contacting the control plane. Applying desired state creates or advances a job revision; Trellis then creates runtime **allocations** to satisfy the desired task-group replicas. Allocation **lifecycle** and **health** are separate concepts.
 
-See the [Trellis user model](docs/public/user-model.md) for the canonical vocabulary shared by `trellisctl`, the dashboard, docs, examples, and API.
+See the [Trellis user model](docs/public/user-model.md) for the canonical vocabulary shared by `trellisctl`, the Console, docs, examples, and API.
 
 ## Design principles
 
@@ -67,7 +67,7 @@ See the [Trellis user model](docs/public/user-model.md) for the canonical vocabu
 
 **Consumers own representation; Trellis owns meaning.** The control-plane API consumes canonical JSON, not YAML, HCL, Python, or another authoring language. A consumer may expose any representation it wants, but it must convert that representation into the canonical JSON model before calling Trellis. Human conveniences such as `64MiB` or `10s` therefore belong to the consumer; canonical validation, defaults, planning, revision semantics, and reconciliation belong to Trellis. This keeps custom frontends and abstractions open-ended without allowing each interface to invent different Trellis semantics.
 
-**Declarative, with open-ended delivery.** Trellis accepts declarative desired state. The first-party human-authored representation is YAML, but it is only one consumer of the canonical JSON model. You can use `trellisctl`, drive it from CI/CD, use the first-party dashboard, build a custom UI or HCL/Python abstraction, or integrate with any tooling that can produce the API model. The workflow that generates and submits desired state is entirely yours.
+**Declarative, with open-ended delivery.** Trellis accepts declarative desired state. The first-party human-authored representation is YAML, but it is only one consumer of the canonical JSON model. You can use `trellisctl`, drive it from CI/CD, use the first-party Console, build a custom UI or HCL/Python abstraction, or integrate with any tooling that can produce the API model. The workflow that generates and submits desired state is entirely yours.
 
 **Easy to use.** The tension between "flexible building blocks" and "easy to use" is addressed through thorough documentation and first-party examples. Trellis favors clear documentation over opinionated defaults that hide what is actually happening.
 
@@ -83,7 +83,7 @@ See the [Trellis user model](docs/public/user-model.md) for the canonical vocabu
 - Container resource limits, explicit host-port reservations, and persistent local volumes
 - Built-in DNS discovery for healthy job allocations and optional WireGuard namespace networking
 - Namespace-scoped, write-only secrets with encrypted persistence and memory-backed delivery
-- A Next.js operations dashboard for cluster health, job/allocation diagnostics, node draining, secret management, and opt-in job writes
+- A Next.js Trellis Console: a low-level graphical equivalent of `trellisctl` for cluster health, job/allocation diagnostics, node draining, secret management, canonical JSON inspection, and opt-in job writes
 
 ## Documentation
 

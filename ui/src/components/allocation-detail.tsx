@@ -6,6 +6,7 @@ import { useAllocationEvents, useAllocationLogs } from "@/hooks/use-api";
 import { StatusBadge } from "./status-badge";
 import { Skeleton } from "./skeleton";
 import { timeAgo } from "@/lib/utils";
+import { JsonInspection } from "./json-inspection";
 
 export function AllocationDetail({
   allocation,
@@ -149,6 +150,8 @@ export function AllocationDetail({
               </div>
             )}
           </section>
+
+          <JsonInspection title="Raw allocation JSON" value={allocation} />
 
           <section>
             <h3 className="mb-3 text-sm font-medium text-foreground">Lifecycle events</h3>

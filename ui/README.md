@@ -1,8 +1,8 @@
-# Trellis operations dashboard
+# Trellis Console
 
-The `ui/` directory contains the first-party Next.js operations client for Trellis. It deliberately stays close to the Trellis resource model rather than adding application-platform abstractions.
+The `ui/` directory contains Trellis Console, the first-party low-level Next.js operator client for Trellis. It is a graphical equivalent of `trellisctl`: inspect jobs, revisions, allocations, nodes, secrets metadata, and canonical API JSON without adding application-platform abstractions.
 
-Operator-facing behavior, authorization, configuration, manifest editing, production deployment, and troubleshooting are documented in the authoritative [Operations dashboard guide](../docs/public/dashboard.md). Keep those details there rather than duplicating them in this package README.
+Operator-facing behavior, authorization, configuration, manifest editing, production deployment, and troubleshooting are documented in the authoritative [Trellis Console guide](../docs/public/dashboard.md). Keep those details there rather than duplicating them in this package README.
 
 ## Local development
 
@@ -33,4 +33,4 @@ npm run build
 npm run start
 ```
 
-The repository also provides a `Dockerfile` and `start.sh` for the released dashboard image. See the [Operations dashboard guide](../docs/public/dashboard.md) for supported runtime configuration and deployment guidance.
+The repository also provides a `Dockerfile` and `start.sh` for the released Console image. See the [Trellis Console guide](../docs/public/dashboard.md) for supported runtime configuration and deployment guidance.
