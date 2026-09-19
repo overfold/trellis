@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"syscall"
 	"time"
@@ -93,6 +94,18 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 		allMounts = append(allMounts, specs.Mount{
 			Source:      resolvPath,
 			Destination: "/etc/resolv.conf",
+			Type:        "bind",
+			Options:     []string{"rbind", "ro"},
+		})
+	}
+	if len(options.ExtraHosts) > 0 {
+		hostsPath := filepath.Join(c.logDir, options.ID+"-hosts")
+		if err := writeHostsConfig(hostsPath, options.ExtraHosts); err != nil {
+			return "", fmt.Errorf("write hosts file for %s: %w", options.ID, err)
+		}
+		allMounts = append(allMounts, specs.Mount{
+			Source:      hostsPath,
+			Destination: "/etc/hosts",
 			Type:        "bind",
 			Options:     []string{"rbind", "ro"},
 		})
@@ -445,6 +458,22 @@ func writeDNSConfig(path string, servers []string) error {
 	var content string
 	for _, s := range servers {
 		content += "nameserver " + s + "\n"
+	}
+	return os.WriteFile(path, []byte(content), 0o644)
+}
+
+func writeHostsConfig(path string, hosts map[string]string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return fmt.Errorf("create hosts config directory: %w", err)
+	}
+	names := make([]string, 0, len(hosts))
+	for name := range hosts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	content := "127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n"
+	for _, name := range names {
+		content += hosts[name] + " " + name + "\n"
 	}
 	return os.WriteFile(path, []byte(content), 0o644)
 }
