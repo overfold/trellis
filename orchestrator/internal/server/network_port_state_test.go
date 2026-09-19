@@ -61,3 +61,34 @@ func TestRegisterNodeRejectsMismatchedWireGuardPortCount(t *testing.T) {
 		t.Fatal("expected mismatched WireGuard port count to be rejected")
 	}
 }
+
+
+func TestEnsureNetworkPortRegistrationsReleasesUnusedNamespace(t *testing.T) {
+	ctx := context.Background()
+	store := memoryStore{}
+	state := NewStateController(store, "test")
+	s := &Server{state: state, wireGuardPortCount: 2}
+
+	first, err := s.ensureNetworkPortRegistrations(ctx, []string{"acme", "globex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	acmeSlot := first["acme"]
+	if _, err := s.ensureNetworkPortRegistrations(ctx, []string{"globex"}); err != nil {
+		t.Fatal(err)
+	}
+	registrations, err := state.ListNetworkPortRegistrations(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := registrations["acme"]; exists {
+		t.Fatalf("unused namespace registration was not released: %v", registrations)
+	}
+	third, err := s.ensureNetworkPortRegistrations(ctx, []string{"globex", "initech"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third["initech"] != acmeSlot {
+		t.Fatalf("released slot %d was not reusable: %v", acmeSlot, third)
+	}
+}
