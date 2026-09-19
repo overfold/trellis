@@ -36,6 +36,7 @@ type nodeConfigFile struct {
 	WireGuardPool     *string              `yaml:"wireguard_pool"`
 	WireGuardEndpoint *string              `yaml:"wireguard_endpoint"`
 	WireGuardPort     *int                 `yaml:"wireguard_port"`
+	WireGuardPortCount *int                `yaml:"wireguard_port_count"`
 	DNSListen         *string              `yaml:"dns_listen"`
 	CACert            *string              `yaml:"ca_cert"`
 	CAKey             *string              `yaml:"ca_key"`
@@ -90,6 +91,9 @@ func loadNodeConfig(path string, cfg *config, flags *pflag.FlagSet) error {
 	setString("secrets-key-id", parsed.SecretsKeyID, &cfg.SecretsKeyID)
 	if parsed.WireGuardPort != nil && !flags.Changed("wireguard-port") {
 		cfg.WireGuardPort = *parsed.WireGuardPort
+	}
+	if parsed.WireGuardPortCount != nil && !flags.Changed("wireguard-port-count") {
+		cfg.WireGuardPortCount = *parsed.WireGuardPortCount
 	}
 	if parsed.Labels != nil && !flags.Changed("label") {
 		cfg.Labels = append([]string(nil), (*parsed.Labels)...)
