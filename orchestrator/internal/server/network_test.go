@@ -46,3 +46,25 @@ func TestNetworkPlanUsesRegisteredPeerIdentity(t *testing.T) {
 		t.Fatalf("unexpected plan: %#v", plan)
 	}
 }
+
+
+func TestNetworkPlanUsesDifferentPortsForDifferentNamespaces(t *testing.T) {
+	nodeID := uuid.New()
+	node := &Node{ID: nodeID, WireGuardPortBase: 51820, WireGuardPortCount: 256}
+	s := &Server{
+		networkPool:  netip.MustParsePrefix("10.64.0.0/10"),
+		networkPorts: map[string]int{"acme": 3, "globex": 11},
+		nodes:        map[uuid.UUID]*Node{nodeID: node},
+	}
+	acme, err := s.networkPlan("acme", node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	globex, err := s.networkPlan("globex", node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acme.ListenPort != 51823 || globex.ListenPort != 51831 || acme.ListenPort == globex.ListenPort {
+		t.Fatalf("unexpected namespace ports: acme=%d globex=%d", acme.ListenPort, globex.ListenPort)
+	}
+}
