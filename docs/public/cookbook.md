@@ -244,7 +244,7 @@ A scaled task group repeats the same volume identities in every replica, so shar
 
 Set `api_access: namespace` on the controller's task group. Namespace mode cannot name or select some other namespace: Trellis creates a persistent bearer token restricted to the **job's own namespace**. It injects:
 
-- `TRELLIS_ADDR` — control-plane address;
+- `TRELLIS_ADDR` — workload-reachable control-plane address;
 - `TRELLIS_TOKEN` — bearer token restricted to the job namespace;
 - `TRELLIS_NAMESPACE` — that same job namespace, for request scoping;
 - `TRELLIS_CA_CERT` — cluster CA PEM when TLS is configured.
