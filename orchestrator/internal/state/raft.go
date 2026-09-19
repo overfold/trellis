@@ -30,7 +30,8 @@ type RaftStore struct {
 // DesiredSnapshot is the portable portion of control-plane state. Keys are
 // relative to their state prefixes so a backup can be restored into a freshly
 // bootstrapped cluster with a different name. Volume registrations preserve
-// locality metadata only; volume bytes remain external to the backup.
+// locality metadata only; volume bytes remain external to the backup. Namespace
+// network port registrations preserve stable WireGuard pathway assignments.
 type DesiredSnapshot struct {
 	Jobs                     map[string][]byte `json:"jobs"`
 	Secrets                  map[string][]byte `json:"secrets"`
@@ -48,7 +49,7 @@ func (r *RaftStore) BackupDesired(cluster string) (*DesiredSnapshot, error) {
 }
 
 // RestoreDesired installs a backup as one Raft log entry. The FSM rejects the
-// operation unless both desired-state prefixes are empty.
+// operation unless the target desired-state prefixes are empty.
 func (r *RaftStore) RestoreDesired(cluster string, snapshot *DesiredSnapshot) error {
 	cmd := fsmCommand{Op: "restore_desired", Cluster: cluster, Snapshot: snapshot}
 	data, err := json.Marshal(cmd)
