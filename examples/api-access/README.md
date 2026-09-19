@@ -36,7 +36,7 @@ With API access enabled, Trellis adds these variables to every task in the group
 
 | Variable | Meaning |
 |---|---|
-| `TRELLIS_ADDR` | Address of the Trellis control-plane API. |
+| `TRELLIS_ADDR` | Workload-reachable address of the Trellis control-plane API. |
 | `TRELLIS_TOKEN` | Workload bearer token with the requested effective scope/access. |
 | `TRELLIS_NAMESPACE` | The job's namespace; use it as the default scope for namespace-aware requests. |
 | `TRELLIS_CA_CERT` | Cluster CA certificate (inline PEM) for TLS verification when configured. |
