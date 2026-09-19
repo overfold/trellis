@@ -48,9 +48,10 @@ func (execRunner) Run(ctx context.Context, name string, args ...string) error {
 	return nil
 }
 
-// WireGuardManager manages allocation networking with WireGuard.
+// WorkloadDNSAddress is the reserved node-local resolver address injected into workloads.
 const WorkloadDNSAddress = "198.18.0.53"
 
+// WireGuardManager manages allocation networking with WireGuard.
 type WireGuardManager struct {
 	configDir  string
 	stateDir   string
