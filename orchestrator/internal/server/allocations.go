@@ -45,14 +45,70 @@ func (s *Server) ListAllocations(namespace string, filter *AllocationListFilter)
 	return result
 }
 
+func allocationTaskEndpoints(allocation *Allocation) []api.AllocationEndpoint {
+	observed := make(map[string]api.AllocationEndpoint, len(allocation.Endpoints))
+	for _, endpoint := range allocation.Endpoints {
+		if endpoint.Task != "" {
+			observed[endpoint.Task] = endpoint
+		}
+	}
+
+	// Older persisted allocations may not have task specs. Preserve the
+	// historical node-address behavior for those records only.
+	if len(allocation.Tasks) == 0 {
+		if len(allocation.Endpoints) > 0 {
+			return append([]api.AllocationEndpoint(nil), allocation.Endpoints...)
+		}
+		if allocation.Node != nil {
+			return []api.AllocationEndpoint{{Address: allocation.Node.Host, Ports: append([]api.PortMapping(nil), allocation.Ports...)}}
+		}
+		return nil
+	}
+
+	endpoints := make([]api.AllocationEndpoint, 0, len(allocation.Tasks))
+	for _, task := range allocation.Tasks {
+		mode := spec.TaskNetworkDefault
+		if task.Networking != nil {
+			mode = task.Networking.Mode
+		}
+		endpoint := observed[task.Name]
+		endpoint.Task = task.Name
+		switch mode {
+		case spec.TaskNetworkHost:
+			if allocation.Node == nil {
+				continue
+			}
+			endpoint.Address = allocation.Node.Host
+			if len(endpoint.Ports) == 0 && task.Networking != nil {
+				for _, port := range task.Networking.Ports {
+					endpoint.Ports = append(endpoint.Ports, api.PortMapping{HostPort: port.Port, ContainerPort: port.Port})
+				}
+			}
+			endpoints = append(endpoints, endpoint)
+		case spec.TaskNetworkWireGuard:
+			// Namespace addresses are valid only when observed from the agent.
+			// Never substitute the node host for a missing workload address.
+			endpoints = append(endpoints, endpoint)
+		}
+	}
+	return endpoints
+}
+
 func allocationEndpointAddress(allocation *Allocation) string {
-	if allocation.Address != "" {
-		return allocation.Address
+	var address string
+	for _, endpoint := range allocationTaskEndpoints(allocation) {
+		if endpoint.Address == "" {
+			continue
+		}
+		if address == "" {
+			address = endpoint.Address
+			continue
+		}
+		if address != endpoint.Address {
+			return ""
+		}
 	}
-	if allocation.Node != nil {
-		return allocation.Node.Host
-	}
-	return ""
+	return address
 }
 
 func (s *Server) allocationResponseLocked(allocation *Allocation) api.AllocationResponse {
@@ -62,6 +118,7 @@ func (s *Server) allocationResponseLocked(allocation *Allocation) api.Allocation
 		Group:            allocation.TaskGroupName,
 		Namespace:        allocation.Namespace,
 		Address:          allocationEndpointAddress(allocation),
+		Endpoints:        allocationTaskEndpoints(allocation),
 		Phase:            allocation.Phase,
 		Health:           allocation.Health,
 		Draining:         allocation.Draining,
