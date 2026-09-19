@@ -308,17 +308,8 @@ func (c *ContainerdRuntime) Exec(ctx context.Context, containerID string, comman
 	}
 
 	execID := fmt.Sprintf("healthcheck-%d", time.Now().UnixNano())
-	process := &specs.Process{
-		Args: command,
-		Cwd:  "/",
-	}
-	if containerSpec, specErr := container.Spec(ctx); specErr == nil && containerSpec.Process != nil {
-		process.Env = containerSpec.Process.Env
-		process.User = containerSpec.Process.User
-		if containerSpec.Process.Cwd != "" {
-			process.Cwd = containerSpec.Process.Cwd
-		}
-	}
+	containerSpec, _ := container.Spec(ctx)
+	process := execProcessSpec(containerSpec, command, false)
 
 	taskExec, err := task.Exec(ctx, execID, process, cio.NullIO)
 	if err != nil {
@@ -343,6 +334,23 @@ func (c *ContainerdRuntime) Exec(ctx context.Context, containerID string, comman
 	}
 
 	return int(code), nil
+}
+
+func execProcessSpec(containerSpec *specs.Spec, command []string, terminal bool) *specs.Process {
+	process := &specs.Process{
+		Args:     append([]string(nil), command...),
+		Cwd:      "/",
+		Terminal: terminal,
+	}
+	if containerSpec == nil || containerSpec.Process == nil {
+		return process
+	}
+	process.Env = append([]string(nil), containerSpec.Process.Env...)
+	process.User = containerSpec.Process.User
+	if containerSpec.Process.Cwd != "" {
+		process.Cwd = containerSpec.Process.Cwd
+	}
+	return process
 }
 
 // Inspect returns the current state of a container.
@@ -493,10 +501,8 @@ func (c *ContainerdRuntime) ExecOutput(ctx context.Context, containerID string, 
 	}
 
 	execID := fmt.Sprintf("exec-%d", time.Now().UnixNano())
-	process := &specs.Process{
-		Args: command,
-		Cwd:  "/",
-	}
+	containerSpec, _ := container.Spec(ctx)
+	process := execProcessSpec(containerSpec, command, false)
 
 	var outBuf, errBuf bytes.Buffer
 	creator := cio.NewCreator(cio.WithStreams(nil, &outBuf, &errBuf))
@@ -634,14 +640,8 @@ func (c *ContainerdRuntime) StartTerminal(ctx context.Context, containerID strin
 		return nil, fmt.Errorf("getting task for %s: %w", containerID, err)
 	}
 
-	processSpec := &specs.Process{Args: command, Cwd: "/", Terminal: true}
-	if containerSpec, specErr := container.Spec(ctx); specErr == nil && containerSpec.Process != nil {
-		processSpec.Env = append([]string(nil), containerSpec.Process.Env...)
-		processSpec.User = containerSpec.Process.User
-		if containerSpec.Process.Cwd != "" {
-			processSpec.Cwd = containerSpec.Process.Cwd
-		}
-	}
+	containerSpec, _ := container.Spec(ctx)
+	processSpec := execProcessSpec(containerSpec, command, true)
 	if term != "" {
 		env := make([]string, 0, len(processSpec.Env)+1)
 		for _, value := range processSpec.Env {
