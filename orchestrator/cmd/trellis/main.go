@@ -136,18 +136,20 @@ func run(parent context.Context, cfg *config) error {
 	if err != nil {
 		return err
 	}
-	hostname, err := os.Hostname()
-	if err != nil {
-		return fmt.Errorf("hostname: %w", err)
-	}
-	if cfg.AgentAdvertise == "" {
-		cfg.AgentAdvertise = net.JoinHostPort(hostname, "8127")
-	}
-	if cfg.ServerAdvertise == "" {
-		cfg.ServerAdvertise = net.JoinHostPort(hostname, "8128")
-	}
-	if cfg.RaftAdvertise == "" {
-		cfg.RaftAdvertise = net.JoinHostPort(hostname, "8129")
+	if cfg.AgentAdvertise == "" || cfg.ServerAdvertise == "" || cfg.RaftAdvertise == "" {
+		advertiseHost, err := detectAdvertiseHost()
+		if err != nil {
+			return fmt.Errorf("determine advertise address: %w; configure agent_advertise, server_advertise, and raft_advertise explicitly", err)
+		}
+		if cfg.AgentAdvertise == "" {
+			cfg.AgentAdvertise = net.JoinHostPort(advertiseHost, "8127")
+		}
+		if cfg.ServerAdvertise == "" {
+			cfg.ServerAdvertise = net.JoinHostPort(advertiseHost, "8128")
+		}
+		if cfg.RaftAdvertise == "" {
+			cfg.RaftAdvertise = net.JoinHostPort(advertiseHost, "8129")
+		}
 	}
 	agentHost, agentPort, err := splitAddress(cfg.AgentAdvertise)
 	if err != nil {
@@ -417,6 +419,34 @@ func run(parent context.Context, cfg *config) error {
 			}
 		}
 	}
+}
+
+func detectAdvertiseHost() (string, error) {
+	if conn, err := net.Dial("udp4", "1.1.1.1:53"); err == nil {
+		defer func() { _ = conn.Close() }()
+		if address, ok := conn.LocalAddr().(*net.UDPAddr); ok {
+			if ip := address.IP.To4(); ip != nil && !ip.IsLoopback() && !ip.IsUnspecified() {
+				return ip.String(), nil
+			}
+		}
+	}
+	addresses, err := net.InterfaceAddrs()
+	if err != nil {
+		return "", err
+	}
+	for _, address := range addresses {
+		var ip net.IP
+		switch value := address.(type) {
+		case *net.IPNet:
+			ip = value.IP
+		case *net.IPAddr:
+			ip = value.IP
+		}
+		if ip = ip.To4(); ip != nil && !ip.IsLoopback() && !ip.IsUnspecified() {
+			return ip.String(), nil
+		}
+	}
+	return "", fmt.Errorf("no non-loopback IPv4 address found")
 }
 
 func detectNodeCapabilities(runtimeName string) []spec.NodeCapability {
