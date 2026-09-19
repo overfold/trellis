@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -297,3 +298,51 @@ func TestAllocationEndpointKeepsDistinctTaskAddresses(t *testing.T) {
 	}
 }
 
+
+func TestHeartbeatPreservesTaskEndpointIdentity(t *testing.T) {
+	nodeID := uuid.MustParse("88888888-8888-8888-8888-888888888888")
+	node := &Node{ID: nodeID, Host: "node-a", Status: NodeStatusHealthy}
+	allocation := &Allocation{
+		Namespace:     "demo",
+		JobName:       "web",
+		TaskGroupName: "web",
+		ID:            "demo-web-1",
+		Node:          node,
+		Tasks: []spec.TaskSpec{
+			{Name: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard}},
+			{Name: "sidecar", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard}},
+		},
+		Generation: 1,
+		Phase:      lifecycle.PhaseRunning,
+		Health:     lifecycle.HealthHealthy,
+	}
+	s := &Server{
+		state:       NewStateController(memoryStore{}, "test"),
+		nodes:       map[uuid.UUID]*Node{nodeID: node},
+		allocations: []*Allocation{allocation},
+		catalog:     catalog.New(),
+	}
+	actual := []api.AllocationStatus{
+		{ID: allocation.ID, Generation: 1, Task: "sidecar", Address: "10.86.213.17", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy},
+		{ID: allocation.ID, Generation: 1, Task: "app", Address: "10.86.213.2", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy},
+	}
+	if err := s.Heartbeat(context.Background(), nodeID, actual, "test", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(allocation.Endpoints) != 2 ||
+		allocation.Endpoints[0].Task != "app" || allocation.Endpoints[0].Address != "10.86.213.2" ||
+		allocation.Endpoints[1].Task != "sidecar" || allocation.Endpoints[1].Address != "10.86.213.17" {
+		t.Fatalf("heartbeat endpoints = %#v, want stable task/address pairs", allocation.Endpoints)
+	}
+
+	actual[1].Address = ""
+	if err := s.Heartbeat(context.Background(), nodeID, actual, "test", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := allocationEndpointAddress(allocation); got != "" {
+		t.Fatalf("allocation address after missing task observation = %q, want empty", got)
+	}
+	if allocation.Endpoints[0].Address != "" {
+		t.Fatalf("stale app address was retained: %#v", allocation.Endpoints)
+	}
+}
