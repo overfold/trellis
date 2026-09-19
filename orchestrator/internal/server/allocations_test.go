@@ -168,14 +168,18 @@ func TestAllocationEvents(t *testing.T) {
 
 func TestAllocationEndpointUsesObservedNetworkAddress(t *testing.T) {
 	node := &Node{ID: uuid.MustParse("44444444-4444-4444-4444-444444444444"), Host: "node-a"}
+	tasks := []spec.TaskSpec{{
+		Name: "app",
+		Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard},
+	}}
 	allocation := &Allocation{
 		Namespace:     "demo",
 		JobName:       "web",
 		TaskGroupName: "web",
 		ID:            "demo-web-1",
 		Node:          node,
-		Address:       "10.86.213.2",
-		Ports:         []api.PortMapping{{ContainerPort: 80}},
+		Tasks:         tasks,
+		Endpoints:     []api.AllocationEndpoint{{Task: "app", Address: "10.86.213.2"}},
 		Generation:    1,
 		JobRevision:   1,
 		Phase:         lifecycle.PhaseRunning,
@@ -184,7 +188,7 @@ func TestAllocationEndpointUsesObservedNetworkAddress(t *testing.T) {
 	s := &Server{
 		jobs: map[string]*Job{
 			jobKey("demo", "web"): {
-				Spec: &spec.JobSpec{Namespace: "demo", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "web", Count: 1}}},
+				Spec: &spec.JobSpec{Namespace: "demo", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "web", Count: 1, Tasks: tasks}}},
 				Revision: 1,
 			},
 		},
@@ -193,12 +197,12 @@ func TestAllocationEndpointUsesObservedNetworkAddress(t *testing.T) {
 	}
 
 	listed := s.ListAllocations("demo", nil)
-	if len(listed) != 1 || listed[0].Address != "10.86.213.2" {
-		t.Fatalf("allocation endpoint = %#v, want observed namespace address", listed)
+	if len(listed) != 1 || listed[0].Address != "10.86.213.2" || len(listed[0].Endpoints) != 1 || listed[0].Endpoints[0].Task != "app" {
+		t.Fatalf("allocation endpoint = %#v, want observed namespace task address", listed)
 	}
 	status, ok := s.GetJob("demo", "web")
-	if !ok || len(status.Allocations) != 1 || status.Allocations[0].Address != "10.86.213.2" || len(status.Allocations[0].Ports) != 1 {
-		t.Fatalf("job status endpoint = %#v, want observed address and ports", status)
+	if !ok || len(status.Allocations) != 1 || status.Allocations[0].Address != "10.86.213.2" || len(status.Allocations[0].Endpoints) != 1 {
+		t.Fatalf("job status endpoint = %#v, want observed namespace task endpoint", status)
 	}
 
 	s.refreshCatalog()
@@ -208,22 +212,88 @@ func TestAllocationEndpointUsesObservedNetworkAddress(t *testing.T) {
 	}
 }
 
+func TestAllocationEndpointDoesNotFallBackForNamespaceNetworking(t *testing.T) {
+	allocation := &Allocation{
+		Namespace:     "demo",
+		JobName:       "web",
+		TaskGroupName: "web",
+		ID:            "demo-web-1",
+		Node:          &Node{ID: uuid.MustParse("55555555-5555-5555-5555-555555555555"), Host: "node-a"},
+		Tasks: []spec.TaskSpec{{
+			Name: "app",
+			Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard},
+		}},
+		Generation: 1,
+		Phase:      lifecycle.PhaseRunning,
+		Health:     lifecycle.HealthHealthy,
+	}
+	s := &Server{allocations: []*Allocation{allocation}, catalog: catalog.New()}
+
+	listed := s.ListAllocations("demo", nil)
+	if len(listed) != 1 || listed[0].Address != "" {
+		t.Fatalf("allocation endpoint = %#v, want no node fallback for namespace task", listed)
+	}
+	s.refreshCatalog()
+	if services := s.ListServices("demo", nil); len(services) != 0 {
+		t.Fatalf("catalog = %#v, want no endpoint until namespace address is observed", services)
+	}
+}
+
 func TestAllocationEndpointFallsBackToNodeForHostNetworking(t *testing.T) {
 	allocation := &Allocation{
-		Namespace: "demo",
-		JobName: "web",
+		Namespace:     "demo",
+		JobName:       "web",
 		TaskGroupName: "web",
-		ID: "demo-web-1",
-		Node: &Node{ID: uuid.MustParse("55555555-5555-5555-5555-555555555555"), Host: "node-a"},
+		ID:            "demo-web-1",
+		Node:          &Node{ID: uuid.MustParse("66666666-6666-6666-6666-666666666666"), Host: "node-a"},
+		Tasks: []spec.TaskSpec{{
+			Name: "app",
+			Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkHost, Ports: []spec.PortSpec{{Port: 8080}}},
+		}},
 		Generation: 1,
-		Phase: lifecycle.PhaseRunning,
-		Health: lifecycle.HealthHealthy,
+		Phase:      lifecycle.PhaseRunning,
+		Health:     lifecycle.HealthHealthy,
 	}
 	s := &Server{allocations: []*Allocation{allocation}}
 
 	listed := s.ListAllocations("demo", nil)
-	if len(listed) != 1 || listed[0].Address != "node-a" {
-		t.Fatalf("allocation endpoint = %#v, want node fallback", listed)
+	if len(listed) != 1 || listed[0].Address != "node-a" || len(listed[0].Endpoints) != 1 || len(listed[0].Endpoints[0].Ports) != 1 {
+		t.Fatalf("allocation endpoint = %#v, want host task node fallback and port", listed)
+	}
+}
+
+func TestAllocationEndpointKeepsDistinctTaskAddresses(t *testing.T) {
+	allocation := &Allocation{
+		Namespace:     "demo",
+		JobName:       "web",
+		TaskGroupName: "web",
+		ID:            "demo-web-1",
+		Node:          &Node{ID: uuid.MustParse("77777777-7777-7777-7777-777777777777"), Host: "node-a"},
+		Tasks: []spec.TaskSpec{
+			{Name: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard}},
+			{Name: "sidecar", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard}},
+		},
+		Endpoints: []api.AllocationEndpoint{
+			{Task: "sidecar", Address: "10.86.213.17"},
+			{Task: "app", Address: "10.86.213.2"},
+		},
+		Generation: 1,
+		Phase:      lifecycle.PhaseRunning,
+		Health:     lifecycle.HealthHealthy,
+	}
+	s := &Server{allocations: []*Allocation{allocation}, catalog: catalog.New()}
+
+	listed := s.ListAllocations("demo", nil)
+	if len(listed) != 1 || listed[0].Address != "" || len(listed[0].Endpoints) != 2 {
+		t.Fatalf("allocation endpoint = %#v, want ambiguous legacy address plus two task endpoints", listed)
+	}
+	if listed[0].Endpoints[0].Task != "app" || listed[0].Endpoints[0].Address != "10.86.213.2" ||
+		listed[0].Endpoints[1].Task != "sidecar" || listed[0].Endpoints[1].Address != "10.86.213.17" {
+		t.Fatalf("task endpoints = %#v, want addresses matched by task", listed[0].Endpoints)
+	}
+	s.refreshCatalog()
+	if services := s.ListServices("demo", nil); len(services) != 0 {
+		t.Fatalf("catalog = %#v, want ambiguous allocation omitted from allocation-level discovery", services)
 	}
 }
 
