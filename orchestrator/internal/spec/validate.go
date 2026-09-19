@@ -272,6 +272,15 @@ func Validate(job *JobSpec) error {
 					}
 				}
 			}
+			if group.APIAccess != nil {
+				mode := TaskNetworkDefault
+				if task.Networking != nil {
+					mode = task.Networking.Mode
+				}
+				if mode != TaskNetworkHost && mode != TaskNetworkWireGuard {
+					add(taskPath+".networking.mode", "incompatible", "api_access requires host or namespace networking")
+				}
+			}
 
 			if task.HealthCheck != nil {
 				checkPath := taskPath + ".health_check"
