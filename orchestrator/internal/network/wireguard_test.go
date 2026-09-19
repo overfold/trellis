@@ -59,7 +59,7 @@ func TestWireGuardRejectsUntrustedNetworkName(t *testing.T) {
 
 func TestAutomatedIdentityPersists(t *testing.T) {
 	dir := t.TempDir()
-	first, err := NewAutomatedWireGuardManager(dir, 51820)
+	first, err := NewAutomatedWireGuardManager(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestAutomatedIdentityPersists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := NewAutomatedWireGuardManager(dir, 51820)
+	second, err := NewAutomatedWireGuardManager(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,5 +92,88 @@ func TestConfigureWorkloadDNSRejectsIPv6(t *testing.T) {
 	manager.run = &recordingRunner{}
 	if err := manager.ConfigureWorkloadDNS(context.Background(), "fd00::53"); err == nil {
 		t.Fatal("expected IPv6 workload DNS address to be rejected")
+	}
+}
+
+
+func TestAutomatedWireGuardUsesPlanListenPort(t *testing.T) {
+	manager, err := NewAutomatedWireGuardManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{}
+	manager.run = runner
+	_, err = manager.Attach(context.Background(), AttachRequest{
+		Namespace:    "acme",
+		Network:      "acme",
+		AllocationID: "alloc-port",
+		Plan: Plan{
+			CIDR:             "10.42.1.0/24",
+			Gateway:          "10.42.1.1",
+			WireGuardAddress: "169.254.1.1/32",
+			ListenPort:       51917,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(runner.commands, "\n")
+	if !strings.Contains(joined, "listen-port 51917") {
+		t.Fatalf("namespace listen port was not applied:\n%s", joined)
+	}
+}
+
+
+func TestWireGuardDetachRemovesNamespacePathAfterLastAllocation(t *testing.T) {
+	manager, err := NewAutomatedWireGuardManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{}
+	manager.run = runner
+	plan := Plan{
+		CIDR:             "10.42.1.0/24",
+		Gateway:          "10.42.1.1",
+		WireGuardAddress: "169.254.1.1/32",
+		ListenPort:       51917,
+	}
+	first, err := manager.Attach(context.Background(), AttachRequest{
+		Namespace: "acme", Network: "acme", AllocationID: "alloc-one", Plan: plan,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := manager.Attach(context.Background(), AttachRequest{
+		Namespace: "acme", Network: "acme", AllocationID: "alloc-two", Plan: plan,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runner.commands = nil
+	if err := manager.Detach(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(runner.commands, "\n")
+	if strings.Contains(joined, "ip link del "+first.WireGuardInterface) || strings.Contains(joined, "ip link del "+first.Bridge) {
+		t.Fatalf("namespace path removed while another allocation still used it:\n%s", joined)
+	}
+
+	runner.commands = nil
+	if err := manager.Detach(context.Background(), second); err != nil {
+		t.Fatal(err)
+	}
+	joined = strings.Join(runner.commands, "\n")
+	for _, want := range []string{
+		"ip link del " + second.WireGuardInterface,
+		"ip link del " + second.Bridge,
+		"iptables -D FORWARD",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("last detach did not tear down %q:\n%s", want, joined)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(manager.stateDir, "acme")); !os.IsNotExist(err) {
+		t.Fatalf("namespace lease directory still exists after last detach: %v", err)
 	}
 }

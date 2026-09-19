@@ -57,7 +57,6 @@ type WireGuardManager struct {
 	stateDir   string
 	run        commandRunner
 	mu         sync.Mutex
-	listenPort int
 	dnsAddress string
 }
 
@@ -79,8 +78,8 @@ func (m *WireGuardManager) ConfigureWorkloadDNS(ctx context.Context, address str
 }
 
 // NewAutomatedWireGuardManager creates a manager with an automatically generated identity.
-func NewAutomatedWireGuardManager(stateDir string, listenPort int) (*WireGuardManager, error) {
-	m := &WireGuardManager{stateDir: stateDir, run: execRunner{}, listenPort: listenPort}
+func NewAutomatedWireGuardManager(stateDir string) (*WireGuardManager, error) {
+	m := &WireGuardManager{stateDir: stateDir, run: execRunner{}}
 	if _, err := m.Identity(); err != nil {
 		return nil, err
 	}
@@ -207,7 +206,7 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 		cfg, err = m.load(networkName)
 	} else {
 		cfg = &Config{CIDR: request.Plan.CIDR, Gateway: request.Plan.Gateway, WireGuardAddress: request.Plan.WireGuardAddress,
-			PrivateKeyFile: filepath.Join(m.stateDir, "identity.key"), ListenPort: m.listenPort}
+			PrivateKeyFile: filepath.Join(m.stateDir, "identity.key"), ListenPort: request.Plan.ListenPort}
 		for _, peer := range request.Plan.Peers {
 			cfg.Peers = append(cfg.Peers, Peer(peer))
 		}
@@ -318,7 +317,18 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 	if err = m.run.Run(ctx, "ip", "-n", allocation, "route", "replace", "default", "via", cfg.Gateway); err != nil {
 		return nil, err
 	}
-	return &Attachment{AllocationID: allocation, Namespace: namespace, Network: networkName, NetworkNamespace: ns, HostVeth: hostVeth, Address: address, LeasePath: lease}, nil
+	return &Attachment{
+		AllocationID:       allocation,
+		Namespace:          namespace,
+		Network:            networkName,
+		NetworkNamespace:   ns,
+		HostVeth:           hostVeth,
+		Bridge:             bridge,
+		WireGuardInterface: wg,
+		Gateway:            cfg.Gateway,
+		Address:            address,
+		LeasePath:          lease,
+	}, nil
 }
 
 // Detach removes networking resources for an allocation.
@@ -328,14 +338,46 @@ func (m *WireGuardManager) Detach(ctx context.Context, a *Attachment) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
 	_ = m.run.Run(ctx, "ip", "link", "del", a.HostVeth)
-	if err := m.run.Run(ctx, "ip", "netns", "del", a.AllocationID); err != nil {
-		return err
-	}
+	_ = m.run.Run(ctx, "ip", "netns", "del", a.AllocationID)
 	if a.LeasePath != "" {
 		if err := os.Remove(a.LeasePath); err != nil && !os.IsNotExist(err) {
 			return err
 		}
+	}
+
+	leaseDir := filepath.Join(m.stateDir, a.Network)
+	entries, err := os.ReadDir(leaseDir)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read network leases: %w", err)
+	}
+	if len(entries) != 0 {
+		return nil
+	}
+
+	bridge := a.Bridge
+	if bridge == "" {
+		bridge = short("tb", a.Namespace+"\x00"+a.Network)
+	}
+	wg := a.WireGuardInterface
+	if wg == "" {
+		wg = short("tw", a.Namespace+"\x00"+a.Network)
+	}
+	_ = m.run.Run(ctx, "iptables", "-D", "FORWARD", "-i", bridge, "!", "-o", wg, "-j", "DROP")
+	_ = m.run.Run(ctx, "iptables", "-D", "FORWARD", "-o", bridge, "!", "-i", wg, "-j", "DROP")
+	if m.dnsAddress != "" {
+		for _, protocol := range []string{"udp", "tcp"} {
+			_ = m.run.Run(ctx, "iptables", "-D", "INPUT", "-i", bridge, "-d", m.dnsAddress, "-p", protocol, "--dport", "53", "-j", "ACCEPT")
+		}
+	}
+	if a.Gateway != "" {
+		_ = m.run.Run(ctx, "iptables", "-D", "INPUT", "-i", bridge, "!", "-d", a.Gateway, "-j", "DROP")
+	}
+	_ = m.run.Run(ctx, "ip", "link", "del", wg)
+	_ = m.run.Run(ctx, "ip", "link", "del", bridge)
+	if err := os.Remove(leaseDir); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove empty network lease directory: %w", err)
 	}
 	return nil
 }

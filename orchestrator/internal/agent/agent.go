@@ -173,9 +173,10 @@ func (a *Agent) SetNetworkManager(manager network.Manager) {
 	}
 }
 
-// SetWireGuardIdentity configures the node WireGuard endpoint.
-func (a *Agent) SetWireGuardIdentity(publicKey, endpoint string) {
+// SetWireGuardIdentity configures the node WireGuard identity and namespace port range.
+func (a *Agent) SetWireGuardIdentity(publicKey, endpoint string, portBase, portCount int) {
 	a.nodeInfo.WireGuardPublicKey, a.nodeInfo.WireGuardEndpoint = publicKey, endpoint
+	a.nodeInfo.WireGuardPortBase, a.nodeInfo.WireGuardPortCount = portBase, portCount
 }
 
 // SetDNSServers configures allocation DNS servers.

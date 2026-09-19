@@ -102,8 +102,9 @@ func TestRestoreDesiredKeepsRuntimeStateAndRequiresFreshTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot := &DesiredSnapshot{
-		Jobs:    map[string][]byte{"web": []byte(`{"revision":3}`)},
-		Secrets: map[string][]byte{"prod/token": []byte(`{"ciphertext":"encrypted"}`)},
+		Jobs:                     map[string][]byte{"web": []byte(`{"revision":3}`)},
+		Secrets:                  map[string][]byte{"prod/token": []byte(`{"ciphertext":"encrypted"}`)},
+		NetworkPortRegistrations: map[string][]byte{"acme": []byte(`{"namespace":"acme","slot":7}`)},
 	}
 	if err := store.RestoreDesired("new", snapshot); err != nil {
 		t.Fatal(err)
@@ -112,7 +113,11 @@ func TestRestoreDesiredKeepsRuntimeStateAndRequiresFreshTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 3 || all["trellis/new/nodes/local"] == nil || all["trellis/new/jobs/web"] == nil || all["trellis/new/secrets/prod/token"] == nil {
+	if len(all) != 4 ||
+		all["trellis/new/nodes/local"] == nil ||
+		all["trellis/new/jobs/web"] == nil ||
+		all["trellis/new/secrets/prod/token"] == nil ||
+		all["trellis/new/network-port-registrations/acme"] == nil {
 		t.Fatalf("unexpected restored state: %#v", all)
 	}
 	if err := store.RestoreDesired("new", snapshot); err == nil {

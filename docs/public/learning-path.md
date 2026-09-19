@@ -156,7 +156,7 @@ http://web.namespace-networking.default.trellis:8080/health
 
 That makes both discovery and the private network visible in `trellisctl jobs logs` without introducing an application proxy or special service resource.
 
-Configure the namespace-networking dependencies on every participating node and open the configured WireGuard UDP port between nodes (`51820` by default). The installer sets up WireGuard when namespace networking is enabled and optionally installs gVisor/runsc for additional sandboxing. Use `trellisctl jobs status` to see placement and current diagnostics, `jobs logs` to see application-level peer probes, and `jobs status NAME --history` when you need the recorded allocation lifecycle transitions that led to the current state.
+Configure the namespace-networking dependencies on every participating node and open the configured WireGuard UDP range between nodes (by default `51820-52075`). Each namespace is assigned one stable port from that range. The installer sets up WireGuard when namespace networking is enabled and optionally installs gVisor/runsc for additional sandboxing. Use `trellisctl jobs status` to see placement and current diagnostics, `jobs logs` to see application-level peer probes, and `jobs status NAME --history` when you need the recorded allocation lifecycle transitions that led to the current state.
 
 Treat discovery as runtime endpoint information, not application consensus. Applications that require a single writer, leader election, or distributed locking still need their own coordination protocol.
 

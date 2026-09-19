@@ -61,7 +61,7 @@ type config struct {
 	DataDir, Cluster, ClusterToken, ContainerdSock             string
 	Runtime, RuntimeFaults                                     string
 	WireGuardPool, WireGuardEndpoint                           string
-	WireGuardPort                                              int
+	WireGuardPort, WireGuardPortCount                          int
 	DNSListen                                                  string
 	CACert, CAKey, Cert, Key                                   string
 	SecretsKey, SecretsKeyID                                   string
@@ -105,8 +105,9 @@ func main() {
 	f.StringVar(&cfg.Runtime, "runtime", "containerd", "Workload runtime: containerd or injected (test only)")
 	f.StringVar(&cfg.RuntimeFaults, "runtime-faults", "", "Injected runtime fault-control file")
 	f.StringVar(&cfg.WireGuardPool, "wireguard-pool", "10.64.0.0/10", "Cluster address pool used for automatic namespace networking")
-	f.StringVar(&cfg.WireGuardEndpoint, "wireguard-endpoint", "", "Externally reachable WireGuard host or host:port")
-	f.IntVar(&cfg.WireGuardPort, "wireguard-port", 51820, "WireGuard UDP listen port")
+	f.StringVar(&cfg.WireGuardEndpoint, "wireguard-endpoint", "", "Externally reachable WireGuard host or base host:port")
+	f.IntVar(&cfg.WireGuardPort, "wireguard-port", 51820, "First UDP port in the per-namespace WireGuard range")
+	f.IntVar(&cfg.WireGuardPortCount, "wireguard-port-count", 256, "Number of consecutive UDP ports available for namespace WireGuard networks")
 	f.StringVar(&cfg.DNSListen, "dns-listen", net.JoinHostPort(network.WorkloadDNSAddress, "53"), "Workload DNS resolver listen address")
 	f.StringVar(&cfg.CACert, "ca-cert", "", "Path to cluster CA certificate (PEM)")
 	f.StringVar(&cfg.CAKey, "ca-key", "", "Path to cluster CA private key (PEM)")
@@ -128,6 +129,9 @@ func run(parent context.Context, cfg *config) error {
 	}
 	if cfg.WireGuardPort < 1 || cfg.WireGuardPort > 65535 {
 		return fmt.Errorf("--wireguard-port must be between 1 and 65535")
+	}
+	if cfg.WireGuardPortCount < 1 || cfg.WireGuardPort+cfg.WireGuardPortCount-1 > 65535 {
+		return fmt.Errorf("--wireguard-port-count must be positive and fit between --wireguard-port and 65535")
 	}
 	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
 		return fmt.Errorf("create data dir: %w", err)
@@ -248,6 +252,9 @@ func run(parent context.Context, cfg *config) error {
 	if err := control.SetNetworkPool(cfg.WireGuardPool); err != nil {
 		return err
 	}
+	if err := control.SetWireGuardPortCount(cfg.WireGuardPortCount); err != nil {
+		return err
+	}
 
 	server.RegisterMetrics(control, prometheus.DefaultRegisterer)
 
@@ -294,7 +301,7 @@ func run(parent context.Context, cfg *config) error {
 	ag := agent.NewAgent(log, runtimeClient, healthMgr, restartCtl, agent.NewPortManager(runtimeClient, 0, 0, 0), volumeManager, leaderClient, id)
 	ag.SetVersion(version.Current())
 	ag.ConfigureDurability(local, cfg.Cluster)
-	networkManager, err := network.NewAutomatedWireGuardManager(filepath.Join(cfg.DataDir, "network"), cfg.WireGuardPort)
+	networkManager, err := network.NewAutomatedWireGuardManager(filepath.Join(cfg.DataDir, "network"))
 	if err != nil {
 		return fmt.Errorf("initialize WireGuard identity: %w", err)
 	}
@@ -322,11 +329,19 @@ func run(parent context.Context, cfg *config) error {
 	} else if _, _, err := net.SplitHostPort(endpoint); err != nil {
 		endpoint = net.JoinHostPort(endpoint, strconv.Itoa(cfg.WireGuardPort))
 	}
+	_, externalBaseRaw, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		return fmt.Errorf("WireGuard endpoint: %w", err)
+	}
+	externalBase, err := strconv.Atoi(externalBaseRaw)
+	if err != nil || externalBase < 1 || externalBase+cfg.WireGuardPortCount-1 > 65535 {
+		return fmt.Errorf("WireGuard endpoint base port and namespace port count must fit within 1-65535")
+	}
 	publicKey, err := networkManager.Identity()
 	if err != nil {
 		return err
 	}
-	ag.SetWireGuardIdentity(publicKey, endpoint)
+	ag.SetWireGuardIdentity(publicKey, endpoint, cfg.WireGuardPort, cfg.WireGuardPortCount)
 	ag.SetAdvertiseAddress(agentHost, agentPort)
 	var sysinfo syscall.Sysinfo_t
 	memory := int64(0)

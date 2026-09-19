@@ -30,11 +30,13 @@ type RaftStore struct {
 // DesiredSnapshot is the portable portion of control-plane state. Keys are
 // relative to their state prefixes so a backup can be restored into a freshly
 // bootstrapped cluster with a different name. Volume registrations preserve
-// locality metadata only; volume bytes remain external to the backup.
+// locality metadata only; volume bytes remain external to the backup. Namespace
+// network port registrations preserve stable WireGuard pathway assignments.
 type DesiredSnapshot struct {
-	Jobs                map[string][]byte `json:"jobs"`
-	Secrets             map[string][]byte `json:"secrets"`
-	VolumeRegistrations map[string][]byte `json:"volume_registrations"`
+	Jobs                     map[string][]byte `json:"jobs"`
+	Secrets                  map[string][]byte `json:"secrets"`
+	VolumeRegistrations      map[string][]byte `json:"volume_registrations"`
+	NetworkPortRegistrations map[string][]byte `json:"network_port_registrations"`
 }
 
 // BackupDesired takes a linearizable view of desired state. The barrier makes
@@ -47,7 +49,7 @@ func (r *RaftStore) BackupDesired(cluster string) (*DesiredSnapshot, error) {
 }
 
 // RestoreDesired installs a backup as one Raft log entry. The FSM rejects the
-// operation unless both desired-state prefixes are empty.
+// operation unless the target desired-state prefixes are empty.
 func (r *RaftStore) RestoreDesired(cluster string, snapshot *DesiredSnapshot) error {
 	cmd := fsmCommand{Op: "restore_desired", Cluster: cluster, Snapshot: snapshot}
 	data, err := json.Marshal(cmd)
@@ -313,6 +315,7 @@ func (f *fsm) desiredSnapshot(cluster string) (*DesiredSnapshot, error) {
 	jobsPrefix := fmt.Sprintf("trellis/%s/jobs/", cluster)
 	secretsPrefix := fmt.Sprintf("trellis/%s/secrets/", cluster)
 	volumesPrefix := fmt.Sprintf("trellis/%s/volume-registrations/", cluster)
+	networkPortsPrefix := fmt.Sprintf("trellis/%s/network-port-registrations/", cluster)
 	jobs, err := f.store.List(context.Background(), jobsPrefix)
 	if err != nil {
 		return nil, err
@@ -325,10 +328,15 @@ func (f *fsm) desiredSnapshot(cluster string) (*DesiredSnapshot, error) {
 	if err != nil {
 		return nil, err
 	}
+	networkPorts, err := f.store.List(context.Background(), networkPortsPrefix)
+	if err != nil {
+		return nil, err
+	}
 	result := &DesiredSnapshot{
-		Jobs:                make(map[string][]byte, len(jobs)),
-		Secrets:             make(map[string][]byte, len(secrets)),
-		VolumeRegistrations: make(map[string][]byte, len(volumes)),
+		Jobs:                     make(map[string][]byte, len(jobs)),
+		Secrets:                  make(map[string][]byte, len(secrets)),
+		VolumeRegistrations:      make(map[string][]byte, len(volumes)),
+		NetworkPortRegistrations: make(map[string][]byte, len(networkPorts)),
 	}
 	for key, value := range jobs {
 		result.Jobs[key[len(jobsPrefix):]] = value
@@ -338,6 +346,9 @@ func (f *fsm) desiredSnapshot(cluster string) (*DesiredSnapshot, error) {
 	}
 	for key, value := range volumes {
 		result.VolumeRegistrations[key[len(volumesPrefix):]] = value
+	}
+	for key, value := range networkPorts {
+		result.NetworkPortRegistrations[key[len(networkPortsPrefix):]] = value
 	}
 	return result, nil
 }

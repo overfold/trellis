@@ -52,18 +52,20 @@ type Server struct {
 	state   *StateController
 	client  *client.AgentClient
 
-	cluster      *Cluster
-	nodes        map[uuid.UUID]*Node
-	jobs         map[string]*Job
-	allocations  []*Allocation
-	networkPool  netip.Prefix
-	tokenManager *auth.TokenManager
-	catalog      *catalog.ServiceCatalog
-	serverAddr   string
-	clusterName  string
-	joiner       ClusterJoiner
-	backupStore  desiredStore
-	clientTLS    *tls.Config
+	cluster            *Cluster
+	nodes              map[uuid.UUID]*Node
+	jobs               map[string]*Job
+	allocations        []*Allocation
+	networkPool        netip.Prefix
+	networkPorts       map[string]int
+	wireGuardPortCount int
+	tokenManager       *auth.TokenManager
+	catalog            *catalog.ServiceCatalog
+	serverAddr         string
+	clusterName        string
+	joiner             ClusterJoiner
+	backupStore        desiredStore
+	clientTLS          *tls.Config
 	// Locking contract:
 	//   - mu protects the in-memory cluster, node, job, allocation, epoch, and
 	//     leadership snapshots. It must never be held during network or storage I/O.
@@ -72,15 +74,18 @@ type Server struct {
 	//   - reconcileMu serializes complete reconciliation passes.
 	//   - mutationMu serializes durable state mutations and is never acquired
 	//     while mu or allocation.mu is held.
-	mu           sync.RWMutex
-	reconcileMu  sync.Mutex
-	mutationMu   sync.Mutex
-	controlEpoch uint64
-	leaderSince  time.Time
-	now          func() time.Time
-	metrics      *Metrics
-	secrets      *secretstore.Store
-	events       *EventBus
+	//   - networkPortMu serializes durable namespace WireGuard port assignment
+	//     and is never acquired while mu or allocation.mu is held.
+	mu            sync.RWMutex
+	reconcileMu   sync.Mutex
+	mutationMu    sync.Mutex
+	networkPortMu sync.Mutex
+	controlEpoch  uint64
+	leaderSince   time.Time
+	now           func() time.Time
+	metrics       *Metrics
+	secrets       *secretstore.Store
+	events        *EventBus
 }
 
 // SetSecretStore configures encrypted secret storage.
@@ -98,9 +103,10 @@ func (s *Server) Backup(_ context.Context) (*api.BackupSnapshot, error) {
 	result := &api.BackupSnapshot{
 		FormatVersion:       api.BackupFormatVersion,
 		CreatedAt:           s.now().UTC(),
-		Jobs:                make(map[string]json.RawMessage, len(snapshot.Jobs)),
-		Secrets:             make(map[string]json.RawMessage, len(snapshot.Secrets)),
-		VolumeRegistrations: make(map[string]json.RawMessage, len(snapshot.VolumeRegistrations)),
+		Jobs:                     make(map[string]json.RawMessage, len(snapshot.Jobs)),
+		Secrets:                  make(map[string]json.RawMessage, len(snapshot.Secrets)),
+		VolumeRegistrations:      make(map[string]json.RawMessage, len(snapshot.VolumeRegistrations)),
+		NetworkPortRegistrations: make(map[string]json.RawMessage, len(snapshot.NetworkPortRegistrations)),
 	}
 	for key, value := range snapshot.Jobs {
 		result.Jobs[key] = json.RawMessage(value)
@@ -110,6 +116,9 @@ func (s *Server) Backup(_ context.Context) (*api.BackupSnapshot, error) {
 	}
 	for key, value := range snapshot.VolumeRegistrations {
 		result.VolumeRegistrations[key] = json.RawMessage(value)
+	}
+	for key, value := range snapshot.NetworkPortRegistrations {
+		result.NetworkPortRegistrations[key] = json.RawMessage(value)
 	}
 	return result, nil
 }
@@ -122,7 +131,12 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 	if s.backupStore == nil {
 		return fmt.Errorf("restore is unavailable")
 	}
-	snapshot := &state.DesiredSnapshot{Jobs: make(map[string][]byte, len(backup.Jobs)), Secrets: make(map[string][]byte, len(backup.Secrets)), VolumeRegistrations: make(map[string][]byte, len(backup.VolumeRegistrations))}
+	snapshot := &state.DesiredSnapshot{
+		Jobs:                     make(map[string][]byte, len(backup.Jobs)),
+		Secrets:                  make(map[string][]byte, len(backup.Secrets)),
+		VolumeRegistrations:      make(map[string][]byte, len(backup.VolumeRegistrations)),
+		NetworkPortRegistrations: make(map[string][]byte, len(backup.NetworkPortRegistrations)),
+	}
 	for key, value := range backup.Jobs {
 		if !json.Valid(value) {
 			return fmt.Errorf("job %q contains invalid JSON", key)
@@ -140,6 +154,12 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 			return fmt.Errorf("volume registration %q contains invalid JSON", key)
 		}
 		snapshot.VolumeRegistrations[key] = value
+	}
+	for key, value := range backup.NetworkPortRegistrations {
+		if !json.Valid(value) {
+			return fmt.Errorf("network port registration %q contains invalid JSON", key)
+		}
+		snapshot.NetworkPortRegistrations[key] = value
 	}
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
@@ -193,6 +213,8 @@ type NodeRegistration struct {
 	Capabilities       []spec.NodeCapability
 	WireGuardPublicKey string
 	WireGuardEndpoint  string
+	WireGuardPortBase  int
+	WireGuardPortCount int
 }
 
 // Node contains the in-memory state of a registered node.
@@ -211,6 +233,8 @@ type Node struct {
 	Capabilities       []spec.NodeCapability
 	WireGuardPublicKey string
 	WireGuardEndpoint  string
+	WireGuardPortBase  int
+	WireGuardPortCount int
 	Version            string
 }
 
@@ -241,6 +265,8 @@ type NodeSummary struct {
 	Status             NodeStatus
 	WireGuardPublicKey string
 	WireGuardEndpoint  string
+	WireGuardPortBase  int
+	WireGuardPortCount int
 	LastHeartbeat      time.Time
 	Version            string `json:"version,omitempty"`
 }
@@ -308,18 +334,20 @@ func (a *Allocation) SetHealth(health lifecycle.Health) error {
 func NewServer(log *slog.Logger, storage *storage.LocalStorage, state *StateController, store state.Store, cluster, serverAddr string) *Server {
 	pool := netip.MustParsePrefix("10.64.0.0/10")
 	s := &Server{
-		log:          log.With("component", "server"),
-		storage:      storage,
-		state:        state,
-		client:       &client.AgentClient{},
-		nodes:        make(map[uuid.UUID]*Node),
-		jobs:         make(map[string]*Job),
-		networkPool:  pool,
-		tokenManager: auth.NewTokenManager(store, cluster),
-		catalog:      catalog.New(),
-		serverAddr:   serverAddr,
-		clusterName:  cluster,
-		now:          time.Now,
+		log:                log.With("component", "server"),
+		storage:            storage,
+		state:              state,
+		client:             &client.AgentClient{},
+		nodes:              make(map[uuid.UUID]*Node),
+		jobs:               make(map[string]*Job),
+		networkPool:        pool,
+		networkPorts:       make(map[string]int),
+		wireGuardPortCount: 256,
+		tokenManager:       auth.NewTokenManager(store, cluster),
+		catalog:            catalog.New(),
+		serverAddr:         serverAddr,
+		clusterName:        cluster,
+		now:                time.Now,
 	}
 	s.backupStore, _ = store.(desiredStore)
 	s.events = newEventBus()
@@ -360,6 +388,16 @@ func (s *Server) SetNetworkPool(pool string) error {
 		return fmt.Errorf("WireGuard pool must be an IPv4 prefix of /16 or larger")
 	}
 	s.networkPool = p.Masked()
+	return nil
+}
+
+// SetWireGuardPortCount configures how many consecutive UDP ports are
+// available for namespace WireGuard pathways on every node.
+func (s *Server) SetWireGuardPortCount(count int) error {
+	if count < 1 || count > 65535 {
+		return fmt.Errorf("WireGuard port count must be between 1 and 65535")
+	}
+	s.wireGuardPortCount = count
 	return nil
 }
 
@@ -468,6 +506,17 @@ func (s *Server) ListNodes() []Node {
 
 // RegisterNode adds or updates a cluster node.
 func (s *Server) RegisterNode(ctx context.Context, nodeRegistration *NodeRegistration) error {
+	if nodeRegistration.WireGuardPublicKey != "" || nodeRegistration.WireGuardEndpoint != "" || nodeRegistration.WireGuardPortBase != 0 || nodeRegistration.WireGuardPortCount != 0 {
+		if nodeRegistration.WireGuardPublicKey == "" || nodeRegistration.WireGuardEndpoint == "" {
+			return fmt.Errorf("WireGuard registration requires a public key and endpoint")
+		}
+		if nodeRegistration.WireGuardPortCount != s.wireGuardPortCount {
+			return fmt.Errorf("WireGuard port count %d does not match cluster count %d", nodeRegistration.WireGuardPortCount, s.wireGuardPortCount)
+		}
+		if nodeRegistration.WireGuardPortBase < 1 || nodeRegistration.WireGuardPortBase+nodeRegistration.WireGuardPortCount-1 > 65535 {
+			return fmt.Errorf("WireGuard port range is outside 1-65535")
+		}
+	}
 	s.mu.RLock()
 	status := NodeStatusHealthy
 	if existing := s.nodes[nodeRegistration.ID]; existing != nil && existing.Status == NodeStatusDraining {
@@ -483,6 +532,7 @@ func (s *Server) RegisterNode(ctx context.Context, nodeRegistration *NodeRegistr
 		Volumes:            nodeRegistration.Volumes,
 		Capabilities:       nodeRegistration.Capabilities,
 		WireGuardPublicKey: nodeRegistration.WireGuardPublicKey, WireGuardEndpoint: nodeRegistration.WireGuardEndpoint,
+		WireGuardPortBase: nodeRegistration.WireGuardPortBase, WireGuardPortCount: nodeRegistration.WireGuardPortCount,
 		LastHeartbeat: s.now().UTC(),
 	})
 	if err != nil {
@@ -507,6 +557,7 @@ func (s *Server) RegisterNode(ctx context.Context, nodeRegistration *NodeRegistr
 	node.Volumes = append([]string(nil), nodeRegistration.Volumes...)
 	node.Capabilities = append([]spec.NodeCapability(nil), nodeRegistration.Capabilities...)
 	node.WireGuardPublicKey, node.WireGuardEndpoint = nodeRegistration.WireGuardPublicKey, nodeRegistration.WireGuardEndpoint
+	node.WireGuardPortBase, node.WireGuardPortCount = nodeRegistration.WireGuardPortBase, nodeRegistration.WireGuardPortCount
 
 	return nil
 }
@@ -533,7 +584,7 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 			owned = append(owned, allocation)
 		}
 	}
-	summary := &NodeSummary{ID: node.ID, Host: node.Host, Port: node.Port, CPU: node.CPU, Memory: node.Memory, OS: node.OS, Arch: node.Arch, Labels: node.Labels, Volumes: node.Volumes, Capabilities: node.Capabilities, Status: node.Status, WireGuardPublicKey: node.WireGuardPublicKey, WireGuardEndpoint: node.WireGuardEndpoint, LastHeartbeat: node.LastHeartbeat, Version: node.Version}
+	summary := &NodeSummary{ID: node.ID, Host: node.Host, Port: node.Port, CPU: node.CPU, Memory: node.Memory, OS: node.OS, Arch: node.Arch, Labels: node.Labels, Volumes: node.Volumes, Capabilities: node.Capabilities, Status: node.Status, WireGuardPublicKey: node.WireGuardPublicKey, WireGuardEndpoint: node.WireGuardEndpoint, WireGuardPortBase: node.WireGuardPortBase, WireGuardPortCount: node.WireGuardPortCount, LastHeartbeat: node.LastHeartbeat, Version: node.Version}
 	s.mu.Unlock()
 	if err := s.state.PutNode(ctx, node.ID.String(), summary); err != nil {
 		return fmt.Errorf("persist node heartbeat: %w", err)
@@ -725,7 +776,7 @@ func (s *Server) Reload(ctx context.Context) error {
 		if summary.Status == NodeStatusDraining {
 			status = NodeStatusDraining
 		}
-		nodes[summary.ID] = &Node{ID: summary.ID, Host: summary.Host, Port: summary.Port, CPU: summary.CPU, Memory: summary.Memory, OS: summary.OS, Arch: summary.Arch, Labels: summary.Labels, Volumes: summary.Volumes, Capabilities: summary.Capabilities, Status: status, WireGuardPublicKey: summary.WireGuardPublicKey, WireGuardEndpoint: summary.WireGuardEndpoint, LastHeartbeat: summary.LastHeartbeat, Version: summary.Version}
+		nodes[summary.ID] = &Node{ID: summary.ID, Host: summary.Host, Port: summary.Port, CPU: summary.CPU, Memory: summary.Memory, OS: summary.OS, Arch: summary.Arch, Labels: summary.Labels, Volumes: summary.Volumes, Capabilities: summary.Capabilities, Status: status, WireGuardPublicKey: summary.WireGuardPublicKey, WireGuardEndpoint: summary.WireGuardEndpoint, WireGuardPortBase: summary.WireGuardPortBase, WireGuardPortCount: summary.WireGuardPortCount, LastHeartbeat: summary.LastHeartbeat, Version: summary.Version}
 	}
 	allocations := make([]*Allocation, 0, len(allocationMap))
 	for _, allocation := range allocationMap {
@@ -752,7 +803,7 @@ func (s *Server) DrainNode(ctx context.Context, id uuid.UUID) error {
 	}
 	previousStatus := node.Status
 	node.Status = NodeStatusDraining
-	summary := &NodeSummary{ID: node.ID, Host: node.Host, Port: node.Port, CPU: node.CPU, Memory: node.Memory, OS: node.OS, Arch: node.Arch, Labels: node.Labels, Volumes: node.Volumes, Capabilities: node.Capabilities, Status: node.Status, WireGuardPublicKey: node.WireGuardPublicKey, WireGuardEndpoint: node.WireGuardEndpoint, LastHeartbeat: node.LastHeartbeat, Version: node.Version}
+	summary := &NodeSummary{ID: node.ID, Host: node.Host, Port: node.Port, CPU: node.CPU, Memory: node.Memory, OS: node.OS, Arch: node.Arch, Labels: node.Labels, Volumes: node.Volumes, Capabilities: node.Capabilities, Status: node.Status, WireGuardPublicKey: node.WireGuardPublicKey, WireGuardEndpoint: node.WireGuardEndpoint, WireGuardPortBase: node.WireGuardPortBase, WireGuardPortCount: node.WireGuardPortCount, LastHeartbeat: node.LastHeartbeat, Version: node.Version}
 	s.mu.Unlock()
 	if err := s.state.PutNode(ctx, id.String(), summary); err != nil {
 		s.mu.Lock()
@@ -776,7 +827,7 @@ func (s *Server) UndrainNode(ctx context.Context, id uuid.UUID) error {
 	}
 	previousStatus := node.Status
 	node.Status = NodeStatusHealthy
-	summary := &NodeSummary{ID: node.ID, Host: node.Host, Port: node.Port, CPU: node.CPU, Memory: node.Memory, OS: node.OS, Arch: node.Arch, Labels: node.Labels, Volumes: node.Volumes, Capabilities: node.Capabilities, Status: node.Status, WireGuardPublicKey: node.WireGuardPublicKey, WireGuardEndpoint: node.WireGuardEndpoint, LastHeartbeat: node.LastHeartbeat, Version: node.Version}
+	summary := &NodeSummary{ID: node.ID, Host: node.Host, Port: node.Port, CPU: node.CPU, Memory: node.Memory, OS: node.OS, Arch: node.Arch, Labels: node.Labels, Volumes: node.Volumes, Capabilities: node.Capabilities, Status: node.Status, WireGuardPublicKey: node.WireGuardPublicKey, WireGuardEndpoint: node.WireGuardEndpoint, WireGuardPortBase: node.WireGuardPortBase, WireGuardPortCount: node.WireGuardPortCount, LastHeartbeat: node.LastHeartbeat, Version: node.Version}
 	s.mu.Unlock()
 	if err := s.state.PutNode(ctx, id.String(), summary); err != nil {
 		s.mu.Lock()
