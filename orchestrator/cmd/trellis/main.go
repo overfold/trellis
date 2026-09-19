@@ -105,7 +105,7 @@ func main() {
 	f.StringVar(&cfg.Runtime, "runtime", "containerd", "Workload runtime: containerd or injected (test only)")
 	f.StringVar(&cfg.RuntimeFaults, "runtime-faults", "", "Injected runtime fault-control file")
 	f.StringVar(&cfg.WireGuardPool, "wireguard-pool", "10.64.0.0/10", "Cluster address pool used for automatic namespace networking")
-	f.StringVar(&cfg.WireGuardEndpoint, "wireguard-endpoint", "", "Externally reachable WireGuard host or host:port")
+	f.StringVar(&cfg.WireGuardEndpoint, "wireguard-endpoint", "", "Externally reachable WireGuard host or base host:port")
 	f.IntVar(&cfg.WireGuardPort, "wireguard-port", 51820, "First UDP port in the per-namespace WireGuard range")
 	f.IntVar(&cfg.WireGuardPortCount, "wireguard-port-count", 256, "Number of consecutive UDP ports available for namespace WireGuard networks")
 	f.StringVar(&cfg.DNSListen, "dns-listen", net.JoinHostPort(network.WorkloadDNSAddress, "53"), "Workload DNS resolver listen address")
