@@ -22,7 +22,7 @@ const (
 	DefaultDomain = "trellis"
 	// DefaultTTL is the default lifetime of DNS answers, in seconds.
 	DefaultTTL = 5
-	maxUDPSize = 512
+	maxDNSMessageSize = 65535
 )
 
 // DiscoveryLookup lists service-discovery records.
