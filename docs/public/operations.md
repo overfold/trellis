@@ -35,8 +35,11 @@ job_limits:
   max_task_groups_per_job: 64
   max_tasks_per_task_group: 32
   max_desired_allocations: 1000
+  max_desired_allocations_per_namespace: 10000
   default_task_cpu: 100
   default_task_memory: 128MiB
+  max_task_cpu: 1000000
+  max_task_memory: 1TiB
 ```
 
 `job_limits` is operator-only admission policy. Jobs cannot override it. The

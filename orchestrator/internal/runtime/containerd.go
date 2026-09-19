@@ -14,12 +14,12 @@ import (
 	"syscall"
 	"time"
 
+	v1stats "github.com/containerd/cgroups/v3/cgroup1/stats"
+	v2stats "github.com/containerd/cgroups/v3/cgroup2/stats"
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/oci"
-	v1stats "github.com/containerd/cgroups/v3/cgroup1/stats"
-	v2stats "github.com/containerd/cgroups/v3/cgroup2/stats"
 	"github.com/containerd/errdefs"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"google.golang.org/protobuf/proto"
@@ -122,7 +122,11 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 		}))
 	}
 	if options.CPU > 0 {
-		ociSpecOpts = append(ociSpecOpts, oci.WithCPUCFS(int64(options.CPU*100), 100000))
+		cpuQuota := int64(options.CPU) * 100
+		if cpuQuota/100 != int64(options.CPU) {
+			return "", fmt.Errorf("CPU request %d overflows CFS quota", options.CPU)
+		}
+		ociSpecOpts = append(ociSpecOpts, oci.WithCPUCFS(cpuQuota, 100000))
 	}
 	if options.Memory > 0 {
 		ociSpecOpts = append(ociSpecOpts, oci.WithMemoryLimit(uint64(options.Memory)))

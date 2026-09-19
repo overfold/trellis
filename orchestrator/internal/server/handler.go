@@ -460,6 +460,9 @@ func (h *Handler) handlePlanJob(c *echo.Context) error {
 	if selected != "" && selected != request.Spec.Namespace {
 		return echo.NewHTTPError(http.StatusForbidden, "manifest namespace does not match selected namespace")
 	}
+	if err := h.server.ValidateNamespaceAllocationLimit(request.Spec.Namespace, &request.Spec); err != nil {
+		return validationResponse(c, err)
+	}
 	if err := requireAPIAccessDelegation(c, &request.Spec); err != nil {
 		return err
 	}

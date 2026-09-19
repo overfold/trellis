@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"math"
 	"slices"
 
 	"github.com/clofour/trellis/internal/spec"
@@ -11,14 +12,14 @@ import (
 // PlacementIntent describes an allocation placement request.
 // Placement associates a task group index with a node.
 type PlacementIntent struct {
-	Namespace     string
-	JobName       string
-	TaskGroupName string
-	Count         int
-	Nodes         []*Node
-	Allocations   []*Allocation
-	Tasks         []spec.TaskSpec
-	Constraints   []spec.ConstraintSpec
+	Namespace            string
+	JobName              string
+	TaskGroupName        string
+	Count                int
+	Nodes                []*Node
+	Allocations          []*Allocation
+	Tasks                []spec.TaskSpec
+	Constraints          []spec.ConstraintSpec
 	RequiredCapabilities []spec.NodeCapability
 	// VolumeOwners maps namespace/name volume registrations to their owning node.
 	// Schedule mutates the map when it places the first allocation for a volume.
@@ -53,8 +54,8 @@ func Schedule(intent *PlacementIntent) []Placement {
 			}
 			for _, task := range alloc.Tasks {
 				if task.Resources != nil {
-					usedCPU[alloc.Node.ID] += task.Resources.CPU
-					usedMemory[alloc.Node.ID] += int64(task.Resources.Memory)
+					usedCPU[alloc.Node.ID] = saturatingAddInt(usedCPU[alloc.Node.ID], task.Resources.CPU)
+					usedMemory[alloc.Node.ID] = saturatingAddInt64(usedMemory[alloc.Node.ID], int64(task.Resources.Memory))
 				}
 			}
 		}
@@ -66,15 +67,15 @@ func Schedule(intent *PlacementIntent) []Placement {
 		var reqMemory int64
 		for _, task := range intent.Tasks {
 			if task.Resources != nil {
-				reqCPU += task.Resources.CPU
-				reqMemory += int64(task.Resources.Memory)
+				reqCPU = saturatingAddInt(reqCPU, task.Resources.CPU)
+				reqMemory = saturatingAddInt64(reqMemory, int64(task.Resources.Memory))
 			}
 		}
 		for _, node := range nodes {
 			if node.Status != NodeStatusHealthy || !nodeMatchesConstraints(node, intent.Constraints) || !nodeHasTaskVolumes(node.ID, intent.Namespace, intent.Tasks, intent.VolumeOwners) || !nodeHasCapabilities(node, intent.RequiredCapabilities) {
 				continue
 			}
-			if (node.CPU > 0 && usedCPU[node.ID]+reqCPU > node.CPU) || (node.Memory > 0 && usedMemory[node.ID]+reqMemory > node.Memory) {
+			if (node.CPU > 0 && saturatingAddInt(usedCPU[node.ID], reqCPU) > node.CPU) || (node.Memory > 0 && saturatingAddInt64(usedMemory[node.ID], reqMemory) > node.Memory) {
 				continue
 			}
 			better := target == nil
@@ -101,11 +102,25 @@ func Schedule(intent *PlacementIntent) []Placement {
 			NodeID:        target.ID,
 		})
 		replicaCounts[target.ID]++
-		usedCPU[target.ID] += reqCPU
-		usedMemory[target.ID] += reqMemory
+		usedCPU[target.ID] = saturatingAddInt(usedCPU[target.ID], reqCPU)
+		usedMemory[target.ID] = saturatingAddInt64(usedMemory[target.ID], reqMemory)
 	}
 
 	return result
+}
+
+func saturatingAddInt(a, b int) int {
+	if b > 0 && a > math.MaxInt-b {
+		return math.MaxInt
+	}
+	return a + b
+}
+
+func saturatingAddInt64(a, b int64) int64 {
+	if b > 0 && a > math.MaxInt64-b {
+		return math.MaxInt64
+	}
+	return a + b
 }
 
 func nodeHasCapabilities(node *Node, required []spec.NodeCapability) bool {

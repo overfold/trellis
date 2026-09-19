@@ -29,7 +29,11 @@ func newTestServerWithAgent() (*Server, *testAgent) {
 func TestReconcileDoesNotCreateAllocationsForInvalidJob(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()
-	limits := spec.Limits{MaxReplicasPerTaskGroup: 1, MaxTaskGroupsPerJob: 1, MaxTasksPerTaskGroup: 1, MaxDesiredAllocations: 1, DefaultTaskCPU: 100, DefaultTaskMemory: 128 << 20}
+	limits := spec.DefaultLimits()
+	limits.MaxReplicasPerTaskGroup = 1
+	limits.MaxTaskGroupsPerJob = 1
+	limits.MaxTasksPerTaskGroup = 1
+	limits.MaxDesiredAllocations = 1
 	if err := s.SetJobLimits(limits); err != nil {
 		t.Fatal(err)
 	}
@@ -40,6 +44,24 @@ func TestReconcileDoesNotCreateAllocationsForInvalidJob(t *testing.T) {
 	s.Reconcile(context.Background())
 	if len(s.allocations) != 0 {
 		t.Fatalf("invalid job created allocations: %#v", s.allocations)
+	}
+}
+
+func TestNamespaceDesiredAllocationLimitIncludesOtherJobs(t *testing.T) {
+	s, agent := newTestServerWithAgent()
+	defer agent.server.Close()
+	limits := spec.DefaultLimits()
+	limits.MaxDesiredAllocationsPerNamespace = 2
+	if err := s.SetJobLimits(limits); err != nil {
+		t.Fatal(err)
+	}
+	s.jobs[jobKey("default", "first")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "first", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 2, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}}}
+	candidate := &spec.JobSpec{Namespace: "default", Name: "second", TaskGroups: []spec.TaskGroupSpec{{Name: "worker", Count: 1, Tasks: []spec.TaskSpec{{Name: "worker", Image: "worker"}}}}}
+	if err := s.CanonicalizeJob(candidate); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ValidateNamespaceAllocationLimit("default", candidate); err == nil {
+		t.Fatal("expected namespace desired-allocation limit rejection")
 	}
 }
 

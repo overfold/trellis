@@ -3,7 +3,13 @@ package spec
 import "testing"
 
 func TestCanonicalizeAppliesResourceDefaultsAndBounds(t *testing.T) {
-	limits := Limits{MaxReplicasPerTaskGroup: 2, MaxTaskGroupsPerJob: 1, MaxTasksPerTaskGroup: 1, MaxDesiredAllocations: 2, DefaultTaskCPU: 250, DefaultTaskMemory: 512 << 20}
+	limits := DefaultLimits()
+	limits.MaxReplicasPerTaskGroup = 2
+	limits.MaxTaskGroupsPerJob = 1
+	limits.MaxTasksPerTaskGroup = 1
+	limits.MaxDesiredAllocations = 2
+	limits.DefaultTaskCPU = 250
+	limits.DefaultTaskMemory = 512 << 20
 	job := validJob()
 	if err := Canonicalize(job, limits); err != nil {
 		t.Fatalf("canonicalize simple job: %v", err)
@@ -21,7 +27,6 @@ func TestCanonicalizeAppliesResourceDefaultsAndBounds(t *testing.T) {
 		"tasks": func(job *JobSpec) {
 			job.TaskGroups[0].Tasks = append(job.TaskGroups[0].Tasks, TaskSpec{Name: "sidecar", Image: "sidecar"})
 		},
-		"total allocations": func(job *JobSpec) { job.TaskGroups[0].Count = 3 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			job := validJob()
@@ -31,6 +36,15 @@ func TestCanonicalizeAppliesResourceDefaultsAndBounds(t *testing.T) {
 			}
 		})
 	}
+	t.Run("total allocations", func(t *testing.T) {
+		job := validJob()
+		job.TaskGroups = append(job.TaskGroups, TaskGroupSpec{Name: "worker", Count: 2, Tasks: []TaskSpec{{Name: "worker", Image: "worker"}}})
+		totalLimits := limits
+		totalLimits.MaxTaskGroupsPerJob = 2
+		if err := Canonicalize(job, totalLimits); err == nil {
+			t.Fatal("expected total desired-allocation limit rejection")
+		}
+	})
 }
 
 func TestCanonicalizeRejectsExplicitZeroResources(t *testing.T) {
@@ -38,6 +52,19 @@ func TestCanonicalizeRejectsExplicitZeroResources(t *testing.T) {
 		job := validJob()
 		job.TaskGroups[0].Tasks[0].Resources = resources
 		if err := Canonicalize(job, DefaultLimits()); err == nil {
+			t.Fatalf("resources %#v accepted", resources)
+		}
+	}
+}
+
+func TestCanonicalizeRejectsResourcesAboveOperatorMaximum(t *testing.T) {
+	limits := DefaultLimits()
+	limits.MaxTaskCPU = 500
+	limits.MaxTaskMemory = 1024
+	for _, resources := range []*ResourcesSpec{{CPU: 501, Memory: 1}, {CPU: 1, Memory: 1025}} {
+		job := validJob()
+		job.TaskGroups[0].Tasks[0].Resources = resources
+		if err := Canonicalize(job, limits); err == nil {
 			t.Fatalf("resources %#v accepted", resources)
 		}
 	}

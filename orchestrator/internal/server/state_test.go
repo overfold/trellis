@@ -2,13 +2,37 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"log/slog"
 	"testing"
 
+	"github.com/clofour/trellis/internal/api"
 	"github.com/clofour/trellis/internal/lifecycle"
 	"github.com/clofour/trellis/internal/spec"
 	"github.com/clofour/trellis/internal/state"
 )
+
+type backupStore struct {
+	snapshot *state.DesiredSnapshot
+	data     memoryStore
+}
+
+func (b *backupStore) BackupDesired(string) (*state.DesiredSnapshot, error) { return b.snapshot, nil }
+func (b *backupStore) RestoreDesired(_ string, snapshot *state.DesiredSnapshot) error {
+	b.snapshot = snapshot
+	return nil
+}
+func (b *backupStore) Get(ctx context.Context, key string) ([]byte, error) {
+	return b.data.Get(ctx, key)
+}
+func (b *backupStore) List(ctx context.Context, prefix string) (map[string][]byte, error) {
+	return b.data.List(ctx, prefix)
+}
+func (b *backupStore) Put(ctx context.Context, key string, value []byte) error {
+	return b.data.Put(ctx, key, value)
+}
+func (b *backupStore) Delete(ctx context.Context, key string) error { return b.data.Delete(ctx, key) }
 
 type memoryStore map[string][]byte
 
@@ -84,4 +108,35 @@ func TestStateControllerRoundTripsDurableLeaderState(t *testing.T) {
 	if len(allocations) != 0 {
 		t.Fatalf("allocation was not deleted: %#v", allocations)
 	}
+}
+
+func TestBackupRestoreRoundTripsPersistedJob(t *testing.T) {
+	ctx := context.Background()
+	store := &backupStore{data: memoryStore{}, snapshot: &state.DesiredSnapshot{Jobs: map[string][]byte{}, JobRevisions: map[string][]byte{}, Secrets: map[string][]byte{}, VolumeRegistrations: map[string][]byte{}, NetworkPortRegistrations: map[string][]byte{}}}
+	job := &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}}, Revision: 1}
+	raw, err := json.Marshal(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.snapshot.Jobs["default%00web"] = raw
+	s := NewServer(slog.Default(), nil, newNopStateController(), store, "test", "")
+	if err := s.Restore(ctx, mustBackup(t, s)); err != nil {
+		t.Fatalf("restore backup containing persisted job: %v", err)
+	}
+	var restored Job
+	if err := json.Unmarshal(store.snapshot.Jobs["default%00web"], &restored); err != nil {
+		t.Fatal(err)
+	}
+	if restored.Spec == nil || restored.Spec.TaskGroups[0].Tasks[0].Resources == nil {
+		t.Fatalf("restored job was not canonicalized: %#v", restored)
+	}
+}
+
+func mustBackup(t *testing.T, s *Server) *api.BackupSnapshot {
+	t.Helper()
+	backup, err := s.Backup(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return backup
 }

@@ -20,12 +20,15 @@ type nodeResourcesConfig struct {
 }
 
 type jobLimitsConfig struct {
-	MaxReplicasPerTaskGroup *int    `yaml:"max_replicas_per_task_group"`
-	MaxTaskGroupsPerJob     *int    `yaml:"max_task_groups_per_job"`
-	MaxTasksPerTaskGroup    *int    `yaml:"max_tasks_per_task_group"`
-	MaxDesiredAllocations   *int    `yaml:"max_desired_allocations"`
-	DefaultTaskCPU          *int    `yaml:"default_task_cpu"`
-	DefaultTaskMemory       *string `yaml:"default_task_memory"`
+	MaxReplicasPerTaskGroup           *int    `yaml:"max_replicas_per_task_group"`
+	MaxTaskGroupsPerJob               *int    `yaml:"max_task_groups_per_job"`
+	MaxTasksPerTaskGroup              *int    `yaml:"max_tasks_per_task_group"`
+	MaxDesiredAllocations             *int    `yaml:"max_desired_allocations"`
+	MaxDesiredAllocationsPerNamespace *int    `yaml:"max_desired_allocations_per_namespace"`
+	DefaultTaskCPU                    *int    `yaml:"default_task_cpu"`
+	DefaultTaskMemory                 *string `yaml:"default_task_memory"`
+	MaxTaskCPU                        *int    `yaml:"max_task_cpu"`
+	MaxTaskMemory                     *string `yaml:"max_task_memory"`
 }
 
 type nodeConfigFile struct {
@@ -119,8 +122,11 @@ func loadNodeConfig(path string, cfg *config, flags *pflag.FlagSet) error {
 		setInt("max-task-groups-per-job", limits.MaxTaskGroupsPerJob, &cfg.MaxTaskGroupsPerJob)
 		setInt("max-tasks-per-task-group", limits.MaxTasksPerTaskGroup, &cfg.MaxTasksPerTaskGroup)
 		setInt("max-desired-allocations", limits.MaxDesiredAllocations, &cfg.MaxDesiredAllocations)
+		setInt("max-desired-allocations-per-namespace", limits.MaxDesiredAllocationsPerNamespace, &cfg.MaxDesiredAllocationsPerNamespace)
 		setInt("default-task-cpu", limits.DefaultTaskCPU, &cfg.DefaultTaskCPU)
 		setString("default-task-memory", limits.DefaultTaskMemory, &cfg.DefaultTaskMemory)
+		setInt("max-task-cpu", limits.MaxTaskCPU, &cfg.MaxTaskCPU)
+		setString("max-task-memory", limits.MaxTaskMemory, &cfg.MaxTaskMemory)
 	}
 
 	// Resource reservation policy belongs to the Trellis node. Omitted values

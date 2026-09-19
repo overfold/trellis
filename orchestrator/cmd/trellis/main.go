@@ -55,21 +55,23 @@ import (
 const shutdownTime = 10 * time.Second
 
 type config struct {
-	ConfigFile                                                 string
-	AgentListen, AgentAdvertise, ServerListen, ServerAdvertise string
-	RaftListen, RaftAdvertise, Join                            string
-	DataDir, Cluster, ClusterToken, ContainerdSock             string
-	Runtime, RuntimeFaults                                     string
-	WireGuardPool, WireGuardEndpoint                           string
-	WireGuardPort, WireGuardPortCount                          int
-	DNSListen                                                  string
-	CACert, CAKey, Cert, Key                                   string
-	SecretsKey, SecretsKeyID                                   string
-	Labels                                                     []string
-	MaxReplicasPerTaskGroup, MaxTaskGroupsPerJob               int
-	MaxTasksPerTaskGroup, MaxDesiredAllocations                int
-	DefaultTaskCPU                                             int
-	DefaultTaskMemory                                          string
+	ConfigFile                                                                     string
+	AgentListen, AgentAdvertise, ServerListen, ServerAdvertise                     string
+	RaftListen, RaftAdvertise, Join                                                string
+	DataDir, Cluster, ClusterToken, ContainerdSock                                 string
+	Runtime, RuntimeFaults                                                         string
+	WireGuardPool, WireGuardEndpoint                                               string
+	WireGuardPort, WireGuardPortCount                                              int
+	DNSListen                                                                      string
+	CACert, CAKey, Cert, Key                                                       string
+	SecretsKey, SecretsKeyID                                                       string
+	Labels                                                                         []string
+	MaxReplicasPerTaskGroup, MaxTaskGroupsPerJob                                   int
+	MaxTasksPerTaskGroup, MaxDesiredAllocations, MaxDesiredAllocationsPerNamespace int
+	DefaultTaskCPU                                                                 int
+	DefaultTaskMemory                                                              string
+	MaxTaskCPU                                                                     int
+	MaxTaskMemory                                                                  string
 }
 
 func main() {
@@ -125,8 +127,11 @@ func main() {
 	f.IntVar(&cfg.MaxTaskGroupsPerJob, "max-task-groups-per-job", defaults.MaxTaskGroupsPerJob, "Maximum task groups allowed in one job")
 	f.IntVar(&cfg.MaxTasksPerTaskGroup, "max-tasks-per-task-group", defaults.MaxTasksPerTaskGroup, "Maximum tasks allowed in one task group")
 	f.IntVar(&cfg.MaxDesiredAllocations, "max-desired-allocations", defaults.MaxDesiredAllocations, "Maximum desired allocations allowed in one job")
+	f.IntVar(&cfg.MaxDesiredAllocationsPerNamespace, "max-desired-allocations-per-namespace", defaults.MaxDesiredAllocationsPerNamespace, "Maximum desired allocations allowed in one namespace")
 	f.IntVar(&cfg.DefaultTaskCPU, "default-task-cpu", defaults.DefaultTaskCPU, "Default task CPU request in millicores")
 	f.StringVar(&cfg.DefaultTaskMemory, "default-task-memory", fmt.Sprintf("%d", defaults.DefaultTaskMemory), "Default task memory request in bytes")
+	f.IntVar(&cfg.MaxTaskCPU, "max-task-cpu", defaults.MaxTaskCPU, "Maximum task CPU request in millicores")
+	f.StringVar(&cfg.MaxTaskMemory, "max-task-memory", fmt.Sprintf("%d", defaults.MaxTaskMemory), "Maximum task memory request in bytes")
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}
@@ -148,7 +153,11 @@ func run(parent context.Context, cfg *config) error {
 	if err != nil {
 		return fmt.Errorf("--default-task-memory: %w", err)
 	}
-	limits := spec.Limits{MaxReplicasPerTaskGroup: cfg.MaxReplicasPerTaskGroup, MaxTaskGroupsPerJob: cfg.MaxTaskGroupsPerJob, MaxTasksPerTaskGroup: cfg.MaxTasksPerTaskGroup, MaxDesiredAllocations: cfg.MaxDesiredAllocations, DefaultTaskCPU: cfg.DefaultTaskCPU, DefaultTaskMemory: defaultMemory}
+	maxMemory, err := spec.ParseByteSize(cfg.MaxTaskMemory)
+	if err != nil {
+		return fmt.Errorf("--max-task-memory: %w", err)
+	}
+	limits := spec.Limits{MaxReplicasPerTaskGroup: cfg.MaxReplicasPerTaskGroup, MaxTaskGroupsPerJob: cfg.MaxTaskGroupsPerJob, MaxTasksPerTaskGroup: cfg.MaxTasksPerTaskGroup, MaxDesiredAllocations: cfg.MaxDesiredAllocations, MaxDesiredAllocationsPerNamespace: cfg.MaxDesiredAllocationsPerNamespace, DefaultTaskCPU: cfg.DefaultTaskCPU, DefaultTaskMemory: defaultMemory, MaxTaskCPU: cfg.MaxTaskCPU, MaxTaskMemory: maxMemory}
 	if err := spec.ValidateLimits(limits); err != nil {
 		return fmt.Errorf("job limits: %w", err)
 	}
