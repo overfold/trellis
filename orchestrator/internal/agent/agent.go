@@ -555,6 +555,11 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	var ports []*runtime.Port
 	var secretDir string
 	defer func() {
+		if err := a.volumes.ReleaseStaging(allocID, ts.Volumes); err != nil {
+			a.log.Error("release volume staging", "allocation", allocID, "error", err)
+		}
+	}()
+	defer func() {
 		if committed {
 			return
 		}
@@ -602,7 +607,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 
 	var mounts []*runtime.Mount
 	for _, v := range ts.Volumes {
-		mount, err := a.volumes.Create(namespace, jobName, taskName, v)
+		mount, err := a.volumes.Create(namespace, jobName, allocID, v)
 		if err != nil {
 			return fmt.Errorf("create volume %s: %w", v.Name, err)
 		}
