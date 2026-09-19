@@ -103,9 +103,10 @@ func (s *Server) Backup(_ context.Context) (*api.BackupSnapshot, error) {
 	result := &api.BackupSnapshot{
 		FormatVersion:       api.BackupFormatVersion,
 		CreatedAt:           s.now().UTC(),
-		Jobs:                make(map[string]json.RawMessage, len(snapshot.Jobs)),
-		Secrets:             make(map[string]json.RawMessage, len(snapshot.Secrets)),
-		VolumeRegistrations: make(map[string]json.RawMessage, len(snapshot.VolumeRegistrations)),
+		Jobs:                     make(map[string]json.RawMessage, len(snapshot.Jobs)),
+		Secrets:                  make(map[string]json.RawMessage, len(snapshot.Secrets)),
+		VolumeRegistrations:      make(map[string]json.RawMessage, len(snapshot.VolumeRegistrations)),
+		NetworkPortRegistrations: make(map[string]json.RawMessage, len(snapshot.NetworkPortRegistrations)),
 	}
 	for key, value := range snapshot.Jobs {
 		result.Jobs[key] = json.RawMessage(value)
@@ -115,6 +116,9 @@ func (s *Server) Backup(_ context.Context) (*api.BackupSnapshot, error) {
 	}
 	for key, value := range snapshot.VolumeRegistrations {
 		result.VolumeRegistrations[key] = json.RawMessage(value)
+	}
+	for key, value := range snapshot.NetworkPortRegistrations {
+		result.NetworkPortRegistrations[key] = json.RawMessage(value)
 	}
 	return result, nil
 }
@@ -127,7 +131,12 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 	if s.backupStore == nil {
 		return fmt.Errorf("restore is unavailable")
 	}
-	snapshot := &state.DesiredSnapshot{Jobs: make(map[string][]byte, len(backup.Jobs)), Secrets: make(map[string][]byte, len(backup.Secrets)), VolumeRegistrations: make(map[string][]byte, len(backup.VolumeRegistrations))}
+	snapshot := &state.DesiredSnapshot{
+		Jobs:                     make(map[string][]byte, len(backup.Jobs)),
+		Secrets:                  make(map[string][]byte, len(backup.Secrets)),
+		VolumeRegistrations:      make(map[string][]byte, len(backup.VolumeRegistrations)),
+		NetworkPortRegistrations: make(map[string][]byte, len(backup.NetworkPortRegistrations)),
+	}
 	for key, value := range backup.Jobs {
 		if !json.Valid(value) {
 			return fmt.Errorf("job %q contains invalid JSON", key)
@@ -145,6 +154,12 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 			return fmt.Errorf("volume registration %q contains invalid JSON", key)
 		}
 		snapshot.VolumeRegistrations[key] = value
+	}
+	for key, value := range backup.NetworkPortRegistrations {
+		if !json.Valid(value) {
+			return fmt.Errorf("network port registration %q contains invalid JSON", key)
+		}
+		snapshot.NetworkPortRegistrations[key] = value
 	}
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
