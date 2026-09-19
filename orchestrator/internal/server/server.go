@@ -876,7 +876,7 @@ func (s *Server) ListJobs(namespace string) api.JobListResponse {
 				a.mu.Unlock()
 				continue
 			}
-			ar := api.AllocationResponse{ID: a.ID, Group: a.TaskGroupName, Phase: a.Phase, Health: a.Health, Draining: a.Draining, Generation: a.Generation, JobRevision: a.JobRevision, CreatedAt: a.CreatedAt, LastTransitionAt: a.TransitionedAt, Reason: a.Reason, Message: a.Message, Attempt: a.Attempt, NextRetryAt: a.NextRetryAt}
+			ar := api.AllocationResponse{ID: a.ID, Group: a.TaskGroupName, Address: allocationEndpointAddressLocked(a), Ports: a.Ports, Phase: a.Phase, Health: a.Health, Draining: a.Draining, Generation: a.Generation, JobRevision: a.JobRevision, CreatedAt: a.CreatedAt, LastTransitionAt: a.TransitionedAt, Reason: a.Reason, Message: a.Message, Attempt: a.Attempt, NextRetryAt: a.NextRetryAt}
 			if a.Node != nil {
 				ar.NodeID = a.Node.ID
 			}
@@ -913,7 +913,7 @@ func (s *Server) GetJob(namespace, name string) (*api.JobStatusResponse, bool) {
 			a.mu.Unlock()
 			continue
 		}
-		ar := api.AllocationResponse{ID: a.ID, Group: a.TaskGroupName, Phase: a.Phase, Health: a.Health, Draining: a.Draining, Generation: a.Generation, JobRevision: a.JobRevision, CreatedAt: a.CreatedAt, LastTransitionAt: a.TransitionedAt, Reason: a.Reason, Message: a.Message, Attempt: a.Attempt, NextRetryAt: a.NextRetryAt}
+		ar := api.AllocationResponse{ID: a.ID, Group: a.TaskGroupName, Address: allocationEndpointAddressLocked(a), Ports: a.Ports, Phase: a.Phase, Health: a.Health, Draining: a.Draining, Generation: a.Generation, JobRevision: a.JobRevision, CreatedAt: a.CreatedAt, LastTransitionAt: a.TransitionedAt, Reason: a.Reason, Message: a.Message, Attempt: a.Attempt, NextRetryAt: a.NextRetryAt}
 		if a.Node != nil {
 			ar.NodeID = a.Node.ID
 		}
@@ -1212,10 +1212,7 @@ func (s *Server) refreshCatalog() {
 				}
 			}
 		}
-		var address string
-		if a.Node != nil {
-			address = a.Node.Host
-		}
+		address := allocationEndpointAddressLocked(a)
 		namespaced[a.Namespace] = append(namespaced[a.Namespace], catalog.ServiceInstance{
 			ID:      a.ID,
 			Job:     a.JobName,
