@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -127,6 +128,17 @@ func (a *Agent) AcceptEpoch(epoch uint64) error {
 
 func allocationRecordKey(id string) string {
 	return "agent/allocations/" + base64.RawURLEncoding.EncodeToString([]byte(id))
+}
+
+func allocationObservedAddress(allocation *Allocation) string {
+	if allocation == nil || allocation.Network == nil || allocation.Network.Address == "" {
+		return ""
+	}
+	prefix, err := netip.ParsePrefix(allocation.Network.Address)
+	if err != nil {
+		return ""
+	}
+	return prefix.Addr().String()
 }
 
 func (a *Agent) persistAllocation(allocation *Allocation) error {
@@ -1060,7 +1072,7 @@ func (a *Agent) runHeartbeatLoop(ctx context.Context) {
 				for _, p := range alloc.Ports {
 					ports = append(ports, api.PortMapping{HostPort: p.HostPort, ContainerPort: p.ContainerPort})
 				}
-				actual = append(actual, api.AllocationStatus{ID: alloc.AllocationID, Generation: alloc.Generation, Task: alloc.TaskName, Phase: lifecycle.Phase(alloc.Status), Health: lifecycle.Health(alloc.Health), Ports: ports})
+				actual = append(actual, api.AllocationStatus{ID: alloc.AllocationID, Generation: alloc.Generation, Task: alloc.TaskName, Phase: lifecycle.Phase(alloc.Status), Health: lifecycle.Health(alloc.Health), Address: allocationObservedAddress(alloc), Ports: ports})
 			}
 			a.mu.RUnlock()
 			response, err := a.server.SendHeartbeat(ctx, a.nodeID, &client.Heartbeat{
