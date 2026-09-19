@@ -24,13 +24,16 @@ type AttachRequest struct {
 
 // Attachment records resources created for an allocation network.
 type Attachment struct {
-	AllocationID     string
-	Namespace        string
-	Network          string
-	NetworkNamespace string
-	HostVeth         string
-	Address          string
-	LeasePath        string
+	AllocationID       string
+	Namespace          string
+	Network            string
+	NetworkNamespace   string
+	HostVeth           string
+	Bridge             string
+	WireGuardInterface string
+	Gateway            string
+	Address            string
+	LeasePath          string
 }
 
 // Manager attaches and detaches allocation networks.
