@@ -41,7 +41,7 @@ Usage:
   setup.sh [options]
 
 Options:
-  --advertise HOST              Address peers can use to reach this node
+  --advertise HOST              Address peers and workloads can use to reach this node
   --join HOST:8128              Join an existing cluster instead of creating one
   --bootstrap-token-file FILE   Read the existing cluster bootstrap token from FILE
   --secrets-key-file FILE       Read the existing cluster secrets key from FILE
@@ -134,9 +134,9 @@ if [ -f "$CONFIG_FILE" ]; then
     [ -z "$configured_advertise" ] || advertise_host="$configured_advertise"
 fi
 if [ -z "$advertise_host" ]; then
-    advertise_host="$(detect_private_ipv4 2>/dev/null || hostname)"
+    advertise_host="$(detect_advertise_ipv4 2>/dev/null || true)"
 fi
-[ -n "$advertise_host" ] || ui_die "Could not determine an advertise address. Pass --advertise HOST."
+[ -n "$advertise_host" ] || ui_die "Could not determine a routable IPv4 advertise address. Pass --advertise HOST explicitly."
 
 if [ -n "$join_addr" ] && [[ "$join_addr" != *:* ]]; then
     ui_die "--join must be an existing node address such as node-a:8128"
