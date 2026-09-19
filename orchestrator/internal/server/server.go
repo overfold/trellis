@@ -471,6 +471,9 @@ func (s *Server) InitWithToken(ctx context.Context, configuredToken string) (str
 	}
 
 	s.cluster = cluster
+	if err := s.tokenManager.StoreToken(ctx, token, auth.Principal{Kind: auth.CredentialOperator, Scope: auth.AccessCluster, Access: auth.AccessWrite}); err != nil {
+		return "", fmt.Errorf("store initial operator credential: %w", err)
+	}
 	s.controlEpoch = cluster.ControlEpoch
 	s.client = client.NewAgentClient("", s.clientTLS)
 

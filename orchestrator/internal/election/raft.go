@@ -2,6 +2,7 @@ package election
 
 import (
 	"context"
+	"strings"
 
 	"github.com/hashicorp/raft"
 )
@@ -38,5 +39,9 @@ func (e *RaftElector) Current(_ context.Context) (*Leader, error) {
 	if id == "" {
 		return nil, nil
 	}
-	return &Leader{Address: string(id)}, nil
+	_, address, ok := strings.Cut(string(id), "@")
+	if !ok || address == "" {
+		return nil, nil
+	}
+	return &Leader{Address: address}, nil
 }

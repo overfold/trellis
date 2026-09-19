@@ -54,7 +54,7 @@ func newTestRaft(t *testing.T) (*raft.Raft, string) {
 	snaps, _ := raft.NewFileSnapshotStore(dir, 1, os.Stderr)
 
 	cfg := raft.DefaultConfig()
-	cfg.LocalID = raft.ServerID(bind)
+	cfg.LocalID = raft.ServerID(uuid.NewString() + "@" + bind)
 	cfg.HeartbeatTimeout = 200 * time.Millisecond
 	cfg.ElectionTimeout = 200 * time.Millisecond
 	cfg.LeaderLeaseTimeout = 100 * time.Millisecond
@@ -69,7 +69,7 @@ func newTestRaft(t *testing.T) (*raft.Raft, string) {
 	})
 
 	r.BootstrapCluster(raft.Configuration{
-		Servers: []raft.Server{{ID: raft.ServerID(bind), Address: transport.LocalAddr()}},
+		Servers: []raft.Server{{ID: cfg.LocalID, Address: transport.LocalAddr()}},
 	})
 
 	return r, bind

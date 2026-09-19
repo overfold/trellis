@@ -208,7 +208,7 @@ func run(parent context.Context, cfg *config) error {
 		DataDir:   cfg.DataDir,
 		BindAddr:  cfg.RaftListen,
 		Advertise: cfg.RaftAdvertise,
-		ServerID:  cfg.ServerAdvertise,
+		ServerID:  raftServerID(id, cfg.ServerAdvertise),
 		Bootstrap: cfg.Join == "",
 		TLS:       peerTLS,
 	})
@@ -219,9 +219,6 @@ func run(parent context.Context, cfg *config) error {
 
 	if cfg.Join != "" && !raftStore.HadExistingState() {
 		log.Info("joining cluster", "address", cfg.Join)
-		if err := joinClusterRaft(ctx, log, cfg.Join, cfg.ClusterToken, cfg.ServerAdvertise, raftStore.LocalAddr(), clientTLS); err != nil {
-			return fmt.Errorf("join cluster: %w", err)
-		}
 		if err := discardEnrollmentCredential(cfg.ConfigFile); err != nil {
 			log.Warn("could not remove consumed enrollment credential", "error", err)
 		}
@@ -573,7 +570,7 @@ func loadOrBootstrapTLS(ctx context.Context, log *slog.Logger, cfg *config, loca
 		return m, nil
 	}
 	if cfg.Join != "" {
-		resp, err := joinClusterTLS(ctx, log, cfg.Join, cfg.ClusterToken, cfg.ServerAdvertise, nodeID.String(), cfg.RaftAdvertise)
+		resp, err := joinClusterTLS(ctx, log, cfg.Join, cfg.ClusterToken, raftServerID(nodeID, cfg.ServerAdvertise), nodeID.String(), cfg.RaftAdvertise)
 		if err != nil {
 			return nil, fmt.Errorf("join cluster for TLS: %w", err)
 		}
@@ -799,6 +796,14 @@ func (p *controlPlaneProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
 	proxy.Transport = p.transport
+	proxy.Director = func(req *http.Request) {
+		req.URL.Scheme = targetURL.Scheme
+		req.URL.Host = targetURL.Host
+		req.Host = targetURL.Host
+		// A follower's mTLS certificate authenticates the proxy connection, not
+		// the original caller. Never allow it to become a request principal.
+		req.Header.Set("X-Trellis-Forwarded-By-Proxy", "1")
+	}
 	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
 		p.log.Error("proxy request to leader failed", "leader", target, "error", err)
 		http.Error(w, "control-plane leader unavailable", http.StatusServiceUnavailable)
@@ -833,10 +838,8 @@ func leaderAuthMiddleware(bootstrapToken string, tokenManager *auth.TokenManager
 				return next(c)
 			}
 			key := strings.TrimPrefix(c.Request().Header.Get("Authorization"), "Bearer ")
-			if subtle.ConstantTimeCompare([]byte(key), []byte(bootstrapToken)) == 1 {
-				principal := auth.BootstrapPrincipal()
-				ctx := context.WithValue(c.Request().Context(), server.AdminContextKey, true)
-				ctx = context.WithValue(ctx, server.PrincipalContextKey, principal)
+			if c.Request().URL.Path == "/v1/raft/join" && bootstrapToken != "" && key != "" && subtle.ConstantTimeCompare([]byte(key), []byte(bootstrapToken)) == 1 {
+				ctx := context.WithValue(c.Request().Context(), server.EnrollmentContextKey, true)
 				c.SetRequest(c.Request().WithContext(ctx))
 				return next(c)
 			}
@@ -847,15 +850,21 @@ func leaderAuthMiddleware(bootstrapToken string, tokenManager *auth.TokenManager
 				c.SetRequest(c.Request().WithContext(ctx))
 				return next(c)
 			}
-			if nodeID, ok := tlsNodeID(c.Request()); ok {
-				ctx := context.WithValue(c.Request().Context(), server.NodeContextKey, nodeID)
-				c.SetRequest(c.Request().WithContext(ctx))
-				return next(c)
+			if c.Request().Header.Get("X-Trellis-Forwarded-By-Proxy") == "" && isNodeEndpoint(c.Request().URL.Path) {
+				if nodeID, ok := tlsNodeID(c.Request()); ok {
+					ctx := context.WithValue(c.Request().Context(), server.NodeContextKey, nodeID)
+					c.SetRequest(c.Request().WithContext(ctx))
+					return next(c)
+				}
 			}
 			_ = err
 			return echo.NewHTTPError(http.StatusUnauthorized, "invalid API credential")
 		}
 	}
+}
+
+func isNodeEndpoint(path string) bool {
+	return path == "/v1/nodes" || path == "/v1/internal/discovery" || strings.HasPrefix(path, "/v1/nodes/") && strings.HasSuffix(path, "/heartbeat")
 }
 
 // leaderAgentAuthMiddleware authorizes commands only from the certificate
@@ -871,17 +880,27 @@ func leaderAgentAuthMiddleware(r *raft.Raft) echo.MiddlewareFunc {
 			if len(certs) == 0 {
 				return echo.NewHTTPError(http.StatusUnauthorized, "node certificate required")
 			}
-			leader, _ := r.LeaderWithID()
-			if leader == "" {
+			_, leader := r.LeaderWithID()
+			leaderNodeID, _, ok := parseRaftServerID(string(leader))
+			if !ok {
 				return echo.NewHTTPError(http.StatusServiceUnavailable, "Raft leader unavailable")
 			}
-			host, _, err := net.SplitHostPort(string(leader))
-			if err != nil || certs[0].VerifyHostname(host) != nil {
+			if certs[0].Subject.CommonName != leaderNodeID.String() {
 				return echo.NewHTTPError(http.StatusForbidden, "caller is not the current Raft leader")
 			}
 			return next(c)
 		}
 	}
+}
+
+func raftServerID(nodeID uuid.UUID, serverAddress string) string {
+	return nodeID.String() + "@" + serverAddress
+}
+
+func parseRaftServerID(value string) (uuid.UUID, string, bool) {
+	rawID, address, ok := strings.Cut(value, "@")
+	id, err := uuid.Parse(rawID)
+	return id, address, ok && err == nil && address != ""
 }
 
 func tlsNodeID(r *http.Request) (uuid.UUID, bool) {

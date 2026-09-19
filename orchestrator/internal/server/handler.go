@@ -31,11 +31,15 @@ type contextKey string
 // NamespaceContextKey stores the authenticated namespace or encoded scoped authorization in a request context.
 const NamespaceContextKey contextKey = "trellis-namespace"
 
-// AdminContextKey stores bootstrap cluster-administrator status in a request context.
+// AdminContextKey stores cluster-administrator status in a request context.
 const AdminContextKey contextKey = "trellis-admin"
 
 // NodeContextKey stores the immutable node identity authenticated by mTLS.
 const NodeContextKey contextKey = "trellis-node"
+
+// EnrollmentContextKey marks the narrow bootstrap-authenticated enrollment
+// exchange. It never grants general API or administrator authority.
+const EnrollmentContextKey contextKey = "trellis-enrollment"
 
 type requestAuthorization struct {
 	root      bool
@@ -171,7 +175,7 @@ func (h *Handler) Register(e *echo.Echo) {
 }
 
 func (h *Handler) handleCreateCredential(c *echo.Context) error {
-	if err := requireRoot(c, "credential creation requires the bootstrap cluster credential"); err != nil {
+	if err := requireRoot(c, "credential creation requires an administrator credential"); err != nil {
 		return err
 	}
 	var request api.CredentialCreateRequest
@@ -202,7 +206,7 @@ func (h *Handler) handleCreateCredential(c *echo.Context) error {
 }
 
 func (h *Handler) handleBackupCreate(c *echo.Context) error {
-	if err := requireRoot(c, "backup operations require the bootstrap cluster credential"); err != nil {
+	if err := requireRoot(c, "backup operations require an administrator credential"); err != nil {
 		return err
 	}
 	backup, err := h.server.Backup(c.Request().Context())
@@ -214,7 +218,7 @@ func (h *Handler) handleBackupCreate(c *echo.Context) error {
 }
 
 func (h *Handler) handleBackupRestore(c *echo.Context) error {
-	if err := requireRoot(c, "backup operations require the bootstrap cluster credential"); err != nil {
+	if err := requireRoot(c, "backup operations require an administrator credential"); err != nil {
 		return err
 	}
 	c.Request().Body = http.MaxBytesReader(c.Response(), c.Request().Body, 64<<20)
@@ -549,10 +553,7 @@ func (h *Handler) handleRaftJoin(c *echo.Context) error {
 	if request.ID == "" || request.RaftAddress == "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "id and raft_address are required")
 	}
-	if caller, authenticated := c.Request().Context().Value(NodeContextKey).(uuid.UUID); !authenticated {
-		if err := requireRoot(c, "cluster enrollment requires an enrollment credential"); err != nil {
-			return err
-		}
+	if enrolled, _ := c.Request().Context().Value(EnrollmentContextKey).(bool); enrolled {
 		nodeID, err := uuid.Parse(request.NodeID)
 		if err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, "node_id is required for enrollment")
@@ -561,28 +562,23 @@ func (h *Handler) handleRaftJoin(c *echo.Context) error {
 		if err != nil {
 			return echo.NewHTTPError(http.StatusServiceUnavailable, "cluster CA unavailable")
 		}
-		cert, key, err := tlsutil.GenerateNodeCert([]byte(caCert), []byte(caKey), nodeID.String(), request.ID)
+		cert, key, err := tlsutil.GenerateNodeCert([]byte(caCert), []byte(caKey), nodeID.String())
 		if err != nil {
 			return echo.NewHTTPError(http.StatusInternalServerError, "unable to issue node certificate")
 		}
-		return c.JSON(http.StatusOK, api.RaftJoinResponse{CACert: caCert, Cert: string(cert), Key: string(key)})
-	} else if request.NodeID != "" {
-		nodeID, err := uuid.Parse(request.NodeID)
-		if err != nil || caller != nodeID {
-			return echo.NewHTTPError(http.StatusForbidden, "enrollment identity does not match node certificate")
+		if h.server.joiner == nil {
+			return echo.NewHTTPError(http.StatusServiceUnavailable, "cluster join not available")
 		}
+		if err := h.server.joiner.AddVoter(request.ID, request.RaftAddress); err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+		}
+		return c.JSON(http.StatusOK, api.RaftJoinResponse{CACert: caCert, Cert: string(cert), Key: string(key)})
 	}
-	if h.server.joiner == nil {
-		return echo.NewHTTPError(http.StatusServiceUnavailable, "cluster join not available")
-	}
-	if err := h.server.joiner.AddVoter(request.ID, request.RaftAddress); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
-	}
-	return c.NoContent(http.StatusOK)
+	return echo.NewHTTPError(http.StatusForbidden, "Raft membership changes require a one-time enrollment credential")
 }
 
 func (h *Handler) handleRaftMemberRemove(c *echo.Context) error {
-	if err := requireRoot(c, "Raft membership changes require the bootstrap cluster credential"); err != nil {
+	if err := requireRoot(c, "Raft membership changes require an administrator credential"); err != nil {
 		return err
 	}
 	id := c.Param("id")
@@ -599,7 +595,7 @@ func (h *Handler) handleRaftMemberRemove(c *echo.Context) error {
 }
 
 func (h *Handler) handleRaftLeadershipTransfer(c *echo.Context) error {
-	if err := requireRoot(c, "leadership transfer requires the bootstrap cluster credential"); err != nil {
+	if err := requireRoot(c, "leadership transfer requires an administrator credential"); err != nil {
 		return err
 	}
 	if h.server.joiner == nil {

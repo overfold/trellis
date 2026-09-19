@@ -39,8 +39,6 @@ const (
 type CredentialKind string
 
 const (
-	// CredentialBootstrap is the root credential shared by Trellis nodes.
-	CredentialBootstrap CredentialKind = "bootstrap"
 	// CredentialOperator is an explicitly minted human or external-client credential.
 	CredentialOperator CredentialKind = "operator"
 	// CredentialWorkload is injected into a task group through api_access.
@@ -62,11 +60,6 @@ type Principal struct {
 	Namespace string             `json:"namespace,omitempty"`
 	Subject   *CredentialSubject `json:"subject,omitempty"`
 	CreatedAt time.Time          `json:"created_at,omitempty"`
-}
-
-// BootstrapPrincipal returns the effective principal for the node bootstrap credential.
-func BootstrapPrincipal() Principal {
-	return Principal{Kind: CredentialBootstrap, Scope: AccessCluster, Access: AccessWrite}
 }
 
 // Validate checks that a persisted principal is internally consistent.
@@ -146,6 +139,31 @@ func (m *TokenManager) CreateToken(ctx context.Context, principal Principal) (st
 		return "", fmt.Errorf("store token: %w", err)
 	}
 	return token, nil
+}
+
+// StoreToken persists a caller-provided token with an explicit principal. It
+// is used exactly once when bootstrapping the first operator credential; new
+// credentials must use CreateToken so their values are cryptographically random.
+func (m *TokenManager) StoreToken(ctx context.Context, token string, principal Principal) error {
+	if token == "" {
+		return fmt.Errorf("token is required")
+	}
+	if principal.CreatedAt.IsZero() {
+		principal.CreatedAt = time.Now().UTC()
+	}
+	if err := principal.Validate(); err != nil {
+		return err
+	}
+	hash := sha256.Sum256([]byte(token))
+	data, err := json.Marshal(&principal)
+	if err != nil {
+		return fmt.Errorf("marshal principal: %w", err)
+	}
+	key := fmt.Sprintf("trellis/%s/tokens/%s", m.cluster, hex.EncodeToString(hash[:]))
+	if err := m.store.Put(ctx, key, data); err != nil {
+		return fmt.Errorf("store token: %w", err)
+	}
+	return nil
 }
 
 // ValidateToken returns the principal for a valid generated token.
