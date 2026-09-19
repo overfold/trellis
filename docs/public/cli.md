@@ -202,7 +202,7 @@ For an interactive container terminal, add `-it` (or `--tty --stdin`) and provid
 trellisctl exec -it --task app a1b2c3d4 -- /bin/sh
 ```
 
-Trellis deliberately does not choose a shell for the caller, so the command after `--` is always required. TTY mode uses the persistent exec-session API, forwards terminal bytes in both directions, restores the local terminal on exit, and tracks local terminal-size changes. The remote `TERM` value defaults to the local `TERM`, then `xterm-256color` when the local environment does not provide one; override it with `--term` when needed.
+Exec starts the command in the selected task's container process context: it inherits the task's environment variables, OCI user, and working directory. This is true for both one-shot and TTY exec. Trellis deliberately does not choose a shell for the caller, so the command after `--` is always required. TTY mode uses the persistent exec-session API, forwards terminal bytes in both directions, restores the local terminal on exit, and tracks local terminal-size changes. For TTY sessions, `TERM` is the one intentional environment override: it defaults to the local `TERM`, then `xterm-256color` when the local environment does not provide one; override it with `--term` when needed.
 
 ## Delete and wait for removal
 
