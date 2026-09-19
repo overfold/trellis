@@ -52,20 +52,20 @@ type Server struct {
 	state   *StateController
 	client  *client.AgentClient
 
-	cluster      *Cluster
-	nodes        map[uuid.UUID]*Node
-	jobs         map[string]*Job
-	allocations         []*Allocation
-	networkPool         netip.Prefix
-	networkPorts        map[string]int
-	wireGuardPortCount  int
-	tokenManager        *auth.TokenManager
-	catalog      *catalog.ServiceCatalog
-	serverAddr   string
-	clusterName  string
-	joiner       ClusterJoiner
-	backupStore  desiredStore
-	clientTLS    *tls.Config
+	cluster            *Cluster
+	nodes              map[uuid.UUID]*Node
+	jobs               map[string]*Job
+	allocations        []*Allocation
+	networkPool        netip.Prefix
+	networkPorts       map[string]int
+	wireGuardPortCount int
+	tokenManager       *auth.TokenManager
+	catalog            *catalog.ServiceCatalog
+	serverAddr         string
+	clusterName        string
+	joiner             ClusterJoiner
+	backupStore        desiredStore
+	clientTLS          *tls.Config
 	// Locking contract:
 	//   - mu protects the in-memory cluster, node, job, allocation, epoch, and
 	//     leadership snapshots. It must never be held during network or storage I/O.
@@ -80,12 +80,12 @@ type Server struct {
 	reconcileMu   sync.Mutex
 	mutationMu    sync.Mutex
 	networkPortMu sync.Mutex
-	controlEpoch uint64
-	leaderSince  time.Time
-	now          func() time.Time
-	metrics      *Metrics
-	secrets      *secretstore.Store
-	events       *EventBus
+	controlEpoch  uint64
+	leaderSince   time.Time
+	now           func() time.Time
+	metrics       *Metrics
+	secrets       *secretstore.Store
+	events        *EventBus
 }
 
 // SetSecretStore configures encrypted secret storage.
@@ -319,20 +319,20 @@ func (a *Allocation) SetHealth(health lifecycle.Health) error {
 func NewServer(log *slog.Logger, storage *storage.LocalStorage, state *StateController, store state.Store, cluster, serverAddr string) *Server {
 	pool := netip.MustParsePrefix("10.64.0.0/10")
 	s := &Server{
-		log:          log.With("component", "server"),
-		storage:      storage,
-		state:        state,
-		client:       &client.AgentClient{},
-		nodes:        make(map[uuid.UUID]*Node),
-		jobs:         make(map[string]*Job),
+		log:                log.With("component", "server"),
+		storage:            storage,
+		state:              state,
+		client:             &client.AgentClient{},
+		nodes:              make(map[uuid.UUID]*Node),
+		jobs:               make(map[string]*Job),
 		networkPool:        pool,
 		networkPorts:       make(map[string]int),
 		wireGuardPortCount: 256,
 		tokenManager:       auth.NewTokenManager(store, cluster),
-		catalog:      catalog.New(),
-		serverAddr:   serverAddr,
-		clusterName:  cluster,
-		now:          time.Now,
+		catalog:            catalog.New(),
+		serverAddr:         serverAddr,
+		clusterName:        cluster,
+		now:                time.Now,
 	}
 	s.backupStore, _ = store.(desiredStore)
 	s.events = newEventBus()
