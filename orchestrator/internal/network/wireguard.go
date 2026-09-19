@@ -64,7 +64,8 @@ type WireGuardManager struct {
 // workload resolver. Namespace firewall rules allow only DNS traffic to this
 // address; it is not exposed on external interfaces.
 func (m *WireGuardManager) ConfigureWorkloadDNS(ctx context.Context, address string) error {
-	if ip := netip.MustParseAddr(address); !ip.Is4() {
+	ip, err := netip.ParseAddr(address)
+	if err != nil || !ip.Is4() {
 		return fmt.Errorf("workload DNS address must be IPv4: %s", address)
 	}
 	m.mu.Lock()
