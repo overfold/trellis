@@ -9,6 +9,8 @@ task_groups:
     tasks:
       - name: dashboard
         image: docker.io/library/nginx:1.27-alpine
+        networking:
+          mode: host
         resources:
           cpu: 100
           memory: 134217728
