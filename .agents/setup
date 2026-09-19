@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly GO_VERSION="1.26.4"
+readonly NODE_VERSION="20.20.1"
+readonly GOLANGCI_LINT_VERSION="2.12.2"
+readonly TOOLCHAIN_DIR="$HOME/.local/trellis-toolchains"
+readonly GO_DIR="$TOOLCHAIN_DIR/go-$GO_VERSION"
+readonly NODE_DIR="$TOOLCHAIN_DIR/node-v$NODE_VERSION-linux-x64"
+readonly GOLANGCI_LINT_DIR="$TOOLCHAIN_DIR/golangci-lint-$GOLANGCI_LINT_VERSION"
+readonly PROFILE_MARKER="# Trellis orb toolchains"
+
+step() {
+  printf '\n==> %s\n' "$1"
+}
+
+step "Installing system prerequisites"
+missing_packages=()
+for package in ca-certificates curl tar xz-utils; do
+  dpkg-query -W -f='${db:Status-Status}\n' "$package" 2>/dev/null | grep -qx installed || missing_packages+=("$package")
+done
+if ((${#missing_packages[@]})); then
+  apt-get update
+  apt-get install -y "${missing_packages[@]}"
+fi
+
+mkdir -p "$TOOLCHAIN_DIR"
+
+step "Installing Go $GO_VERSION"
+if [[ ! -x "$GO_DIR/bin/go" ]]; then
+  archive="$(mktemp)"
+  trap 'rm -f "$archive"' EXIT
+  curl --fail --location --retry 3 --output "$archive" "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"
+  rm -rf "$GO_DIR"
+  tar -C "$TOOLCHAIN_DIR" -xzf "$archive"
+  mv "$TOOLCHAIN_DIR/go" "$GO_DIR"
+  rm -f "$archive"
+  trap - EXIT
+fi
+
+step "Installing Node.js $NODE_VERSION"
+if [[ ! -x "$NODE_DIR/bin/node" ]]; then
+  archive="$(mktemp)"
+  trap 'rm -f "$archive"' EXIT
+  curl --fail --location --retry 3 --output "$archive" "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz"
+  rm -rf "$NODE_DIR"
+  tar -C "$TOOLCHAIN_DIR" -xJf "$archive"
+  rm -f "$archive"
+  trap - EXIT
+fi
+
+step "Installing golangci-lint $GOLANGCI_LINT_VERSION"
+if [[ ! -x "$GOLANGCI_LINT_DIR/golangci-lint" ]]; then
+  archive="$(mktemp)"
+  trap 'rm -f "$archive"' EXIT
+  curl --fail --location --retry 3 --output "$archive" "https://github.com/golangci/golangci-lint/releases/download/v${GOLANGCI_LINT_VERSION}/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64.tar.gz"
+  rm -rf "$GOLANGCI_LINT_DIR"
+  tar -xzf "$archive" -C "$TOOLCHAIN_DIR"
+  mv "$TOOLCHAIN_DIR/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64" "$GOLANGCI_LINT_DIR"
+  rm -f "$archive"
+  trap - EXIT
+fi
+
+export PATH="$GO_DIR/bin:$NODE_DIR/bin:$GOLANGCI_LINT_DIR:$PATH"
+
+step "Persisting the orb toolchain path"
+if ! grep -Fqx "$PROFILE_MARKER" "$HOME/.bash_profile" 2>/dev/null; then
+  cat >> "$HOME/.bash_profile" <<EOF
+
+$PROFILE_MARKER
+export PATH="$GO_DIR/bin:$NODE_DIR/bin:$GOLANGCI_LINT_DIR:\$PATH"
+EOF
+fi
+
+step "Downloading Go module dependencies"
+(cd orchestrator && go mod download)
+(cd tutorial && go mod download)
+
+step "Installing dashboard dependencies"
+(
+  cd ui
+  dependency_marker="node_modules/.trellis-orb-dependency-fingerprint"
+  dependency_fingerprint="$(sha256sum package-lock.json | awk '{print $1}'):$(node --version)"
+  if [[ ! -f "$dependency_marker" ]] || [[ "$(<"$dependency_marker")" != "$dependency_fingerprint" ]]; then
+    npm ci
+    printf '%s\n' "$dependency_fingerprint" > "$dependency_marker"
+  fi
+)
+
+step "Verifying installed toolchains"
+go version
+node --version
+npm --version
+golangci-lint version

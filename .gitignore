@@ -37,3 +37,6 @@ node_modules/
 .next/
 out/
 .env.local
+
+# Amp orb portal metadata
+.amp/portals/
