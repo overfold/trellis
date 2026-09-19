@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"os"
+	"sort"
 	"sync"
 	"time"
 
@@ -293,9 +294,9 @@ type Allocation struct {
 	Phase         lifecycle.Phase  `json:"phase"`
 	Health        lifecycle.Health `json:"health"`
 	lifecycle.Diagnostic
-	Node    *Node
-	Address string            `json:"address,omitempty"`
-	Ports   []api.PortMapping `json:"ports,omitempty"`
+	Node      *Node
+	Endpoints []api.AllocationEndpoint `json:"endpoints,omitempty"`
+	Ports     []api.PortMapping        `json:"ports,omitempty"`
 	// Draining marks an allocation whose job revision is superseded under
 	// a rolling update strategy. Draining allocations are not restarted on
 	// failure and are not counted toward the desired count.
@@ -594,7 +595,7 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 		Generation uint64
 		Phase      lifecycle.Phase
 		Health     lifecycle.Health
-		Address    string
+		Endpoints  []api.AllocationEndpoint
 		Ports      []api.PortMapping
 		Tasks      int
 	}
@@ -606,11 +607,8 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 		phase, health := a.Phase, a.Health
 		info := statuses[a.ID]
 		if info.Tasks == 0 {
-			info.Generation, info.Phase, info.Health, info.Address = a.Generation, phase, health, a.Address
+			info.Generation, info.Phase, info.Health = a.Generation, phase, health
 		} else {
-			if info.Address == "" && a.Address != "" {
-				info.Address = a.Address
-			}
 			if phase != lifecycle.PhaseRunning {
 				info.Phase = phase
 			}
@@ -624,6 +622,11 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 		}
 		info.Tasks++
 		info.Ports = append(info.Ports, a.Ports...)
+		if a.Task != "" || a.Address != "" || len(a.Ports) > 0 {
+			info.Endpoints = append(info.Endpoints, api.AllocationEndpoint{
+				Task: a.Task, Address: a.Address, Ports: append([]api.PortMapping(nil), a.Ports...),
+			})
+		}
 		statuses[a.ID] = info
 	}
 	var changed []*Allocation
@@ -638,12 +641,9 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 			_ = a.Transition(info.Phase, time.Now().UTC(), "", "")
 		}
 		_ = a.SetHealth(info.Health)
-		if info.Address != "" {
-			a.Address = info.Address
-		}
-		if len(info.Ports) > 0 {
-			a.Ports = info.Ports
-		}
+		sort.Slice(info.Endpoints, func(i, j int) bool { return info.Endpoints[i].Task < info.Endpoints[j].Task })
+		a.Endpoints = append([]api.AllocationEndpoint(nil), info.Endpoints...)
+		a.Ports = append([]api.PortMapping(nil), info.Ports...)
 		changed = append(changed, a)
 		a.mu.Unlock()
 	}
