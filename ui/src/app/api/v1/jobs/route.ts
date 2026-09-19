@@ -36,7 +36,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   if (!getAllowWrites()) {
     return NextResponse.json(
-      { error: "Dashboard is read-only" },
+      { error: "Console is read-only" },
       { status: 403 },
     );
   }

@@ -11,7 +11,7 @@ export async function POST(
 ) {
   if (!getAllowWrites()) {
     return NextResponse.json(
-      { error: "Dashboard is read-only" },
+      { error: "Console is read-only" },
       { status: 403 },
     );
   }
@@ -42,7 +42,7 @@ export async function DELETE(
 ) {
   if (!getAllowWrites()) {
     return NextResponse.json(
-      { error: "Dashboard is read-only" },
+      { error: "Console is read-only" },
       { status: 403 },
     );
   }

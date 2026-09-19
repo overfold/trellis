@@ -1,6 +1,6 @@
 # Job manifest reference
 
-A **job manifest** is the first-party human-authored representation of one Trellis job. The CLI, dashboard, documentation, and examples use YAML because it is pleasant to edit, but the control-plane API does not process YAML. Consumers convert their representation into the canonical JSON `JobSpec` before calling Trellis.
+A **job manifest** is the first-party human-authored representation of one Trellis job. The CLI, Trellis Console, documentation, and examples use YAML because it is pleasant to edit, but the control-plane API does not process YAML. Consumers convert their representation into the canonical JSON `JobSpec` before calling Trellis.
 
 > **Consumers own representation; Trellis owns meaning.** YAML, HCL, Python, forms, or another frontend may provide their own authoring conveniences. Consumers are responsible for converting those conveniences into canonical JSON. Trellis remains authoritative for validation, defaults, planning, revision semantics, and reconciliation.
 
@@ -54,7 +54,7 @@ task_groups:
 
 Because the sample uses host networking and reserves port 8080, its two replicas must run on different nodes. A rolling replacement also needs another compatible node with port 8080 available while old and new allocations overlap.
 
-Check locally with `trellisctl jobs apply --check --file trellis.yaml`, preview with `trellisctl jobs apply --dry-run --file trellis.yaml`, and apply with `trellisctl jobs apply --file trellis.yaml`. The dashboard's **Apply Manifest** editor accepts the same YAML, converts its human values to canonical JSON, and asks the control plane for the same semantic plan.
+Check locally with `trellisctl jobs apply --check --file trellis.yaml`, preview with `trellisctl jobs apply --dry-run --file trellis.yaml`, and apply with `trellisctl jobs apply --file trellis.yaml`. The Console's **Apply Manifest** editor accepts the same YAML, converts its human values to canonical JSON, and asks the control plane for the same semantic plan.
 
 ## Representation boundary
 
@@ -116,7 +116,7 @@ api_access:
 
 - `namespace/read` is appropriate for discovery, observers, and namespace-local read-only controllers.
 - `namespace/write` is appropriate for trusted controllers that deliberately mutate jobs in their own namespace.
-- `cluster/read` can inspect cluster-scoped state and is the credential used by the read-only first-party dashboard.
+- `cluster/read` can inspect cluster-scoped state and is the credential used by the read-only first-party Console.
 - `cluster/write` is the normal high-privilege operator/controller credential for cluster-wide mutations.
 - omitted means no API credential is injected.
 

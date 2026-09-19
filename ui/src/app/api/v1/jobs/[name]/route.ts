@@ -45,7 +45,7 @@ export async function DELETE(
   { params }: { params: Promise<{ name: string }> }
 ) {
   if (!getAllowWrites()) {
-    return NextResponse.json({ error: "Dashboard is read-only" }, { status: 403 });
+    return NextResponse.json({ error: "Console is read-only" }, { status: 403 });
   }
   const selected = resolveDashboardNamespace(request);
   if (selected.error) {

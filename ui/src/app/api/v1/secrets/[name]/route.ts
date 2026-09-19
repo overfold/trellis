@@ -16,7 +16,7 @@ export async function PUT(
 ) {
   if (!getAllowWrites()) {
     return NextResponse.json(
-      { error: "Dashboard is read-only" },
+      { error: "Console is read-only" },
       { status: 403 },
     );
   }
@@ -27,7 +27,7 @@ export async function PUT(
   }
   if (!selected.namespace) {
     return NextResponse.json(
-      { error: "A non-empty dashboard namespace is required for secret management" },
+      { error: "A non-empty Console namespace is required for secret management" },
       { status: 400 },
     );
   }
@@ -66,7 +66,7 @@ export async function DELETE(
 ) {
   if (!getAllowWrites()) {
     return NextResponse.json(
-      { error: "Dashboard is read-only" },
+      { error: "Console is read-only" },
       { status: 403 },
     );
   }
@@ -77,7 +77,7 @@ export async function DELETE(
   }
   if (!selected.namespace) {
     return NextResponse.json(
-      { error: "A non-empty dashboard namespace is required for secret management" },
+      { error: "A non-empty Console namespace is required for secret management" },
       { status: 400 },
     );
   }

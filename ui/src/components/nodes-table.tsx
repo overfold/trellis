@@ -9,6 +9,7 @@ import { formatCPU, formatBytes, timeAgo } from "@/lib/utils";
 import { drainNode, undrainNode } from "@/lib/api";
 import { EmptyState } from "./empty-state";
 import { Skeleton } from "./skeleton";
+import { JsonInspection } from "./json-inspection";
 import type { Node } from "@/lib/types";
 
 export function NodesTable() {
@@ -52,7 +53,7 @@ export function NodesTable() {
     return (
       <EmptyState
         title="Unable to load nodes"
-        description="Could not connect to the orchestrator. Ensure it is running and the UI is configured."
+        description="Could not connect to the orchestrator. Ensure it is running and the console is configured."
       />
     );
   }
@@ -79,7 +80,7 @@ export function NodesTable() {
               <th className="px-4 py-3 text-left font-medium text-muted-foreground">Host</th>
               <th className="px-4 py-3 text-left font-medium text-muted-foreground">Status</th>
               <th className="px-4 py-3 text-left font-medium text-muted-foreground">Capacity</th>
-              <th className="px-4 py-3 text-left font-medium text-muted-foreground">Placement</th>
+              <th className="px-4 py-3 text-left font-medium text-muted-foreground">Scheduling facts</th>
               <th className="px-4 py-3 text-left font-medium text-muted-foreground">Heartbeat</th>
               {allowWrites && (
                 <th className="px-4 py-3 text-right font-medium text-muted-foreground">Actions</th>
@@ -95,8 +96,8 @@ export function NodesTable() {
                 <tr key={node.id} className="align-top transition-colors hover:bg-muted/30">
                   <td className="px-4 py-3">
                     <p className="font-medium text-card-foreground">{node.host}:{node.port}</p>
-                    <p className="mt-0.5 font-mono text-xs text-muted-foreground" title={node.id}>
-                      {node.id.substring(0, 8)}
+                    <p className="mt-0.5 max-w-48 break-all font-mono text-[11px] text-muted-foreground" title={node.id}>
+                      {node.id}
                     </p>
                   </td>
                   <td className="px-4 py-3">
@@ -105,6 +106,7 @@ export function NodesTable() {
                   <td className="px-4 py-3 text-card-foreground">
                     <p className="tabular-nums">{formatCPU(node.cpu)}</p>
                     <p className="mt-0.5 tabular-nums text-xs text-muted-foreground">{formatBytes(node.memory)}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">{node.os || "unknown"}/{node.arch || "unknown"}</p>
                   </td>
                   <td className="max-w-sm px-4 py-3">
                     {labels.length === 0 && volumes.length === 0 && capabilities.length === 0 ? (
@@ -167,6 +169,13 @@ export function NodesTable() {
           </tbody>
         </table>
       </div>
+      <section className="mt-5 space-y-3">
+        <div>
+          <h2 className="text-sm font-medium text-foreground">Node inspection</h2>
+          <p className="mt-1 text-xs text-muted-foreground">Complete state used to evaluate placement and diagnose node availability.</p>
+        </div>
+        {nodes.map((node) => <NodeInspection key={node.id} node={node} />)}
+      </section>
       {allowWrites && drainTarget && (
         <ConfirmDialog
           open
@@ -181,6 +190,57 @@ export function NodesTable() {
         />
       )}
     </>
+  );
+}
+
+function NodeInspection({ node }: { node: Node }) {
+  const labels = Object.entries(node.labels ?? {});
+  return (
+    <details className="rounded-lg border border-border bg-card">
+      <summary className="cursor-pointer select-none px-4 py-3 text-sm font-medium text-foreground">
+        {node.host}:{node.port} <span className="ml-2 font-normal text-muted-foreground">{node.os || "unknown"}/{node.arch || "unknown"} · {node.status}</span>
+      </summary>
+      <div className="space-y-4 border-t border-border p-4">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <NodeField label="Node ID" value={node.id} mono />
+          <NodeField label="Health / scheduling" value={node.status} />
+          <NodeField label="Platform" value={`${node.os || "unknown"}/${node.arch || "unknown"}`} />
+          <NodeField label="Trellis version" value={node.version || "unknown"} mono />
+          <NodeField label="CPU capacity" value={`${formatCPU(node.cpu)} (${node.cpu}m)`} />
+          <NodeField label="Memory capacity" value={`${formatBytes(node.memory)} (${node.memory} bytes)`} />
+          <NodeField label="Last heartbeat" value={new Date(node.last_heartbeat).toLocaleString()} />
+          <NodeField label="Endpoint" value={`${node.host}:${node.port}`} mono />
+        </div>
+        <NodeList label="Labels" values={labels.map(([key, value]) => `${key}=${value}`)} />
+        <NodeList label="Volume registrations" values={node.volumes ?? []} />
+        <NodeList label="Capabilities" values={node.capabilities ?? []} />
+        <JsonInspection title="Raw node JSON" value={node} />
+      </div>
+    </details>
+  );
+}
+
+function NodeField({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="rounded-md border border-border bg-background/50 p-3">
+      <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">{label}</p>
+      <p className={`mt-1.5 break-all text-sm text-foreground ${mono ? "font-mono text-xs" : ""}`}>{value}</p>
+    </div>
+  );
+}
+
+function NodeList({ label, values }: { label: string; values: string[] }) {
+  return (
+    <div>
+      <p className="mb-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">{label}</p>
+      {values.length === 0 ? (
+        <p className="text-sm text-muted-foreground">None reported</p>
+      ) : (
+        <div className="flex flex-wrap gap-1.5">
+          {values.map((value) => <span key={value} className="rounded bg-muted px-2 py-1 font-mono text-xs text-muted-foreground">{value}</span>)}
+        </div>
+      )}
+    </div>
   );
 }
 
