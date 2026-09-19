@@ -55,6 +55,8 @@ A bootstrap credential reports `kind: "bootstrap"`, `scope: "cluster"`, and `acc
 
 For allocation logs, `task` selects the task name from the allocation's task group. It may be omitted when the allocation has exactly one task; a multi-task allocation returns `400` until the caller selects one. The allocation ID is the Trellis allocation identity, not an agent/container runtime ID.
 
+Both non-interactive exec and interactive exec sessions create the command with the selected task container's OCI process context: environment variables, user, and working directory are inherited from the task. The command argv is supplied by the caller; Trellis does not invoke a shell implicitly. TTY sessions may additionally set or replace `TERM` from the session request.
+
 Interactive exec sessions use the same task-selection rule. Create a session with `POST /v1/allocations/{id}/exec/sessions` and a body such as `{"task":"web","command":["/bin/sh"],"term":"xterm-256color","cols":120,"rows":32}`. `command` is required; Trellis does not choose a shell for the client. `term` is optional and, when present, is carried into the OCI process as `TERM`; Trellis does not assume a terminal type. The response is `{"id":"..."}`. Terminal bytes are transported as base64: send `{"data_base64":"..."}` to `.../{session}/input`, poll `.../{session}/output?offset=N` for `data_base64`, `next_offset`, `exited`, and optional `exit_code`, send `{"cols":120,"rows":32}` to `.../{session}/resize`, and `DELETE` the session when finished. Sessions are node-local, ephemeral diagnostics state: they are not persisted in Raft and end when the process, allocation, or explicit session closes.
 
 
