@@ -51,20 +51,54 @@ func (s *StateController) PutNetworkPortRegistration(ctx context.Context, regist
 	return nil
 }
 
-func (s *Server) ensureNetworkPortRegistrations(ctx context.Context, namespaces []string) (map[string]int, error) {
-	if len(namespaces) == 0 {
-		return map[string]int{}, nil
+// DeleteNetworkPortRegistration releases a namespace WireGuard port slot.
+func (s *StateController) DeleteNetworkPortRegistration(ctx context.Context, namespace string) error {
+	if namespace == "" {
+		return fmt.Errorf("network namespace is required")
 	}
+	key := fmt.Sprintf(
+		"%s/%s/network-port-registrations/%s",
+		trellisNamespace,
+		s.cluster,
+		url.QueryEscape(namespace),
+	)
+	if err := s.store.Delete(ctx, key); err != nil {
+		return fmt.Errorf("delete network port registration: %w", err)
+	}
+	return nil
+}
+
+func (s *Server) ensureNetworkPortRegistrations(ctx context.Context, namespaces []string) (map[string]int, error) {
 	s.networkPortMu.Lock()
 	defer s.networkPortMu.Unlock()
+
+	registrations, err := s.state.ListNetworkPortRegistrations(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load network port registrations: %w", err)
+	}
+	wanted := make(map[string]struct{}, len(namespaces))
+	for _, namespace := range namespaces {
+		if namespace == "" {
+			return nil, fmt.Errorf("network namespace is required")
+		}
+		wanted[namespace] = struct{}{}
+	}
+	for namespace := range registrations {
+		if _, keep := wanted[namespace]; keep {
+			continue
+		}
+		if err := s.state.DeleteNetworkPortRegistration(ctx, namespace); err != nil {
+			return nil, err
+		}
+		delete(registrations, namespace)
+	}
+	if len(namespaces) == 0 {
+		return registrations, nil
+	}
 
 	count := s.wireGuardPortCount
 	if count < 1 {
 		return nil, fmt.Errorf("WireGuard namespace port range is not configured")
-	}
-	registrations, err := s.state.ListNetworkPortRegistrations(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("load network port registrations: %w", err)
 	}
 	used := make(map[int]string, len(registrations))
 	for namespace, slot := range registrations {
@@ -80,9 +114,6 @@ func (s *Server) ensureNetworkPortRegistrations(ctx context.Context, namespaces 
 	namespaces = append([]string(nil), namespaces...)
 	sort.Strings(namespaces)
 	for _, namespace := range namespaces {
-		if namespace == "" {
-			return nil, fmt.Errorf("network namespace is required")
-		}
 		if _, exists := registrations[namespace]; exists {
 			continue
 		}
