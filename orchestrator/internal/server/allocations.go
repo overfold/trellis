@@ -98,7 +98,7 @@ func allocationEndpointAddress(allocation *Allocation) string {
 	var address string
 	for _, endpoint := range allocationTaskEndpoints(allocation) {
 		if endpoint.Address == "" {
-			continue
+			return ""
 		}
 		if address == "" {
 			address = endpoint.Address
