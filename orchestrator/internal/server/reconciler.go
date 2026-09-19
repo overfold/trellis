@@ -113,16 +113,29 @@ func (s *Server) Reconcile(ctx context.Context) {
 	s.mu.RLock()
 	networkNamespaces := make([]string, 0)
 	seenNetworkNamespaces := make(map[string]struct{})
+	addNetworkNamespace := func(namespace string) {
+		if _, exists := seenNetworkNamespaces[namespace]; exists {
+			return
+		}
+		networkNamespaces = append(networkNamespaces, namespace)
+		seenNetworkNamespaces[namespace] = struct{}{}
+	}
 	for _, job := range s.jobs {
 		for i := range job.Spec.TaskGroups {
-			if spec.GroupUsesWireGuard(&job.Spec.TaskGroups[i]) {
-				if _, exists := seenNetworkNamespaces[job.Spec.Namespace]; !exists {
-					networkNamespaces = append(networkNamespaces, job.Spec.Namespace)
-					seenNetworkNamespaces[job.Spec.Namespace] = struct{}{}
-				}
+			group := &job.Spec.TaskGroups[i]
+			if group.Count > 0 && spec.GroupUsesWireGuard(group) {
+				addNetworkNamespace(job.Spec.Namespace)
 				break
 			}
 		}
+	}
+	for _, allocation := range s.allocations {
+		allocation.mu.Lock()
+		active := allocation.Phase != lifecycle.PhaseStopped && allocation.Phase != lifecycle.PhaseFailed && allocation.Phase != lifecycle.PhaseLost
+		if active && tasksUseWireGuard(allocation.Tasks) {
+			addNetworkNamespace(allocation.Namespace)
+		}
+		allocation.mu.Unlock()
 	}
 	s.mu.RUnlock()
 	networkPorts, err := s.ensureNetworkPortRegistrations(ctx, networkNamespaces)
@@ -328,6 +341,15 @@ func (s *Server) Reconcile(ctx context.Context) {
 		}
 	}
 	s.refreshCatalog()
+}
+
+func tasksUseWireGuard(tasks []spec.TaskSpec) bool {
+	for i := range tasks {
+		if tasks[i].Networking != nil && tasks[i].Networking.Mode == spec.TaskNetworkWireGuard {
+			return true
+		}
+	}
+	return false
 }
 
 func noCompatibleCapabilityNode(nodes []*Node, constraints []spec.ConstraintSpec, tasks []spec.TaskSpec, volumeOwners map[string]uuid.UUID, namespace string, required []spec.NodeCapability) bool {
