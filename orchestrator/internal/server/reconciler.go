@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 	"time"
 
@@ -109,12 +110,33 @@ func (s *Server) Reconcile(ctx context.Context) {
 		s.log.Error("load volume registrations", "error", err)
 		return
 	}
+	s.mu.RLock()
+	networkNamespaces := make([]string, 0)
+	seenNetworkNamespaces := make(map[string]struct{})
+	for _, job := range s.jobs {
+		for i := range job.Spec.TaskGroups {
+			if spec.GroupUsesWireGuard(&job.Spec.TaskGroups[i]) {
+				if _, exists := seenNetworkNamespaces[job.Spec.Namespace]; !exists {
+					networkNamespaces = append(networkNamespaces, job.Spec.Namespace)
+					seenNetworkNamespaces[job.Spec.Namespace] = struct{}{}
+				}
+				break
+			}
+		}
+	}
+	s.mu.RUnlock()
+	networkPorts, err := s.ensureNetworkPortRegistrations(ctx, networkNamespaces)
+	if err != nil {
+		s.log.Error("prepare namespace WireGuard ports", "error", err)
+		return
+	}
 	persistedVolumeOwners := make(map[string]uuid.UUID, len(volumeOwners))
 	for key, owner := range volumeOwners {
 		persistedVolumeOwners[key] = owner
 	}
 	var newAllocations []*Allocation
 	s.mu.Lock()
+	s.networkPorts = networkPorts
 	for _, node := range s.nodes {
 		if node.Status == NodeStatusHealthy && now.Sub(node.LastHeartbeat) > 3*heartbeatInterval {
 			node.Status = NodeStatusUnhealthy
@@ -513,19 +535,34 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 }
 
 func (s *Server) networkPlan(namespace string, target *Node) (*network.Plan, error) {
+	slot, ok := s.networkPorts[namespace]
+	if !ok {
+		return nil, fmt.Errorf("namespace %q has no WireGuard port registration", namespace)
+	}
+	listenPort, err := namespaceWireGuardPort(target.WireGuardPortBase, target.WireGuardPortCount, slot)
+	if err != nil {
+		return nil, fmt.Errorf("node %s WireGuard port range: %w", target.ID, err)
+	}
 	local := namespaceNodeSubnet(s.networkPool, namespace, target.ID)
-	plan := &network.Plan{CIDR: local.String(), Gateway: local.Addr().Next().String(), WireGuardAddress: wireGuardAddress(namespace, target.ID)}
+	plan := &network.Plan{CIDR: local.String(), Gateway: local.Addr().Next().String(), WireGuardAddress: wireGuardAddress(namespace, target.ID), ListenPort: listenPort}
 	seen := map[string]uuid.UUID{local.String(): target.ID}
 	for _, node := range s.nodes {
 		if node.ID == target.ID || node.WireGuardPublicKey == "" || node.WireGuardEndpoint == "" {
 			continue
+		}
+		if _, err := namespaceWireGuardPort(node.WireGuardPortBase, node.WireGuardPortCount, slot); err != nil {
+			return nil, fmt.Errorf("peer node %s WireGuard port range: %w", node.ID, err)
+		}
+		endpoint, err := namespaceWireGuardEndpoint(node.WireGuardEndpoint, slot)
+		if err != nil {
+			return nil, fmt.Errorf("peer node %s WireGuard endpoint: %w", node.ID, err)
 		}
 		subnet := namespaceNodeSubnet(s.networkPool, namespace, node.ID)
 		if previous, ok := seen[subnet.String()]; ok && previous != node.ID {
 			return nil, fmt.Errorf("automatic network subnet collision between nodes %s and %s", previous, node.ID)
 		}
 		seen[subnet.String()] = node.ID
-		plan.Peers = append(plan.Peers, network.PeerPlan{PublicKey: node.WireGuardPublicKey, Endpoint: node.WireGuardEndpoint, AllowedIPs: []string{subnet.String()}})
+		plan.Peers = append(plan.Peers, network.PeerPlan{PublicKey: node.WireGuardPublicKey, Endpoint: endpoint, AllowedIPs: []string{subnet.String()}})
 	}
 	for _, job := range s.jobs {
 		if job.Spec.Namespace == namespace {
@@ -549,6 +586,36 @@ func (s *Server) networkPlan(namespace string, target *Node) (*network.Plan, err
 		}
 	}
 	return plan, nil
+}
+
+func namespaceWireGuardPort(base, count, slot int) (int, error) {
+	if base < 1 || base > 65535 {
+		return 0, fmt.Errorf("base port %d is invalid", base)
+	}
+	if count < 1 || slot < 0 || slot >= count {
+		return 0, fmt.Errorf("slot %d is outside advertised range of %d ports", slot, count)
+	}
+	port := base + slot
+	if port > 65535 {
+		return 0, fmt.Errorf("base port %d plus slot %d exceeds 65535", base, slot)
+	}
+	return port, nil
+}
+
+func namespaceWireGuardEndpoint(endpoint string, slot int) (string, error) {
+	host, rawPort, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		return "", err
+	}
+	base, err := strconv.Atoi(rawPort)
+	if err != nil {
+		return "", fmt.Errorf("invalid base port %q", rawPort)
+	}
+	port := base + slot
+	if port < 1 || port > 65535 {
+		return "", fmt.Errorf("base port %d plus slot %d is outside valid UDP port range", base, slot)
+	}
+	return net.JoinHostPort(host, strconv.Itoa(port)), nil
 }
 
 func namespaceNodeSubnet(pool netip.Prefix, namespace string, node uuid.UUID) netip.Prefix {
