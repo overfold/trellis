@@ -128,6 +128,8 @@ Generated credentials carry an authoritative server-side kind (`operator` or `wo
 
 Enabled API access injects `TRELLIS_ADDR`, `TRELLIS_TOKEN`, and `TRELLIS_NAMESPACE`; when TLS is configured, `TRELLIS_CA_CERT` contains the cluster CA PEM. `TRELLIS_NAMESPACE` is initialized to the job namespace even for cluster-scoped credentials.
 
+`TRELLIS_ADDR` is a Trellis-owned workload endpoint, currently exposed as the TLS name `trellis` on the control-plane port. Trellis maps that name to the node-local control plane for host-networked tasks and to the namespace gateway for namespace-networked tasks; the local listener proxies requests to the current leader. API-enabled tasks must therefore select either `networking.mode: host` or `networking.mode: namespace`. Omitted/isolated networking is rejected because it intentionally has no route to the control plane.
+
 `api_access` is a task-group privilege boundary: every task in the group can read the credential. Do not colocate untrusted sidecars with an API-enabled controller. Request the narrowest scope and access level the workload needs.
 
 `restart.max_restarts` is zero or greater and `restart.window` is a positive Go-style duration such as `5m`. Once the allowed failures in that window are exhausted, the allocation remains failed for operator diagnosis.

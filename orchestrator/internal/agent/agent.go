@@ -574,6 +574,15 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		"trellis.task-group":            groupName,
 		"trellis.task":                  taskName,
 	}
+	extraHosts := map[string]string{}
+	if _, apiAccess := envOverrides["TRELLIS_ADDR"]; apiAccess {
+		switch {
+		case hostMode:
+			extraHosts["trellis"] = "127.0.0.1"
+		case wireGuard && networkPlan != nil:
+			extraHosts["trellis"] = networkPlan.Gateway
+		}
+	}
 	_, err = a.runtime.Create(ctx, runtime.CreateOptions{
 		ID:     containerID,
 		Image:  ts.Image,
@@ -602,6 +611,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 			return ""
 		}(),
 		DNSServers: a.dnsServers,
+		ExtraHosts: extraHosts,
 		Labels:     labels,
 	})
 	if err != nil {

@@ -15,7 +15,7 @@ Install a Trellis node.
 Usage: setup.sh [options]
 
 Options:
-  --advertise HOST              Address peers can use to reach this node
+  --advertise HOST              Address peers and workloads can use to reach this node
   --join HOST:8128              Join an existing cluster
   --bootstrap-token-file FILE   Read the existing bootstrap credential from FILE
   --secrets-key-file FILE       Read the existing cluster secrets key from FILE
@@ -117,8 +117,8 @@ if [ -f "$CONFIG_FILE" ]; then
     [ -z "$configured" ] || advertise="$configured"
     [ -z "$configured_join" ] || join="$configured_join"
 fi
-[ -n "$advertise" ] || advertise="$(detect_private_ipv4 2>/dev/null || hostname)"
-[ -n "$advertise" ] || ui_die "Could not determine an advertise address."
+[ -n "$advertise" ] || advertise="$(detect_advertise_ipv4 2>/dev/null || true)"
+[ -n "$advertise" ] || ui_die "Could not determine a routable IPv4 advertise address. Pass --advertise HOST explicitly."
 [ -z "$join" ] || [[ "$join" == *:* ]] || ui_die "Join address must look like node-a:8128"
 fetch_latest_release
 

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"strings"
 	"time"
@@ -58,6 +59,14 @@ func agentOperationCode(err error) api.OperationCode {
 		return operation.Response.Code
 	}
 	return ""
+}
+
+func workloadAPIAddress(serverAddr string) (string, error) {
+	_, port, err := net.SplitHostPort(strings.TrimSpace(serverAddr))
+	if err != nil {
+		return "", fmt.Errorf("control-plane advertise address %q: %w", serverAddr, err)
+	}
+	return net.JoinHostPort("trellis", port), nil
 }
 
 func updateStrategy(job *Job, groupName string) spec.UpdateStrategy {
@@ -421,9 +430,13 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 			if err != nil {
 				return err
 			}
+			apiAddr, err := workloadAPIAddress(serverAddr)
+			if err != nil {
+				return err
+			}
 			request.EnvOverrides = map[string]string{
 				"TRELLIS_TOKEN":     token,
-				"TRELLIS_ADDR":      serverAddr,
+				"TRELLIS_ADDR":      apiAddr,
 				"TRELLIS_NAMESPACE": alloc.Namespace,
 			}
 			if caCert, _, caErr := s.ClusterCA(); caErr == nil && caCert != "" {

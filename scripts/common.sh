@@ -155,6 +155,28 @@ detect_private_ipv4() {
     return 1
 }
 
+detect_advertise_ipv4() {
+    local value
+    if command -v ip >/dev/null 2>&1; then
+        value="$(ip -4 route get 1.1.1.1 2>/dev/null |
+            awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+        if [ -n "$value" ] && is_ipv4 "$value" && [[ "$value" != 127.* ]] && [ "$value" != "0.0.0.0" ]; then
+            printf '%s\n' "$value"; return 0
+        fi
+        while read -r value; do
+            if is_ipv4 "$value" && [[ "$value" != 127.* ]] && [ "$value" != "0.0.0.0" ]; then
+                printf '%s\n' "$value"; return 0
+            fi
+        done < <(ip -o -4 addr show scope global 2>/dev/null | awk '{ sub(/\/.*/, "", $4); print $4 }')
+    fi
+    while read -r value; do
+        if is_ipv4 "$value" && [[ "$value" != 127.* ]] && [ "$value" != "0.0.0.0" ]; then
+            printf '%s\n' "$value"; return 0
+        fi
+    done < <(hostname -I 2>/dev/null | tr ' ' '\n')
+    return 1
+}
+
 detect_distro() {
     [ -f /etc/os-release ] || ui_die "Cannot detect Linux distribution."
     # shellcheck disable=SC1091

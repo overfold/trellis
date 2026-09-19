@@ -30,6 +30,7 @@ type CreateOptions struct {
 	Runtime          string
 	NetworkNamespace string
 	DNSServers       []string
+	ExtraHosts       map[string]string
 	Labels           map[string]string
 }
 
