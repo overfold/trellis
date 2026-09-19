@@ -119,6 +119,13 @@ type PortMapping struct {
 	ContainerPort int `json:"container_port"`
 }
 
+// AllocationEndpoint describes one task's routable endpoint within an allocation.
+type AllocationEndpoint struct {
+	Task    string        `json:"task"`
+	Address string        `json:"address,omitempty"`
+	Ports   []PortMapping `json:"ports,omitempty"`
+}
+
 // JobRegistrationRequest contains the job specification to register.
 type JobRegistrationRequest struct {
 	Spec spec.JobSpec `json:"spec"`
@@ -143,8 +150,9 @@ type AllocationResponse struct {
 	Namespace        string            `json:"namespace,omitempty"`
 	NodeID           uuid.UUID         `json:"node_id"`
 	Labels           map[string]string `json:"labels,omitempty"`
-	Address          string            `json:"address,omitempty"`
-	Ports            []PortMapping     `json:"ports,omitempty"`
+	Address          string               `json:"address,omitempty"`
+	Ports            []PortMapping        `json:"ports,omitempty"`
+	Endpoints        []AllocationEndpoint `json:"endpoints,omitempty"`
 	Phase            lifecycle.Phase   `json:"phase"`
 	Health           lifecycle.Health  `json:"health"`
 	Draining         bool              `json:"draining,omitempty"`
