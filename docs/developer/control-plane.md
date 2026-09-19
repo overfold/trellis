@@ -2,7 +2,7 @@
 
 ## Registration and heartbeats
 
-Nodes register UUID, agent address, capacity, OS/architecture, labels, volume inventory, and optional WireGuard identity. Periodic heartbeats refresh node status and report allocation generation, task, phase, health, ports, and version. The response is a desired-allocation set plus control epoch and orphan-confirmation signal. After three missed heartbeat intervals a healthy node is marked unhealthy.
+Nodes register UUID, agent address, capacity, OS/architecture, labels, volume inventory, and optional WireGuard identity. Periodic heartbeats refresh node status and report allocation generation, task, phase, health, the task's observed namespace-network address when present, ports, and version. The response is a desired-allocation set plus control epoch and orphan-confirmation signal. After three missed heartbeat intervals a healthy node is marked unhealthy.
 
 ## Scheduling algorithm
 
@@ -32,4 +32,4 @@ After leader election there is a recovery grace period. A node that remains unav
 
 ## Catalog and discovery
 
-Reconciliation refreshes the catalog from eligible allocation endpoints. Catalog entries retain namespace, job/group, labels, address, ports, and status. Queries can be namespace scoped and label filtered (`key:value`). DNS maps service-shaped names to IPv4 addresses with a short TTL. Proxy sync polls label-filtered allocations, keeps healthy endpoints, honors positive `trellis/weight`, atomically rewrites rendered output, and optionally reloads the proxy.
+Reconciliation refreshes the catalog from eligible allocation endpoints. Namespace-networked tasks advertise their observed workload address from the agent; host-networked allocations fall back to the node address. Catalog entries retain namespace, job/group, labels, address, ports, and status. Queries can be namespace scoped and label filtered (`key:value`). DNS maps service-shaped names to IPv4 addresses with a short TTL. Proxy sync polls label-filtered allocations, keeps healthy endpoints, honors positive `trellis/weight`, atomically rewrites rendered output, and optionally reloads the proxy.
