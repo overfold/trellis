@@ -148,12 +148,12 @@
       "additionalProperties": false,
       "properties": {
         "cpu": {
-          "minimum": 0,
+          "minimum": 1,
           "type": "integer"
         },
         "memory": {
           "description": "Bytes.",
-          "minimum": 0,
+          "minimum": 1,
           "type": "integer"
         }
       },

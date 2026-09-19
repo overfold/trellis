@@ -64,6 +64,7 @@ type Server struct {
 	catalog            *catalog.ServiceCatalog
 	serverAddr         string
 	clusterName        string
+	jobLimits          spec.Limits
 	joiner             ClusterJoiner
 	backupStore        desiredStore
 	clientTLS          *tls.Config
@@ -143,17 +144,44 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 		VolumeRegistrations:      make(map[string][]byte, len(backup.VolumeRegistrations)),
 		NetworkPortRegistrations: make(map[string][]byte, len(backup.NetworkPortRegistrations)),
 	}
+	canonicalizeJob := func(raw json.RawMessage) ([]byte, error) {
+		var record map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &record); err != nil {
+			return nil, err
+		}
+		var job spec.JobSpec
+		if err := json.Unmarshal(record["spec"], &job); err != nil {
+			return nil, err
+		}
+		if err := s.CanonicalizeJob(&job); err != nil {
+			return nil, err
+		}
+		canonical, err := json.Marshal(job)
+		if err != nil {
+			return nil, err
+		}
+		record["spec"] = canonical
+		return json.Marshal(record)
+	}
 	for key, value := range backup.Jobs {
 		if !json.Valid(value) {
 			return fmt.Errorf("job %q contains invalid JSON", key)
 		}
-		snapshot.Jobs[key] = value
+		canonical, err := canonicalizeJob(value)
+		if err != nil {
+			return fmt.Errorf("validate job %q: %w", key, err)
+		}
+		snapshot.Jobs[key] = canonical
 	}
 	for key, value := range backup.JobRevisions {
 		if !json.Valid(value) {
 			return fmt.Errorf("job revision %q contains invalid JSON", key)
 		}
-		snapshot.JobRevisions[key] = value
+		canonical, err := canonicalizeJob(value)
+		if err != nil {
+			return fmt.Errorf("validate job revision %q: %w", key, err)
+		}
+		snapshot.JobRevisions[key] = canonical
 	}
 	for key, value := range backup.Secrets {
 		if !json.Valid(value) {
@@ -360,11 +388,34 @@ func NewServer(log *slog.Logger, storage *storage.LocalStorage, state *StateCont
 		catalog:            catalog.New(),
 		serverAddr:         serverAddr,
 		clusterName:        cluster,
+		jobLimits:          spec.DefaultLimits(),
 		now:                time.Now,
 	}
 	s.backupStore, _ = store.(desiredStore)
 	s.events = newEventBus()
 	return s
+}
+
+// SetJobLimits configures operator-owned job admission and resource defaults.
+func (s *Server) SetJobLimits(limits spec.Limits) error {
+	if err := spec.ValidateLimits(limits); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.jobLimits = limits
+	s.mu.Unlock()
+	return nil
+}
+
+// CanonicalizeJob resolves operator defaults and validates a job before use.
+func (s *Server) CanonicalizeJob(job *spec.JobSpec) error {
+	s.mu.RLock()
+	limits := s.jobLimits
+	s.mu.RUnlock()
+	if limits == (spec.Limits{}) {
+		limits = spec.DefaultLimits()
+	}
+	return spec.Canonicalize(job, limits)
 }
 
 // AcquireLeadership durably advances the fencing epoch. The Raft-backed write
@@ -698,7 +749,7 @@ func jobKey(namespace, name string) string {
 
 // RegisterJob creates or updates desired job state.
 func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spec.JobSpec) error {
-	if err := spec.Validate(jobSpec); err != nil {
+	if err := s.CanonicalizeJob(jobSpec); err != nil {
 		return fmt.Errorf("validate job: %w", err)
 	}
 	s.mutationMu.Lock()

@@ -453,7 +453,7 @@ func (h *Handler) handlePlanJob(c *echo.Context) error {
 	if err := c.Bind(&request); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 	}
-	if err := spec.Validate(&request.Spec); err != nil {
+	if err := h.server.CanonicalizeJob(&request.Spec); err != nil {
 		return validationResponse(c, err)
 	}
 	selected := requestNamespace(c)
@@ -479,7 +479,7 @@ func (h *Handler) handleRegisterJob(c *echo.Context) error {
 	if err := c.Bind(&request); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 	}
-	if err := spec.Validate(&request.Spec); err != nil {
+	if err := h.server.CanonicalizeJob(&request.Spec); err != nil {
 		return validationResponse(c, err)
 	}
 	selected := requestNamespace(c)

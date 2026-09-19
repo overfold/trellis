@@ -19,6 +19,15 @@ type nodeResourcesConfig struct {
 	Reserved *reservedResourcesConfig `yaml:"reserved"`
 }
 
+type jobLimitsConfig struct {
+	MaxReplicasPerTaskGroup *int    `yaml:"max_replicas_per_task_group"`
+	MaxTaskGroupsPerJob     *int    `yaml:"max_task_groups_per_job"`
+	MaxTasksPerTaskGroup    *int    `yaml:"max_tasks_per_task_group"`
+	MaxDesiredAllocations   *int    `yaml:"max_desired_allocations"`
+	DefaultTaskCPU          *int    `yaml:"default_task_cpu"`
+	DefaultTaskMemory       *string `yaml:"default_task_memory"`
+}
+
 type nodeConfigFile struct {
 	AgentListen        *string              `yaml:"agent_listen"`
 	AgentAdvertise     *string              `yaml:"agent_advertise"`
@@ -46,6 +55,7 @@ type nodeConfigFile struct {
 	SecretsKeyID       *string              `yaml:"secrets_key_id"`
 	Labels             *[]string            `yaml:"labels"`
 	Resources          *nodeResourcesConfig `yaml:"resources"`
+	JobLimits          *jobLimitsConfig     `yaml:"job_limits"`
 }
 
 func loadNodeConfig(path string, cfg *config, flags *pflag.FlagSet) error {
@@ -97,6 +107,20 @@ func loadNodeConfig(path string, cfg *config, flags *pflag.FlagSet) error {
 	}
 	if parsed.Labels != nil && !flags.Changed("label") {
 		cfg.Labels = append([]string(nil), (*parsed.Labels)...)
+	}
+	if parsed.JobLimits != nil {
+		limits := parsed.JobLimits
+		setInt := func(flag string, value *int, target *int) {
+			if value != nil && !flags.Changed(flag) {
+				*target = *value
+			}
+		}
+		setInt("max-replicas-per-task-group", limits.MaxReplicasPerTaskGroup, &cfg.MaxReplicasPerTaskGroup)
+		setInt("max-task-groups-per-job", limits.MaxTaskGroupsPerJob, &cfg.MaxTaskGroupsPerJob)
+		setInt("max-tasks-per-task-group", limits.MaxTasksPerTaskGroup, &cfg.MaxTasksPerTaskGroup)
+		setInt("max-desired-allocations", limits.MaxDesiredAllocations, &cfg.MaxDesiredAllocations)
+		setInt("default-task-cpu", limits.DefaultTaskCPU, &cfg.DefaultTaskCPU)
+		setString("default-task-memory", limits.DefaultTaskMemory, &cfg.DefaultTaskMemory)
 	}
 
 	// Resource reservation policy belongs to the Trellis node. Omitted values

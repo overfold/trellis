@@ -229,8 +229,16 @@ func (s *Server) Reconcile(ctx context.Context) {
 		jobKeys = append(jobKeys, key)
 	}
 	sort.Strings(jobKeys)
+	limits := s.jobLimits
+	if limits == (spec.Limits{}) {
+		limits = spec.DefaultLimits()
+	}
 	for _, key := range jobKeys {
 		job := s.jobs[key]
+		if err := spec.Canonicalize(job.Spec, limits); err != nil {
+			s.log.Error("skip invalid job during reconciliation", "job", key, "error", err)
+			continue
+		}
 		jobName := job.Spec.Name
 		namespace := job.Spec.Namespace
 		for _, group := range job.Spec.TaskGroups {

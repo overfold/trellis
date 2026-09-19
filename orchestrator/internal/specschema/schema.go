@@ -199,8 +199,8 @@ func applySemanticConstraints(root schema) {
 
 	patchDef(root, "TaskSpec", "name", identifier())
 	patchDef(root, "TaskSpec", "image", schema{"minLength": 1})
-	patchDef(root, "ResourcesSpec", "cpu", schema{"minimum": 0})
-	patchDef(root, "ResourcesSpec", "memory", schema{"minimum": 0})
+	patchDef(root, "ResourcesSpec", "cpu", schema{"minimum": 1})
+	patchDef(root, "ResourcesSpec", "memory", schema{"minimum": 1})
 
 	patchDef(root, "PortSpec", "port", schema{"minimum": 1, "maximum": 65535})
 	patchDef(root, "HealthCheckSpec", "port", schema{"minimum": 0, "maximum": 65535})

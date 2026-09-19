@@ -26,6 +26,23 @@ func newTestServerWithAgent() (*Server, *testAgent) {
 	return s, agent
 }
 
+func TestReconcileDoesNotCreateAllocationsForInvalidJob(t *testing.T) {
+	s, agent := newTestServerWithAgent()
+	defer agent.server.Close()
+	limits := spec.Limits{MaxReplicasPerTaskGroup: 1, MaxTaskGroupsPerJob: 1, MaxTasksPerTaskGroup: 1, MaxDesiredAllocations: 1, DefaultTaskCPU: 100, DefaultTaskMemory: 128 << 20}
+	if err := s.SetJobLimits(limits); err != nil {
+		t.Fatal(err)
+	}
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
+	s.nodes[node.ID] = node
+	s.jobs[jobKey("default", "oversized")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "oversized", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 2, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}, Revision: 1}
+
+	s.Reconcile(context.Background())
+	if len(s.allocations) != 0 {
+		t.Fatalf("invalid job created allocations: %#v", s.allocations)
+	}
+}
+
 func TestReconcileRecreateStopsOldAllocations(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()

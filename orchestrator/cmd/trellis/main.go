@@ -66,6 +66,10 @@ type config struct {
 	CACert, CAKey, Cert, Key                                   string
 	SecretsKey, SecretsKeyID                                   string
 	Labels                                                     []string
+	MaxReplicasPerTaskGroup, MaxTaskGroupsPerJob               int
+	MaxTasksPerTaskGroup, MaxDesiredAllocations                int
+	DefaultTaskCPU                                             int
+	DefaultTaskMemory                                          string
 }
 
 func main() {
@@ -116,6 +120,13 @@ func main() {
 	f.StringVar(&cfg.SecretsKey, "secrets-key", "", "Path to a root-readable 32-byte or base64-encoded secrets encryption key")
 	f.StringVar(&cfg.SecretsKeyID, "secrets-key-id", "", "Identifier for the active secrets encryption key")
 	f.StringArrayVar(&cfg.Labels, "label", nil, "Node label in key=value form (repeatable)")
+	defaults := spec.DefaultLimits()
+	f.IntVar(&cfg.MaxReplicasPerTaskGroup, "max-replicas-per-task-group", defaults.MaxReplicasPerTaskGroup, "Maximum replicas allowed in one task group")
+	f.IntVar(&cfg.MaxTaskGroupsPerJob, "max-task-groups-per-job", defaults.MaxTaskGroupsPerJob, "Maximum task groups allowed in one job")
+	f.IntVar(&cfg.MaxTasksPerTaskGroup, "max-tasks-per-task-group", defaults.MaxTasksPerTaskGroup, "Maximum tasks allowed in one task group")
+	f.IntVar(&cfg.MaxDesiredAllocations, "max-desired-allocations", defaults.MaxDesiredAllocations, "Maximum desired allocations allowed in one job")
+	f.IntVar(&cfg.DefaultTaskCPU, "default-task-cpu", defaults.DefaultTaskCPU, "Default task CPU request in millicores")
+	f.StringVar(&cfg.DefaultTaskMemory, "default-task-memory", fmt.Sprintf("%d", defaults.DefaultTaskMemory), "Default task memory request in bytes")
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}
@@ -132,6 +143,14 @@ func run(parent context.Context, cfg *config) error {
 	}
 	if cfg.WireGuardPortCount < 1 || cfg.WireGuardPort+cfg.WireGuardPortCount-1 > 65535 {
 		return fmt.Errorf("--wireguard-port-count must be positive and fit between --wireguard-port and 65535")
+	}
+	defaultMemory, err := spec.ParseByteSize(cfg.DefaultTaskMemory)
+	if err != nil {
+		return fmt.Errorf("--default-task-memory: %w", err)
+	}
+	limits := spec.Limits{MaxReplicasPerTaskGroup: cfg.MaxReplicasPerTaskGroup, MaxTaskGroupsPerJob: cfg.MaxTaskGroupsPerJob, MaxTasksPerTaskGroup: cfg.MaxTasksPerTaskGroup, MaxDesiredAllocations: cfg.MaxDesiredAllocations, DefaultTaskCPU: cfg.DefaultTaskCPU, DefaultTaskMemory: defaultMemory}
+	if err := spec.ValidateLimits(limits); err != nil {
+		return fmt.Errorf("job limits: %w", err)
 	}
 	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
 		return fmt.Errorf("create data dir: %w", err)
@@ -234,6 +253,9 @@ func run(parent context.Context, cfg *config) error {
 
 	stateCtl := server.NewStateController(raftStore, cfg.Cluster)
 	control := server.NewServer(log, local, stateCtl, raftStore, cfg.Cluster, cfg.ServerAdvertise)
+	if err := control.SetJobLimits(limits); err != nil {
+		return err
+	}
 	if cfg.SecretsKey != "" {
 		key, keyID, err := loadSecretsKey(cfg.SecretsKey, cfg.SecretsKeyID)
 		if err != nil {

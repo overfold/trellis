@@ -177,11 +177,11 @@ func Validate(job *JobSpec) error {
 				add(taskPath+".image", "required", "image is required")
 			}
 			if task.Resources != nil {
-				if task.Resources.CPU < 0 {
-					add(taskPath+".resources.cpu", "out_of_range", "cannot be negative")
+				if task.Resources.CPU <= 0 {
+					add(taskPath+".resources.cpu", "out_of_range", "must be positive")
 				}
-				if task.Resources.Memory < 0 {
-					add(taskPath+".resources.memory", "out_of_range", "cannot be negative")
+				if task.Resources.Memory <= 0 {
+					add(taskPath+".resources.memory", "out_of_range", "must be positive")
 				}
 			}
 
