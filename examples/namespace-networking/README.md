@@ -21,7 +21,7 @@ Fresh Trellis installs include the namespace-networking dependencies and gVisor/
 curl -fsSL https://raw.githubusercontent.com/clofour/trellis/main/scripts/setup.sh | sudo bash
 ```
 
-Keep **Namespace networking** enabled in the plan. **Customize** can opt out on deliberately minimal hosts, but every node that may run this example needs namespace networking available. For an additional cluster member, use the [documented join workflow](../../docs/public/operations.md#add-a-node). Ensure the configured WireGuard UDP port can pass between participating nodes (`51820` by default).
+Keep **Namespace networking** enabled in the plan. **Customize** can opt out on deliberately minimal hosts, but every node that may run this example needs namespace networking available. For an additional cluster member, use the [documented join workflow](../../docs/public/operations.md#add-a-node). Ensure the configured WireGuard UDP range can pass between participating nodes (`51820-52075` by default); each namespace is assigned one stable port from that range.
 
 If these nodes were installed before namespace networking was enabled, use the node configuration and setup guidance in the [learning path](../../docs/public/learning-path.md#8-namespace-networking-and-discovery) before applying this manifest.
 
