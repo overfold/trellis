@@ -56,7 +56,7 @@ Confirm the selected Patroni image actually consumes `PGPASSWORD_SUPERUSER` and 
 
 ### 4. Design networking and client routing
 
-Open the WireGuard UDP port between nodes and ensure advertised endpoints are routable. PostgreSQL clients should not pick an arbitrary catalog member for writes. Route through a Patroni-aware proxy or controller that checks the leader/read-only REST endpoints and distinguishes primary from replica traffic.
+Open the configured WireGuard UDP range between nodes and ensure advertised endpoints are routable; each Trellis namespace uses one stable port from that range. PostgreSQL clients should not pick an arbitrary catalog member for writes. Route through a Patroni-aware proxy or controller that checks the leader/read-only REST endpoints and distinguishes primary from replica traffic.
 
 ## Apply and inspect
 
