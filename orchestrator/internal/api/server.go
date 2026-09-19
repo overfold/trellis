@@ -18,8 +18,9 @@ type BackupSnapshot struct {
 	FormatVersion       int                        `json:"format_version"`
 	CreatedAt           time.Time                  `json:"created_at"`
 	Jobs                map[string]json.RawMessage `json:"jobs"`
-	Secrets             map[string]json.RawMessage `json:"secrets"`
-	VolumeRegistrations map[string]json.RawMessage `json:"volume_registrations"`
+	Secrets                  map[string]json.RawMessage `json:"secrets"`
+	VolumeRegistrations      map[string]json.RawMessage `json:"volume_registrations"`
+	NetworkPortRegistrations map[string]json.RawMessage `json:"network_port_registrations"`
 }
 
 // NodeStatusResponse describes the scheduling status of a node.
