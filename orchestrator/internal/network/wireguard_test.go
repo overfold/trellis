@@ -59,7 +59,7 @@ func TestWireGuardRejectsUntrustedNetworkName(t *testing.T) {
 
 func TestAutomatedIdentityPersists(t *testing.T) {
 	dir := t.TempDir()
-	first, err := NewAutomatedWireGuardManager(dir, 51820)
+	first, err := NewAutomatedWireGuardManager(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestAutomatedIdentityPersists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := NewAutomatedWireGuardManager(dir, 51820)
+	second, err := NewAutomatedWireGuardManager(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,5 +92,33 @@ func TestConfigureWorkloadDNSRejectsIPv6(t *testing.T) {
 	manager.run = &recordingRunner{}
 	if err := manager.ConfigureWorkloadDNS(context.Background(), "fd00::53"); err == nil {
 		t.Fatal("expected IPv6 workload DNS address to be rejected")
+	}
+}
+
+
+func TestAutomatedWireGuardUsesPlanListenPort(t *testing.T) {
+	manager, err := NewAutomatedWireGuardManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{}
+	manager.run = runner
+	_, err = manager.Attach(context.Background(), AttachRequest{
+		Namespace:    "acme",
+		Network:      "acme",
+		AllocationID: "alloc-port",
+		Plan: Plan{
+			CIDR:             "10.42.1.0/24",
+			Gateway:          "10.42.1.1",
+			WireGuardAddress: "169.254.1.1/32",
+			ListenPort:       51917,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(runner.commands, "\n")
+	if !strings.Contains(joined, "listen-port 51917") {
+		t.Fatalf("namespace listen port was not applied:\n%s", joined)
 	}
 }
