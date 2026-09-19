@@ -68,6 +68,8 @@ type NodeRegistrationRequest struct {
 	Capabilities       []spec.NodeCapability `json:"capabilities,omitempty"`
 	WireGuardPublicKey string            `json:"wireguard_public_key,omitempty"`
 	WireGuardEndpoint  string            `json:"wireguard_endpoint,omitempty"`
+	WireGuardPortBase  int               `json:"wireguard_port_base,omitempty"`
+	WireGuardPortCount int               `json:"wireguard_port_count,omitempty"`
 }
 
 // NodeRegistrationResponse confirms the registered node identity.
