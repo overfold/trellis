@@ -15,6 +15,7 @@ func TestLoadNodeConfig(t *testing.T) {
 bootstrap_token: trls_boot_test
 agent_advertise: node-a:8127
 wireguard_port: 51900
+wireguard_port_count: 64
 labels:
   - storage=fast
 resources:
@@ -24,11 +25,11 @@ resources:
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg := &config{Cluster: "default", WireGuardPort: 51820}
+	cfg := &config{Cluster: "default", WireGuardPort: 51820, WireGuardPortCount: 256}
 	if err := loadNodeConfig(path, cfg, pflag.NewFlagSet("test", pflag.ContinueOnError)); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Cluster != "production" || cfg.ClusterToken != "trls_boot_test" || cfg.AgentAdvertise != "node-a:8127" || cfg.WireGuardPort != 51900 {
+	if cfg.Cluster != "production" || cfg.ClusterToken != "trls_boot_test" || cfg.AgentAdvertise != "node-a:8127" || cfg.WireGuardPort != 51900 || cfg.WireGuardPortCount != 64 {
 		t.Fatalf("unexpected config: %#v", cfg)
 	}
 	if len(cfg.Labels) != 1 || cfg.Labels[0] != "storage=fast" {
