@@ -107,6 +107,7 @@ type AllocationStatus struct {
 	ID         string           `json:"id"`
 	Generation uint64           `json:"generation"`
 	Task       string           `json:"task,omitempty"`
+	Address    string           `json:"address,omitempty"`
 	Phase      lifecycle.Phase  `json:"phase"`
 	Health     lifecycle.Health `json:"health"`
 	Ports      []PortMapping    `json:"ports,omitempty"`
@@ -116,6 +117,13 @@ type AllocationStatus struct {
 type PortMapping struct {
 	HostPort      int `json:"host_port"`
 	ContainerPort int `json:"container_port"`
+}
+
+// AllocationEndpoint describes one task's routable endpoint within an allocation.
+type AllocationEndpoint struct {
+	Task    string        `json:"task"`
+	Address string        `json:"address,omitempty"`
+	Ports   []PortMapping `json:"ports,omitempty"`
 }
 
 // JobRegistrationRequest contains the job specification to register.
@@ -142,8 +150,9 @@ type AllocationResponse struct {
 	Namespace        string            `json:"namespace,omitempty"`
 	NodeID           uuid.UUID         `json:"node_id"`
 	Labels           map[string]string `json:"labels,omitempty"`
-	Address          string            `json:"address,omitempty"`
-	Ports            []PortMapping     `json:"ports,omitempty"`
+	Address          string               `json:"address,omitempty"`
+	Ports            []PortMapping        `json:"ports,omitempty"`
+	Endpoints        []AllocationEndpoint `json:"endpoints,omitempty"`
 	Phase            lifecycle.Phase   `json:"phase"`
 	Health           lifecycle.Health  `json:"health"`
 	Draining         bool              `json:"draining,omitempty"`

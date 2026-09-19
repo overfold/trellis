@@ -1,9 +1,12 @@
 package server
 
 import (
+	"context"
 	"testing"
 	"time"
 
+	"github.com/clofour/trellis/internal/api"
+	"github.com/clofour/trellis/internal/catalog"
 	"github.com/clofour/trellis/internal/lifecycle"
 	"github.com/clofour/trellis/internal/spec"
 	"github.com/google/uuid"
@@ -161,5 +164,185 @@ func TestAllocationEvents(t *testing.T) {
 	// Unknown allocation returns not-found.
 	if _, ok := s.AllocationEvents("acme", "nonexistent"); ok {
 		t.Fatal("expected not-found for unknown allocation")
+	}
+}
+
+func TestAllocationEndpointUsesObservedNetworkAddress(t *testing.T) {
+	node := &Node{ID: uuid.MustParse("44444444-4444-4444-4444-444444444444"), Host: "node-a"}
+	tasks := []spec.TaskSpec{{
+		Name: "app",
+		Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard},
+	}}
+	allocation := &Allocation{
+		Namespace:     "demo",
+		JobName:       "web",
+		TaskGroupName: "web",
+		ID:            "demo-web-1",
+		Node:          node,
+		Tasks:         tasks,
+		Endpoints:     []api.AllocationEndpoint{{Task: "app", Address: "10.86.213.2"}},
+		Generation:    1,
+		JobRevision:   1,
+		Phase:         lifecycle.PhaseRunning,
+		Health:        lifecycle.HealthHealthy,
+	}
+	s := &Server{
+		jobs: map[string]*Job{
+			jobKey("demo", "web"): {
+				Spec: &spec.JobSpec{Namespace: "demo", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "web", Count: 1, Tasks: tasks}}},
+				Revision: 1,
+			},
+		},
+		allocations: []*Allocation{allocation},
+		catalog:     catalog.New(),
+	}
+
+	listed := s.ListAllocations("demo", nil)
+	if len(listed) != 1 || listed[0].Address != "10.86.213.2" || len(listed[0].Endpoints) != 1 || listed[0].Endpoints[0].Task != "app" {
+		t.Fatalf("allocation endpoint = %#v, want observed namespace task address", listed)
+	}
+	status, ok := s.GetJob("demo", "web")
+	if !ok || len(status.Allocations) != 1 || status.Allocations[0].Address != "10.86.213.2" || len(status.Allocations[0].Endpoints) != 1 {
+		t.Fatalf("job status endpoint = %#v, want observed namespace task endpoint", status)
+	}
+
+	s.refreshCatalog()
+	services := s.ListServices("demo", nil)
+	if len(services) != 1 || services[0].Address != "10.86.213.2" {
+		t.Fatalf("catalog endpoint = %#v, want observed namespace address", services)
+	}
+}
+
+func TestAllocationEndpointDoesNotFallBackForNamespaceNetworking(t *testing.T) {
+	allocation := &Allocation{
+		Namespace:     "demo",
+		JobName:       "web",
+		TaskGroupName: "web",
+		ID:            "demo-web-1",
+		Node:          &Node{ID: uuid.MustParse("55555555-5555-5555-5555-555555555555"), Host: "node-a"},
+		Tasks: []spec.TaskSpec{{
+			Name: "app",
+			Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard},
+		}},
+		Generation: 1,
+		Phase:      lifecycle.PhaseRunning,
+		Health:     lifecycle.HealthHealthy,
+	}
+	s := &Server{allocations: []*Allocation{allocation}, catalog: catalog.New()}
+
+	listed := s.ListAllocations("demo", nil)
+	if len(listed) != 1 || listed[0].Address != "" {
+		t.Fatalf("allocation endpoint = %#v, want no node fallback for namespace task", listed)
+	}
+	s.refreshCatalog()
+	if services := s.ListServices("demo", nil); len(services) != 0 {
+		t.Fatalf("catalog = %#v, want no endpoint until namespace address is observed", services)
+	}
+}
+
+func TestAllocationEndpointFallsBackToNodeForHostNetworking(t *testing.T) {
+	allocation := &Allocation{
+		Namespace:     "demo",
+		JobName:       "web",
+		TaskGroupName: "web",
+		ID:            "demo-web-1",
+		Node:          &Node{ID: uuid.MustParse("66666666-6666-6666-6666-666666666666"), Host: "node-a"},
+		Tasks: []spec.TaskSpec{{
+			Name: "app",
+			Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkHost, Ports: []spec.PortSpec{{Port: 8080}}},
+		}},
+		Generation: 1,
+		Phase:      lifecycle.PhaseRunning,
+		Health:     lifecycle.HealthHealthy,
+	}
+	s := &Server{allocations: []*Allocation{allocation}}
+
+	listed := s.ListAllocations("demo", nil)
+	if len(listed) != 1 || listed[0].Address != "node-a" || len(listed[0].Endpoints) != 1 || len(listed[0].Endpoints[0].Ports) != 1 {
+		t.Fatalf("allocation endpoint = %#v, want host task node fallback and port", listed)
+	}
+}
+
+func TestAllocationEndpointKeepsDistinctTaskAddresses(t *testing.T) {
+	allocation := &Allocation{
+		Namespace:     "demo",
+		JobName:       "web",
+		TaskGroupName: "web",
+		ID:            "demo-web-1",
+		Node:          &Node{ID: uuid.MustParse("77777777-7777-7777-7777-777777777777"), Host: "node-a"},
+		Tasks: []spec.TaskSpec{
+			{Name: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard}},
+			{Name: "sidecar", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard}},
+		},
+		Endpoints: []api.AllocationEndpoint{
+			{Task: "sidecar", Address: "10.86.213.17"},
+			{Task: "app", Address: "10.86.213.2"},
+		},
+		Generation: 1,
+		Phase:      lifecycle.PhaseRunning,
+		Health:     lifecycle.HealthHealthy,
+	}
+	s := &Server{allocations: []*Allocation{allocation}, catalog: catalog.New()}
+
+	listed := s.ListAllocations("demo", nil)
+	if len(listed) != 1 || listed[0].Address != "" || len(listed[0].Endpoints) != 2 {
+		t.Fatalf("allocation endpoint = %#v, want ambiguous legacy address plus two task endpoints", listed)
+	}
+	if listed[0].Endpoints[0].Task != "app" || listed[0].Endpoints[0].Address != "10.86.213.2" ||
+		listed[0].Endpoints[1].Task != "sidecar" || listed[0].Endpoints[1].Address != "10.86.213.17" {
+		t.Fatalf("task endpoints = %#v, want addresses matched by task", listed[0].Endpoints)
+	}
+	s.refreshCatalog()
+	if services := s.ListServices("demo", nil); len(services) != 0 {
+		t.Fatalf("catalog = %#v, want ambiguous allocation omitted from allocation-level discovery", services)
+	}
+}
+
+
+func TestHeartbeatPreservesTaskEndpointIdentity(t *testing.T) {
+	nodeID := uuid.MustParse("88888888-8888-8888-8888-888888888888")
+	node := &Node{ID: nodeID, Host: "node-a", Status: NodeStatusHealthy}
+	allocation := &Allocation{
+		Namespace:     "demo",
+		JobName:       "web",
+		TaskGroupName: "web",
+		ID:            "demo-web-1",
+		Node:          node,
+		Tasks: []spec.TaskSpec{
+			{Name: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard}},
+			{Name: "sidecar", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard}},
+		},
+		Generation: 1,
+		Phase:      lifecycle.PhaseRunning,
+		Health:     lifecycle.HealthHealthy,
+	}
+	s := &Server{
+		state:       NewStateController(memoryStore{}, "test"),
+		nodes:       map[uuid.UUID]*Node{nodeID: node},
+		allocations: []*Allocation{allocation},
+		catalog:     catalog.New(),
+	}
+	actual := []api.AllocationStatus{
+		{ID: allocation.ID, Generation: 1, Task: "sidecar", Address: "10.86.213.17", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy},
+		{ID: allocation.ID, Generation: 1, Task: "app", Address: "10.86.213.2", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy},
+	}
+	if err := s.Heartbeat(context.Background(), nodeID, actual, "test", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(allocation.Endpoints) != 2 ||
+		allocation.Endpoints[0].Task != "app" || allocation.Endpoints[0].Address != "10.86.213.2" ||
+		allocation.Endpoints[1].Task != "sidecar" || allocation.Endpoints[1].Address != "10.86.213.17" {
+		t.Fatalf("heartbeat endpoints = %#v, want stable task/address pairs", allocation.Endpoints)
+	}
+
+	actual[1].Address = ""
+	if err := s.Heartbeat(context.Background(), nodeID, actual, "test", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := allocationEndpointAddress(allocation); got != "" {
+		t.Fatalf("allocation address after missing task observation = %q, want empty", got)
+	}
+	if allocation.Endpoints[0].Address != "" {
+		t.Fatalf("stale app address was retained: %#v", allocation.Endpoints)
 	}
 }

@@ -20,6 +20,12 @@ export interface PortMapping {
   container_port: number;
 }
 
+export interface AllocationEndpoint {
+  task: string;
+  address?: string;
+  ports?: PortMapping[];
+}
+
 export type AllocationPhase =
   | "placed"
   | "pending"
@@ -40,6 +46,7 @@ export interface Allocation {
   labels?: Record<string, string>;
   address?: string;
   ports?: PortMapping[];
+  endpoints?: AllocationEndpoint[];
   phase: AllocationPhase;
   health: AllocationHealth;
   draining?: boolean;

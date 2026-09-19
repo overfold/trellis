@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"os"
+	"sort"
 	"sync"
 	"time"
 
@@ -293,8 +294,9 @@ type Allocation struct {
 	Phase         lifecycle.Phase  `json:"phase"`
 	Health        lifecycle.Health `json:"health"`
 	lifecycle.Diagnostic
-	Node  *Node
-	Ports []api.PortMapping `json:"ports,omitempty"`
+	Node      *Node
+	Endpoints []api.AllocationEndpoint `json:"endpoints,omitempty"`
+	Ports     []api.PortMapping        `json:"ports,omitempty"`
 	// Draining marks an allocation whose job revision is superseded under
 	// a rolling update strategy. Draining allocations are not restarted on
 	// failure and are not counted toward the desired count.
@@ -593,6 +595,7 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 		Generation uint64
 		Phase      lifecycle.Phase
 		Health     lifecycle.Health
+		Endpoints  []api.AllocationEndpoint
 		Ports      []api.PortMapping
 		Tasks      int
 	}
@@ -619,6 +622,11 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 		}
 		info.Tasks++
 		info.Ports = append(info.Ports, a.Ports...)
+		if a.Task != "" || a.Address != "" || len(a.Ports) > 0 {
+			info.Endpoints = append(info.Endpoints, api.AllocationEndpoint{
+				Task: a.Task, Address: a.Address, Ports: append([]api.PortMapping(nil), a.Ports...),
+			})
+		}
 		statuses[a.ID] = info
 	}
 	var changed []*Allocation
@@ -633,9 +641,9 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 			_ = a.Transition(info.Phase, time.Now().UTC(), "", "")
 		}
 		_ = a.SetHealth(info.Health)
-		if len(info.Ports) > 0 {
-			a.Ports = info.Ports
-		}
+		sort.Slice(info.Endpoints, func(i, j int) bool { return info.Endpoints[i].Task < info.Endpoints[j].Task })
+		a.Endpoints = append([]api.AllocationEndpoint(nil), info.Endpoints...)
+		a.Ports = append([]api.PortMapping(nil), info.Ports...)
 		changed = append(changed, a)
 		a.mu.Unlock()
 	}
@@ -861,10 +869,7 @@ func (s *Server) ListJobs(namespace string) api.JobListResponse {
 				a.mu.Unlock()
 				continue
 			}
-			ar := api.AllocationResponse{ID: a.ID, Group: a.TaskGroupName, Phase: a.Phase, Health: a.Health, Draining: a.Draining, Generation: a.Generation, JobRevision: a.JobRevision, CreatedAt: a.CreatedAt, LastTransitionAt: a.TransitionedAt, Reason: a.Reason, Message: a.Message, Attempt: a.Attempt, NextRetryAt: a.NextRetryAt}
-			if a.Node != nil {
-				ar.NodeID = a.Node.ID
-			}
+			ar := s.allocationResponseLocked(a)
 			r.Allocations = append(r.Allocations, ar)
 			if a.JobRevision == job.Revision && !a.Draining && a.Phase == lifecycle.PhaseRunning {
 				r.Running++
@@ -898,10 +903,7 @@ func (s *Server) GetJob(namespace, name string) (*api.JobStatusResponse, bool) {
 			a.mu.Unlock()
 			continue
 		}
-		ar := api.AllocationResponse{ID: a.ID, Group: a.TaskGroupName, Phase: a.Phase, Health: a.Health, Draining: a.Draining, Generation: a.Generation, JobRevision: a.JobRevision, CreatedAt: a.CreatedAt, LastTransitionAt: a.TransitionedAt, Reason: a.Reason, Message: a.Message, Attempt: a.Attempt, NextRetryAt: a.NextRetryAt}
-		if a.Node != nil {
-			ar.NodeID = a.Node.ID
-		}
+		ar := s.allocationResponseLocked(a)
 		r.Allocations = append(r.Allocations, ar)
 		if a.JobRevision == job.Revision && !a.Draining && a.Phase == lifecycle.PhaseRunning {
 			r.Running++
@@ -1197,9 +1199,10 @@ func (s *Server) refreshCatalog() {
 				}
 			}
 		}
-		var address string
-		if a.Node != nil {
-			address = a.Node.Host
+		address := allocationEndpointAddress(a)
+		if address == "" {
+			a.mu.Unlock()
+			continue
 		}
 		namespaced[a.Namespace] = append(namespaced[a.Namespace], catalog.ServiceInstance{
 			ID:      a.ID,

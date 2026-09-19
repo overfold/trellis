@@ -3,6 +3,7 @@ package server
 
 import (
 	"github.com/clofour/trellis/internal/api"
+	"github.com/clofour/trellis/internal/spec"
 )
 
 // AllocationListFilter restricts allocation query results.
@@ -37,33 +38,106 @@ func (s *Server) ListAllocations(namespace string, filter *AllocationListFilter)
 			continue
 		}
 
-		response := api.AllocationResponse{
-			ID:               allocation.ID,
-			Job:              allocation.JobName,
-			Group:            allocation.TaskGroupName,
-			Namespace:        allocation.Namespace,
-			Phase:            allocation.Phase,
-			Health:           allocation.Health,
-			Draining:         allocation.Draining,
-			Generation:       allocation.Generation,
-			JobRevision:      allocation.JobRevision,
-			CreatedAt:        allocation.CreatedAt,
-			LastTransitionAt: allocation.TransitionedAt,
-			Reason:           allocation.Reason,
-			Message:          allocation.Message,
-			Attempt:          allocation.Attempt,
-			NextRetryAt:      allocation.NextRetryAt,
-			Labels:           labels,
-			Ports:            allocation.Ports,
-		}
-		if allocation.Node != nil {
-			response.NodeID = allocation.Node.ID
-			response.Address = allocation.Node.Host
-		}
+		response := s.allocationResponseLocked(allocation)
+		response.Labels = labels
 		result = append(result, response)
 		allocation.mu.Unlock()
 	}
 	return result
+}
+
+func allocationTaskEndpoints(allocation *Allocation) []api.AllocationEndpoint {
+	observed := make(map[string]api.AllocationEndpoint, len(allocation.Endpoints))
+	for _, endpoint := range allocation.Endpoints {
+		if endpoint.Task != "" {
+			observed[endpoint.Task] = endpoint
+		}
+	}
+
+	// Older persisted allocations may not have task specs. Preserve the
+	// historical node-address behavior for those records only.
+	if len(allocation.Tasks) == 0 {
+		if len(allocation.Endpoints) > 0 {
+			return append([]api.AllocationEndpoint(nil), allocation.Endpoints...)
+		}
+		if allocation.Node != nil {
+			return []api.AllocationEndpoint{{Address: allocation.Node.Host, Ports: append([]api.PortMapping(nil), allocation.Ports...)}}
+		}
+		return nil
+	}
+
+	endpoints := make([]api.AllocationEndpoint, 0, len(allocation.Tasks))
+	for _, task := range allocation.Tasks {
+		mode := spec.TaskNetworkDefault
+		if task.Networking != nil {
+			mode = task.Networking.Mode
+		}
+		endpoint := observed[task.Name]
+		endpoint.Task = task.Name
+		switch mode {
+		case spec.TaskNetworkHost:
+			if allocation.Node == nil {
+				continue
+			}
+			endpoint.Address = allocation.Node.Host
+			if len(endpoint.Ports) == 0 && task.Networking != nil {
+				for _, port := range task.Networking.Ports {
+					endpoint.Ports = append(endpoint.Ports, api.PortMapping{HostPort: port.Port, ContainerPort: port.Port})
+				}
+			}
+			endpoints = append(endpoints, endpoint)
+		case spec.TaskNetworkWireGuard:
+			// Namespace addresses are valid only when observed from the agent.
+			// Never substitute the node host for a missing workload address.
+			endpoints = append(endpoints, endpoint)
+		}
+	}
+	return endpoints
+}
+
+func allocationEndpointAddress(allocation *Allocation) string {
+	var address string
+	for _, endpoint := range allocationTaskEndpoints(allocation) {
+		if endpoint.Address == "" {
+			return ""
+		}
+		if address == "" {
+			address = endpoint.Address
+			continue
+		}
+		if address != endpoint.Address {
+			return ""
+		}
+	}
+	return address
+}
+
+func (s *Server) allocationResponseLocked(allocation *Allocation) api.AllocationResponse {
+	response := api.AllocationResponse{
+		ID:               allocation.ID,
+		Job:              allocation.JobName,
+		Group:            allocation.TaskGroupName,
+		Namespace:        allocation.Namespace,
+		Address:          allocationEndpointAddress(allocation),
+		Endpoints:        allocationTaskEndpoints(allocation),
+		Phase:            allocation.Phase,
+		Health:           allocation.Health,
+		Draining:         allocation.Draining,
+		Generation:       allocation.Generation,
+		JobRevision:      allocation.JobRevision,
+		CreatedAt:        allocation.CreatedAt,
+		LastTransitionAt: allocation.TransitionedAt,
+		Reason:           allocation.Reason,
+		Message:          allocation.Message,
+		Attempt:          allocation.Attempt,
+		NextRetryAt:      allocation.NextRetryAt,
+		Labels:           s.allocationLabelsLocked(allocation),
+		Ports:            allocation.Ports,
+	}
+	if allocation.Node != nil {
+		response.NodeID = allocation.Node.ID
+	}
+	return response
 }
 
 // AllocationEvents returns the recent lifecycle event history for a single
