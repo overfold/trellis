@@ -37,33 +37,49 @@ func (s *Server) ListAllocations(namespace string, filter *AllocationListFilter)
 			continue
 		}
 
-		response := api.AllocationResponse{
-			ID:               allocation.ID,
-			Job:              allocation.JobName,
-			Group:            allocation.TaskGroupName,
-			Namespace:        allocation.Namespace,
-			Phase:            allocation.Phase,
-			Health:           allocation.Health,
-			Draining:         allocation.Draining,
-			Generation:       allocation.Generation,
-			JobRevision:      allocation.JobRevision,
-			CreatedAt:        allocation.CreatedAt,
-			LastTransitionAt: allocation.TransitionedAt,
-			Reason:           allocation.Reason,
-			Message:          allocation.Message,
-			Attempt:          allocation.Attempt,
-			NextRetryAt:      allocation.NextRetryAt,
-			Labels:           labels,
-			Ports:            allocation.Ports,
-		}
-		if allocation.Node != nil {
-			response.NodeID = allocation.Node.ID
-			response.Address = allocation.Node.Host
-		}
+		response := s.allocationResponseLocked(allocation)
+		response.Labels = labels
 		result = append(result, response)
 		allocation.mu.Unlock()
 	}
 	return result
+}
+
+func allocationEndpointAddress(allocation *Allocation) string {
+	if allocation.Address != "" {
+		return allocation.Address
+	}
+	if allocation.Node != nil {
+		return allocation.Node.Host
+	}
+	return ""
+}
+
+func (s *Server) allocationResponseLocked(allocation *Allocation) api.AllocationResponse {
+	response := api.AllocationResponse{
+		ID:               allocation.ID,
+		Job:              allocation.JobName,
+		Group:            allocation.TaskGroupName,
+		Namespace:        allocation.Namespace,
+		Address:          allocationEndpointAddress(allocation),
+		Phase:            allocation.Phase,
+		Health:           allocation.Health,
+		Draining:         allocation.Draining,
+		Generation:       allocation.Generation,
+		JobRevision:      allocation.JobRevision,
+		CreatedAt:        allocation.CreatedAt,
+		LastTransitionAt: allocation.TransitionedAt,
+		Reason:           allocation.Reason,
+		Message:          allocation.Message,
+		Attempt:          allocation.Attempt,
+		NextRetryAt:      allocation.NextRetryAt,
+		Labels:           s.allocationLabelsLocked(allocation),
+		Ports:            allocation.Ports,
+	}
+	if allocation.Node != nil {
+		response.NodeID = allocation.Node.ID
+	}
+	return response
 }
 
 // AllocationEvents returns the recent lifecycle event history for a single
