@@ -20,32 +20,32 @@ type nodeResourcesConfig struct {
 }
 
 type nodeConfigFile struct {
-	AgentListen       *string              `yaml:"agent_listen"`
-	AgentAdvertise    *string              `yaml:"agent_advertise"`
-	ServerListen      *string              `yaml:"server_listen"`
-	ServerAdvertise   *string              `yaml:"server_advertise"`
-	RaftListen        *string              `yaml:"raft_listen"`
-	RaftAdvertise     *string              `yaml:"raft_advertise"`
-	Join              *string              `yaml:"join"`
-	DataDir           *string              `yaml:"data_dir"`
-	Cluster           *string              `yaml:"cluster"`
-	BootstrapToken    *string              `yaml:"bootstrap_token"`
-	ContainerdSock    *string              `yaml:"containerd_socket"`
-	Runtime           *string              `yaml:"runtime"`
-	RuntimeFaults     *string              `yaml:"runtime_faults"`
-	WireGuardPool     *string              `yaml:"wireguard_pool"`
-	WireGuardEndpoint *string              `yaml:"wireguard_endpoint"`
-	WireGuardPort     *int                 `yaml:"wireguard_port"`
-	WireGuardPortCount *int                `yaml:"wireguard_port_count"`
-	DNSListen         *string              `yaml:"dns_listen"`
-	CACert            *string              `yaml:"ca_cert"`
-	CAKey             *string              `yaml:"ca_key"`
-	Cert              *string              `yaml:"cert"`
-	Key               *string              `yaml:"key"`
-	SecretsKey        *string              `yaml:"secrets_key"`
-	SecretsKeyID      *string              `yaml:"secrets_key_id"`
-	Labels            *[]string            `yaml:"labels"`
-	Resources         *nodeResourcesConfig `yaml:"resources"`
+	AgentListen        *string              `yaml:"agent_listen"`
+	AgentAdvertise     *string              `yaml:"agent_advertise"`
+	ServerListen       *string              `yaml:"server_listen"`
+	ServerAdvertise    *string              `yaml:"server_advertise"`
+	RaftListen         *string              `yaml:"raft_listen"`
+	RaftAdvertise      *string              `yaml:"raft_advertise"`
+	Join               *string              `yaml:"join"`
+	DataDir            *string              `yaml:"data_dir"`
+	Cluster            *string              `yaml:"cluster"`
+	BootstrapToken     *string              `yaml:"bootstrap_token"`
+	ContainerdSock     *string              `yaml:"containerd_socket"`
+	Runtime            *string              `yaml:"runtime"`
+	RuntimeFaults      *string              `yaml:"runtime_faults"`
+	WireGuardPool      *string              `yaml:"wireguard_pool"`
+	WireGuardEndpoint  *string              `yaml:"wireguard_endpoint"`
+	WireGuardPort      *int                 `yaml:"wireguard_port"`
+	WireGuardPortCount *int                 `yaml:"wireguard_port_count"`
+	DNSListen          *string              `yaml:"dns_listen"`
+	CACert             *string              `yaml:"ca_cert"`
+	CAKey              *string              `yaml:"ca_key"`
+	Cert               *string              `yaml:"cert"`
+	Key                *string              `yaml:"key"`
+	SecretsKey         *string              `yaml:"secrets_key"`
+	SecretsKeyID       *string              `yaml:"secrets_key_id"`
+	Labels             *[]string            `yaml:"labels"`
+	Resources          *nodeResourcesConfig `yaml:"resources"`
 }
 
 func loadNodeConfig(path string, cfg *config, flags *pflag.FlagSet) error {
