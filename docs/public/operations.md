@@ -187,7 +187,7 @@ For normal workload diagnosis, start and usually finish with `jobs status`. `rea
 
 ## Networking and TLS
 
-Ports `8127`, `8128`, and `8129` must be reachable between appropriate cluster members; allow WireGuard UDP `51820` and DNS UDP `8053` when namespace networking is enabled. Never expose the unauthenticated transport surface to an untrusted network. Configure a CA and node certificates on every node and pass the CA/client certificate flags to the CLI. Advertised addresses must be routable from peers, not wildcard bind addresses.
+Ports `8127`, `8128`, and `8129` must be reachable between appropriate cluster members; allow WireGuard UDP `51820` and DNS UDP `8053` when namespace networking is enabled. Never expose the unauthenticated transport surface to an untrusted network. Configure a CA and node certificates on every node and pass the CA/client certificate flags to the CLI. Advertised addresses must be routable from peers, not wildcard bind addresses. Automatic setup chooses a non-loopback IPv4 address instead of falling back to the machine hostname; use `--advertise` when the detected address is not the one other nodes should use.
 
 ## Failure recovery
 
