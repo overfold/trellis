@@ -9,17 +9,19 @@ import (
 // EventBus distributes cluster events to SSE subscribers.
 type EventBus struct {
 	mu          sync.Mutex
-	subscribers map[chan api.ClusterEvent]struct{}
+	subscribers map[chan api.ClusterEvent]string
 }
 
 func newEventBus() *EventBus {
-	return &EventBus{subscribers: make(map[chan api.ClusterEvent]struct{})}
+	return &EventBus{subscribers: make(map[chan api.ClusterEvent]string)}
 }
 
-func (b *EventBus) subscribe() chan api.ClusterEvent {
+// subscribe registers a subscriber for namespace. An empty namespace receives
+// events for the entire cluster.
+func (b *EventBus) subscribe(namespace string) chan api.ClusterEvent {
 	ch := make(chan api.ClusterEvent, 64)
 	b.mu.Lock()
-	b.subscribers[ch] = struct{}{}
+	b.subscribers[ch] = namespace
 	b.mu.Unlock()
 	return ch
 }
@@ -36,7 +38,10 @@ func (b *EventBus) publish(event api.ClusterEvent) {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for ch := range b.subscribers {
+	for ch, namespace := range b.subscribers {
+		if namespace != "" && event.Namespace != namespace {
+			continue
+		}
 		select {
 		case ch <- event:
 		default:

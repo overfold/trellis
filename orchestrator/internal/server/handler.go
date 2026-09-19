@@ -738,7 +738,7 @@ func (h *Handler) handleAllocationMetrics(c *echo.Context) error {
 }
 
 func (h *Handler) handleEvents(c *echo.Context) error {
-	ch := h.server.events.subscribe()
+	ch := h.server.events.subscribe(requestNamespace(c))
 	defer h.server.events.unsubscribe(ch)
 
 	c.Response().Header().Set("Content-Type", "text/event-stream")
