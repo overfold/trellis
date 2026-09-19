@@ -57,6 +57,7 @@ type Principal struct {
 	Kind      CredentialKind     `json:"kind"`
 	Scope     AccessScope        `json:"scope"`
 	Access    AccessLevel        `json:"access"`
+	Admin     bool               `json:"admin,omitempty"`
 	Namespace string             `json:"namespace,omitempty"`
 	Subject   *CredentialSubject `json:"subject,omitempty"`
 	CreatedAt time.Time          `json:"created_at,omitempty"`
@@ -78,6 +79,9 @@ func (p Principal) Validate() error {
 	}
 	if p.Scope == AccessCluster && p.Namespace != "" {
 		return fmt.Errorf("cluster credential must not include a namespace")
+	}
+	if p.Admin && p.Kind != CredentialOperator {
+		return fmt.Errorf("only operator credentials may be administrators")
 	}
 	if p.Kind == CredentialOperator && p.Subject != nil {
 		return fmt.Errorf("operator credential must not include a workload subject")

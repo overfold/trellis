@@ -14,11 +14,13 @@ import (
 	"time"
 
 	"github.com/clofour/trellis/internal/api"
+	"github.com/google/uuid"
 )
 
 // AgentClient sends authenticated requests to a Trellis agent.
 type AgentClient struct {
-	client *client
+	client    *client
+	tlsConfig *tls.Config
 }
 
 // AgentOperationError reports a rejected agent operation.
@@ -71,14 +73,28 @@ func NewAgentClient(token string, tlsConfig *tls.Config) *AgentClient {
 	}
 
 	return &AgentClient{
-		client: c,
+		client: c, tlsConfig: tlsConfig,
 	}
 }
 
+func (s *AgentClient) clientForNode(nodeID uuid.UUID) *client {
+	if s.tlsConfig == nil {
+		return s.client
+	}
+	tlsConfig := s.tlsConfig.Clone()
+	tlsConfig.VerifyConnection = func(connection tls.ConnectionState) error {
+		if len(connection.PeerCertificates) == 0 || connection.PeerCertificates[0].Subject.CommonName != nodeID.String() {
+			return fmt.Errorf("agent certificate does not identify node %s", nodeID)
+		}
+		return nil
+	}
+	return &client{token: s.client.token, client: newHTTPClient(tlsConfig)}
+}
+
 // RunAllocation asks an agent to start an allocation.
-func (s *AgentClient) RunAllocation(ctx context.Context, address string, allocation *api.AllocationRequest) error {
+func (s *AgentClient) RunAllocation(ctx context.Context, address string, nodeID uuid.UUID, allocation *api.AllocationRequest) error {
 	var response api.OperationResponse
-	err := s.client.request(ctx, http.MethodPost, normalizeBaseURL(address)+"/v1/allocations", allocation, &response)
+	err := s.clientForNode(nodeID).request(ctx, http.MethodPost, normalizeBaseURL(address)+"/v1/allocations", allocation, &response)
 	if err != nil {
 		return fmt.Errorf("run allocation: %w", decodeOperationError(err))
 	}
@@ -86,9 +102,9 @@ func (s *AgentClient) RunAllocation(ctx context.Context, address string, allocat
 }
 
 // StopAllocation asks an agent to stop an allocation.
-func (s *AgentClient) StopAllocation(ctx context.Context, address string, request *api.StopAllocationRequest) error {
+func (s *AgentClient) StopAllocation(ctx context.Context, address string, nodeID uuid.UUID, request *api.StopAllocationRequest) error {
 	var response api.OperationResponse
-	err := s.client.request(ctx, http.MethodDelete, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(request.AllocationID), request, &response)
+	err := s.clientForNode(nodeID).request(ctx, http.MethodDelete, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(request.AllocationID), request, &response)
 	if err != nil {
 		return fmt.Errorf("stop allocation: %w", decodeOperationError(err))
 	}

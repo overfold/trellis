@@ -167,6 +167,18 @@ func run(parent context.Context, cfg *config) error {
 	if err := local.Init(); err != nil {
 		return fmt.Errorf("init local storage: %w", err)
 	}
+	// A node that already has its mTLS identity has completed enrollment. Never
+	// retain or reuse an enrollment secret supplied by a stale config, flag, or
+	// environment-derived invocation on subsequent restarts.
+	if cfg.Join != "" {
+		if _, err := loadTLSFromStorage(local); err == nil {
+			cfg.ClusterToken = ""
+			if err := discardEnrollmentCredential(cfg.ConfigFile); err != nil {
+				log := slog.Default()
+				log.Warn("could not remove stale enrollment credential", "error", err)
+			}
+		}
+	}
 
 	tlsMaterials, err := loadOrBootstrapTLS(ctx, log, cfg, local, id)
 	if err != nil {
@@ -847,6 +859,9 @@ func leaderAuthMiddleware(bootstrapToken string, tokenManager *auth.TokenManager
 			if principal != nil {
 				ctx := context.WithValue(c.Request().Context(), server.NamespaceContextKey, auth.EncodeScope(principal.Scope, principal.Access, principal.Namespace))
 				ctx = context.WithValue(ctx, server.PrincipalContextKey, *principal)
+				if principal.Admin {
+					ctx = context.WithValue(ctx, server.AdminContextKey, true)
+				}
 				c.SetRequest(c.Request().WithContext(ctx))
 				return next(c)
 			}

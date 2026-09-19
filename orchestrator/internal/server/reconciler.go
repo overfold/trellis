@@ -524,7 +524,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 		if err := s.state.PutAllocation(ctx, alloc); err != nil {
 			return fmt.Errorf("persist allocation: %w", err)
 		}
-		if err := s.client.RunAllocation(ctx, address, request); err != nil {
+		if err := s.client.RunAllocation(ctx, address, alloc.Node.ID, request); err != nil {
 			if code := agentOperationCode(err); code == api.OperationStaleEpoch {
 				return err
 			} else if code == api.OperationStaleGeneration || code == api.OperationConflict {
@@ -564,7 +564,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 		if nodeStatus != NodeStatusHealthy && nodeStatus != NodeStatusDraining {
 			return fmt.Errorf("node %s is unavailable for allocation stop", alloc.Node.ID)
 		}
-		if err := s.client.StopAllocation(ctx, address, &api.StopAllocationRequest{AllocationID: alloc.ID, Generation: alloc.Generation, Epoch: epoch}); err != nil {
+		if err := s.client.StopAllocation(ctx, address, alloc.Node.ID, &api.StopAllocationRequest{AllocationID: alloc.ID, Generation: alloc.Generation, Epoch: epoch}); err != nil {
 			if code := agentOperationCode(err); code == api.OperationStaleEpoch || code == api.OperationStaleGeneration {
 				return err
 			}
