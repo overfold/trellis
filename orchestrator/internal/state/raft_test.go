@@ -109,6 +109,28 @@ func TestRaftStore_PutGetDelete(t *testing.T) {
 	}
 }
 
+func TestRaftStore_Batch(t *testing.T) {
+	store := newTestRaftStore(t)
+	waitLeader(t, store)
+	ctx := context.Background()
+
+	if err := store.Batch(ctx, []Mutation{{Key: "job", Value: []byte("job")}, {Key: "revision", Value: []byte("revision")}}); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{"job": "job", "revision": "revision"} {
+		got, err := store.Get(ctx, key)
+		if err != nil || string(got) != want {
+			t.Fatalf("get %s = %q, %v; want %q", key, got, err, want)
+		}
+	}
+	if err := store.Batch(ctx, []Mutation{{Key: "partial", Value: []byte("bad")}, {Key: "", Value: []byte("fail")}}); err == nil {
+		t.Fatal("expected invalid batch to fail")
+	}
+	if got, err := store.Get(ctx, "partial"); err != nil || got != nil {
+		t.Fatalf("failed Raft batch was not atomic: value=%q err=%v", got, err)
+	}
+}
+
 func TestRaftStore_List(t *testing.T) {
 	store := newTestRaftStore(t)
 	waitLeader(t, store)

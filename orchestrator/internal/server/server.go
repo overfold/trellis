@@ -102,15 +102,19 @@ func (s *Server) Backup(_ context.Context) (*api.BackupSnapshot, error) {
 		return nil, err
 	}
 	result := &api.BackupSnapshot{
-		FormatVersion:       api.BackupFormatVersion,
-		CreatedAt:           s.now().UTC(),
+		FormatVersion:            api.BackupFormatVersion,
+		CreatedAt:                s.now().UTC(),
 		Jobs:                     make(map[string]json.RawMessage, len(snapshot.Jobs)),
+		JobRevisions:             make(map[string]json.RawMessage, len(snapshot.JobRevisions)),
 		Secrets:                  make(map[string]json.RawMessage, len(snapshot.Secrets)),
 		VolumeRegistrations:      make(map[string]json.RawMessage, len(snapshot.VolumeRegistrations)),
 		NetworkPortRegistrations: make(map[string]json.RawMessage, len(snapshot.NetworkPortRegistrations)),
 	}
 	for key, value := range snapshot.Jobs {
 		result.Jobs[key] = json.RawMessage(value)
+	}
+	for key, value := range snapshot.JobRevisions {
+		result.JobRevisions[key] = json.RawMessage(value)
 	}
 	for key, value := range snapshot.Secrets {
 		result.Secrets[key] = json.RawMessage(value)
@@ -134,6 +138,7 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 	}
 	snapshot := &state.DesiredSnapshot{
 		Jobs:                     make(map[string][]byte, len(backup.Jobs)),
+		JobRevisions:             make(map[string][]byte, len(backup.JobRevisions)),
 		Secrets:                  make(map[string][]byte, len(backup.Secrets)),
 		VolumeRegistrations:      make(map[string][]byte, len(backup.VolumeRegistrations)),
 		NetworkPortRegistrations: make(map[string][]byte, len(backup.NetworkPortRegistrations)),
@@ -143,6 +148,12 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 			return fmt.Errorf("job %q contains invalid JSON", key)
 		}
 		snapshot.Jobs[key] = value
+	}
+	for key, value := range backup.JobRevisions {
+		if !json.Valid(value) {
+			return fmt.Errorf("job revision %q contains invalid JSON", key)
+		}
+		snapshot.JobRevisions[key] = value
 	}
 	for key, value := range backup.Secrets {
 		if !json.Valid(value) {
@@ -605,7 +616,8 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 			return fmt.Errorf("invalid allocation state for %s: phase=%q health=%q", a.ID, a.Phase, a.Health)
 		}
 		phase, health := a.Phase, a.Health
-		info := statuses[a.ID]
+		key := fmt.Sprintf("%s/%d", a.ID, a.Generation)
+		info := statuses[key]
 		if info.Tasks == 0 {
 			info.Generation, info.Phase, info.Health = a.Generation, phase, health
 		} else {
@@ -627,13 +639,13 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 				Task: a.Task, Address: a.Address, Ports: append([]api.PortMapping(nil), a.Ports...),
 			})
 		}
-		statuses[a.ID] = info
+		statuses[key] = info
 	}
 	var changed []*Allocation
 	for _, a := range owned {
 		a.mu.Lock()
-		info, ok := statuses[a.ID]
-		if !ok || info.Generation != a.Generation {
+		info, ok := statuses[fmt.Sprintf("%s/%d", a.ID, a.Generation)]
+		if !ok {
 			a.mu.Unlock()
 			continue // absence is not proof of loss or failure
 		}
@@ -718,7 +730,11 @@ func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spe
 		ContentHashes: hashes,
 	}
 	s.mu.Unlock()
-	if err := s.state.PutJob(ctx, key, job); err != nil {
+	var revisionRecord *JobRevisionRecord
+	if !labelOnly {
+		revisionRecord = &JobRevisionRecord{Revision: revision, Spec: jobSpec, CreatedAt: s.now().UTC()}
+	}
+	if err := s.state.PutJobWithRevision(ctx, key, job, revisionRecord); err != nil {
 		return fmt.Errorf("save job remotely: %w", err)
 	}
 	s.mu.Lock()
@@ -728,11 +744,6 @@ func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spe
 	if labelOnly {
 		s.refreshCatalog()
 	} else {
-		_ = s.state.PutJobRevision(ctx, key, &JobRevisionRecord{
-			Revision:  revision,
-			Spec:      jobSpec,
-			CreatedAt: s.now().UTC(),
-		})
 		s.events.publish(api.ClusterEvent{
 			Type:      api.EventJobRegistered,
 			Namespace: namespace,
@@ -946,20 +957,52 @@ func (s *Server) DeleteJob(ctx context.Context, namespace, name string) error {
 // RestartJob marks all running allocations for a job as draining so the
 // reconciler will replace them with fresh instances.
 func (s *Server) RestartJob(ctx context.Context, namespace, name string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mutationMu.Lock()
+	defer s.mutationMu.Unlock()
+	s.mu.RLock()
 	key := jobKey(namespace, name)
 	if s.jobs[key] == nil {
+		s.mu.RUnlock()
 		return fmt.Errorf("job %s not found", name)
 	}
-	for _, alloc := range s.allocations {
+	allocations := append([]*Allocation(nil), s.allocations...)
+	s.mu.RUnlock()
+
+	updates := make([]*Allocation, 0)
+	for _, alloc := range allocations {
 		alloc.mu.Lock()
 		if alloc.Namespace == namespace && alloc.JobName == name && !alloc.Draining &&
 			alloc.Phase != lifecycle.PhaseStopped && alloc.Phase != lifecycle.PhaseFailed && alloc.Phase != lifecycle.PhaseLost {
-			alloc.Draining = true
-			_ = s.state.PutAllocation(context.WithoutCancel(ctx), alloc)
+			raw, err := json.Marshal(alloc)
+			alloc.mu.Unlock()
+			if err != nil {
+				return fmt.Errorf("marshal restart intent: %w", err)
+			}
+			var update Allocation
+			if err := json.Unmarshal(raw, &update); err != nil {
+				return fmt.Errorf("decode restart intent: %w", err)
+			}
+			update.Draining = true
+			updates = append(updates, &update)
+			continue
 		}
 		alloc.mu.Unlock()
+	}
+	if err := s.state.PutAllocations(ctx, updates); err != nil {
+		return fmt.Errorf("persist restart intent: %w", err)
+	}
+	for _, update := range updates {
+		for _, alloc := range allocations {
+			if alloc.ID != update.ID {
+				continue
+			}
+			alloc.mu.Lock()
+			if alloc.Generation == update.Generation {
+				alloc.Draining = true
+			}
+			alloc.mu.Unlock()
+			break
+		}
 	}
 	return nil
 }
@@ -978,32 +1021,8 @@ func (s *Server) StopAllocationByID(ctx context.Context, namespace, id string) e
 		s.mu.RUnlock()
 		return fmt.Errorf("allocation not found")
 	}
-	address := fmt.Sprintf("%s:%d", found.Node.Host, found.Node.Port)
-	generation := found.Generation
-	epoch := s.controlEpoch
 	s.mu.RUnlock()
-
-	now := s.now().UTC()
-	found.mu.Lock()
-	_ = found.Transition(lifecycle.PhaseStopping, now, "manual_stop", "stopped by operator")
-	_ = s.state.PutAllocation(context.WithoutCancel(ctx), found)
-	found.mu.Unlock()
-
-	if err := s.client.StopAllocation(ctx, address, &api.StopAllocationRequest{
-		AllocationID: id,
-		Generation:   generation,
-		Epoch:        epoch,
-	}); err != nil {
-		s.log.Error("stop allocation failed", "id", id, "error", err)
-	}
-
-	now = s.now().UTC()
-	found.mu.Lock()
-	_ = found.Transition(lifecycle.PhaseStopped, now, "manual_stop", "stopped by operator")
-	_ = s.state.PutAllocation(context.WithoutCancel(ctx), found)
-	found.mu.Unlock()
-
-	return nil
+	return s.Execute(ctx, &Action{Type: ActionStop, Allocation: found})
 }
 
 // ListJobRevisions returns the stored spec history for a job.
@@ -1215,16 +1234,7 @@ func (s *Server) refreshCatalog() {
 		a.mu.Unlock()
 	}
 
-	seen := make(map[string]bool)
-	for ns, instances := range namespaced {
-		s.catalog.Update(ns, instances)
-		seen[ns] = true
-	}
-	for _, a := range s.allocations {
-		if !seen[a.Namespace] {
-			s.catalog.Update(a.Namespace, nil)
-		}
-	}
+	s.catalog.Replace(namespaced)
 }
 
 // TokenManager returns the namespace token manager.

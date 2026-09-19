@@ -10,14 +10,15 @@ import (
 )
 
 // BackupFormatVersion is the current desired-state backup format.
-const BackupFormatVersion = 2
+const BackupFormatVersion = 3
 
 // BackupSnapshot contains desired state only. Secret values remain encrypted
 // exactly as stored in Raft and still require the separately managed KEK.
 type BackupSnapshot struct {
-	FormatVersion       int                        `json:"format_version"`
-	CreatedAt           time.Time                  `json:"created_at"`
-	Jobs                map[string]json.RawMessage `json:"jobs"`
+	FormatVersion            int                        `json:"format_version"`
+	CreatedAt                time.Time                  `json:"created_at"`
+	Jobs                     map[string]json.RawMessage `json:"jobs"`
+	JobRevisions             map[string]json.RawMessage `json:"job_revisions"`
 	Secrets                  map[string]json.RawMessage `json:"secrets"`
 	VolumeRegistrations      map[string]json.RawMessage `json:"volume_registrations"`
 	NetworkPortRegistrations map[string]json.RawMessage `json:"network_port_registrations"`
@@ -37,19 +38,19 @@ const (
 
 // NodeResponse contains the reported state and capacity of a node.
 type NodeResponse struct {
-	ID            uuid.UUID          `json:"id"`
-	Host          string             `json:"host"`
-	Port          int                `json:"port"`
-	Status        NodeStatusResponse `json:"status"`
-	LastHeartbeat time.Time          `json:"last_heartbeat"`
-	CPU           int                `json:"cpu"`
-	Memory        int64              `json:"memory"`
-	OS            string             `json:"os,omitempty"`
-	Arch          string             `json:"arch,omitempty"`
-	Labels        map[string]string  `json:"labels,omitempty"`
-	Volumes       []string           `json:"volumes,omitempty"`
+	ID            uuid.UUID             `json:"id"`
+	Host          string                `json:"host"`
+	Port          int                   `json:"port"`
+	Status        NodeStatusResponse    `json:"status"`
+	LastHeartbeat time.Time             `json:"last_heartbeat"`
+	CPU           int                   `json:"cpu"`
+	Memory        int64                 `json:"memory"`
+	OS            string                `json:"os,omitempty"`
+	Arch          string                `json:"arch,omitempty"`
+	Labels        map[string]string     `json:"labels,omitempty"`
+	Volumes       []string              `json:"volumes,omitempty"`
 	Capabilities  []spec.NodeCapability `json:"capabilities,omitempty"`
-	Version       string             `json:"version,omitempty"`
+	Version       string                `json:"version,omitempty"`
 }
 
 // NodeListResponse is the response returned when listing nodes.
@@ -57,20 +58,20 @@ type NodeListResponse = []NodeResponse
 
 // NodeRegistrationRequest contains the identity and capacity of a joining node.
 type NodeRegistrationRequest struct {
-	ID                 uuid.UUID         `json:"id"`
-	Host               string            `json:"host"`
-	Port               int               `json:"port"`
-	CPU                int               `json:"cpu"`
-	Memory             int64             `json:"memory"`
-	OS                 string            `json:"os"`
-	Arch               string            `json:"arch"`
-	Labels             map[string]string `json:"labels,omitempty"`
-	Volumes            []string          `json:"volumes,omitempty"`
+	ID                 uuid.UUID             `json:"id"`
+	Host               string                `json:"host"`
+	Port               int                   `json:"port"`
+	CPU                int                   `json:"cpu"`
+	Memory             int64                 `json:"memory"`
+	OS                 string                `json:"os"`
+	Arch               string                `json:"arch"`
+	Labels             map[string]string     `json:"labels,omitempty"`
+	Volumes            []string              `json:"volumes,omitempty"`
 	Capabilities       []spec.NodeCapability `json:"capabilities,omitempty"`
-	WireGuardPublicKey string            `json:"wireguard_public_key,omitempty"`
-	WireGuardEndpoint  string            `json:"wireguard_endpoint,omitempty"`
-	WireGuardPortBase  int               `json:"wireguard_port_base,omitempty"`
-	WireGuardPortCount int               `json:"wireguard_port_count,omitempty"`
+	WireGuardPublicKey string                `json:"wireguard_public_key,omitempty"`
+	WireGuardEndpoint  string                `json:"wireguard_endpoint,omitempty"`
+	WireGuardPortBase  int                   `json:"wireguard_port_base,omitempty"`
+	WireGuardPortCount int                   `json:"wireguard_port_count,omitempty"`
 }
 
 // NodeRegistrationResponse confirms the registered node identity.
@@ -80,12 +81,12 @@ type NodeRegistrationResponse struct {
 
 // HeartbeatRequest reports a node and its current allocations.
 type HeartbeatRequest struct {
-	NodeID      uuid.UUID          `json:"id"`
-	Timestamp   time.Time          `json:"timestamp"`
-	Allocations []AllocationStatus `json:"allocations,omitempty"`
-	Volumes     []string           `json:"volumes,omitempty"`
+	NodeID       uuid.UUID             `json:"id"`
+	Timestamp    time.Time             `json:"timestamp"`
+	Allocations  []AllocationStatus    `json:"allocations,omitempty"`
+	Volumes      []string              `json:"volumes,omitempty"`
 	Capabilities []spec.NodeCapability `json:"capabilities,omitempty"`
-	Version     string             `json:"version,omitempty"`
+	Version      string                `json:"version,omitempty"`
 }
 
 // DesiredAllocation describes the generation an agent should run.
@@ -144,26 +145,26 @@ type JobStatusResponse struct {
 
 // AllocationResponse describes an allocation and its latest state.
 type AllocationResponse struct {
-	ID               string            `json:"id"`
-	Job              string            `json:"job,omitempty"`
-	Group            string            `json:"group"`
-	Namespace        string            `json:"namespace,omitempty"`
-	NodeID           uuid.UUID         `json:"node_id"`
-	Labels           map[string]string `json:"labels,omitempty"`
+	ID               string               `json:"id"`
+	Job              string               `json:"job,omitempty"`
+	Group            string               `json:"group"`
+	Namespace        string               `json:"namespace,omitempty"`
+	NodeID           uuid.UUID            `json:"node_id"`
+	Labels           map[string]string    `json:"labels,omitempty"`
 	Address          string               `json:"address,omitempty"`
 	Ports            []PortMapping        `json:"ports,omitempty"`
 	Endpoints        []AllocationEndpoint `json:"endpoints,omitempty"`
-	Phase            lifecycle.Phase   `json:"phase"`
-	Health           lifecycle.Health  `json:"health"`
-	Draining         bool              `json:"draining,omitempty"`
-	Generation       uint64            `json:"generation"`
-	JobRevision      int               `json:"job_revision"`
-	CreatedAt        time.Time         `json:"created_at"`
-	LastTransitionAt time.Time         `json:"last_transition_at"`
-	Reason           string            `json:"reason,omitempty"`
-	Message          string            `json:"message,omitempty"`
-	Attempt          int               `json:"attempt"`
-	NextRetryAt      *time.Time        `json:"next_retry_at,omitempty"`
+	Phase            lifecycle.Phase      `json:"phase"`
+	Health           lifecycle.Health     `json:"health"`
+	Draining         bool                 `json:"draining,omitempty"`
+	Generation       uint64               `json:"generation"`
+	JobRevision      int                  `json:"job_revision"`
+	CreatedAt        time.Time            `json:"created_at"`
+	LastTransitionAt time.Time            `json:"last_transition_at"`
+	Reason           string               `json:"reason,omitempty"`
+	Message          string               `json:"message,omitempty"`
+	Attempt          int                  `json:"attempt"`
+	NextRetryAt      *time.Time           `json:"next_retry_at,omitempty"`
 }
 
 // AllocationListResponse is the response returned when listing allocations.

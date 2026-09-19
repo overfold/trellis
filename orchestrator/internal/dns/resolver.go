@@ -21,7 +21,7 @@ const (
 	// DefaultDomain is the default DNS suffix for Trellis services.
 	DefaultDomain = "trellis"
 	// DefaultTTL is the default lifetime of DNS answers, in seconds.
-	DefaultTTL = 5
+	DefaultTTL        = 5
 	maxDNSMessageSize = 65535
 )
 
@@ -42,7 +42,7 @@ type Resolver struct {
 	upstreams []string
 
 	mu    sync.RWMutex
-	cache map[string]*record // "job.namespace" -> record
+	cache map[string]*record // "group.job.namespace" -> record
 }
 
 // NewResolver creates a DNS resolver for the supplied discovery source.
@@ -244,7 +244,7 @@ func (r *Resolver) refresh(ctx context.Context) {
 			}
 			ip = ips[0]
 		}
-		key := svc.Job + "." + svc.Namespace
+		key := svc.Group + "." + svc.Job + "." + svc.Namespace
 		rec, ok := cache[key]
 		if !ok {
 			rec = &record{}
@@ -263,12 +263,12 @@ func (r *Resolver) resolve(name string) []net.IP {
 		return nil
 	}
 	query := strings.TrimSuffix(name, suffix)
-	parts := strings.SplitN(query, ".", 2)
-	if len(parts) != 2 {
+	parts := strings.Split(query, ".")
+	if len(parts) != 3 {
 		return nil
 	}
-	job, namespace := parts[0], parts[1]
-	key := job + "." + namespace
+	group, job, namespace := parts[0], parts[1], parts[2]
+	key := group + "." + job + "." + namespace
 
 	r.mu.RLock()
 	rec := r.cache[key]
@@ -379,7 +379,7 @@ func buildErrorResponse(packet []byte, rcode uint16) []byte {
 	}
 	response := append([]byte(nil), packet[:offset+4]...)
 	requestFlags := binary.BigEndian.Uint16(packet[2:4])
-	flags := uint16(0x8000 | 0x0080) | (requestFlags & 0x0100) | (rcode & 0x000f)
+	flags := uint16(0x8000|0x0080) | (requestFlags & 0x0100) | (rcode & 0x000f)
 	binary.BigEndian.PutUint16(response[2:4], flags)
 	binary.BigEndian.PutUint16(response[6:8], 0)
 	binary.BigEndian.PutUint16(response[8:10], 0)
@@ -389,18 +389,24 @@ func buildErrorResponse(packet []byte, rcode uint16) []byte {
 
 func buildResponse(id uint16, name string, qtype, qclass uint16, ips []net.IP) []byte {
 	buf := make([]byte, 0, 512)
+	ipv4s := make([]net.IP, 0, len(ips))
+	for _, ip := range ips {
+		if ipv4 := ip.To4(); ipv4 != nil {
+			ipv4s = append(ipv4s, ipv4)
+		}
+	}
 
 	// Header
 	header := make([]byte, 12)
 	binary.BigEndian.PutUint16(header[0:2], id)
 	flags := uint16(0x8000) // QR=1 (response)
 	flags |= 0x0400         // AA=1 (authoritative)
-	if len(ips) == 0 {
+	if len(ipv4s) == 0 {
 		flags |= 0x0003 // RCODE=NXDOMAIN
 	}
 	binary.BigEndian.PutUint16(header[2:4], flags)
-	binary.BigEndian.PutUint16(header[4:6], 1)                // QDCOUNT
-	binary.BigEndian.PutUint16(header[6:8], uint16(len(ips))) // ANCOUNT
+	binary.BigEndian.PutUint16(header[4:6], 1)                  // QDCOUNT
+	binary.BigEndian.PutUint16(header[6:8], uint16(len(ipv4s))) // ANCOUNT
 	buf = append(buf, header...)
 
 	// Question section
@@ -411,11 +417,7 @@ func buildResponse(id uint16, name string, qtype, qclass uint16, ips []net.IP) [
 	buf = append(buf, qtypeBytes...)
 
 	// Answer section
-	for _, ip := range ips {
-		ipv4 := ip.To4()
-		if ipv4 == nil {
-			continue
-		}
+	for _, ipv4 := range ipv4s {
 		// Name pointer to offset 12 (start of question name)
 		buf = append(buf, 0xC0, 0x0C)
 		ans := make([]byte, 10)

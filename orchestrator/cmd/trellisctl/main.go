@@ -111,6 +111,9 @@ func addStructuredOutputFlags(root *cobra.Command) {
 }
 
 func buildCLITLSConfig() (*tls.Config, error) {
+	if (config.Cert == "") != (config.Key == "") {
+		return nil, fmt.Errorf("client certificate and private key must be provided together")
+	}
 	var caPEM []byte
 	switch {
 	case config.CACert != "":
@@ -121,15 +124,18 @@ func buildCLITLSConfig() (*tls.Config, error) {
 		caPEM = data
 	case config.CACertPEM != "":
 		caPEM = []byte(config.CACertPEM)
-	default:
+	case config.Cert == "":
 		return nil, nil
 	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(caPEM) {
-		return nil, fmt.Errorf("failed to parse CA certificate")
+	cfg := &tls.Config{ServerName: "trellis"}
+	if caPEM != nil {
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return nil, fmt.Errorf("failed to parse CA certificate")
+		}
+		cfg.RootCAs = pool
 	}
-	cfg := &tls.Config{RootCAs: pool, ServerName: "trellis"}
-	if config.Cert != "" && config.Key != "" {
+	if config.Cert != "" {
 		cert, err := tls.LoadX509KeyPair(config.Cert, config.Key)
 		if err != nil {
 			return nil, fmt.Errorf("load client certificate: %w", err)

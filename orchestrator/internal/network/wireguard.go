@@ -173,8 +173,15 @@ func short(prefix, value string) string {
 }
 
 func allocationAddress(cidr, allocation string) (string, error) {
+	return allocationAddressAt(cidr, allocation, 0)
+}
+
+func allocationAddressAt(cidr, allocation string, probe uint32) (string, error) {
 	p, err := netip.ParsePrefix(cidr)
-	if err != nil {
+	if err != nil || !p.Addr().Is4() {
+		if err == nil {
+			err = fmt.Errorf("CIDR must be IPv4")
+		}
 		return "", err
 	}
 	h := sha256.Sum256([]byte(allocation))
@@ -184,12 +191,112 @@ func allocationAddress(cidr, allocation string) (string, error) {
 	if bits < 3 {
 		return "", fmt.Errorf("CIDR %s has no allocation space", cidr)
 	}
-	mask := uint32(1<<bits) - 1
-	host = host%(mask-2) + 2
+	mask := uint32((uint64(1) << bits) - 1)
+	host = (host+probe)%(mask-2) + 2
 	a := netip.AddrFrom4([4]byte{byte(base >> 24), byte(base >> 16), byte(base >> 8), byte(base)}).Next()
 	// Add host-1 without depending on platform integer address APIs.
 	b := binary.BigEndian.Uint32(a.AsSlice()) + host - 1
 	return fmt.Sprintf("%d.%d.%d.%d/%d", byte(b>>24), byte(b>>16), byte(b>>8), byte(b), p.Bits()), nil
+}
+
+func reserveAddress(leaseDir, cidr, allocation string) (address, lease string, err error) {
+	prefix, err := netip.ParsePrefix(cidr)
+	if err != nil {
+		return "", "", err
+	}
+	if !prefix.Addr().Is4() || prefix.Bits() > 29 {
+		return "", "", fmt.Errorf("CIDR %s has no IPv4 allocation space", cidr)
+	}
+	capacity := uint32((uint64(1) << uint(32-prefix.Bits())) - 3)
+	for probe := uint32(0); probe < capacity; probe++ {
+		address, err = allocationAddressAt(cidr, allocation, probe)
+		if err != nil {
+			return "", "", err
+		}
+		lease = filepath.Join(leaseDir, strings.ReplaceAll(address, "/", "_"))
+		f, openErr := os.OpenFile(lease, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if openErr == nil {
+			if _, err = f.WriteString(allocation); err == nil {
+				err = f.Close()
+			} else {
+				_ = f.Close()
+			}
+			if err != nil {
+				_ = os.Remove(lease)
+				return "", "", fmt.Errorf("persist address lease: %w", err)
+			}
+			return address, lease, nil
+		}
+		if !os.IsExist(openErr) {
+			return "", "", fmt.Errorf("reserve address %s: %w", address, openErr)
+		}
+		owner, readErr := os.ReadFile(lease)
+		if readErr != nil {
+			return "", "", fmt.Errorf("read address lease %s: %w", address, readErr)
+		}
+		if string(owner) == allocation {
+			return address, lease, nil
+		}
+	}
+	return "", "", fmt.Errorf("network %s has no free allocation addresses", cidr)
+}
+
+func (m *WireGuardManager) ensureLink(ctx context.Context, name string, args ...string) error {
+	if err := m.run.Run(ctx, "ip", append([]string{"link", "add", name}, args...)...); err != nil {
+		if showErr := m.run.Run(ctx, "ip", "link", "show", "dev", name); showErr != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *WireGuardManager) reconcilePeers(ctx context.Context, wg, namespace, networkName string, peers []Peer) error {
+	planDir := filepath.Join(m.stateDir, "plans")
+	if err := os.MkdirAll(planDir, 0o700); err != nil {
+		return fmt.Errorf("create network plan state: %w", err)
+	}
+	path := m.planPath(namespace, networkName)
+	var previous []Peer
+	if raw, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(raw, &previous); err != nil {
+			return fmt.Errorf("parse applied network plan: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("read applied network plan: %w", err)
+	}
+	desiredPeers, desiredRoutes := map[string]bool{}, map[string]bool{}
+	for _, peer := range peers {
+		desiredPeers[peer.PublicKey] = true
+		for _, route := range peer.AllowedIPs {
+			desiredRoutes[route] = true
+		}
+	}
+	for _, peer := range previous {
+		if !desiredPeers[peer.PublicKey] {
+			if err := m.run.Run(ctx, "wg", "set", wg, "peer", peer.PublicKey, "remove"); err != nil {
+				return fmt.Errorf("remove stale WireGuard peer: %w", err)
+			}
+		}
+		for _, route := range peer.AllowedIPs {
+			if !desiredRoutes[route] {
+				if err := m.run.Run(ctx, "ip", "route", "del", route, "dev", wg); err != nil {
+					return fmt.Errorf("remove stale WireGuard route: %w", err)
+				}
+			}
+		}
+	}
+	raw, err := json.Marshal(peers)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		return fmt.Errorf("persist applied network plan: %w", err)
+	}
+	return nil
+}
+
+func (m *WireGuardManager) planPath(namespace, networkName string) string {
+	return filepath.Join(m.stateDir, "plans", short("", namespace+"\x00"+networkName)+".json")
 }
 
 // Attach configures networking for an allocation.
@@ -216,36 +323,42 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 	}
 	wg, bridge, hostVeth, peerVeth := short("tw", namespace+"\x00"+networkName), short("tb", namespace+"\x00"+networkName), short("vh", allocation), short("vc", allocation)
 	ns := filepath.Join("/var/run/netns", allocation)
-	address, err := allocationAddress(cfg.CIDR, allocation)
-	if err != nil {
-		return nil, err
-	}
 	leaseDir := filepath.Join(m.stateDir, networkName)
 	if err := os.MkdirAll(leaseDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create IPAM state: %w", err)
 	}
-	lease := filepath.Join(leaseDir, strings.ReplaceAll(address, "/", "_"))
-	f, err := os.OpenFile(lease, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	address, lease, err := reserveAddress(leaseDir, cfg.CIDR, allocation)
 	if err != nil {
-		return nil, fmt.Errorf("reserve address %s: %w", address, err)
+		return nil, err
 	}
-	_, _ = f.WriteString(allocation)
-	_ = f.Close()
 	defer func() {
 		if retErr != nil {
 			_ = os.Remove(lease)
 		}
 	}()
 	// Every command is idempotently reconciled; "replace" is used for routes.
-	_ = m.run.Run(ctx, "ip", "link", "add", bridge, "type", "bridge")
-	_ = m.run.Run(ctx, "ip", "addr", "add", cfg.Gateway+"/"+strings.Split(cfg.CIDR, "/")[1], "dev", bridge)
+	if err = m.ensureLink(ctx, bridge, "type", "bridge"); err != nil {
+		return nil, fmt.Errorf("create bridge: %w", err)
+	}
+	if err = m.run.Run(ctx, "ip", "addr", "replace", cfg.Gateway+"/"+strings.Split(cfg.CIDR, "/")[1], "dev", bridge); err != nil {
+		return nil, fmt.Errorf("configure bridge address: %w", err)
+	}
 	if err = m.run.Run(ctx, "ip", "link", "set", bridge, "up"); err != nil {
 		return nil, err
 	}
-	_ = m.run.Run(ctx, "ip", "link", "add", wg, "type", "wireguard")
-	_ = m.run.Run(ctx, "ip", "addr", "add", cfg.WireGuardAddress, "dev", wg)
+	if err = m.ensureLink(ctx, wg, "type", "wireguard"); err != nil {
+		return nil, fmt.Errorf("create WireGuard interface: %w", err)
+	}
+	if err = m.run.Run(ctx, "ip", "addr", "replace", cfg.WireGuardAddress, "dev", wg); err != nil {
+		return nil, fmt.Errorf("configure WireGuard address: %w", err)
+	}
 	if err = m.run.Run(ctx, "wg", "set", wg, "private-key", cfg.PrivateKeyFile, "listen-port", fmt.Sprint(cfg.ListenPort)); err != nil {
 		return nil, err
+	}
+	if request.Plan.CIDR != "" {
+		if err = m.reconcilePeers(ctx, wg, namespace, networkName, cfg.Peers); err != nil {
+			return nil, err
+		}
 	}
 	for _, p := range cfg.Peers {
 		args := []string{"set", wg, "peer", p.PublicKey, "allowed-ips", strings.Join(p.AllowedIPs, ",")}
@@ -256,7 +369,9 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 			return nil, err
 		}
 		for _, route := range p.AllowedIPs {
-			_ = m.run.Run(ctx, "ip", "route", "replace", route, "dev", wg)
+			if err = m.run.Run(ctx, "ip", "route", "replace", route, "dev", wg); err != nil {
+				return nil, fmt.Errorf("configure WireGuard route: %w", err)
+			}
 		}
 	}
 	if err = m.run.Run(ctx, "ip", "link", "set", wg, "up"); err != nil {
@@ -285,8 +400,17 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 			}
 		}
 	}
-	if m.run.Run(ctx, "iptables", "-C", "INPUT", "-i", bridge, "!", "-d", cfg.Gateway, "-j", "DROP") != nil {
-		if err = m.run.Run(ctx, "iptables", "-A", "INPUT", "-i", bridge, "!", "-d", cfg.Gateway, "-j", "DROP"); err != nil {
+	if request.Plan.APIPort > 0 {
+		args := []string{"INPUT", "-i", bridge, "-d", cfg.Gateway, "-p", "tcp", "--dport", fmt.Sprint(request.Plan.APIPort), "-j", "ACCEPT"}
+		if m.run.Run(ctx, "iptables", append([]string{"-C"}, args...)...) != nil {
+			if err = m.run.Run(ctx, "iptables", append([]string{"-I"}, args...)...); err != nil {
+				return nil, err
+			}
+		}
+	}
+	_ = m.run.Run(ctx, "iptables", "-D", "INPUT", "-i", bridge, "!", "-d", cfg.Gateway, "-j", "DROP")
+	if m.run.Run(ctx, "iptables", "-C", "INPUT", "-i", bridge, "-j", "DROP") != nil {
+		if err = m.run.Run(ctx, "iptables", "-A", "INPUT", "-i", bridge, "-j", "DROP"); err != nil {
 			return nil, err
 		}
 	}
@@ -303,17 +427,27 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 		_ = m.run.Run(ctx, "ip", "netns", "del", allocation)
 		return nil, err
 	}
-	_ = m.run.Run(ctx, "ip", "link", "set", hostVeth, "master", bridge)
-	_ = m.run.Run(ctx, "ip", "link", "set", hostVeth, "up")
+	if err = m.run.Run(ctx, "ip", "link", "set", hostVeth, "master", bridge); err != nil {
+		return nil, err
+	}
+	if err = m.run.Run(ctx, "ip", "link", "set", hostVeth, "up"); err != nil {
+		return nil, err
+	}
 	if err = m.run.Run(ctx, "ip", "link", "set", peerVeth, "netns", allocation); err != nil {
 		return nil, err
 	}
-	_ = m.run.Run(ctx, "ip", "-n", allocation, "link", "set", "lo", "up")
-	_ = m.run.Run(ctx, "ip", "-n", allocation, "link", "set", peerVeth, "name", "eth0")
+	if err = m.run.Run(ctx, "ip", "-n", allocation, "link", "set", "lo", "up"); err != nil {
+		return nil, err
+	}
+	if err = m.run.Run(ctx, "ip", "-n", allocation, "link", "set", peerVeth, "name", "eth0"); err != nil {
+		return nil, err
+	}
 	if err = m.run.Run(ctx, "ip", "-n", allocation, "addr", "add", address, "dev", "eth0"); err != nil {
 		return nil, err
 	}
-	_ = m.run.Run(ctx, "ip", "-n", allocation, "link", "set", "eth0", "up")
+	if err = m.run.Run(ctx, "ip", "-n", allocation, "link", "set", "eth0", "up"); err != nil {
+		return nil, err
+	}
 	if err = m.run.Run(ctx, "ip", "-n", allocation, "route", "replace", "default", "via", cfg.Gateway); err != nil {
 		return nil, err
 	}
@@ -326,6 +460,7 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 		Bridge:             bridge,
 		WireGuardInterface: wg,
 		Gateway:            cfg.Gateway,
+		APIPort:            request.Plan.APIPort,
 		Address:            address,
 		LeasePath:          lease,
 	}, nil
@@ -371,11 +506,15 @@ func (m *WireGuardManager) Detach(ctx context.Context, a *Attachment) error {
 			_ = m.run.Run(ctx, "iptables", "-D", "INPUT", "-i", bridge, "-d", m.dnsAddress, "-p", protocol, "--dport", "53", "-j", "ACCEPT")
 		}
 	}
-	if a.Gateway != "" {
-		_ = m.run.Run(ctx, "iptables", "-D", "INPUT", "-i", bridge, "!", "-d", a.Gateway, "-j", "DROP")
+	if a.APIPort > 0 {
+		_ = m.run.Run(ctx, "iptables", "-D", "INPUT", "-i", bridge, "-d", a.Gateway, "-p", "tcp", "--dport", fmt.Sprint(a.APIPort), "-j", "ACCEPT")
 	}
+	_ = m.run.Run(ctx, "iptables", "-D", "INPUT", "-i", bridge, "-j", "DROP")
 	_ = m.run.Run(ctx, "ip", "link", "del", wg)
 	_ = m.run.Run(ctx, "ip", "link", "del", bridge)
+	if err := os.Remove(m.planPath(a.Namespace, a.Network)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove applied network plan: %w", err)
+	}
 	if err := os.Remove(leaseDir); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove empty network lease directory: %w", err)
 	}

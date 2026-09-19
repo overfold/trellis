@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -223,7 +224,13 @@ func (s *Server) Reconcile(ctx context.Context) {
 		allocation.mu.Unlock()
 	}
 
-	for _, job := range s.jobs {
+	jobKeys := make([]string, 0, len(s.jobs))
+	for key := range s.jobs {
+		jobKeys = append(jobKeys, key)
+	}
+	sort.Strings(jobKeys)
+	for _, key := range jobKeys {
+		job := s.jobs[key]
 		jobName := job.Spec.Name
 		namespace := job.Spec.Namespace
 		for _, group := range job.Spec.TaskGroups {
@@ -460,15 +467,6 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 				clear(request.Secrets[i].Value)
 			}
 		}()
-		hashInput := *request
-		hashInput.Epoch, hashInput.ExecutionHash = 0, ""
-		hashInput.Secrets = append([]api.DeliveredSecret(nil), request.Secrets...)
-		for i := range hashInput.Secrets {
-			hashInput.Secrets[i].Value = nil
-		}
-		raw, _ := json.Marshal(hashInput)
-		hash := sha256.Sum256(raw)
-		request.ExecutionHash = hex.EncodeToString(hash[:])
 		if groupAPIAccess != nil {
 			token, err := s.apiAccessToken(ctx, groupAPIAccess, alloc.Namespace)
 			if err != nil {
@@ -483,10 +481,41 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 				"TRELLIS_ADDR":      apiAddr,
 				"TRELLIS_NAMESPACE": alloc.Namespace,
 			}
+			_, port, err := net.SplitHostPort(serverAddr)
+			if err != nil {
+				return fmt.Errorf("control-plane advertise address %q: %w", serverAddr, err)
+			}
+			apiPort, err := strconv.Atoi(port)
+			if err != nil || apiPort < 1 || apiPort > 65535 {
+				return fmt.Errorf("control-plane advertise port %q is invalid", port)
+			}
+			if request.NetworkPlan != nil {
+				request.NetworkPlan.APIPort = apiPort
+			}
 			if caCert, _, caErr := s.ClusterCA(); caErr == nil && caCert != "" {
 				request.EnvOverrides["TRELLIS_CA_CERT"] = caCert
 			}
 		}
+		hashInput := *request
+		hashInput.Epoch, hashInput.ExecutionHash = 0, ""
+		hashInput.Secrets = append([]api.DeliveredSecret(nil), request.Secrets...)
+		for i := range hashInput.Secrets {
+			hashInput.Secrets[i].Value = nil
+		}
+		if hashInput.EnvOverrides != nil {
+			hashInput.EnvOverrides = make(map[string]string, len(request.EnvOverrides))
+			for key, value := range request.EnvOverrides {
+				if key == "TRELLIS_TOKEN" {
+					digest := sha256.Sum256([]byte(value))
+					hashInput.EnvOverrides[key] = hex.EncodeToString(digest[:])
+					continue
+				}
+				hashInput.EnvOverrides[key] = value
+			}
+		}
+		raw, _ := json.Marshal(hashInput)
+		hash := sha256.Sum256(raw)
+		request.ExecutionHash = hex.EncodeToString(hash[:])
 		if alloc.Phase == lifecycle.PhasePlaced || alloc.Phase == lifecycle.PhaseStopped || alloc.Phase == lifecycle.PhaseFailed || alloc.Phase == lifecycle.PhaseLost {
 			if err := alloc.Transition(lifecycle.PhaseStarting, now, "", ""); err != nil {
 				return err
@@ -532,18 +561,19 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 				return err
 			}
 		}
-		if nodeStatus == NodeStatusHealthy || nodeStatus == NodeStatusDraining {
-			if err := s.client.StopAllocation(ctx, address, &api.StopAllocationRequest{AllocationID: alloc.ID, Generation: alloc.Generation, Epoch: epoch}); err != nil {
-				if code := agentOperationCode(err); code == api.OperationStaleEpoch || code == api.OperationStaleGeneration {
-					return err
-				}
-				alloc.Attempt++
-				alloc.Reason, alloc.Message = "agent_stop_failed", err.Error()
-				next := now.Add(retryDelay(alloc.ID, alloc.Attempt))
-				alloc.NextRetryAt = &next
-				_ = s.state.PutAllocation(context.WithoutCancel(ctx), alloc)
+		if nodeStatus != NodeStatusHealthy && nodeStatus != NodeStatusDraining {
+			return fmt.Errorf("node %s is unavailable for allocation stop", alloc.Node.ID)
+		}
+		if err := s.client.StopAllocation(ctx, address, &api.StopAllocationRequest{AllocationID: alloc.ID, Generation: alloc.Generation, Epoch: epoch}); err != nil {
+			if code := agentOperationCode(err); code == api.OperationStaleEpoch || code == api.OperationStaleGeneration {
 				return err
 			}
+			alloc.Attempt++
+			alloc.Reason, alloc.Message = "agent_stop_failed", err.Error()
+			next := now.Add(retryDelay(alloc.ID, alloc.Attempt))
+			alloc.NextRetryAt = &next
+			_ = s.state.PutAllocation(context.WithoutCancel(ctx), alloc)
+			return err
 		}
 		alloc.Attempt, alloc.NextRetryAt = 0, nil
 		_ = alloc.Transition(lifecycle.PhaseStopped, now, "", "")
@@ -586,6 +616,9 @@ func (s *Server) networkPlan(namespace string, target *Node) (*network.Plan, err
 		seen[subnet.String()] = node.ID
 		plan.Peers = append(plan.Peers, network.PeerPlan{PublicKey: node.WireGuardPublicKey, Endpoint: endpoint, AllowedIPs: []string{subnet.String()}})
 	}
+	sort.Slice(plan.Peers, func(i, j int) bool {
+		return plan.Peers[i].PublicKey < plan.Peers[j].PublicKey
+	})
 	for _, job := range s.jobs {
 		if job.Spec.Namespace == namespace {
 			continue

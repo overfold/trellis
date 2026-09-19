@@ -17,6 +17,7 @@ import (
 )
 
 var _ Store = (*RaftStore)(nil)
+var _ AtomicStore = (*RaftStore)(nil)
 
 // RaftStore replicates state through a Raft cluster.
 type RaftStore struct {
@@ -34,6 +35,7 @@ type RaftStore struct {
 // network port registrations preserve stable WireGuard pathway assignments.
 type DesiredSnapshot struct {
 	Jobs                     map[string][]byte `json:"jobs"`
+	JobRevisions             map[string][]byte `json:"job_revisions,omitempty"`
 	Secrets                  map[string][]byte `json:"secrets"`
 	VolumeRegistrations      map[string][]byte `json:"volume_registrations"`
 	NetworkPortRegistrations map[string][]byte `json:"network_port_registrations"`
@@ -45,12 +47,15 @@ func (r *RaftStore) BackupDesired(cluster string) (*DesiredSnapshot, error) {
 	if err := r.raft.Barrier(10 * time.Second).Error(); err != nil {
 		return nil, fmt.Errorf("raft backup barrier: %w", err)
 	}
-	return r.fsm.desiredSnapshot(cluster)
+	return r.fsm.store.DesiredSnapshot(cluster)
 }
 
 // RestoreDesired installs a backup as one Raft log entry. The FSM rejects the
 // operation unless the target desired-state prefixes are empty.
 func (r *RaftStore) RestoreDesired(cluster string, snapshot *DesiredSnapshot) error {
+	if err := ValidateDesiredSnapshot(snapshot, nil); err != nil {
+		return err
+	}
 	cmd := fsmCommand{Op: "restore_desired", Cluster: cluster, Snapshot: snapshot}
 	data, err := json.Marshal(cmd)
 	if err != nil {
@@ -61,6 +66,23 @@ func (r *RaftStore) RestoreDesired(cluster string, snapshot *DesiredSnapshot) er
 		return err
 	}
 	if resp, ok := fut.Response().(error); ok && resp != nil {
+		return resp
+	}
+	return nil
+}
+
+// Batch applies mutations as one Raft log entry and one Bolt transaction.
+func (r *RaftStore) Batch(_ context.Context, mutations []Mutation) error {
+	cmd := fsmCommand{Op: "batch", Mutations: mutations}
+	data, err := json.Marshal(cmd)
+	if err != nil {
+		return err
+	}
+	fut := r.raft.Apply(data, 10*time.Second)
+	if err := fut.Error(); err != nil {
+		return err
+	}
+	if resp, ok := fut.Response().(error); ok {
 		return resp
 	}
 	return nil
@@ -283,11 +305,12 @@ type fsm struct {
 }
 
 type fsmCommand struct {
-	Op       string           `json:"op"`
-	Key      string           `json:"key,omitempty"`
-	Value    []byte           `json:"value,omitempty"`
-	Cluster  string           `json:"cluster,omitempty"`
-	Snapshot *DesiredSnapshot `json:"snapshot,omitempty"`
+	Op        string           `json:"op"`
+	Key       string           `json:"key,omitempty"`
+	Value     []byte           `json:"value,omitempty"`
+	Cluster   string           `json:"cluster,omitempty"`
+	Snapshot  *DesiredSnapshot `json:"snapshot,omitempty"`
+	Mutations []Mutation       `json:"mutations,omitempty"`
 }
 
 func (f *fsm) Apply(log *raft.Log) interface{} {
@@ -301,6 +324,8 @@ func (f *fsm) Apply(log *raft.Log) interface{} {
 		return f.store.Put(ctx, cmd.Key, cmd.Value)
 	case "delete":
 		return f.store.Delete(ctx, cmd.Key)
+	case "batch":
+		return f.store.Batch(ctx, cmd.Mutations)
 	case "restore_desired":
 		if cmd.Snapshot == nil {
 			return fmt.Errorf("restore snapshot is missing")
@@ -309,48 +334,6 @@ func (f *fsm) Apply(log *raft.Log) interface{} {
 	default:
 		return fmt.Errorf("unknown FSM command: %s", cmd.Op)
 	}
-}
-
-func (f *fsm) desiredSnapshot(cluster string) (*DesiredSnapshot, error) {
-	jobsPrefix := fmt.Sprintf("trellis/%s/jobs/", cluster)
-	secretsPrefix := fmt.Sprintf("trellis/%s/secrets/", cluster)
-	volumesPrefix := fmt.Sprintf("trellis/%s/volume-registrations/", cluster)
-	networkPortsPrefix := fmt.Sprintf("trellis/%s/network-port-registrations/", cluster)
-	jobs, err := f.store.List(context.Background(), jobsPrefix)
-	if err != nil {
-		return nil, err
-	}
-	secrets, err := f.store.List(context.Background(), secretsPrefix)
-	if err != nil {
-		return nil, err
-	}
-	volumes, err := f.store.List(context.Background(), volumesPrefix)
-	if err != nil {
-		return nil, err
-	}
-	networkPorts, err := f.store.List(context.Background(), networkPortsPrefix)
-	if err != nil {
-		return nil, err
-	}
-	result := &DesiredSnapshot{
-		Jobs:                     make(map[string][]byte, len(jobs)),
-		Secrets:                  make(map[string][]byte, len(secrets)),
-		VolumeRegistrations:      make(map[string][]byte, len(volumes)),
-		NetworkPortRegistrations: make(map[string][]byte, len(networkPorts)),
-	}
-	for key, value := range jobs {
-		result.Jobs[key[len(jobsPrefix):]] = value
-	}
-	for key, value := range secrets {
-		result.Secrets[key[len(secretsPrefix):]] = value
-	}
-	for key, value := range volumes {
-		result.VolumeRegistrations[key[len(volumesPrefix):]] = value
-	}
-	for key, value := range networkPorts {
-		result.NetworkPortRegistrations[key[len(networkPortsPrefix):]] = value
-	}
-	return result, nil
 }
 
 func (f *fsm) Snapshot() (raft.FSMSnapshot, error) {

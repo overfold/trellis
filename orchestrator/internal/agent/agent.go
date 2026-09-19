@@ -36,21 +36,52 @@ type Agent struct {
 
 	log *slog.Logger
 
-	runtime    runtime.ContainerRuntime
-	health     *health.HealthManager
-	reconciler *AllocationReconciler
-	ports      *PortManager
-	volumes    *VolumeManager
-	network    network.Manager
-	server     *client.ServerClient
-	nodeInfo   client.NodeInfo
-	dnsServers []string
-	local      *storage.LocalStorage
-	cluster    string
-	version    string
-	epoch      uint64
-	orphans    map[string]int
-	mu         sync.RWMutex
+	runtime     runtime.ContainerRuntime
+	health      *health.HealthManager
+	reconciler  *AllocationReconciler
+	ports       *PortManager
+	volumes     *VolumeManager
+	network     network.Manager
+	server      *client.ServerClient
+	nodeInfo    client.NodeInfo
+	dnsServers  []string
+	local       *storage.LocalStorage
+	cluster     string
+	version     string
+	epoch       uint64
+	orphans     map[string]int
+	mu          sync.RWMutex
+	operationMu sync.Mutex
+	operations  map[string]*allocationOperation
+}
+
+type allocationOperation struct {
+	mu   sync.Mutex
+	refs int
+}
+
+func (a *Agent) lockAllocationOperation(allocationID string) func() {
+	a.operationMu.Lock()
+	if a.operations == nil {
+		a.operations = make(map[string]*allocationOperation)
+	}
+	operation := a.operations[allocationID]
+	if operation == nil {
+		operation = &allocationOperation{}
+		a.operations[allocationID] = operation
+	}
+	operation.refs++
+	a.operationMu.Unlock()
+	operation.mu.Lock()
+	return func() {
+		a.operationMu.Lock()
+		operation.mu.Unlock()
+		operation.refs--
+		if operation.refs == 0 {
+			delete(a.operations, allocationID)
+		}
+		a.operationMu.Unlock()
+	}
 }
 
 type execSession struct {
@@ -162,6 +193,7 @@ func NewAgent(log *slog.Logger, runtime runtime.ContainerRuntime, health *health
 		allocations:  make(map[string]*Allocation),
 		execSessions: make(map[string]*execSession),
 		orphans:      make(map[string]int),
+		operations:   make(map[string]*allocationOperation),
 
 		log: log,
 
@@ -268,10 +300,9 @@ func (a *Agent) recover(ctx context.Context) error {
 		allocation := stored[container.ID]
 		hadRecord := allocation != nil
 		if allocation == nil {
-			generation, _ := strconv.ParseUint(container.Labels["trellis.allocation-generation"], 10, 64)
-			allocation = &Allocation{ID: container.ID, ContainerID: container.ID, AllocationID: container.Labels["trellis.allocation-id"], Generation: generation, Namespace: container.Labels["trellis.namespace"], JobName: container.Labels["trellis.job"], GroupName: container.Labels["trellis.task-group"], TaskName: container.Labels["trellis.task"], Status: "running", Health: "unknown"}
+			allocation = allocationFromRuntime(container)
 		}
-		if allocation.AllocationID == "" || allocation.Generation == 0 {
+		if allocation == nil {
 			a.log.Warn("leave unidentifiable Trellis container untouched", "container", container.ID)
 			continue
 		}
@@ -324,6 +355,29 @@ func (a *Agent) recover(ctx context.Context) error {
 	return nil
 }
 
+func allocationFromRuntime(container runtime.ContainerInfo) *Allocation {
+	generation, err := strconv.ParseUint(container.Labels["trellis.allocation-generation"], 10, 64)
+	if err != nil || generation == 0 {
+		return nil
+	}
+	jobRevision, err := strconv.Atoi(container.Labels["trellis.job-revision"])
+	if err != nil || jobRevision <= 0 {
+		return nil
+	}
+	allocationID := container.Labels["trellis.allocation-id"]
+	executionHash := container.Labels["trellis.execution-hash"]
+	if allocationID == "" || executionHash == "" {
+		return nil
+	}
+	return &Allocation{
+		ID: container.ID, ContainerID: container.ID, AllocationID: allocationID,
+		Generation: generation, JobRevision: jobRevision, ExecutionHash: executionHash,
+		Namespace: container.Labels["trellis.namespace"], JobName: container.Labels["trellis.job"],
+		GroupName: container.Labels["trellis.task-group"], TaskName: container.Labels["trellis.task"],
+		Status: "running", Health: "unknown",
+	}
+}
+
 // GetAllocations returns copies of agent allocation state.
 func (a *Agent) GetAllocations() []*Allocation {
 	a.mu.RLock()
@@ -341,6 +395,12 @@ func (a *Agent) GetAllocations() []*Allocation {
 
 // PrepareStart validates and begins an allocation start operation.
 func (a *Agent) PrepareStart(ctx context.Context, request *api.AllocationRequest) error {
+	unlock := a.lockAllocationOperation(request.AllocationID)
+	defer unlock()
+	return a.prepareStart(ctx, request)
+}
+
+func (a *Agent) prepareStart(ctx context.Context, request *api.AllocationRequest) error {
 	if err := a.AcceptEpoch(request.Epoch); err != nil {
 		return err
 	}
@@ -364,8 +424,25 @@ func (a *Agent) PrepareStart(ctx context.Context, request *api.AllocationRequest
 	}
 	a.mu.RUnlock()
 	for _, id := range oldIDs {
-		if err := a.StopAllocation(ctx, id); err != nil {
+		if err := a.stopAllocation(ctx, id); err != nil {
 			return fmt.Errorf("replace older generation: %w", err)
+		}
+	}
+	return nil
+}
+
+// RunGroup serializes and starts every task in one scheduler allocation.
+func (a *Agent) RunGroup(ctx context.Context, request *api.AllocationRequest) error {
+	unlock := a.lockAllocationOperation(request.AllocationID)
+	defer unlock()
+	if err := a.prepareStart(ctx, request); err != nil {
+		return err
+	}
+	for i := range request.Tasks {
+		task := &request.Tasks[i]
+		id := fmt.Sprintf("%s-g%d-%s", request.AllocationID, request.Generation, task.Name)
+		if err := a.RunAllocation(ctx, id, request.AllocationID, request.Generation, request.JobRevision, request.ExecutionHash, request.Namespace, request.JobName, request.GroupName, task.Name, task, request.Runtime, request.NetworkPlan, request.EnvOverrides, request.Secrets, request.Restart); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -373,6 +450,8 @@ func (a *Agent) PrepareStart(ctx context.Context, request *api.AllocationRequest
 
 // StopGroup stops all tasks in an allocation group.
 func (a *Agent) StopGroup(ctx context.Context, request *api.StopAllocationRequest) error {
+	unlock := a.lockAllocationOperation(request.AllocationID)
+	defer unlock()
 	if err := a.AcceptEpoch(request.Epoch); err != nil {
 		return err
 	}
@@ -393,7 +472,7 @@ func (a *Agent) StopGroup(ctx context.Context, request *api.StopAllocationReques
 	a.mu.RUnlock()
 	var errs []error
 	for _, id := range ids {
-		if err := a.StopAllocation(ctx, id); err != nil {
+		if err := a.stopAllocation(ctx, id); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -582,6 +661,8 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		"trellis.cluster":               a.cluster,
 		"trellis.allocation-id":         schedulerID,
 		"trellis.allocation-generation": strconv.FormatUint(generation, 10),
+		"trellis.job-revision":          strconv.Itoa(jobRevision),
+		"trellis.execution-hash":        executionHash,
 		"trellis.namespace":             namespace,
 		"trellis.job":                   jobName,
 		"trellis.task-group":            groupName,
@@ -876,6 +957,18 @@ func (a *Agent) Logs(ctx context.Context, allocID string, follow bool, tail int)
 // StopAllocation stops and removes an allocation.
 func (a *Agent) StopAllocation(ctx context.Context, allocID string) error {
 	a.mu.RLock()
+	allocation := a.allocations[allocID]
+	a.mu.RUnlock()
+	if allocation == nil {
+		return fmt.Errorf("%w: %s", ErrAllocationNotFound, allocID)
+	}
+	unlock := a.lockAllocationOperation(allocation.AllocationID)
+	defer unlock()
+	return a.stopAllocation(ctx, allocID)
+}
+
+func (a *Agent) stopAllocation(ctx context.Context, allocID string) error {
+	a.mu.RLock()
 	stored, ok := a.allocations[allocID]
 	var alloc Allocation
 	if ok {
@@ -1076,12 +1169,12 @@ func (a *Agent) runHeartbeatLoop(ctx context.Context) {
 			}
 			a.mu.RUnlock()
 			response, err := a.server.SendHeartbeat(ctx, a.nodeID, &client.Heartbeat{
-				NodeID:      a.nodeID,
-				Timestamp:   time.Now(),
-				Allocations: actual,
-				Volumes:     a.volumes.AvailableHostVolumes(),
+				NodeID:       a.nodeID,
+				Timestamp:    time.Now(),
+				Allocations:  actual,
+				Volumes:      a.volumes.AvailableHostVolumes(),
 				Capabilities: a.nodeInfo.Capabilities,
-				Version:     a.version,
+				Version:      a.version,
 			})
 			if err != nil {
 				a.log.Error("send heartbeat failed", "error", err)

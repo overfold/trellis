@@ -3,6 +3,8 @@ package network
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +15,20 @@ type recordingRunner struct{ commands []string }
 
 func (r *recordingRunner) Run(_ context.Context, name string, args ...string) error {
 	r.commands = append(r.commands, name+" "+strings.Join(args, " "))
+	return nil
+}
+
+type failingRunner struct {
+	recordingRunner
+	failCommand string
+}
+
+func (r *failingRunner) Run(ctx context.Context, name string, args ...string) error {
+	command := name + " " + strings.Join(args, " ")
+	r.commands = append(r.commands, command)
+	if strings.Contains(command, r.failCommand) {
+		return errors.New("command failed")
+	}
 	return nil
 }
 
@@ -95,7 +111,6 @@ func TestConfigureWorkloadDNSRejectsIPv6(t *testing.T) {
 	}
 }
 
-
 func TestAutomatedWireGuardUsesPlanListenPort(t *testing.T) {
 	manager, err := NewAutomatedWireGuardManager(t.TempDir())
 	if err != nil {
@@ -122,7 +137,6 @@ func TestAutomatedWireGuardUsesPlanListenPort(t *testing.T) {
 		t.Fatalf("namespace listen port was not applied:\n%s", joined)
 	}
 }
-
 
 func TestWireGuardDetachRemovesNamespacePathAfterLastAllocation(t *testing.T) {
 	manager, err := NewAutomatedWireGuardManager(t.TempDir())
@@ -175,5 +189,82 @@ func TestWireGuardDetachRemovesNamespacePathAfterLastAllocation(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(manager.stateDir, "acme")); !os.IsNotExist(err) {
 		t.Fatalf("namespace lease directory still exists after last detach: %v", err)
+	}
+}
+
+func TestReserveAddressResolvesCollisionAndPersistsChoice(t *testing.T) {
+	dir := t.TempDir()
+	var first, second string
+	addresses := map[string]string{}
+	for i := 0; ; i++ {
+		candidate := fmt.Sprintf("alloc-%d", i)
+		address, err := allocationAddress("10.42.1.0/29", candidate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if owner, exists := addresses[address]; exists {
+			first, second = owner, candidate
+			break
+		}
+		addresses[address] = candidate
+	}
+	firstAddress, _, err := reserveAddress(dir, "10.42.1.0/29", first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondAddress, secondLease, err := reserveAddress(dir, "10.42.1.0/29", second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondAddress == firstAddress {
+		t.Fatalf("colliding allocations both received %s", firstAddress)
+	}
+	again, lease, err := reserveAddress(dir, "10.42.1.0/29", second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != secondAddress || lease != secondLease {
+		t.Fatalf("persisted lease changed: (%s, %s) != (%s, %s)", again, lease, secondAddress, secondLease)
+	}
+}
+
+func TestAuthoritativePlanRemovesStalePeersAndRoutes(t *testing.T) {
+	manager, err := NewAutomatedWireGuardManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{}
+	manager.run = runner
+	plan := Plan{CIDR: "10.42.1.0/24", Gateway: "10.42.1.1", WireGuardAddress: "169.254.1.1/32", ListenPort: 51917,
+		Peers: []PeerPlan{{PublicKey: "old-peer", AllowedIPs: []string{"10.42.2.0/24"}}}}
+	first, err := manager.Attach(context.Background(), AttachRequest{Namespace: "acme", Network: "acme", AllocationID: "alloc-old", Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.Peers = []PeerPlan{{PublicKey: "new-peer", AllowedIPs: []string{"10.42.3.0/24"}}}
+	runner.commands = nil
+	if _, err := manager.Attach(context.Background(), AttachRequest{Namespace: "acme", Network: "acme", AllocationID: "alloc-new", Plan: plan}); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(runner.commands, "\n")
+	for _, want := range []string{"peer old-peer remove", "ip route del 10.42.2.0/24 dev " + first.WireGuardInterface} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("commands do not contain %q:\n%s", want, joined)
+		}
+	}
+}
+
+func TestAttachReturnsSetupErrors(t *testing.T) {
+	manager, err := NewAutomatedWireGuardManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &failingRunner{failCommand: "ip addr replace 10.42.1.1/24"}
+	manager.run = runner
+	_, err = manager.Attach(context.Background(), AttachRequest{Namespace: "acme", Network: "acme", AllocationID: "alloc-error", Plan: Plan{
+		CIDR: "10.42.1.0/24", Gateway: "10.42.1.1", WireGuardAddress: "169.254.1.1/32", ListenPort: 51917,
+	}})
+	if err == nil {
+		t.Fatal("Attach reported success after bridge address setup failed")
 	}
 }

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/clofour/trellis/internal/lifecycle"
@@ -26,8 +27,24 @@ func (m memoryStore) Put(_ context.Context, key string, value []byte) error {
 	return nil
 }
 func (m memoryStore) Delete(_ context.Context, key string) error { delete(m, key); return nil }
+func (m memoryStore) Batch(_ context.Context, mutations []state.Mutation) error {
+	for _, mutation := range mutations {
+		if mutation.Key == "" {
+			return fmt.Errorf("empty key")
+		}
+	}
+	for _, mutation := range mutations {
+		if mutation.Value == nil {
+			delete(m, mutation.Key)
+		} else {
+			m[mutation.Key] = mutation.Value
+		}
+	}
+	return nil
+}
 
 var _ state.Store = memoryStore{}
+var _ state.AtomicStore = memoryStore{}
 
 func TestStateControllerRoundTripsDurableLeaderState(t *testing.T) {
 	ctx := context.Background()

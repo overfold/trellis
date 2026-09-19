@@ -2,9 +2,26 @@ package state
 
 import (
 	"context"
+	"encoding/json"
+	"net/url"
 	"path/filepath"
 	"testing"
+
+	"github.com/clofour/trellis/internal/spec"
 )
+
+func validSnapshotJob(t *testing.T, namespace, name string, revision int) (string, []byte) {
+	t.Helper()
+	value, err := json.Marshal(persistedJob{Spec: &spec.JobSpec{
+		Namespace:  namespace,
+		Name:       name,
+		TaskGroups: []spec.TaskGroupSpec{{Name: "group", Count: 1, Tasks: []spec.TaskSpec{{Name: "task", Image: "example/image:1"}}}},
+	}, Revision: revision})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return url.QueryEscape(namespace + "\x00" + name), value
+}
 
 func TestBoltStoreRoundTrip(t *testing.T) {
 	store, err := NewBoltStore(filepath.Join(t.TempDir(), "test.db"))
@@ -101,9 +118,9 @@ func TestRestoreDesiredKeepsRuntimeStateAndRequiresFreshTarget(t *testing.T) {
 	if err := store.Put(ctx, "trellis/new/nodes/local", []byte(`{"id":"local"}`)); err != nil {
 		t.Fatal(err)
 	}
+	jobKey, jobValue := validSnapshotJob(t, "default", "web", 3)
 	snapshot := &DesiredSnapshot{
-		Jobs:                     map[string][]byte{"web": []byte(`{"revision":3}`)},
-		Secrets:                  map[string][]byte{"prod/token": []byte(`{"ciphertext":"encrypted"}`)},
+		Jobs:                     map[string][]byte{jobKey: jobValue},
 		NetworkPortRegistrations: map[string][]byte{"acme": []byte(`{"namespace":"acme","slot":7}`)},
 	}
 	if err := store.RestoreDesired("new", snapshot); err != nil {
@@ -113,10 +130,9 @@ func TestRestoreDesiredKeepsRuntimeStateAndRequiresFreshTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 4 ||
+	if len(all) != 3 ||
 		all["trellis/new/nodes/local"] == nil ||
-		all["trellis/new/jobs/web"] == nil ||
-		all["trellis/new/secrets/prod/token"] == nil ||
+		all["trellis/new/jobs/"+jobKey] == nil ||
 		all["trellis/new/network-port-registrations/acme"] == nil {
 		t.Fatalf("unexpected restored state: %#v", all)
 	}
@@ -125,4 +141,65 @@ func TestRestoreDesiredKeepsRuntimeStateAndRequiresFreshTarget(t *testing.T) {
 	}
 }
 
+func TestRestoreDesiredRejectsInvalidSnapshotWithoutWriting(t *testing.T) {
+	store, err := NewBoltStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+
+	key, value := validSnapshotJob(t, "default", "web", 2)
+	var job persistedJob
+	if err := json.Unmarshal(value, &job); err != nil {
+		t.Fatal(err)
+	}
+	job.Spec.Name = "other"
+	value, _ = json.Marshal(job)
+	snapshot := &DesiredSnapshot{
+		Jobs:                     map[string][]byte{key: value},
+		NetworkPortRegistrations: map[string][]byte{"bad": []byte(`{"namespace":"bad","slot":-1}`)},
+	}
+	if err := store.RestoreDesired("new", snapshot); err == nil {
+		t.Fatal("expected semantic validation failure")
+	}
+	entries, err := store.List(context.Background(), "trellis/new/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("invalid restore wrote state: %#v", entries)
+	}
+}
+
+func TestBoltBatchAndDesiredSnapshot(t *testing.T) {
+	store, err := NewBoltStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	ctx := context.Background()
+	jobKey, jobValue := validSnapshotJob(t, "default", "web", 1)
+	mutations := []Mutation{
+		{Key: "trellis/c/jobs/" + jobKey, Value: jobValue},
+		{Key: "trellis/c/job-revisions/" + jobKey + "/1", Value: []byte(`{"revision":1}`)},
+	}
+	if err := store.Batch(ctx, mutations); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.DesiredSnapshot("c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Jobs) != 1 || len(snapshot.JobRevisions) != 1 {
+		t.Fatalf("snapshot omitted atomic job state: %#v", snapshot)
+	}
+	if err := store.Batch(ctx, []Mutation{{Key: "trellis/c/jobs/other", Value: []byte("bad")}, {Key: "", Value: []byte("fail")}}); err == nil {
+		t.Fatal("expected invalid batch to fail")
+	}
+	if value, err := store.Get(ctx, "trellis/c/jobs/other"); err != nil || value != nil {
+		t.Fatalf("failed batch was not atomic: value=%q err=%v", value, err)
+	}
+}
+
 var _ Store = (*BoltStore)(nil)
+var _ AtomicStore = (*BoltStore)(nil)

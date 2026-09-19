@@ -10,7 +10,7 @@ The design is leader-driven. A Raft-backed state store persists jobs, secrets, a
 
 A `spec.JobSpec` is immutable input to a job revision. A task group's execution content is hashed independently of count, labels, and update policy so metadata/scale changes can be distinguished from container replacement. Server `Allocation` objects join desired identity (namespace/job/group/revision/generation) with placement and observed lifecycle/health. Agents reconstruct local allocation state from runtime labels after restart.
 
-Desired state is durable. Observations—heartbeats, runtime status, logs, much of the catalog—are renewable. Backups intentionally capture only jobs and encrypted secrets; restoring reconstitutes desired state and lets reconciliation schedule clean allocations.
+Desired state is durable. Observations—heartbeats, runtime status, logs, much of the catalog—are renewable. Backups capture desired jobs, their revision history, encrypted secrets, and placement metadata; restoring reconstitutes desired state and lets reconciliation schedule clean allocations.
 
 ## Package map
 

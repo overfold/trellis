@@ -4,7 +4,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -95,22 +94,12 @@ func (h *Handler) handleRun(c *echo.Context) error {
 	if request.ExecutionHash == "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "execution_hash is required")
 	}
-	if err := h.agent.PrepareStart(ctx, &request); err != nil {
-		return operationError(err)
-	}
 	defer func() {
 		for i := range request.Secrets {
 			clear(request.Secrets[i].Value)
 		}
 	}()
-	for i := range request.Tasks {
-		task := &request.Tasks[i]
-		id := fmt.Sprintf("%s-g%d-%s", request.AllocationID, request.Generation, task.Name)
-		err = h.agent.RunAllocation(ctx, id, request.AllocationID, request.Generation, request.JobRevision, request.ExecutionHash, request.Namespace, request.JobName, request.GroupName, task.Name, task, request.Runtime, request.NetworkPlan, request.EnvOverrides, request.Secrets, request.Restart)
-		if err != nil {
-			break
-		}
-	}
+	err = h.agent.RunGroup(ctx, &request)
 	if err != nil {
 		h.agent.log.Error("start allocation failed", "allocation", request.AllocationID, "error", err)
 		return operationError(err)

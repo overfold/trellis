@@ -95,6 +95,31 @@ func (s *StateController) PutJob(ctx context.Context, id string, job *Job) error
 	return nil
 }
 
+// PutJobWithRevision commits a job and its revision history record together.
+func (s *StateController) PutJobWithRevision(ctx context.Context, id string, job *Job, record *JobRevisionRecord) error {
+	if record == nil {
+		return s.PutJob(ctx, id, job)
+	}
+	jobRaw, err := json.Marshal(job)
+	if err != nil {
+		return fmt.Errorf("marshal job: %w", err)
+	}
+	revisionRaw, err := json.Marshal(record)
+	if err != nil {
+		return fmt.Errorf("marshal job revision: %w", err)
+	}
+	jobKey := fmt.Sprintf("%s/%s/jobs/%s", trellisNamespace, s.cluster, url.QueryEscape(id))
+	revisionKey := fmt.Sprintf("%s/%s/job-revisions/%s/%d", trellisNamespace, s.cluster, url.QueryEscape(id), record.Revision)
+	atomic, ok := s.store.(state.AtomicStore)
+	if !ok {
+		return fmt.Errorf("state store does not support atomic job revisions")
+	}
+	if err := atomic.Batch(ctx, []state.Mutation{{Key: jobKey, Value: jobRaw}, {Key: revisionKey, Value: revisionRaw}}); err != nil {
+		return fmt.Errorf("put job and revision: %w", err)
+	}
+	return nil
+}
+
 // DeleteJob removes a persisted job.
 func (s *StateController) DeleteJob(ctx context.Context, id string) error {
 	key := fmt.Sprintf("%s/%s/jobs/%s", trellisNamespace, s.cluster, url.QueryEscape(id))
@@ -120,6 +145,29 @@ func (s *StateController) ListAllocations(ctx context.Context) (map[string]*Allo
 func (s *StateController) PutAllocation(ctx context.Context, allocation *Allocation) error {
 	key := fmt.Sprintf("%s/%s/allocations/%s", trellisNamespace, s.cluster, allocation.ID)
 	return s.put(ctx, key, allocation)
+}
+
+// PutAllocations commits allocation updates as one durable state transition.
+func (s *StateController) PutAllocations(ctx context.Context, allocations []*Allocation) error {
+	if len(allocations) == 0 {
+		return nil
+	}
+	atomic, ok := s.store.(state.AtomicStore)
+	if !ok {
+		return fmt.Errorf("state store does not support atomic allocation updates")
+	}
+	mutations := make([]state.Mutation, 0, len(allocations))
+	for _, allocation := range allocations {
+		raw, err := json.Marshal(allocation)
+		if err != nil {
+			return fmt.Errorf("marshal allocation %s: %w", allocation.ID, err)
+		}
+		mutations = append(mutations, state.Mutation{Key: fmt.Sprintf("%s/%s/allocations/%s", trellisNamespace, s.cluster, allocation.ID), Value: raw})
+	}
+	if err := atomic.Batch(ctx, mutations); err != nil {
+		return fmt.Errorf("put allocations: %w", err)
+	}
+	return nil
 }
 
 // DeleteAllocation removes a persisted allocation.

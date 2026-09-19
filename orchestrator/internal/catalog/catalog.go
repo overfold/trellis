@@ -41,6 +41,18 @@ func (c *ServiceCatalog) Update(namespace string, instances []ServiceInstance) {
 	}
 }
 
+// Replace atomically replaces the complete renewable catalog snapshot.
+func (c *ServiceCatalog) Replace(services map[string][]ServiceInstance) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.services = make(map[string][]ServiceInstance, len(services))
+	for namespace, instances := range services {
+		if len(instances) != 0 {
+			c.services[namespace] = append([]ServiceInstance(nil), instances...)
+		}
+	}
+}
+
 // Lookup returns instances for a job in a namespace.
 func (c *ServiceCatalog) Lookup(namespace, jobName string) []ServiceInstance {
 	c.mu.RLock()

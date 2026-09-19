@@ -13,6 +13,7 @@ type PeerPlan struct {
 type Plan struct {
 	CIDR, Gateway, WireGuardAddress string
 	ListenPort                      int
+	APIPort                         int
 	Peers                           []PeerPlan
 }
 
@@ -32,6 +33,7 @@ type Attachment struct {
 	Bridge             string
 	WireGuardInterface string
 	Gateway            string
+	APIPort            int
 	Address            string
 	LeasePath          string
 }
