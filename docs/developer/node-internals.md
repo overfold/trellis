@@ -22,7 +22,7 @@ Volume registrations and their data outlive individual allocations. Changing `ho
 
 ## Networking
 
-Host mode bypasses allocation isolation. Isolated allocations can receive an automatically derived namespace address and WireGuard peer plan when the job enables WireGuard. The leader deterministically derives namespace subnets and node peer information from the configured cluster pool. The node manager materializes interfaces/routes/peers; disabled networking returns an explicit capability error. Trellis DNS answers catalog lookups over UDP.
+Host mode bypasses allocation isolation. Isolated allocations can receive an automatically derived namespace address and WireGuard peer plan when the job enables WireGuard. The leader deterministically derives namespace subnets and node peer information from the configured cluster pool. The node manager materializes interfaces/routes/peers; disabled networking returns an explicit capability error. Every container receives the same Trellis workload resolver in `resolv.conf`. The resolver listens on the reserved node-local address `198.18.0.53:53` over UDP and TCP, answers `*.trellis` discovery records itself, and forwards other queries to the node's normal upstream resolvers. Namespace firewall rules permit DNS to that internal address without otherwise weakening namespace isolation.
 
 ## Secrets and API access
 
