@@ -57,7 +57,6 @@ type WireGuardManager struct {
 	stateDir   string
 	run        commandRunner
 	mu         sync.Mutex
-	listenPort int
 	dnsAddress string
 }
 
@@ -79,8 +78,8 @@ func (m *WireGuardManager) ConfigureWorkloadDNS(ctx context.Context, address str
 }
 
 // NewAutomatedWireGuardManager creates a manager with an automatically generated identity.
-func NewAutomatedWireGuardManager(stateDir string, listenPort int) (*WireGuardManager, error) {
-	m := &WireGuardManager{stateDir: stateDir, run: execRunner{}, listenPort: listenPort}
+func NewAutomatedWireGuardManager(stateDir string) (*WireGuardManager, error) {
+	m := &WireGuardManager{stateDir: stateDir, run: execRunner{}}
 	if _, err := m.Identity(); err != nil {
 		return nil, err
 	}
@@ -207,7 +206,7 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 		cfg, err = m.load(networkName)
 	} else {
 		cfg = &Config{CIDR: request.Plan.CIDR, Gateway: request.Plan.Gateway, WireGuardAddress: request.Plan.WireGuardAddress,
-			PrivateKeyFile: filepath.Join(m.stateDir, "identity.key"), ListenPort: m.listenPort}
+			PrivateKeyFile: filepath.Join(m.stateDir, "identity.key"), ListenPort: request.Plan.ListenPort}
 		for _, peer := range request.Plan.Peers {
 			cfg.Peers = append(cfg.Peers, Peer(peer))
 		}
