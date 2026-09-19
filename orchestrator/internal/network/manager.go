@@ -12,6 +12,7 @@ type PeerPlan struct {
 // Plan describes the network configuration for an allocation.
 type Plan struct {
 	CIDR, Gateway, WireGuardAddress string
+	ListenPort                      int
 	Peers                           []PeerPlan
 }
 
