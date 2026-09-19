@@ -1200,6 +1200,10 @@ func (s *Server) refreshCatalog() {
 			}
 		}
 		address := allocationEndpointAddress(a)
+		if address == "" {
+			a.mu.Unlock()
+			continue
+		}
 		namespaced[a.Namespace] = append(namespaced[a.Namespace], catalog.ServiceInstance{
 			ID:      a.ID,
 			Job:     a.JobName,
