@@ -107,7 +107,7 @@ func main() {
 	f.StringVar(&cfg.WireGuardPool, "wireguard-pool", "10.64.0.0/10", "Cluster address pool used for automatic namespace networking")
 	f.StringVar(&cfg.WireGuardEndpoint, "wireguard-endpoint", "", "Externally reachable WireGuard host or host:port")
 	f.IntVar(&cfg.WireGuardPort, "wireguard-port", 51820, "WireGuard UDP listen port")
-	f.StringVar(&cfg.DNSListen, "dns-listen", ":8053", "DNS resolver listen address")
+	f.StringVar(&cfg.DNSListen, "dns-listen", net.JoinHostPort(network.WorkloadDNSAddress, "53"), "Workload DNS resolver listen address")
 	f.StringVar(&cfg.CACert, "ca-cert", "", "Path to cluster CA certificate (PEM)")
 	f.StringVar(&cfg.CAKey, "ca-key", "", "Path to cluster CA private key (PEM)")
 	f.StringVar(&cfg.Cert, "cert", "", "Path to node certificate (PEM)")
@@ -303,9 +303,18 @@ func run(parent context.Context, cfg *config) error {
 		return fmt.Errorf("dns listen address: %w", err)
 	}
 	if dnsHost == "" || dnsHost == "0.0.0.0" {
-		dnsHost = "127.0.0.1"
+		dnsHost = network.WorkloadDNSAddress
+		cfg.DNSListen = net.JoinHostPort(dnsHost, strconv.Itoa(dnsPort))
 	}
-	ag.SetDNSServers([]string{net.JoinHostPort(dnsHost, strconv.Itoa(dnsPort))})
+	if cfg.Runtime == "containerd" {
+		if dnsPort != 53 {
+			return fmt.Errorf("workload DNS must listen on port 53; resolv.conf nameserver entries cannot include a custom port")
+		}
+		if err := networkManager.ConfigureWorkloadDNS(ctx, dnsHost); err != nil {
+			return err
+		}
+	}
+	ag.SetDNSServers([]string{dnsHost})
 	ag.SetNetworkManager(networkManager)
 	endpoint := cfg.WireGuardEndpoint
 	if endpoint == "" {
@@ -335,7 +344,19 @@ func run(parent context.Context, cfg *config) error {
 	}
 	ag.Init(ctx)
 
-	dnsResolver := trellisdns.NewResolver(log, leaderClient, trellisdns.DefaultDomain)
+	upstreams, upstreamErr := trellisdns.SystemResolvers("/etc/resolv.conf")
+	if upstreamErr != nil {
+		log.Warn("load DNS upstreams", "error", upstreamErr)
+	}
+	filteredUpstreams := upstreams[:0]
+	for _, upstream := range upstreams {
+		host, _, splitErr := net.SplitHostPort(upstream)
+		if splitErr == nil && host == dnsHost {
+			continue
+		}
+		filteredUpstreams = append(filteredUpstreams, upstream)
+	}
+	dnsResolver := trellisdns.NewResolver(log, leaderClient, trellisdns.DefaultDomain, filteredUpstreams...)
 	go func() {
 		if err := dnsResolver.Run(ctx, cfg.DNSListen); err != nil && ctx.Err() == nil {
 			log.Error("dns resolver stopped", "error", err)

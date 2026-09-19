@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sort"
@@ -464,8 +465,11 @@ func writeDNSConfig(path string, servers []string) error {
 		return fmt.Errorf("create DNS config directory: %w", err)
 	}
 	var content string
-	for _, s := range servers {
-		content += "nameserver " + s + "\n"
+	for _, server := range servers {
+		if _, err := netip.ParseAddr(server); err != nil {
+			return fmt.Errorf("DNS server %q must be an IP address without a port", server)
+		}
+		content += "nameserver " + server + "\n"
 	}
 	return os.WriteFile(path, []byte(content), 0o644)
 }

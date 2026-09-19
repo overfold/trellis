@@ -48,6 +48,9 @@ func (execRunner) Run(ctx context.Context, name string, args ...string) error {
 	return nil
 }
 
+// WorkloadDNSAddress is the reserved node-local resolver address injected into workloads.
+const WorkloadDNSAddress = "198.18.0.53"
+
 // WireGuardManager manages allocation networking with WireGuard.
 type WireGuardManager struct {
 	configDir  string
@@ -55,6 +58,24 @@ type WireGuardManager struct {
 	run        commandRunner
 	mu         sync.Mutex
 	listenPort int
+	dnsAddress string
+}
+
+// ConfigureWorkloadDNS reserves an internal address on loopback for the Trellis
+// workload resolver. Namespace firewall rules allow only DNS traffic to this
+// address; it is not exposed on external interfaces.
+func (m *WireGuardManager) ConfigureWorkloadDNS(ctx context.Context, address string) error {
+	ip, err := netip.ParseAddr(address)
+	if err != nil || !ip.Is4() {
+		return fmt.Errorf("workload DNS address must be IPv4: %s", address)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.run.Run(ctx, "ip", "addr", "replace", address+"/32", "dev", "lo"); err != nil {
+		return fmt.Errorf("configure workload DNS address: %w", err)
+	}
+	m.dnsAddress = address
+	return nil
 }
 
 // NewAutomatedWireGuardManager creates a manager with an automatically generated identity.
@@ -253,6 +274,16 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 	if m.run.Run(ctx, "iptables", "-C", "FORWARD", "-o", bridge, "!", "-i", wg, "-j", "DROP") != nil {
 		if err = m.run.Run(ctx, "iptables", "-A", "FORWARD", "-o", bridge, "!", "-i", wg, "-j", "DROP"); err != nil {
 			return nil, err
+		}
+	}
+	if m.dnsAddress != "" {
+		for _, protocol := range []string{"udp", "tcp"} {
+			args := []string{"INPUT", "-i", bridge, "-d", m.dnsAddress, "-p", protocol, "--dport", "53", "-j", "ACCEPT"}
+			if m.run.Run(ctx, "iptables", append([]string{"-C"}, args...)...) != nil {
+				if err = m.run.Run(ctx, "iptables", append([]string{"-I"}, args...)...); err != nil {
+					return nil, err
+				}
+			}
 		}
 	}
 	if m.run.Run(ctx, "iptables", "-C", "INPUT", "-i", bridge, "!", "-d", cfg.Gateway, "-j", "DROP") != nil {

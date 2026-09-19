@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/binary"
 	"net"
+	"os"
+	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/clofour/trellis/internal/api"
@@ -60,7 +63,7 @@ func TestHandleQuery(t *testing.T) {
 	r := NewResolver(nil, &mockLookup{services: &services}, "trellis")
 	r.refresh(context.Background())
 
-	query := buildQuery("web.acme.trellis.", 1, 1)
+	query := buildQuery("web.acme.trellis.")
 	resp := r.handleQuery(query)
 	if resp == nil {
 		t.Fatal("expected response")
@@ -82,7 +85,7 @@ func TestHandleQueryNXDomain(t *testing.T) {
 	r := NewResolver(nil, &mockLookup{services: &api.ServiceListResponse{}}, "trellis")
 	r.refresh(context.Background())
 
-	query := buildQuery("missing.acme.trellis.", 1, 1)
+	query := buildQuery("missing.acme.trellis.")
 	resp := r.handleQuery(query)
 	if resp == nil {
 		t.Fatal("expected response")
@@ -121,7 +124,7 @@ func TestResolveIgnoresEmptyAddresses(t *testing.T) {
 	}
 }
 
-func buildQuery(name string, qtype, qclass uint16) []byte {
+func buildQuery(name string) []byte {
 	var buf []byte
 
 	header := make([]byte, 12)
@@ -132,8 +135,8 @@ func buildQuery(name string, qtype, qclass uint16) []byte {
 	buf = append(buf, encodeName(name)...)
 
 	trailer := make([]byte, 4)
-	binary.BigEndian.PutUint16(trailer[0:2], qtype)
-	binary.BigEndian.PutUint16(trailer[2:4], qclass)
+	binary.BigEndian.PutUint16(trailer[0:2], 1)
+	binary.BigEndian.PutUint16(trailer[2:4], 1)
 	buf = append(buf, trailer...)
 
 	return buf
@@ -155,5 +158,61 @@ func TestResolveMultipleNamespaces(t *testing.T) {
 	ips = r.resolve("web.staging.trellis.")
 	if len(ips) != 1 || !ips[0].Equal(net.ParseIP("10.0.1.1")) {
 		t.Fatalf("expected 10.0.1.1 for staging, got %v", ips)
+	}
+}
+
+
+func TestForwardsExternalQueriesToUpstream(t *testing.T) {
+	upstream, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = upstream.Close() }()
+
+	go func() {
+		buf := make([]byte, maxDNSMessageSize)
+		n, remote, err := upstream.ReadFromUDP(buf)
+		if err != nil {
+			return
+		}
+		response := append([]byte(nil), buf[:n]...)
+		flags := binary.BigEndian.Uint16(response[2:4])
+		binary.BigEndian.PutUint16(response[2:4], flags|0x8000|0x0080)
+		_, _ = upstream.WriteToUDP(response, remote)
+	}()
+
+	r := NewResolver(nil, &mockLookup{services: &api.ServiceListResponse{}}, "trellis", upstream.LocalAddr().String())
+	resp := r.handleQuery(buildQuery("example.com."))
+	if resp == nil {
+		t.Fatal("expected forwarded response")
+	}
+	if flags := binary.BigEndian.Uint16(resp[2:4]); flags&0x8000 == 0 {
+		t.Fatalf("expected response bit, flags=%#x", flags)
+	}
+}
+
+func TestExternalQueryWithoutUpstreamReturnsServfail(t *testing.T) {
+	r := NewResolver(nil, &mockLookup{services: &api.ServiceListResponse{}}, "trellis")
+	resp := r.handleQuery(buildQuery("example.com."))
+	if resp == nil {
+		t.Fatal("expected SERVFAIL response")
+	}
+	if rcode := binary.BigEndian.Uint16(resp[2:4]) & 0x000f; rcode != 2 {
+		t.Fatalf("expected SERVFAIL (2), got %d", rcode)
+	}
+}
+
+func TestSystemResolversParsesNameservers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "resolv.conf")
+	if err := os.WriteFile(path, []byte("# generated\nnameserver 127.0.0.53\nnameserver 2001:db8::53\nnameserver 127.0.0.53\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := SystemResolvers(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"127.0.0.53:53", "[2001:db8::53]:53"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("resolvers = %#v, want %#v", got, want)
 	}
 }

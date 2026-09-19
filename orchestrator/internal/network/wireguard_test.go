@@ -32,6 +32,9 @@ func TestWireGuardAttachBuildsIsolatedNamespace(t *testing.T) {
 	manager := NewWireGuardManager(dir)
 	manager.run = runner
 	manager.stateDir = t.TempDir()
+	if err := manager.ConfigureWorkloadDNS(context.Background(), WorkloadDNSAddress); err != nil {
+		t.Fatal(err)
+	}
 	a, err := manager.Attach(context.Background(), AttachRequest{Namespace: "acme", Network: "blue", AllocationID: "alloc-1"})
 	if err != nil {
 		t.Fatalf("Attach() error = %v", err)
@@ -40,7 +43,7 @@ func TestWireGuardAttachBuildsIsolatedNamespace(t *testing.T) {
 		t.Fatalf("unexpected attachment: %#v", a)
 	}
 	joined := strings.Join(runner.commands, "\n")
-	for _, want := range []string{"type wireguard", "wg set", "ip netns add alloc-1", "netns alloc-1", "iptables -C FORWARD"} {
+	for _, want := range []string{"type wireguard", "wg set", "ip netns add alloc-1", "netns alloc-1", "iptables -C FORWARD", "ip addr replace 198.18.0.53/32 dev lo", "iptables -C INPUT -i tb"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("commands do not contain %q:\n%s", want, joined)
 		}
@@ -81,5 +84,13 @@ func TestAutomatedIdentityPersists(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("private key mode = %o", info.Mode().Perm())
+	}
+}
+
+func TestConfigureWorkloadDNSRejectsIPv6(t *testing.T) {
+	manager := NewWireGuardManager(t.TempDir())
+	manager.run = &recordingRunner{}
+	if err := manager.ConfigureWorkloadDNS(context.Background(), "fd00::53"); err == nil {
+		t.Fatal("expected IPv6 workload DNS address to be rejected")
 	}
 }

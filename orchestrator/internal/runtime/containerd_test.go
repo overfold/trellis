@@ -11,7 +11,7 @@ import (
 
 func TestWriteDNSConfigCreatesParentDirectory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "logs", "allocation-resolv.conf")
-	if err := writeDNSConfig(path, []string{"127.0.0.1:8053"}); err != nil {
+	if err := writeDNSConfig(path, []string{"198.18.0.53"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -19,7 +19,7 @@ func TestWriteDNSConfigCreatesParentDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "nameserver 127.0.0.1:8053\n"; string(got) != want {
+	if want := "nameserver 198.18.0.53\n"; string(got) != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
@@ -69,5 +69,12 @@ func TestWriteHostsConfigAddsDeterministicAliases(t *testing.T) {
 	want := "127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n127.0.0.1 trellis\n10.0.0.2 zeta\n"
 	if string(got) != want {
 		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestWriteDNSConfigRejectsNameserverPorts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "resolv.conf")
+	if err := writeDNSConfig(path, []string{"127.0.0.1:8053"}); err == nil {
+		t.Fatal("expected nameserver with port to be rejected")
 	}
 }
