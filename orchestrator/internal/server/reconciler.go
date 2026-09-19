@@ -332,16 +332,36 @@ func (s *Server) nodePointers() []*Node {
 // Execute performs a reconciliation action.
 func (s *Server) Execute(ctx context.Context, action *Action) error {
 	alloc := action.Allocation
+
+	// Follow the server locking contract: when both locks are needed, acquire the
+	// global server lock before the allocation lock. In particular, do not hold
+	// allocation.mu while waiting for mu; readers such as metrics and allocation
+	// listing acquire them in the opposite direction and would otherwise be able
+	// to deadlock the whole control plane once a writer (for example a heartbeat)
+	// is queued on mu.
+	s.mu.RLock()
 	alloc.mu.Lock()
 	defer alloc.mu.Unlock()
+
+	serverLocked := true
+	unlockServer := func() {
+		if serverLocked {
+			s.mu.RUnlock()
+			serverLocked = false
+		}
+	}
+	defer unlockServer()
+
 	now := s.now().UTC()
 	address := fmt.Sprintf("%s:%d", alloc.Node.Host, alloc.Node.Port)
+	epoch := s.controlEpoch
+	serverAddr := s.serverAddr
+	nodeStatus := alloc.Node.Status
+
 	switch action.Type {
 	case ActionStart:
-		s.mu.RLock()
 		job := s.jobs[jobKey(alloc.Namespace, alloc.JobName)]
 		if job == nil {
-			s.mu.RUnlock()
 			return fmt.Errorf("job %s was deleted before allocation start", alloc.JobName)
 		}
 		var groupRuntime string
@@ -357,16 +377,19 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 				break
 			}
 		}
-		request := &api.AllocationRequest{AllocationID: alloc.ID, Generation: alloc.Generation, JobRevision: alloc.JobRevision, Epoch: s.controlEpoch, Namespace: alloc.Namespace, JobName: alloc.JobName, GroupName: alloc.TaskGroupName, Tasks: alloc.Tasks, Runtime: groupRuntime, Restart: groupRestart}
+		request := &api.AllocationRequest{AllocationID: alloc.ID, Generation: alloc.Generation, JobRevision: alloc.JobRevision, Epoch: epoch, Namespace: alloc.Namespace, JobName: alloc.JobName, GroupName: alloc.TaskGroupName, Tasks: alloc.Tasks, Runtime: groupRuntime, Restart: groupRestart}
 		if groupUsesWireGuard {
 			plan, err := s.networkPlan(alloc.Namespace, alloc.Node)
 			if err != nil {
-				s.mu.RUnlock()
 				return err
 			}
 			request.NetworkPlan = plan
 		}
-		s.mu.RUnlock()
+
+		// Everything below may perform storage or network I/O. Release mu while
+		// retaining allocation.mu so the allocation lifecycle remains serialized.
+		unlockServer()
+
 		for _, task := range request.Tasks {
 			for _, ref := range task.Secrets {
 				if s.secrets == nil {
@@ -400,7 +423,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 			}
 			request.EnvOverrides = map[string]string{
 				"TRELLIS_TOKEN":     token,
-				"TRELLIS_ADDR":      s.serverAddr,
+				"TRELLIS_ADDR":      serverAddr,
 				"TRELLIS_NAMESPACE": alloc.Namespace,
 			}
 			if caCert, _, caErr := s.ClusterCA(); caErr == nil && caCert != "" {
@@ -442,6 +465,8 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 			return fmt.Errorf("persist running allocation: %w", err)
 		}
 	case ActionStop:
+		unlockServer()
+
 		if alloc.Phase != lifecycle.PhaseStopping {
 			if err := alloc.Transition(lifecycle.PhaseStopping, now, "", ""); err != nil {
 				return err
@@ -450,8 +475,8 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 				return err
 			}
 		}
-		if alloc.Node.Status == NodeStatusHealthy || alloc.Node.Status == NodeStatusDraining {
-			if err := s.client.StopAllocation(ctx, address, &api.StopAllocationRequest{AllocationID: alloc.ID, Generation: alloc.Generation, Epoch: s.controlEpoch}); err != nil {
+		if nodeStatus == NodeStatusHealthy || nodeStatus == NodeStatusDraining {
+			if err := s.client.StopAllocation(ctx, address, &api.StopAllocationRequest{AllocationID: alloc.ID, Generation: alloc.Generation, Epoch: epoch}); err != nil {
 				if code := agentOperationCode(err); code == api.OperationStaleEpoch || code == api.OperationStaleGeneration {
 					return err
 				}
@@ -468,6 +493,8 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 		if err := s.state.PutAllocation(ctx, alloc); err != nil {
 			return fmt.Errorf("persist stopped allocation: %w", err)
 		}
+	default:
+		unlockServer()
 	}
 	return nil
 }
