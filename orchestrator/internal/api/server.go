@@ -107,6 +107,7 @@ type AllocationStatus struct {
 	ID         string           `json:"id"`
 	Generation uint64           `json:"generation"`
 	Task       string           `json:"task,omitempty"`
+	Address    string           `json:"address,omitempty"`
 	Phase      lifecycle.Phase  `json:"phase"`
 	Health     lifecycle.Health `json:"health"`
 	Ports      []PortMapping    `json:"ports,omitempty"`
