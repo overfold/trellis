@@ -293,8 +293,9 @@ type Allocation struct {
 	Phase         lifecycle.Phase  `json:"phase"`
 	Health        lifecycle.Health `json:"health"`
 	lifecycle.Diagnostic
-	Node  *Node
-	Ports []api.PortMapping `json:"ports,omitempty"`
+	Node    *Node
+	Address string            `json:"address,omitempty"`
+	Ports   []api.PortMapping `json:"ports,omitempty"`
 	// Draining marks an allocation whose job revision is superseded under
 	// a rolling update strategy. Draining allocations are not restarted on
 	// failure and are not counted toward the desired count.
@@ -590,11 +591,13 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 		return fmt.Errorf("persist node heartbeat: %w", err)
 	}
 	type statusInfo struct {
-		Generation uint64
-		Phase      lifecycle.Phase
-		Health     lifecycle.Health
-		Ports      []api.PortMapping
-		Tasks      int
+		Generation       uint64
+		Phase            lifecycle.Phase
+		Health           lifecycle.Health
+		Address          string
+		AddressAmbiguous bool
+		Ports            []api.PortMapping
+		Tasks            int
 	}
 	statuses := make(map[string]statusInfo, len(actual))
 	for _, a := range actual {
@@ -618,6 +621,13 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 			}
 		}
 		info.Tasks++
+		if a.Address != "" {
+			if info.Address == "" {
+				info.Address = a.Address
+			} else if info.Address != a.Address {
+				info.AddressAmbiguous = true
+			}
+		}
 		info.Ports = append(info.Ports, a.Ports...)
 		statuses[a.ID] = info
 	}
@@ -633,6 +643,11 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 			_ = a.Transition(info.Phase, time.Now().UTC(), "", "")
 		}
 		_ = a.SetHealth(info.Health)
+		if info.AddressAmbiguous {
+			a.Address = ""
+		} else if info.Address != "" {
+			a.Address = info.Address
+		}
 		if len(info.Ports) > 0 {
 			a.Ports = info.Ports
 		}
@@ -861,7 +876,7 @@ func (s *Server) ListJobs(namespace string) api.JobListResponse {
 				a.mu.Unlock()
 				continue
 			}
-			ar := api.AllocationResponse{ID: a.ID, Group: a.TaskGroupName, Phase: a.Phase, Health: a.Health, Draining: a.Draining, Generation: a.Generation, JobRevision: a.JobRevision, CreatedAt: a.CreatedAt, LastTransitionAt: a.TransitionedAt, Reason: a.Reason, Message: a.Message, Attempt: a.Attempt, NextRetryAt: a.NextRetryAt}
+			ar := api.AllocationResponse{ID: a.ID, Group: a.TaskGroupName, Address: allocationEndpointAddressLocked(a), Ports: a.Ports, Phase: a.Phase, Health: a.Health, Draining: a.Draining, Generation: a.Generation, JobRevision: a.JobRevision, CreatedAt: a.CreatedAt, LastTransitionAt: a.TransitionedAt, Reason: a.Reason, Message: a.Message, Attempt: a.Attempt, NextRetryAt: a.NextRetryAt}
 			if a.Node != nil {
 				ar.NodeID = a.Node.ID
 			}
@@ -898,7 +913,7 @@ func (s *Server) GetJob(namespace, name string) (*api.JobStatusResponse, bool) {
 			a.mu.Unlock()
 			continue
 		}
-		ar := api.AllocationResponse{ID: a.ID, Group: a.TaskGroupName, Phase: a.Phase, Health: a.Health, Draining: a.Draining, Generation: a.Generation, JobRevision: a.JobRevision, CreatedAt: a.CreatedAt, LastTransitionAt: a.TransitionedAt, Reason: a.Reason, Message: a.Message, Attempt: a.Attempt, NextRetryAt: a.NextRetryAt}
+		ar := api.AllocationResponse{ID: a.ID, Group: a.TaskGroupName, Address: allocationEndpointAddressLocked(a), Ports: a.Ports, Phase: a.Phase, Health: a.Health, Draining: a.Draining, Generation: a.Generation, JobRevision: a.JobRevision, CreatedAt: a.CreatedAt, LastTransitionAt: a.TransitionedAt, Reason: a.Reason, Message: a.Message, Attempt: a.Attempt, NextRetryAt: a.NextRetryAt}
 		if a.Node != nil {
 			ar.NodeID = a.Node.ID
 		}
@@ -1197,10 +1212,7 @@ func (s *Server) refreshCatalog() {
 				}
 			}
 		}
-		var address string
-		if a.Node != nil {
-			address = a.Node.Host
-		}
+		address := allocationEndpointAddressLocked(a)
 		namespaced[a.Namespace] = append(namespaced[a.Namespace], catalog.ServiceInstance{
 			ID:      a.ID,
 			Job:     a.JobName,

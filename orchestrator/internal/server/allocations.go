@@ -3,6 +3,7 @@ package server
 
 import (
 	"github.com/clofour/trellis/internal/api"
+	"github.com/clofour/trellis/internal/spec"
 )
 
 // AllocationListFilter restricts allocation query results.
@@ -58,8 +59,8 @@ func (s *Server) ListAllocations(namespace string, filter *AllocationListFilter)
 		}
 		if allocation.Node != nil {
 			response.NodeID = allocation.Node.ID
-			response.Address = allocation.Node.Host
 		}
+		response.Address = allocationEndpointAddressLocked(allocation)
 		result = append(result, response)
 		allocation.mu.Unlock()
 	}
@@ -96,6 +97,50 @@ func (s *Server) AllocationEvents(namespace, id string) (api.AllocationEventList
 		return result, true
 	}
 	return nil, false
+}
+
+func allocationEndpointAddressLocked(allocation *Allocation) string {
+	if allocation == nil {
+		return ""
+	}
+
+	namespaceTasks := 0
+	hostTasks := 0
+	for i := range allocation.Tasks {
+		if allocation.Tasks[i].Networking == nil {
+			continue
+		}
+		switch allocation.Tasks[i].Networking.Mode {
+		case spec.TaskNetworkWireGuard:
+			namespaceTasks++
+		case spec.TaskNetworkHost:
+			hostTasks++
+		}
+	}
+
+	switch {
+	case namespaceTasks == 1 && hostTasks == 0:
+		return allocation.Address
+	case namespaceTasks > 0:
+		// One AllocationResponse has only one address. Multiple namespace
+		// endpoints, or a namespace/host mixture, cannot be represented safely.
+		return ""
+	case hostTasks > 0:
+		if allocation.Node != nil {
+			return allocation.Node.Host
+		}
+		return ""
+	case len(allocation.Tasks) == 0:
+		// Preserve the legacy node-address behavior for old/recovered allocation
+		// records that do not carry task metadata.
+		if allocation.Address != "" {
+			return allocation.Address
+		}
+		if allocation.Node != nil {
+			return allocation.Node.Host
+		}
+	}
+	return ""
 }
 
 func (s *Server) allocationLabelsLocked(allocation *Allocation) map[string]string {

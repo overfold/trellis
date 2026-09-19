@@ -46,7 +46,8 @@ func TestStateControllerRoundTripsDurableLeaderState(t *testing.T) {
 	allocation := &Allocation{ID: "web-1", JobName: "web", JobRevision: 3,
 		Generation: 1,
 		Phase:      lifecycle.PhasePlaced,
-		Health:     lifecycle.HealthUnknown}
+		Health:     lifecycle.HealthUnknown,
+		Address:    "10.86.213.2"}
 	if err := controller.PutAllocation(ctx, allocation); err != nil {
 		t.Fatal(err)
 	}
@@ -56,6 +57,9 @@ func TestStateControllerRoundTripsDurableLeaderState(t *testing.T) {
 	}
 	if allocations["web-1"] == nil {
 		t.Fatalf("unexpected allocations: %#v", allocations)
+	}
+	if allocations["web-1"].Address != "10.86.213.2" {
+		t.Fatalf("allocation address was not persisted: %#v", allocations["web-1"])
 	}
 	if err := controller.DeleteAllocation(ctx, "web-1"); err != nil {
 		t.Fatal(err)

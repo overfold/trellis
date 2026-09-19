@@ -33,6 +33,8 @@ The API uses the same resource vocabulary as the [Trellis user model](../public/
 | `POST` | `/v1/allocations/{id}/exec/sessions` | Start an ephemeral interactive TTY session; requires write access. |
 | `POST` / `GET` / `DELETE` | `/v1/allocations/{id}/exec/sessions/{session}/...` | Write input, read output, resize, or close an interactive TTY session; requires write access. |
 | `GET` | `/v1/allocations/{id}/metrics` | Current per-task CPU and memory usage. |
+
+Allocation responses expose the endpoint address Trellis has actually observed for the allocation. Host-networked allocations use the node address; a task using namespace networking reports its private namespace address from the agent. Trellis leaves `address` empty when one allocation contains multiple distinct namespace endpoints that cannot be represented safely by the allocation-level response. Job status and job-list responses expose the same address and observed port data for their embedded allocations.
 | `PUT` | `/v1/namespaces/{ns}/secrets/{name}` | Set a secret; requires `cluster/write`. |
 | `GET` | `/v1/namespaces/{ns}/secrets[/{name}]` | List/get secret metadata only; requires cluster scope. |
 | `DELETE` | `/v1/namespaces/{ns}/secrets/{name}` | Delete a secret; requires `cluster/write`. |
