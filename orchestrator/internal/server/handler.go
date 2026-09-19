@@ -393,6 +393,7 @@ func (h *Handler) handleRegisterNode(c *echo.Context) error {
 		ID: request.ID, Host: request.Host, Port: request.Port, CPU: request.CPU, Memory: request.Memory,
 		OS: request.OS, Arch: request.Arch, Labels: request.Labels, Volumes: request.Volumes, Capabilities: request.Capabilities,
 		WireGuardPublicKey: request.WireGuardPublicKey, WireGuardEndpoint: request.WireGuardEndpoint,
+		WireGuardPortBase: request.WireGuardPortBase, WireGuardPortCount: request.WireGuardPortCount,
 	}); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "unable to register node")
 	}
