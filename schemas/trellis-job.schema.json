@@ -177,7 +177,7 @@
       "properties": {
         "cpu": {
           "description": "CPU request in millicores; 1000 represents one CPU core.",
-          "minimum": 0,
+          "minimum": 1,
           "type": "integer"
         },
         "memory": {
@@ -185,7 +185,7 @@
           "oneOf": [
             {
               "description": "Bytes.",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
             {

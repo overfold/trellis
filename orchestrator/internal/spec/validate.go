@@ -115,9 +115,6 @@ func Validate(job *JobSpec) error {
 			if !group.Update.Strategy.Valid() {
 				add(groupPath+".update.strategy", "unsupported", fmt.Sprintf("unsupported update strategy %q", group.Update.Strategy))
 			}
-			if group.Update.Strategy == UpdateRolling && group.Count < 2 {
-				add(groupPath+".update.strategy", "incompatible", "rolling updates require count >= 2; use recreate for single-instance groups")
-			}
 			if group.Update.MaxParallel < 0 {
 				add(groupPath+".update.max_parallel", "out_of_range", "must be at least 0")
 			}
@@ -177,11 +174,11 @@ func Validate(job *JobSpec) error {
 				add(taskPath+".image", "required", "image is required")
 			}
 			if task.Resources != nil {
-				if task.Resources.CPU < 0 {
-					add(taskPath+".resources.cpu", "out_of_range", "cannot be negative")
+				if task.Resources.CPU <= 0 {
+					add(taskPath+".resources.cpu", "out_of_range", "must be positive")
 				}
-				if task.Resources.Memory < 0 {
-					add(taskPath+".resources.memory", "out_of_range", "cannot be negative")
+				if task.Resources.Memory <= 0 {
+					add(taskPath+".resources.memory", "out_of_range", "must be positive")
 				}
 			}
 

@@ -26,6 +26,73 @@ func newTestServerWithAgent() (*Server, *testAgent) {
 	return s, agent
 }
 
+func TestReconcileDoesNotCreateAllocationsForInvalidJob(t *testing.T) {
+	s, agent := newTestServerWithAgent()
+	defer agent.server.Close()
+	limits := spec.DefaultLimits()
+	limits.MaxReplicasPerTaskGroup = 1
+	limits.MaxTaskGroupsPerJob = 1
+	limits.MaxTasksPerTaskGroup = 1
+	limits.MaxDesiredAllocations = 1
+	if err := s.SetJobLimits(limits); err != nil {
+		t.Fatal(err)
+	}
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
+	s.nodes[node.ID] = node
+	s.jobs[jobKey("default", "oversized")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "oversized", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 2, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}, Revision: 1}
+
+	s.Reconcile(context.Background())
+	if len(s.allocations) != 0 {
+		t.Fatalf("invalid job created allocations: %#v", s.allocations)
+	}
+}
+
+func TestNamespaceDesiredAllocationLimitIncludesOtherJobs(t *testing.T) {
+	s, agent := newTestServerWithAgent()
+	defer agent.server.Close()
+	limits := spec.DefaultLimits()
+	limits.MaxDesiredAllocationsPerNamespace = 2
+	if err := s.SetJobLimits(limits); err != nil {
+		t.Fatal(err)
+	}
+	s.jobs[jobKey("default", "first")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "first", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 2, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}}}
+	candidate := &spec.JobSpec{Namespace: "default", Name: "second", TaskGroups: []spec.TaskGroupSpec{{Name: "worker", Count: 1, Tasks: []spec.TaskSpec{{Name: "worker", Image: "worker"}}}}}
+	if err := s.CanonicalizeJob(candidate); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ValidateNamespaceAllocationLimit("default", candidate); err == nil {
+		t.Fatal("expected namespace desired-allocation limit rejection")
+	}
+}
+
+func TestReconcileEnforcesNamespaceDesiredAllocationLimit(t *testing.T) {
+	s, agent := newTestServerWithAgent()
+	defer agent.server.Close()
+	limits := spec.DefaultLimits()
+	limits.MaxDesiredAllocationsPerNamespace = 2
+	if err := s.SetJobLimits(limits); err != nil {
+		t.Fatal(err)
+	}
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
+	s.nodes[node.ID] = node
+	for _, name := range []string{"first", "second", "third"} {
+		s.jobs[jobKey("default", name)] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: name, TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}}, Revision: 1}
+	}
+	s.allocations = append(s.allocations, &Allocation{ID: "third-existing", Namespace: "default", JobName: "third", TaskGroupName: "app", Tasks: s.jobs[jobKey("default", "third")].Spec.TaskGroups[0].Tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhasePlaced, Health: lifecycle.HealthUnknown, Diagnostic: lifecycle.Diagnostic{CreatedAt: s.now(), TransitionedAt: s.now()}})
+
+	s.Reconcile(context.Background())
+	if len(s.allocations) != 3 {
+		t.Fatalf("allocations = %d, want two admitted plus one stopped", len(s.allocations))
+	}
+	for _, allocation := range s.allocations {
+		if allocation.JobName == "third" {
+			if allocation.Phase != lifecycle.PhaseStopped {
+				t.Fatalf("excluded allocation phase = %s, want stopped", allocation.Phase)
+			}
+		}
+	}
+}
+
 func TestReconcileRecreateStopsOldAllocations(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()
@@ -377,19 +444,6 @@ func TestValidateUpdateStrategy(t *testing.T) {
 		{"negative max_parallel", &spec.UpdateSpec{Strategy: spec.UpdateRolling, MaxParallel: -1}},
 	}
 
-	// rolling with count=1 must also be rejected
-	t.Run("rolling with count 1", func(t *testing.T) {
-		job := &spec.JobSpec{
-			Namespace: "default", Name: "web",
-			TaskGroups: []spec.TaskGroupSpec{{
-				Name: "api", Count: 1, Update: &spec.UpdateSpec{Strategy: spec.UpdateRolling},
-				Tasks: []spec.TaskSpec{{Name: "server", Image: "image"}},
-			}},
-		}
-		if err := spec.Validate(job); err == nil {
-			t.Fatal("expected rolling with count=1 to be rejected")
-		}
-	})
 	for _, tt := range invalid {
 		t.Run(tt.name, func(t *testing.T) {
 			if err := spec.Validate(base(tt.update)); err == nil {

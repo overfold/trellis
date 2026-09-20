@@ -30,7 +30,24 @@ data_dir: /var/lib/trellis/data
 agent_advertise: node-a:8127
 server_advertise: node-a:8128
 raft_advertise: node-a:8129
+job_limits:
+  max_replicas_per_task_group: 500
+  max_task_groups_per_job: 64
+  max_tasks_per_task_group: 32
+  max_desired_allocations: 1000
+  max_desired_allocations_per_namespace: 10000
+  default_task_cpu: 100
+  default_task_memory: 128MiB
+  max_task_cpu: 1000000
+  max_task_memory: 1TiB
 ```
+
+`job_limits` is operator-only admission policy. Jobs cannot override it. The
+defaults shown above are used when the section is omitted. Every task without a
+`resources` block receives the configured CPU and memory requests before it is
+stored, scheduled, and sent to containerd. Explicit zero or negative resource
+values are invalid. Keep these values identical on every control-plane node so
+leadership changes preserve the same admission policy.
 
 Edit this file when changing persistent node configuration, then restart the service:
 

@@ -64,6 +64,7 @@ type Server struct {
 	catalog            *catalog.ServiceCatalog
 	serverAddr         string
 	clusterName        string
+	jobLimits          spec.Limits
 	joiner             ClusterJoiner
 	backupStore        desiredStore
 	clientTLS          *tls.Config
@@ -143,17 +144,47 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 		VolumeRegistrations:      make(map[string][]byte, len(backup.VolumeRegistrations)),
 		NetworkPortRegistrations: make(map[string][]byte, len(backup.NetworkPortRegistrations)),
 	}
+	canonicalizeJob := func(raw json.RawMessage) (*Job, []byte, error) {
+		var record Job
+		if err := json.Unmarshal(raw, &record); err != nil {
+			return nil, nil, err
+		}
+		if err := s.CanonicalizeJob(record.Spec); err != nil {
+			return nil, nil, err
+		}
+		canonical, err := json.Marshal(record)
+		if err != nil {
+			return nil, nil, err
+		}
+		return &record, canonical, nil
+	}
+	var restoredJobs []*Job
 	for key, value := range backup.Jobs {
 		if !json.Valid(value) {
 			return fmt.Errorf("job %q contains invalid JSON", key)
 		}
-		snapshot.Jobs[key] = value
+		job, canonical, err := canonicalizeJob(value)
+		if err != nil {
+			return fmt.Errorf("validate job %q: %w", key, err)
+		}
+		snapshot.Jobs[key] = canonical
+		restoredJobs = append(restoredJobs, job)
 	}
 	for key, value := range backup.JobRevisions {
 		if !json.Valid(value) {
 			return fmt.Errorf("job revision %q contains invalid JSON", key)
 		}
+		var record JobRevisionRecord
+		if err := json.Unmarshal(value, &record); err != nil {
+			return fmt.Errorf("validate job revision %q: %w", key, err)
+		}
+		if record.Spec == nil || record.Revision < 1 || record.CreatedAt.IsZero() {
+			return fmt.Errorf("validate job revision %q: invalid revision record", key)
+		}
 		snapshot.JobRevisions[key] = value
+	}
+	if err := s.validateNamespaceAllocationLimit(restoredJobs, "", nil); err != nil {
+		return err
 	}
 	for key, value := range backup.Secrets {
 		if !json.Valid(value) {
@@ -360,11 +391,34 @@ func NewServer(log *slog.Logger, storage *storage.LocalStorage, state *StateCont
 		catalog:            catalog.New(),
 		serverAddr:         serverAddr,
 		clusterName:        cluster,
+		jobLimits:          spec.DefaultLimits(),
 		now:                time.Now,
 	}
 	s.backupStore, _ = store.(desiredStore)
 	s.events = newEventBus()
 	return s
+}
+
+// SetJobLimits configures operator-owned job admission and resource defaults.
+func (s *Server) SetJobLimits(limits spec.Limits) error {
+	if err := spec.ValidateLimits(limits); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.jobLimits = limits
+	s.mu.Unlock()
+	return nil
+}
+
+// CanonicalizeJob resolves operator defaults and validates a job before use.
+func (s *Server) CanonicalizeJob(job *spec.JobSpec) error {
+	s.mu.RLock()
+	limits := s.jobLimits
+	s.mu.RUnlock()
+	if limits == (spec.Limits{}) {
+		limits = spec.DefaultLimits()
+	}
+	return spec.Canonicalize(job, limits)
 }
 
 // AcquireLeadership durably advances the fencing epoch. The Raft-backed write
@@ -698,7 +752,7 @@ func jobKey(namespace, name string) string {
 
 // RegisterJob creates or updates desired job state.
 func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spec.JobSpec) error {
-	if err := spec.Validate(jobSpec); err != nil {
+	if err := s.CanonicalizeJob(jobSpec); err != nil {
 		return fmt.Errorf("validate job: %w", err)
 	}
 	s.mutationMu.Lock()
@@ -709,6 +763,10 @@ func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spe
 		return fmt.Errorf("job namespace does not match request namespace")
 	}
 	key := jobKey(namespace, jobSpec.Name)
+	if err := s.validateNamespaceAllocationLimitLocked(nil, namespace, jobSpec, key); err != nil {
+		s.mu.Unlock()
+		return err
+	}
 
 	hashes := make(map[string]string, len(jobSpec.TaskGroups))
 	for i := range jobSpec.TaskGroups {
@@ -754,6 +812,57 @@ func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spe
 	}
 
 	return nil
+}
+
+// ValidateNamespaceAllocationLimit checks a candidate job against the current
+// namespace desired-allocation budget without mutating state.
+func (s *Server) ValidateNamespaceAllocationLimit(namespace string, job *spec.JobSpec) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.validateNamespaceAllocationLimitLocked(nil, namespace, job, jobKey(namespace, job.Name))
+}
+
+func (s *Server) validateNamespaceAllocationLimit(restored []*Job, namespace string, candidate *spec.JobSpec) error {
+	return s.validateNamespaceAllocationLimitLocked(restored, namespace, candidate, "")
+}
+
+func (s *Server) validateNamespaceAllocationLimitLocked(source []*Job, namespace string, candidate *spec.JobSpec, replacingKey string) error {
+	limits := s.jobLimits
+	if limits == (spec.Limits{}) {
+		limits = spec.DefaultLimits()
+	}
+	totals := make(map[string]int64)
+	if source == nil {
+		for key, job := range s.jobs {
+			if key == replacingKey || job == nil || job.Spec == nil {
+				continue
+			}
+			totals[job.Spec.Namespace] += desiredAllocations(job.Spec)
+		}
+	} else {
+		for _, job := range source {
+			if job != nil && job.Spec != nil {
+				totals[job.Spec.Namespace] += desiredAllocations(job.Spec)
+			}
+		}
+	}
+	if candidate != nil {
+		totals[namespace] += desiredAllocations(candidate)
+	}
+	for name, total := range totals {
+		if total > int64(limits.MaxDesiredAllocationsPerNamespace) {
+			return spec.ValidationErrors{{Path: "task_groups", Code: "limit_exceeded", Message: fmt.Sprintf("namespace %q desired allocations %d exceeds operator limit of %d", name, total, limits.MaxDesiredAllocationsPerNamespace)}}
+		}
+	}
+	return nil
+}
+
+func desiredAllocations(job *spec.JobSpec) int64 {
+	total := int64(0)
+	for _, group := range job.TaskGroups {
+		total += int64(group.Count)
+	}
+	return total
 }
 
 // isLabelOnlyChange returns true when the new job spec differs from the
