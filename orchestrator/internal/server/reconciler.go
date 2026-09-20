@@ -233,6 +233,7 @@ func (s *Server) Reconcile(ctx context.Context) {
 	if limits == (spec.Limits{}) {
 		limits = spec.DefaultLimits()
 	}
+	namespaceDesired := make(map[string]int64)
 	for _, key := range jobKeys {
 		job := s.jobs[key]
 		if err := spec.Canonicalize(job.Spec, limits); err != nil {
@@ -241,6 +242,12 @@ func (s *Server) Reconcile(ctx context.Context) {
 		}
 		jobName := job.Spec.Name
 		namespace := job.Spec.Namespace
+		desired := desiredAllocations(job.Spec)
+		if namespaceDesired[namespace]+desired > int64(limits.MaxDesiredAllocationsPerNamespace) {
+			s.log.Error("skip job exceeding namespace allocation limit during reconciliation", "job", key, "namespace", namespace, "limit", limits.MaxDesiredAllocationsPerNamespace)
+			continue
+		}
+		namespaceDesired[namespace] += desired
 		for _, group := range job.Spec.TaskGroups {
 			var current []*Allocation
 			var pending []*Allocation

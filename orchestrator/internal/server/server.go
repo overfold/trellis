@@ -178,14 +178,10 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 		if err := json.Unmarshal(value, &record); err != nil {
 			return fmt.Errorf("validate job revision %q: %w", key, err)
 		}
-		if err := s.CanonicalizeJob(record.Spec); err != nil {
-			return fmt.Errorf("validate job revision %q: %w", key, err)
+		if record.Spec == nil || record.Revision < 1 || record.CreatedAt.IsZero() {
+			return fmt.Errorf("validate job revision %q: invalid revision record", key)
 		}
-		canonical, err := json.Marshal(record)
-		if err != nil {
-			return fmt.Errorf("validate job revision %q: %w", key, err)
-		}
-		snapshot.JobRevisions[key] = canonical
+		snapshot.JobRevisions[key] = value
 	}
 	if err := s.validateNamespaceAllocationLimit(restoredJobs, "", nil); err != nil {
 		return err

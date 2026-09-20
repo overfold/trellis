@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/clofour/trellis/internal/api"
 	"github.com/clofour/trellis/internal/lifecycle"
@@ -119,6 +120,12 @@ func TestBackupRestoreRoundTripsPersistedJob(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.snapshot.Jobs["default%00web"] = raw
+	historical := &JobRevisionRecord{Revision: 1, Spec: &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 2000, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}}, CreatedAt: time.Now()}
+	historicalRaw, err := json.Marshal(historical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.snapshot.JobRevisions["default%00web/1"] = historicalRaw
 	s := NewServer(slog.Default(), nil, newNopStateController(), store, "test", "")
 	if err := s.Restore(ctx, mustBackup(t, s)); err != nil {
 		t.Fatalf("restore backup containing persisted job: %v", err)
@@ -129,6 +136,9 @@ func TestBackupRestoreRoundTripsPersistedJob(t *testing.T) {
 	}
 	if restored.Spec == nil || restored.Spec.TaskGroups[0].Tasks[0].Resources == nil {
 		t.Fatalf("restored job was not canonicalized: %#v", restored)
+	}
+	if string(store.snapshot.JobRevisions["default%00web/1"]) != string(historicalRaw) {
+		t.Fatal("restore rewrote historical revision")
 	}
 }
 

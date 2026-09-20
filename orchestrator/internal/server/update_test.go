@@ -65,6 +65,31 @@ func TestNamespaceDesiredAllocationLimitIncludesOtherJobs(t *testing.T) {
 	}
 }
 
+func TestReconcileEnforcesNamespaceDesiredAllocationLimit(t *testing.T) {
+	s, agent := newTestServerWithAgent()
+	defer agent.server.Close()
+	limits := spec.DefaultLimits()
+	limits.MaxDesiredAllocationsPerNamespace = 2
+	if err := s.SetJobLimits(limits); err != nil {
+		t.Fatal(err)
+	}
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
+	s.nodes[node.ID] = node
+	for _, name := range []string{"first", "second", "third"} {
+		s.jobs[jobKey("default", name)] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: name, TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}}, Revision: 1}
+	}
+
+	s.Reconcile(context.Background())
+	if len(s.allocations) != 2 {
+		t.Fatalf("allocations = %d, want namespace limit 2", len(s.allocations))
+	}
+	for _, allocation := range s.allocations {
+		if allocation.JobName == "third" {
+			t.Fatal("reconciliation admitted job beyond deterministic namespace budget")
+		}
+	}
+}
+
 func TestReconcileRecreateStopsOldAllocations(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()
