@@ -115,9 +115,6 @@ func Validate(job *JobSpec) error {
 			if !group.Update.Strategy.Valid() {
 				add(groupPath+".update.strategy", "unsupported", fmt.Sprintf("unsupported update strategy %q", group.Update.Strategy))
 			}
-			if group.Update.Strategy == UpdateRolling && group.Count < 2 {
-				add(groupPath+".update.strategy", "incompatible", "rolling updates require count >= 2; use recreate for single-instance groups")
-			}
 			if group.Update.MaxParallel < 0 {
 				add(groupPath+".update.max_parallel", "out_of_range", "must be at least 0")
 			}

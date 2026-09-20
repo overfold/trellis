@@ -275,7 +275,7 @@ func TestReconcileRollingDoesNotStopDrainingUntilNewHealthy(t *testing.T) {
 	newSpec := &spec.JobSpec{
 		Namespace: "default", Name: "web",
 		TaskGroups: []spec.TaskGroupSpec{{
-			Name: "api", Count: 2,
+			Name: "api", Count: 1,
 			Update: &spec.UpdateSpec{Strategy: spec.UpdateRolling, MaxParallel: 1},
 			Tasks:  []spec.TaskSpec{{Name: "server", Image: "app:v2"}},
 		}},
@@ -444,19 +444,6 @@ func TestValidateUpdateStrategy(t *testing.T) {
 		{"negative max_parallel", &spec.UpdateSpec{Strategy: spec.UpdateRolling, MaxParallel: -1}},
 	}
 
-	// rolling with count=1 must also be rejected
-	t.Run("rolling with count 1", func(t *testing.T) {
-		job := &spec.JobSpec{
-			Namespace: "default", Name: "web",
-			TaskGroups: []spec.TaskGroupSpec{{
-				Name: "api", Count: 1, Update: &spec.UpdateSpec{Strategy: spec.UpdateRolling},
-				Tasks: []spec.TaskSpec{{Name: "server", Image: "image"}},
-			}},
-		}
-		if err := spec.Validate(job); err == nil {
-			t.Fatal("expected rolling with count=1 to be rejected")
-		}
-	})
 	for _, tt := range invalid {
 		t.Run(tt.name, func(t *testing.T) {
 			if err := spec.Validate(base(tt.update)); err == nil {

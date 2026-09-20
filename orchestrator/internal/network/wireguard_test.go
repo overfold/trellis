@@ -23,7 +23,7 @@ type failingRunner struct {
 	failCommand string
 }
 
-func (r *failingRunner) Run(ctx context.Context, name string, args ...string) error {
+func (r *failingRunner) Run(_ context.Context, name string, args ...string) error {
 	command := name + " " + strings.Join(args, " ")
 	r.commands = append(r.commands, command)
 	if strings.Contains(command, r.failCommand) {
