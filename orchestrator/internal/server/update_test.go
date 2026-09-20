@@ -78,14 +78,17 @@ func TestReconcileEnforcesNamespaceDesiredAllocationLimit(t *testing.T) {
 	for _, name := range []string{"first", "second", "third"} {
 		s.jobs[jobKey("default", name)] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: name, TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}}, Revision: 1}
 	}
+	s.allocations = append(s.allocations, &Allocation{ID: "third-existing", Namespace: "default", JobName: "third", TaskGroupName: "app", Tasks: s.jobs[jobKey("default", "third")].Spec.TaskGroups[0].Tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhasePlaced, Health: lifecycle.HealthUnknown, Diagnostic: lifecycle.Diagnostic{CreatedAt: s.now(), TransitionedAt: s.now()}})
 
 	s.Reconcile(context.Background())
-	if len(s.allocations) != 2 {
-		t.Fatalf("allocations = %d, want namespace limit 2", len(s.allocations))
+	if len(s.allocations) != 3 {
+		t.Fatalf("allocations = %d, want two admitted plus one stopped", len(s.allocations))
 	}
 	for _, allocation := range s.allocations {
 		if allocation.JobName == "third" {
-			t.Fatal("reconciliation admitted job beyond deterministic namespace budget")
+			if allocation.Phase != lifecycle.PhaseStopped {
+				t.Fatalf("excluded allocation phase = %s, want stopped", allocation.Phase)
+			}
 		}
 	}
 }
@@ -272,7 +275,7 @@ func TestReconcileRollingDoesNotStopDrainingUntilNewHealthy(t *testing.T) {
 	newSpec := &spec.JobSpec{
 		Namespace: "default", Name: "web",
 		TaskGroups: []spec.TaskGroupSpec{{
-			Name: "api", Count: 1,
+			Name: "api", Count: 2,
 			Update: &spec.UpdateSpec{Strategy: spec.UpdateRolling, MaxParallel: 1},
 			Tasks:  []spec.TaskSpec{{Name: "server", Image: "app:v2"}},
 		}},

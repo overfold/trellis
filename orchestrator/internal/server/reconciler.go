@@ -156,11 +156,49 @@ func (s *Server) Reconcile(ctx context.Context) {
 			node.Status = NodeStatusUnhealthy
 		}
 	}
+	jobKeys := make([]string, 0, len(s.jobs))
+	for key := range s.jobs {
+		jobKeys = append(jobKeys, key)
+	}
+	sort.Strings(jobKeys)
+	limits := s.jobLimits
+	if limits == (spec.Limits{}) {
+		limits = spec.DefaultLimits()
+	}
+	admittedJobs := make(map[string]bool, len(jobKeys))
+	namespaceDesired := make(map[string]int64)
+	for _, key := range jobKeys {
+		job := s.jobs[key]
+		if err := spec.Canonicalize(job.Spec, limits); err != nil {
+			s.log.Error("skip invalid job during reconciliation", "job", key, "error", err)
+			continue
+		}
+		namespace := job.Spec.Namespace
+		desired := desiredAllocations(job.Spec)
+		if namespaceDesired[namespace]+desired > int64(limits.MaxDesiredAllocationsPerNamespace) {
+			s.log.Error("skip job exceeding namespace allocation limit during reconciliation", "job", key, "namespace", namespace, "limit", limits.MaxDesiredAllocationsPerNamespace)
+			continue
+		}
+		namespaceDesired[namespace] += desired
+		admittedJobs[key] = true
+	}
 	var actions []Action
 	valid := make([]*Allocation, 0, len(s.allocations))
 	for _, allocation := range s.allocations {
 		allocation.mu.Lock()
-		job := s.jobs[jobKey(allocation.Namespace, allocation.JobName)]
+		key := jobKey(allocation.Namespace, allocation.JobName)
+		job := s.jobs[key]
+		if !admittedJobs[key] {
+			if allocation.Phase != lifecycle.PhaseStopped && allocation.Phase != lifecycle.PhaseFailed && allocation.Phase != lifecycle.PhaseLost && allocation.Node != nil {
+				actions = append(actions, Action{Type: ActionStop, Allocation: allocation})
+			} else if allocation.Phase == lifecycle.PhasePending {
+				_ = allocation.Transition(lifecycle.PhaseStopping, now, "namespace_limit", "job exceeds the namespace desired-allocation limit")
+				_ = allocation.Transition(lifecycle.PhaseStopped, now, "namespace_limit", "job exceeds the namespace desired-allocation limit")
+				_ = s.state.PutAllocation(context.WithoutCancel(ctx), allocation)
+			}
+			allocation.mu.Unlock()
+			continue
+		}
 		if allocation.Phase == lifecycle.PhasePending {
 			valid = append(valid, allocation)
 			allocation.mu.Unlock()
@@ -224,30 +262,13 @@ func (s *Server) Reconcile(ctx context.Context) {
 		allocation.mu.Unlock()
 	}
 
-	jobKeys := make([]string, 0, len(s.jobs))
-	for key := range s.jobs {
-		jobKeys = append(jobKeys, key)
-	}
-	sort.Strings(jobKeys)
-	limits := s.jobLimits
-	if limits == (spec.Limits{}) {
-		limits = spec.DefaultLimits()
-	}
-	namespaceDesired := make(map[string]int64)
 	for _, key := range jobKeys {
 		job := s.jobs[key]
-		if err := spec.Canonicalize(job.Spec, limits); err != nil {
-			s.log.Error("skip invalid job during reconciliation", "job", key, "error", err)
+		if !admittedJobs[key] {
 			continue
 		}
 		jobName := job.Spec.Name
 		namespace := job.Spec.Namespace
-		desired := desiredAllocations(job.Spec)
-		if namespaceDesired[namespace]+desired > int64(limits.MaxDesiredAllocationsPerNamespace) {
-			s.log.Error("skip job exceeding namespace allocation limit during reconciliation", "job", key, "namespace", namespace, "limit", limits.MaxDesiredAllocationsPerNamespace)
-			continue
-		}
-		namespaceDesired[namespace] += desired
 		for _, group := range job.Spec.TaskGroups {
 			var current []*Allocation
 			var pending []*Allocation
