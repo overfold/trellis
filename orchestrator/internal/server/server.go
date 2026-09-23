@@ -82,6 +82,9 @@ type Server struct {
 	reconcileMu   sync.Mutex
 	mutationMu    sync.Mutex
 	networkPortMu sync.Mutex
+	networkPlanMu sync.Mutex
+	networkPlans  map[networkPlanKey]*networkPlanState
+	networkPlanWake chan struct{}
 	controlEpoch  uint64
 	leaderSince   time.Time
 	now           func() time.Time
@@ -387,6 +390,8 @@ func NewServer(log *slog.Logger, storage *storage.LocalStorage, state *StateCont
 		networkPool:        pool,
 		networkPorts:       make(map[string]int),
 		wireGuardPortCount: 256,
+		networkPlans:       make(map[networkPlanKey]*networkPlanState),
+		networkPlanWake:    make(chan struct{}, 1),
 		tokenManager:       auth.NewTokenManager(store, cluster),
 		catalog:            catalog.New(),
 		serverAddr:         serverAddr,
@@ -556,6 +561,7 @@ func validateToken(cluster *Cluster, token string) bool {
 // Run starts background reconciliation until the context ends.
 func (s *Server) Run(ctx context.Context) {
 	go s.runReconcileLoop(ctx)
+	go s.runNetworkPlanLoop(ctx)
 }
 
 // ListNodes returns registered nodes.
