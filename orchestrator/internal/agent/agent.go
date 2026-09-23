@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -459,10 +460,31 @@ func (a *Agent) UpdateNetworkPlan(ctx context.Context, request *api.NetworkPlanR
 		return fmt.Errorf("%w: received %d, highest accepted %d", ErrStaleEpoch, request.Epoch, a.epoch)
 	}
 	active := false
+	var desiredCIDR netip.Prefix
+	if request.Plan.CIDR != "" {
+		var err error
+		desiredCIDR, err = netip.ParsePrefix(request.Plan.CIDR)
+		if err != nil {
+			return fmt.Errorf("invalid network plan CIDR %q: %w", request.Plan.CIDR, err)
+		}
+		desiredCIDR = desiredCIDR.Masked()
+	}
 	for _, allocation := range a.allocations {
-		if allocation.Namespace == request.Namespace && allocation.Network != nil {
-			active = true
-			break
+		if allocation.Namespace != request.Namespace || allocation.Network == nil {
+			continue
+		}
+		active = true
+		if request.Plan.Gateway != "" && allocation.Network.Gateway != "" && request.Plan.Gateway != allocation.Network.Gateway {
+			return fmt.Errorf("network plan would change active namespace gateway from %s to %s", allocation.Network.Gateway, request.Plan.Gateway)
+		}
+		if desiredCIDR.IsValid() && allocation.Network.Address != "" {
+			current, err := netip.ParsePrefix(allocation.Network.Address)
+			if err != nil {
+				return fmt.Errorf("invalid active network address %q: %w", allocation.Network.Address, err)
+			}
+			if current.Masked() != desiredCIDR {
+				return fmt.Errorf("network plan would change active namespace CIDR from %s to %s", current.Masked(), desiredCIDR)
+			}
 		}
 	}
 	if !active {
