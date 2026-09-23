@@ -390,7 +390,8 @@ func (s *Server) Reconcile(ctx context.Context) {
 func (s *Server) reconcileNetworkPlans(ctx context.Context) {
 	type target struct {
 		namespace string
-		node      *Node
+		address   string
+		nodeID    uuid.UUID
 		plan      *network.Plan
 	}
 	var targets []target
@@ -407,7 +408,12 @@ func (s *Server) reconcileNetworkPlans(ctx context.Context) {
 				if err != nil {
 					s.log.Error("build namespace network plan", "namespace", allocation.Namespace, "node", allocation.Node.ID, "error", err)
 				} else {
-					targets = append(targets, target{allocation.Namespace, allocation.Node, plan})
+					targets = append(targets, target{
+						namespace: allocation.Namespace,
+						address:   fmt.Sprintf("%s:%d", allocation.Node.Host, allocation.Node.Port),
+						nodeID:    allocation.Node.ID,
+						plan:      plan,
+					})
 				}
 			}
 		}
@@ -416,10 +422,9 @@ func (s *Server) reconcileNetworkPlans(ctx context.Context) {
 	epoch := s.controlEpoch
 	s.mu.RUnlock()
 	for _, target := range targets {
-		address := fmt.Sprintf("%s:%d", target.node.Host, target.node.Port)
 		request := &api.NetworkPlanRequest{Epoch: epoch, Namespace: target.namespace, Plan: *target.plan}
-		if err := s.client.UpdateNetworkPlan(ctx, address, request); err != nil {
-			s.log.Error("reconcile namespace network plan", "namespace", target.namespace, "node", target.node.ID, "error", err)
+		if err := s.client.UpdateNetworkPlan(ctx, target.address, request); err != nil {
+			s.log.Error("reconcile namespace network plan", "namespace", target.namespace, "node", target.nodeID, "error", err)
 		}
 	}
 }
