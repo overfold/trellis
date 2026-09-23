@@ -64,3 +64,25 @@ func TestUpdateNetworkPlanSerializesEpochAndApplication(t *testing.T) {
 		t.Fatalf("stale plan error = %v, want %v", err, ErrStaleEpoch)
 	}
 }
+
+func TestUpdateNetworkPlanRejectsActiveSubnetChange(t *testing.T) {
+	agent := newOperationTestAgent(t, &reconcilerRuntime{})
+	agent.allocations["allocation"] = &Allocation{
+		Namespace: "default",
+		Network: &network.Attachment{
+			Address: "10.42.1.23/24",
+			Gateway: "10.42.1.1",
+		},
+	}
+	err := agent.UpdateNetworkPlan(context.Background(), &api.NetworkPlanRequest{
+		Epoch:     1,
+		Namespace: "default",
+		Plan: network.Plan{
+			CIDR:    "10.42.2.0/24",
+			Gateway: "10.42.2.1",
+		},
+	})
+	if err == nil {
+		t.Fatal("active namespace subnet change was accepted")
+	}
+}
