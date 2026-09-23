@@ -448,6 +448,30 @@ func (a *Agent) RunGroup(ctx context.Context, request *api.AllocationRequest) er
 	return nil
 }
 
+// UpdateNetworkPlan refreshes the network shared by running allocations.
+func (a *Agent) UpdateNetworkPlan(ctx context.Context, request *api.NetworkPlanRequest) error {
+	if err := a.AcceptEpoch(request.Epoch); err != nil {
+		return err
+	}
+	a.mu.RLock()
+	active := false
+	for _, allocation := range a.allocations {
+		if allocation.Namespace == request.Namespace && allocation.Network != nil {
+			active = true
+			break
+		}
+	}
+	a.mu.RUnlock()
+	if !active {
+		return nil
+	}
+	updater, ok := a.network.(network.PlanUpdater)
+	if !ok {
+		return network.ErrDisabled
+	}
+	return updater.UpdatePlan(ctx, request.Namespace, request.Plan)
+}
+
 // StopGroup stops all tasks in an allocation group.
 func (a *Agent) StopGroup(ctx context.Context, request *api.StopAllocationRequest) error {
 	unlock := a.lockAllocationOperation(request.AllocationID)

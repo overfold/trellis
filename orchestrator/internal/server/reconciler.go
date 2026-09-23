@@ -383,7 +383,45 @@ func (s *Server) Reconcile(ctx context.Context) {
 			s.log.Error("reconcile action failed", "action", actions[i].Type, "allocation", actions[i].Allocation.ID, "error", err)
 		}
 	}
+	s.reconcileNetworkPlans(ctx)
 	s.refreshCatalog()
+}
+
+func (s *Server) reconcileNetworkPlans(ctx context.Context) {
+	type target struct {
+		namespace string
+		node      *Node
+		plan      *network.Plan
+	}
+	var targets []target
+	seen := make(map[string]bool)
+	s.mu.RLock()
+	for _, allocation := range s.allocations {
+		allocation.mu.Lock()
+		if allocation.Node != nil && allocation.Phase == lifecycle.PhaseRunning && tasksUseWireGuard(allocation.Tasks) &&
+			(allocation.Node.Status == NodeStatusHealthy || allocation.Node.Status == NodeStatusDraining) {
+			key := allocation.Namespace + "/" + allocation.Node.ID.String()
+			if !seen[key] {
+				seen[key] = true
+				plan, err := s.networkPlan(allocation.Namespace, allocation.Node)
+				if err != nil {
+					s.log.Error("build namespace network plan", "namespace", allocation.Namespace, "node", allocation.Node.ID, "error", err)
+				} else {
+					targets = append(targets, target{allocation.Namespace, allocation.Node, plan})
+				}
+			}
+		}
+		allocation.mu.Unlock()
+	}
+	epoch := s.controlEpoch
+	s.mu.RUnlock()
+	for _, target := range targets {
+		address := fmt.Sprintf("%s:%d", target.node.Host, target.node.Port)
+		request := &api.NetworkPlanRequest{Epoch: epoch, Namespace: target.namespace, Plan: *target.plan}
+		if err := s.client.UpdateNetworkPlan(ctx, address, request); err != nil {
+			s.log.Error("reconcile namespace network plan", "namespace", target.namespace, "node", target.node.ID, "error", err)
+		}
+	}
 }
 
 func tasksUseWireGuard(tasks []spec.TaskSpec) bool {

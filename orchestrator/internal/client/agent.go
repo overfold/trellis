@@ -96,6 +96,15 @@ func (s *AgentClient) StopAllocation(ctx context.Context, address string, reques
 	return nil
 }
 
+// UpdateNetworkPlan reconciles an active namespace network on an agent.
+func (s *AgentClient) UpdateNetworkPlan(ctx context.Context, address string, request *api.NetworkPlanRequest) error {
+	var response api.OperationResponse
+	if err := s.client.request(ctx, http.MethodPost, normalizeBaseURL(address)+"/v1/network-plans", request, &response); err != nil {
+		return fmt.Errorf("update network plan: %w", decodeOperationError(err))
+	}
+	return nil
+}
+
 // ExecAllocation runs a command in an allocation task container via an agent.
 func (s *AgentClient) ExecAllocation(ctx context.Context, address, allocID, task string, command []string) (*api.ExecResponse, error) {
 	request := api.AgentExecRequest{Task: task, Command: command}

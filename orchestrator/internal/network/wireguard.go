@@ -299,6 +299,38 @@ func (m *WireGuardManager) planPath(namespace, networkName string) string {
 	return filepath.Join(m.stateDir, "plans", short("", namespace+"\x00"+networkName)+".json")
 }
 
+// UpdatePlan reconciles peers and routes without touching running allocations.
+func (m *WireGuardManager) UpdatePlan(ctx context.Context, namespace string, plan Plan) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !safeName.MatchString(namespace) {
+		return fmt.Errorf("namespace must be a safe identifier")
+	}
+	wg := short("tw", namespace+"\x00"+namespace)
+	peers := make([]Peer, len(plan.Peers))
+	for i, peer := range plan.Peers {
+		peers[i] = Peer(peer)
+	}
+	if err := m.reconcilePeers(ctx, wg, namespace, namespace, peers); err != nil {
+		return err
+	}
+	for _, peer := range peers {
+		args := []string{"set", wg, "peer", peer.PublicKey, "allowed-ips", strings.Join(peer.AllowedIPs, ",")}
+		if peer.Endpoint != "" {
+			args = append(args, "endpoint", peer.Endpoint)
+		}
+		if err := m.run.Run(ctx, "wg", args...); err != nil {
+			return fmt.Errorf("configure WireGuard peer: %w", err)
+		}
+		for _, route := range peer.AllowedIPs {
+			if err := m.run.Run(ctx, "ip", "route", "replace", route, "dev", wg); err != nil {
+				return fmt.Errorf("configure WireGuard route: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
 // Attach configures networking for an allocation.
 func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_ *Attachment, retErr error) {
 	m.mu.Lock()

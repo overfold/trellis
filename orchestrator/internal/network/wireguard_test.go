@@ -254,6 +254,42 @@ func TestAuthoritativePlanRemovesStalePeersAndRoutes(t *testing.T) {
 	}
 }
 
+func TestUpdatePlanAddsPeerAndRouteWithoutNewAllocation(t *testing.T) {
+	manager, err := NewAutomatedWireGuardManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{}
+	manager.run = runner
+	plan := Plan{CIDR: "10.42.1.0/24", Gateway: "10.42.1.1", WireGuardAddress: "169.254.1.1/32", ListenPort: 51917}
+	attachment, err := manager.Attach(context.Background(), AttachRequest{Namespace: "acme", Network: "acme", AllocationID: "alloc-old", Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.commands = nil
+	plan.Peers = []PeerPlan{{PublicKey: "new-peer", Endpoint: "node-b:51917", AllowedIPs: []string{"10.42.2.0/24"}}}
+	if err := manager.UpdatePlan(context.Background(), "acme", plan); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(runner.commands, "\n")
+	for _, want := range []string{"wg set " + attachment.WireGuardInterface + " peer new-peer allowed-ips 10.42.2.0/24 endpoint node-b:51917", "ip route replace 10.42.2.0/24 dev " + attachment.WireGuardInterface} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("commands do not contain %q:\n%s", want, joined)
+		}
+	}
+	runner.commands = nil
+	plan.Peers = nil
+	if err := manager.UpdatePlan(context.Background(), "acme", plan); err != nil {
+		t.Fatal(err)
+	}
+	joined = strings.Join(runner.commands, "\n")
+	for _, want := range []string{"peer new-peer remove", "ip route del 10.42.2.0/24 dev " + attachment.WireGuardInterface} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("commands do not contain %q:\n%s", want, joined)
+		}
+	}
+}
+
 func TestAttachReturnsSetupErrors(t *testing.T) {
 	manager, err := NewAutomatedWireGuardManager(t.TempDir())
 	if err != nil {
