@@ -1,9 +1,14 @@
 package server
 
 import (
+	"context"
+	"log/slog"
 	"net/netip"
 	"testing"
+	"time"
 
+	"github.com/clofour/trellis/internal/api"
+	"github.com/clofour/trellis/internal/network"
 	"github.com/google/uuid"
 )
 
@@ -47,7 +52,6 @@ func TestNetworkPlanUsesRegisteredPeerIdentity(t *testing.T) {
 	}
 }
 
-
 func TestNetworkPlanUsesDifferentPortsForDifferentNamespaces(t *testing.T) {
 	nodeID := uuid.New()
 	node := &Node{ID: nodeID, WireGuardPortBase: 51820, WireGuardPortCount: 256}
@@ -66,5 +70,35 @@ func TestNetworkPlanUsesDifferentPortsForDifferentNamespaces(t *testing.T) {
 	}
 	if acme.ListenPort != 51823 || globex.ListenPort != 51831 || acme.ListenPort == globex.ListenPort {
 		t.Fatalf("unexpected namespace ports: acme=%d globex=%d", acme.ListenPort, globex.ListenPort)
+	}
+}
+
+func TestSendNetworkPlansBoundsSlowAgentAndUpdatesHealthyAgent(t *testing.T) {
+	s := &Server{log: slog.Default()}
+	targets := []networkPlanTarget{
+		{namespace: "default", address: "slow", plan: &network.Plan{}},
+		{namespace: "default", address: "healthy", plan: &network.Plan{}},
+	}
+	healthyCalled := make(chan struct{}, 1)
+	update := func(ctx context.Context, address string, request *api.NetworkPlanRequest) error {
+		if request.Epoch != 7 || request.Namespace != "default" {
+			t.Errorf("unexpected network plan request: %#v", request)
+		}
+		if address == "healthy" {
+			healthyCalled <- struct{}{}
+			return nil
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	start := time.Now()
+	s.sendNetworkPlans(context.Background(), targets, 7, update)
+	if elapsed := time.Since(start); elapsed > networkPlanTimeout+time.Second {
+		t.Fatalf("network plan reconciliation took %s, exceeds deadline", elapsed)
+	}
+	select {
+	case <-healthyCalled:
+	default:
+		t.Fatal("healthy agent did not receive its network plan")
 	}
 }

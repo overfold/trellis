@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/clofour/trellis/internal/api"
@@ -43,6 +44,7 @@ const (
 	allocationLossTimeout = 45 * time.Second
 	leaderRecoveryGrace   = 30 * time.Second
 	maxExecutionAttempts  = 8
+	networkPlanTimeout    = 2 * time.Second
 )
 
 func retryDelay(id string, attempt int) time.Duration {
@@ -388,13 +390,7 @@ func (s *Server) Reconcile(ctx context.Context) {
 }
 
 func (s *Server) reconcileNetworkPlans(ctx context.Context) {
-	type target struct {
-		namespace string
-		address   string
-		nodeID    uuid.UUID
-		plan      *network.Plan
-	}
-	var targets []target
+	var targets []networkPlanTarget
 	seen := make(map[string]bool)
 	s.mu.RLock()
 	for _, allocation := range s.allocations {
@@ -408,7 +404,7 @@ func (s *Server) reconcileNetworkPlans(ctx context.Context) {
 				if err != nil {
 					s.log.Error("build namespace network plan", "namespace", allocation.Namespace, "node", allocation.Node.ID, "error", err)
 				} else {
-					targets = append(targets, target{
+					targets = append(targets, networkPlanTarget{
 						namespace: allocation.Namespace,
 						address:   fmt.Sprintf("%s:%d", allocation.Node.Host, allocation.Node.Port),
 						nodeID:    allocation.Node.ID,
@@ -421,12 +417,34 @@ func (s *Server) reconcileNetworkPlans(ctx context.Context) {
 	}
 	epoch := s.controlEpoch
 	s.mu.RUnlock()
-	for _, target := range targets {
-		request := &api.NetworkPlanRequest{Epoch: epoch, Namespace: target.namespace, Plan: *target.plan}
-		if err := s.client.UpdateNetworkPlan(ctx, target.address, request); err != nil {
-			s.log.Error("reconcile namespace network plan", "namespace", target.namespace, "node", target.nodeID, "error", err)
-		}
+	s.sendNetworkPlans(ctx, targets, epoch, s.client.UpdateNetworkPlan)
+}
+
+type networkPlanTarget struct {
+	namespace string
+	address   string
+	nodeID    uuid.UUID
+	plan      *network.Plan
+}
+
+func (s *Server) sendNetworkPlans(ctx context.Context, targets []networkPlanTarget, epoch uint64, update func(context.Context, string, *api.NetworkPlanRequest) error) {
+	if len(targets) == 0 {
+		return
 	}
+	// Bound the entire fanout so a slow agent cannot hold the reconciliation lock
+	// for one client timeout per namespace or node.
+	planCtx, cancel := context.WithTimeout(ctx, networkPlanTimeout)
+	defer cancel()
+	var workers sync.WaitGroup
+	for _, target := range targets {
+		workers.Go(func() {
+			request := &api.NetworkPlanRequest{Epoch: epoch, Namespace: target.namespace, Plan: *target.plan}
+			if err := update(planCtx, target.address, request); err != nil {
+				s.log.Error("reconcile namespace network plan", "namespace", target.namespace, "node", target.nodeID, "error", err)
+			}
+		})
+	}
+	workers.Wait()
 }
 
 func tasksUseWireGuard(tasks []spec.TaskSpec) bool {
