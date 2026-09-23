@@ -306,6 +306,16 @@ func (m *WireGuardManager) UpdatePlan(ctx context.Context, namespace string, pla
 	if !safeName.MatchString(namespace) {
 		return fmt.Errorf("namespace must be a safe identifier")
 	}
+	entries, err := os.ReadDir(filepath.Join(m.stateDir, namespace))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read network leases: %w", err)
+	}
+	if len(entries) == 0 {
+		return nil
+	}
 	wg := short("tw", namespace+"\x00"+namespace)
 	peers := make([]Peer, len(plan.Peers))
 	for i, peer := range plan.Peers {

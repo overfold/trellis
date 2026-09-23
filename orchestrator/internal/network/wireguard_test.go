@@ -32,6 +32,20 @@ func (r *failingRunner) Run(_ context.Context, name string, args ...string) erro
 	return nil
 }
 
+type blockingRunner struct {
+	blockCommand string
+	entered      chan struct{}
+	release      chan struct{}
+}
+
+func (r *blockingRunner) Run(_ context.Context, name string, args ...string) error {
+	if name+" "+strings.Join(args, " ") == r.blockCommand {
+		close(r.entered)
+		<-r.release
+	}
+	return nil
+}
+
 func TestWireGuardAttachBuildsIsolatedNamespace(t *testing.T) {
 	dir := t.TempDir()
 	key := filepath.Join(dir, "private.key")
@@ -287,6 +301,50 @@ func TestUpdatePlanAddsPeerAndRouteWithoutNewAllocation(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("commands do not contain %q:\n%s", want, joined)
 		}
+	}
+}
+
+func TestUpdatePlanWaitingForFinalDetachDoesNotRestorePlan(t *testing.T) {
+	manager, err := NewAutomatedWireGuardManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.run = &recordingRunner{}
+	plan := Plan{CIDR: "10.42.1.0/24", Gateway: "10.42.1.1", WireGuardAddress: "169.254.1.1/32", ListenPort: 51917,
+		Peers: []PeerPlan{{PublicKey: "old-peer", AllowedIPs: []string{"10.42.2.0/24"}}}}
+	attachment, err := manager.Attach(context.Background(), AttachRequest{Namespace: "acme", Network: "acme", AllocationID: "alloc-old", Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &blockingRunner{
+		blockCommand: "ip link del " + attachment.WireGuardInterface,
+		entered:      make(chan struct{}),
+		release:      make(chan struct{}),
+	}
+	manager.run = runner
+	detached := make(chan error, 1)
+	go func() { detached <- manager.Detach(context.Background(), attachment) }()
+	<-runner.entered
+
+	plan.Peers = []PeerPlan{{PublicKey: "intermediate-peer", AllowedIPs: []string{"10.42.3.0/24"}}}
+	updated := make(chan error, 1)
+	go func() { updated <- manager.UpdatePlan(context.Background(), "acme", plan) }()
+	close(runner.release)
+	if err := <-detached; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-updated; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(manager.planPath("acme", "acme")); !os.IsNotExist(err) {
+		t.Fatalf("plan restored after final detach: %v", err)
+	}
+
+	manager.run = &failingRunner{failCommand: "ip route del"}
+	plan.Peers = []PeerPlan{{PublicKey: "new-peer", AllowedIPs: []string{"10.42.4.0/24"}}}
+	if _, err := manager.Attach(context.Background(), AttachRequest{Namespace: "acme", Network: "acme", AllocationID: "alloc-new", Plan: plan}); err != nil {
+		t.Fatalf("Attach() after final detach: %v", err)
 	}
 }
 
