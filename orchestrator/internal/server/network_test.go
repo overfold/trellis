@@ -114,6 +114,15 @@ func TestNetworkPlanStateCoalescesUnchangedPlansAndRepairsPeriodically(t *testin
 	}
 	s.finishNetworkPlanAttempt(pending[0], nil)
 
+	identityChanged := changed
+	identityChanged.wireGuardPublicKey = "rotated-key"
+	s.setDesiredNetworkPlans([]networkPlanTarget{identityChanged})
+	pending = s.pendingNetworkPlans(now.Add(2 * time.Minute))
+	if len(pending) != 1 {
+		t.Fatalf("identity change pending plans = %d, want 1", len(pending))
+	}
+	s.finishNetworkPlanAttempt(pending[0], nil)
+
 	if pending := s.pendingNetworkPlans(now.Add(networkPlanRepairInterval + time.Second)); len(pending) != 1 {
 		t.Fatalf("periodic repair pending plans = %d, want 1", len(pending))
 	}
