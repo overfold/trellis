@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/netip"
+	"sync"
 	"testing"
 	"time"
 
@@ -100,5 +101,41 @@ func TestSendNetworkPlansBoundsSlowAgentAndUpdatesHealthyAgent(t *testing.T) {
 	case <-healthyCalled:
 	default:
 		t.Fatal("healthy agent did not receive its network plan")
+	}
+}
+
+func TestSendNetworkPlansConvergesMultipleNamespacesOnOneNode(t *testing.T) {
+	s := &Server{log: slog.Default()}
+	namespaces := []string{"acme", "globex", "initech"}
+	targets := make([]networkPlanTarget, 0, len(namespaces))
+	for _, namespace := range namespaces {
+		targets = append(targets, networkPlanTarget{namespace: namespace, address: "node-a", plan: &network.Plan{}})
+	}
+
+	var managerMu sync.Mutex
+	applied := make(map[string]bool)
+	update := func(ctx context.Context, address string, request *api.NetworkPlanRequest) error {
+		managerMu.Lock()
+		defer managerMu.Unlock()
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if address != "node-a" || request.Epoch != 7 {
+			t.Errorf("unexpected network plan request: address=%q request=%#v", address, request)
+		}
+		select {
+		case <-time.After(750 * time.Millisecond):
+			applied[request.Namespace] = true
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	s.sendNetworkPlans(context.Background(), targets, 7, update)
+	for _, namespace := range namespaces {
+		if !applied[namespace] {
+			t.Errorf("namespace %q did not receive its network plan", namespace)
+		}
 	}
 }

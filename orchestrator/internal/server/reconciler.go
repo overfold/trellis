@@ -431,16 +431,31 @@ func (s *Server) sendNetworkPlans(ctx context.Context, targets []networkPlanTarg
 	if len(targets) == 0 {
 		return
 	}
-	// Bound the entire fanout so a slow agent cannot hold the reconciliation lock
-	// for one client timeout per namespace or node.
-	planCtx, cancel := context.WithTimeout(ctx, networkPlanTimeout)
-	defer cancel()
-	var workers sync.WaitGroup
+	// The agent serializes plan updates. Send each agent's plans in order so a
+	// request's deadline starts when the agent can actually process it.
+	byAddress := make(map[string][]networkPlanTarget)
+	var addresses []string
 	for _, target := range targets {
+		if _, exists := byAddress[target.address]; !exists {
+			addresses = append(addresses, target.address)
+		}
+		byAddress[target.address] = append(byAddress[target.address], target)
+	}
+	var workers sync.WaitGroup
+	for _, address := range addresses {
+		agentTargets := byAddress[address]
 		workers.Go(func() {
-			request := &api.NetworkPlanRequest{Epoch: epoch, Namespace: target.namespace, Plan: *target.plan}
-			if err := update(planCtx, target.address, request); err != nil {
-				s.log.Error("reconcile namespace network plan", "namespace", target.namespace, "node", target.nodeID, "error", err)
+			for _, target := range agentTargets {
+				if ctx.Err() != nil {
+					return
+				}
+				planCtx, cancel := context.WithTimeout(ctx, networkPlanTimeout)
+				request := &api.NetworkPlanRequest{Epoch: epoch, Namespace: target.namespace, Plan: *target.plan}
+				err := update(planCtx, target.address, request)
+				cancel()
+				if err != nil {
+					s.log.Error("reconcile namespace network plan", "namespace", target.namespace, "node", target.nodeID, "error", err)
+				}
 			}
 		})
 	}
