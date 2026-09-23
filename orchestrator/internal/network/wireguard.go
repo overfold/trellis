@@ -317,6 +317,21 @@ func (m *WireGuardManager) UpdatePlan(ctx context.Context, namespace string, pla
 		return nil
 	}
 	wg := short("tw", namespace+"\x00"+namespace)
+	if plan.WireGuardAddress == "" {
+		return fmt.Errorf("WireGuard address is required")
+	}
+	if _, err := netip.ParsePrefix(plan.WireGuardAddress); err != nil {
+		return fmt.Errorf("invalid WireGuard address %q: %w", plan.WireGuardAddress, err)
+	}
+	if plan.ListenPort < 1 || plan.ListenPort > 65535 {
+		return fmt.Errorf("WireGuard listen port %d is invalid", plan.ListenPort)
+	}
+	if err := m.run.Run(ctx, "ip", "addr", "replace", plan.WireGuardAddress, "dev", wg); err != nil {
+		return fmt.Errorf("configure WireGuard address: %w", err)
+	}
+	if err := m.run.Run(ctx, "wg", "set", wg, "private-key", filepath.Join(m.stateDir, "identity.key"), "listen-port", fmt.Sprint(plan.ListenPort)); err != nil {
+		return fmt.Errorf("configure WireGuard listener: %w", err)
+	}
 	peers := make([]Peer, len(plan.Peers))
 	for i, peer := range plan.Peers {
 		peers[i] = Peer(peer)
