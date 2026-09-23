@@ -43,9 +43,9 @@ type Action struct {
 const (
 	allocationLossTimeout = 45 * time.Second
 	leaderRecoveryGrace   = 30 * time.Second
-	maxExecutionAttempts  = 8
-	networkPlanTimeout    = 2 * time.Second
-	networkAgentTimeout   = 3 * time.Second
+	maxExecutionAttempts      = 8
+	networkPlanTimeout        = 2 * time.Second
+	networkPlanRepairInterval = 5 * time.Minute
 )
 
 func retryDelay(id string, attempt int) time.Duration {
@@ -386,19 +386,43 @@ func (s *Server) Reconcile(ctx context.Context) {
 			s.log.Error("reconcile action failed", "action", actions[i].Type, "allocation", actions[i].Allocation.ID, "error", err)
 		}
 	}
-	s.reconcileNetworkPlans(ctx)
+	s.refreshNetworkPlans()
 	s.refreshCatalog()
 }
 
-func (s *Server) reconcileNetworkPlans(ctx context.Context) {
+type networkPlanKey struct {
+	nodeID    uuid.UUID
+	namespace string
+}
+
+type networkPlanTarget struct {
+	key       networkPlanKey
+	namespace string
+	address   string
+	nodeID    uuid.UUID
+	plan      *network.Plan
+	hash      string
+}
+
+type networkPlanState struct {
+	target      networkPlanTarget
+	appliedHash string
+	appliedAt   time.Time
+	attempt     int
+	retryAt     time.Time
+}
+
+// refreshNetworkPlans computes desired network plans without performing agent
+// I/O. Delivery is handled independently by runNetworkPlanLoop.
+func (s *Server) refreshNetworkPlans() {
 	var targets []networkPlanTarget
-	seen := make(map[string]bool)
+	seen := make(map[networkPlanKey]bool)
 	s.mu.RLock()
 	for _, allocation := range s.allocations {
 		allocation.mu.Lock()
 		if allocation.Node != nil && allocation.Phase == lifecycle.PhaseRunning && tasksUseWireGuard(allocation.Tasks) &&
 			(allocation.Node.Status == NodeStatusHealthy || allocation.Node.Status == NodeStatusDraining) {
-			key := allocation.Namespace + "/" + allocation.Node.ID.String()
+			key := networkPlanKey{nodeID: allocation.Node.ID, namespace: allocation.Namespace}
 			if !seen[key] {
 				seen[key] = true
 				plan, err := s.networkPlan(allocation.Namespace, allocation.Node)
@@ -406,6 +430,7 @@ func (s *Server) reconcileNetworkPlans(ctx context.Context) {
 					s.log.Error("build namespace network plan", "namespace", allocation.Namespace, "node", allocation.Node.ID, "error", err)
 				} else {
 					targets = append(targets, networkPlanTarget{
+						key:       key,
 						namespace: allocation.Namespace,
 						address:   fmt.Sprintf("%s:%d", allocation.Node.Host, allocation.Node.Port),
 						nodeID:    allocation.Node.ID,
@@ -416,47 +441,151 @@ func (s *Server) reconcileNetworkPlans(ctx context.Context) {
 		}
 		allocation.mu.Unlock()
 	}
+	s.mu.RUnlock()
+	s.setDesiredNetworkPlans(targets)
+}
+
+func networkPlanHash(address string, plan *network.Plan) string {
+	raw, _ := json.Marshal(struct {
+		Address string        `json:"address"`
+		Plan    *network.Plan `json:"plan"`
+	}{Address: address, Plan: plan})
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+func (s *Server) setDesiredNetworkPlans(targets []networkPlanTarget) {
+	desired := make(map[networkPlanKey]bool, len(targets))
+	dirty := false
+	s.networkPlanMu.Lock()
+	if s.networkPlans == nil {
+		s.networkPlans = make(map[networkPlanKey]*networkPlanState)
+	}
+	for _, target := range targets {
+		target.hash = networkPlanHash(target.address, target.plan)
+		desired[target.key] = true
+		state := s.networkPlans[target.key]
+		if state == nil {
+			state = &networkPlanState{}
+			s.networkPlans[target.key] = state
+		}
+		if state.target.hash != target.hash {
+			state.attempt = 0
+			state.retryAt = time.Time{}
+		}
+		state.target = target
+		if state.appliedHash != target.hash {
+			dirty = true
+		}
+	}
+	for key := range s.networkPlans {
+		if !desired[key] {
+			delete(s.networkPlans, key)
+		}
+	}
+	s.networkPlanMu.Unlock()
+	if dirty {
+		s.wakeNetworkPlans()
+	}
+}
+
+func (s *Server) wakeNetworkPlans() {
+	select {
+	case s.networkPlanWake <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Server) pendingNetworkPlans(now time.Time) []networkPlanTarget {
+	s.networkPlanMu.Lock()
+	defer s.networkPlanMu.Unlock()
+	targets := make([]networkPlanTarget, 0, len(s.networkPlans))
+	for _, state := range s.networkPlans {
+		dirty := state.appliedHash != state.target.hash || state.appliedAt.IsZero() || now.Sub(state.appliedAt) >= networkPlanRepairInterval
+		if !dirty || (!state.retryAt.IsZero() && now.Before(state.retryAt)) {
+			continue
+		}
+		targets = append(targets, state.target)
+	}
+	sort.Slice(targets, func(i, j int) bool {
+		if targets[i].nodeID != targets[j].nodeID {
+			return targets[i].nodeID.String() < targets[j].nodeID.String()
+		}
+		return targets[i].namespace < targets[j].namespace
+	})
+	return targets
+}
+
+func (s *Server) finishNetworkPlanAttempt(target networkPlanTarget, err error) {
+	now := s.now().UTC()
+	s.networkPlanMu.Lock()
+	defer s.networkPlanMu.Unlock()
+	state := s.networkPlans[target.key]
+	if state == nil || state.target.hash != target.hash {
+		return
+	}
+	if err == nil {
+		state.appliedHash = target.hash
+		state.appliedAt = now
+		state.attempt = 0
+		state.retryAt = time.Time{}
+		return
+	}
+	state.attempt++
+	state.retryAt = now.Add(retryDelay("network/"+target.nodeID.String()+"/"+target.namespace, state.attempt))
+}
+
+func (s *Server) runNetworkPlanLoop(ctx context.Context) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	s.wakeNetworkPlans()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		case <-s.networkPlanWake:
+		}
+		s.sendPendingNetworkPlans(ctx)
+	}
+}
+
+func (s *Server) sendPendingNetworkPlans(ctx context.Context) {
+	targets := s.pendingNetworkPlans(s.now().UTC())
+	if len(targets) == 0 {
+		return
+	}
+	s.mu.RLock()
 	epoch := s.controlEpoch
 	s.mu.RUnlock()
 	s.sendNetworkPlans(ctx, targets, epoch, s.client.UpdateNetworkPlan)
-}
-
-type networkPlanTarget struct {
-	namespace string
-	address   string
-	nodeID    uuid.UUID
-	plan      *network.Plan
 }
 
 func (s *Server) sendNetworkPlans(ctx context.Context, targets []networkPlanTarget, epoch uint64, update func(context.Context, string, *api.NetworkPlanRequest) error) {
 	if len(targets) == 0 {
 		return
 	}
-	// The agent serializes plan updates. Bound both each request and the total
-	// time spent on an agent so unavailable agents cannot delay reconciliation
-	// by a timeout per namespace.
-	byAddress := make(map[string][]networkPlanTarget)
-	var addresses []string
+	byNode := make(map[uuid.UUID][]networkPlanTarget)
+	var nodes []uuid.UUID
 	for _, target := range targets {
-		if _, exists := byAddress[target.address]; !exists {
-			addresses = append(addresses, target.address)
+		if _, exists := byNode[target.nodeID]; !exists {
+			nodes = append(nodes, target.nodeID)
 		}
-		byAddress[target.address] = append(byAddress[target.address], target)
+		byNode[target.nodeID] = append(byNode[target.nodeID], target)
 	}
 	var workers sync.WaitGroup
-	for _, address := range addresses {
-		agentTargets := byAddress[address]
+	for _, nodeID := range nodes {
+		agentTargets := byNode[nodeID]
 		workers.Go(func() {
-			agentCtx, cancel := context.WithTimeout(ctx, networkAgentTimeout)
-			defer cancel()
 			for _, target := range agentTargets {
-				if agentCtx.Err() != nil {
+				if ctx.Err() != nil {
 					return
 				}
-				planCtx, planCancel := context.WithTimeout(agentCtx, networkPlanTimeout)
+				planCtx, cancel := context.WithTimeout(ctx, networkPlanTimeout)
 				request := &api.NetworkPlanRequest{Epoch: epoch, Namespace: target.namespace, Plan: *target.plan}
 				err := update(planCtx, target.address, request)
-				planCancel()
+				cancel()
+				s.finishNetworkPlanAttempt(target, err)
 				if err != nil {
 					s.log.Error("reconcile namespace network plan", "namespace", target.namespace, "node", target.nodeID, "error", err)
 				}
