@@ -454,6 +454,10 @@ func (a *Agent) UpdateNetworkPlan(ctx context.Context, request *api.NetworkPlanR
 		return err
 	}
 	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if request.Epoch < a.epoch {
+		return fmt.Errorf("%w: received %d, highest accepted %d", ErrStaleEpoch, request.Epoch, a.epoch)
+	}
 	active := false
 	for _, allocation := range a.allocations {
 		if allocation.Namespace == request.Namespace && allocation.Network != nil {
@@ -461,7 +465,6 @@ func (a *Agent) UpdateNetworkPlan(ctx context.Context, request *api.NetworkPlanR
 			break
 		}
 	}
-	a.mu.RUnlock()
 	if !active {
 		return nil
 	}
@@ -664,7 +667,9 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		if err != nil {
 			return fmt.Errorf("attach WireGuard network: %w", err)
 		}
+		a.mu.Lock()
 		alloc.Network = netAttachment
+		a.mu.Unlock()
 		if err := a.persistAllocation(alloc); err != nil {
 			return fmt.Errorf("persist network attachment: %w", err)
 		}
