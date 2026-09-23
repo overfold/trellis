@@ -339,8 +339,8 @@ type Allocation struct {
 	Node      *Node
 	Endpoints []api.AllocationEndpoint `json:"endpoints,omitempty"`
 	Ports     []api.PortMapping        `json:"ports,omitempty"`
-	// Draining marks an allocation whose job revision is superseded under
-	// a rolling update strategy. Draining allocations are not restarted on
+	// Draining marks an allocation being replaced during a rolling update or
+	// node drain. Draining allocations are not restarted on
 	// failure and are not counted toward the desired count.
 	Draining bool `json:"draining,omitempty"`
 	// Events is an in-memory ring buffer of recent phase transitions.

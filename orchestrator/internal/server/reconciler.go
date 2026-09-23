@@ -218,6 +218,21 @@ func (s *Server) Reconcile(ctx context.Context) {
 			allocation.mu.Unlock()
 			continue
 		}
+		if allocation.Node != nil && allocation.Node.Status == NodeStatusDraining {
+			if now.Sub(s.leaderSince) >= leaderRecoveryGrace && !allocation.Node.LastHeartbeat.IsZero() && now.Sub(allocation.Node.LastHeartbeat) >= allocationLossTimeout {
+				_ = allocation.Transition(lifecycle.PhaseLost, now, "node_unavailable", "node did not re-register before the allocation loss timeout")
+				_ = s.state.PutAllocation(context.WithoutCancel(ctx), allocation)
+				allocation.mu.Unlock()
+				continue
+			}
+			if !allocation.Draining {
+				allocation.Draining = true
+				_ = s.state.PutAllocation(context.WithoutCancel(ctx), allocation)
+			}
+			valid = append(valid, allocation)
+			allocation.mu.Unlock()
+			continue
+		}
 		if allocation.JobRevision < job.Revision {
 			strategy := updateStrategy(job, allocation.TaskGroupName)
 			switch strategy {
