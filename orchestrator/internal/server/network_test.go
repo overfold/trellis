@@ -76,26 +76,35 @@ func TestNetworkPlanUsesDifferentPortsForDifferentNamespaces(t *testing.T) {
 
 func TestSendNetworkPlansBoundsSlowAgentAndUpdatesHealthyAgent(t *testing.T) {
 	s := &Server{log: slog.Default()}
-	targets := []networkPlanTarget{
-		{namespace: "default", address: "slow", plan: &network.Plan{}},
-		{namespace: "default", address: "healthy", plan: &network.Plan{}},
+	targets := make([]networkPlanTarget, 0, 11)
+	for _, namespace := range []string{"one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"} {
+		targets = append(targets, networkPlanTarget{namespace: namespace, address: "slow", plan: &network.Plan{}})
 	}
+	targets = append(targets, networkPlanTarget{namespace: "default", address: "healthy", plan: &network.Plan{}})
 	healthyCalled := make(chan struct{}, 1)
+	slowCalls := 0
 	update := func(ctx context.Context, address string, request *api.NetworkPlanRequest) error {
-		if request.Epoch != 7 || request.Namespace != "default" {
+		if request.Epoch != 7 {
 			t.Errorf("unexpected network plan request: %#v", request)
 		}
 		if address == "healthy" {
+			if request.Namespace != "default" {
+				t.Errorf("unexpected healthy agent network plan request: %#v", request)
+			}
 			healthyCalled <- struct{}{}
 			return nil
 		}
+		slowCalls++
 		<-ctx.Done()
 		return ctx.Err()
 	}
 	start := time.Now()
 	s.sendNetworkPlans(context.Background(), targets, 7, update)
-	if elapsed := time.Since(start); elapsed > networkPlanTimeout+time.Second {
+	if elapsed := time.Since(start); elapsed > networkAgentTimeout+time.Second {
 		t.Fatalf("network plan reconciliation took %s, exceeds deadline", elapsed)
+	}
+	if slowCalls < 1 || slowCalls > 2 {
+		t.Fatalf("slow agent received %d attempts, want at most two before its deadline", slowCalls)
 	}
 	select {
 	case <-healthyCalled:

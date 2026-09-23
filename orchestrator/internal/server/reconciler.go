@@ -45,6 +45,7 @@ const (
 	leaderRecoveryGrace   = 30 * time.Second
 	maxExecutionAttempts  = 8
 	networkPlanTimeout    = 2 * time.Second
+	networkAgentTimeout   = 3 * time.Second
 )
 
 func retryDelay(id string, attempt int) time.Duration {
@@ -431,8 +432,9 @@ func (s *Server) sendNetworkPlans(ctx context.Context, targets []networkPlanTarg
 	if len(targets) == 0 {
 		return
 	}
-	// The agent serializes plan updates. Send each agent's plans in order so a
-	// request's deadline starts when the agent can actually process it.
+	// The agent serializes plan updates. Bound both each request and the total
+	// time spent on an agent so unavailable agents cannot delay reconciliation
+	// by a timeout per namespace.
 	byAddress := make(map[string][]networkPlanTarget)
 	var addresses []string
 	for _, target := range targets {
@@ -445,14 +447,16 @@ func (s *Server) sendNetworkPlans(ctx context.Context, targets []networkPlanTarg
 	for _, address := range addresses {
 		agentTargets := byAddress[address]
 		workers.Go(func() {
+			agentCtx, cancel := context.WithTimeout(ctx, networkAgentTimeout)
+			defer cancel()
 			for _, target := range agentTargets {
-				if ctx.Err() != nil {
+				if agentCtx.Err() != nil {
 					return
 				}
-				planCtx, cancel := context.WithTimeout(ctx, networkPlanTimeout)
+				planCtx, planCancel := context.WithTimeout(agentCtx, networkPlanTimeout)
 				request := &api.NetworkPlanRequest{Epoch: epoch, Namespace: target.namespace, Plan: *target.plan}
 				err := update(planCtx, target.address, request)
-				cancel()
+				planCancel()
 				if err != nil {
 					s.log.Error("reconcile namespace network plan", "namespace", target.namespace, "node", target.nodeID, "error", err)
 				}
