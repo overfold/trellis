@@ -106,3 +106,29 @@ func TestDrainNodeStopsAllocationAfterReplacementHealthy(t *testing.T) {
 		t.Fatalf("original phase after replacement healthy = %s, want stopped", original.Phase)
 	}
 }
+
+func TestReconcileStopsRemovedGroupOnDrainingNode(t *testing.T) {
+	s, agent := newTestServerWithAgent()
+	defer agent.server.Close()
+
+	drainingNode := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusDraining, LastHeartbeat: s.now()}
+	healthyNode := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
+	s.nodes[drainingNode.ID] = drainingNode
+	s.nodes[healthyNode.ID] = healthyNode
+
+	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app:v2"}}}}}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: jobSpec, Revision: 2}
+	now := s.now()
+	removed := &Allocation{ID: "removed", Namespace: "default", JobName: "web", TaskGroupName: "worker", Tasks: []spec.TaskSpec{{Name: "worker", Image: "app:v1"}}, Node: drainingNode, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy, Diagnostic: lifecycle.Diagnostic{CreatedAt: now, TransitionedAt: now}}
+	retained := &Allocation{ID: "retained", Namespace: "default", JobName: "web", TaskGroupName: "api", Tasks: jobSpec.TaskGroups[0].Tasks, Node: healthyNode, Generation: 1, JobRevision: 2, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy, Diagnostic: lifecycle.Diagnostic{CreatedAt: now, TransitionedAt: now}}
+	s.allocations = []*Allocation{removed, retained}
+
+	s.Reconcile(context.Background())
+
+	if removed.Phase != lifecycle.PhaseStopped {
+		t.Fatalf("removed group allocation phase = %s, want stopped", removed.Phase)
+	}
+	if retained.Phase != lifecycle.PhaseRunning {
+		t.Fatalf("retained group allocation phase = %s, want running", retained.Phase)
+	}
+}

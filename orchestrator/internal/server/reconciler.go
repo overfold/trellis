@@ -225,6 +225,18 @@ func (s *Server) Reconcile(ctx context.Context) {
 				allocation.mu.Unlock()
 				continue
 			}
+			groupExists := false
+			for _, group := range job.Spec.TaskGroups {
+				if group.Name == allocation.TaskGroupName {
+					groupExists = true
+					break
+				}
+			}
+			if !groupExists {
+				actions = append(actions, Action{Type: ActionStop, Allocation: allocation})
+				allocation.mu.Unlock()
+				continue
+			}
 			if !allocation.Draining {
 				allocation.Draining = true
 				_ = s.state.PutAllocation(context.WithoutCancel(ctx), allocation)
