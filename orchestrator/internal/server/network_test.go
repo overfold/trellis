@@ -2,9 +2,9 @@ package server
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/netip"
-	"sync"
 	"testing"
 	"time"
 
@@ -74,77 +74,84 @@ func TestNetworkPlanUsesDifferentPortsForDifferentNamespaces(t *testing.T) {
 	}
 }
 
-func TestSendNetworkPlansBoundsSlowAgentAndUpdatesHealthyAgent(t *testing.T) {
-	s := &Server{log: slog.Default()}
-	targets := make([]networkPlanTarget, 0, 11)
-	for _, namespace := range []string{"one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"} {
-		targets = append(targets, networkPlanTarget{namespace: namespace, address: "slow", plan: &network.Plan{}})
+func TestNetworkPlanStateCoalescesUnchangedPlansAndRepairsPeriodically(t *testing.T) {
+	now := time.Date(2026, 9, 23, 18, 0, 0, 0, time.UTC)
+	s := &Server{
+		log:          slog.Default(),
+		now:          func() time.Time { return now },
+		networkPlans: make(map[networkPlanKey]*networkPlanState),
 	}
-	targets = append(targets, networkPlanTarget{namespace: "default", address: "healthy", plan: &network.Plan{}})
-	healthyCalled := make(chan struct{}, 1)
-	slowCalls := 0
-	update := func(ctx context.Context, address string, request *api.NetworkPlanRequest) error {
-		if request.Epoch != 7 {
-			t.Errorf("unexpected network plan request: %#v", request)
-		}
-		if address == "healthy" {
-			if request.Namespace != "default" {
-				t.Errorf("unexpected healthy agent network plan request: %#v", request)
-			}
-			healthyCalled <- struct{}{}
-			return nil
-		}
-		slowCalls++
-		<-ctx.Done()
-		return ctx.Err()
+	nodeID := uuid.New()
+	target := networkPlanTarget{
+		key:       networkPlanKey{nodeID: nodeID, namespace: "acme"},
+		namespace: "acme",
+		address:   "node-a:8127",
+		nodeID:    nodeID,
+		plan:      &network.Plan{ListenPort: 51820},
 	}
-	start := time.Now()
-	s.sendNetworkPlans(context.Background(), targets, 7, update)
-	if elapsed := time.Since(start); elapsed > networkAgentTimeout+time.Second {
-		t.Fatalf("network plan reconciliation took %s, exceeds deadline", elapsed)
+
+	s.setDesiredNetworkPlans([]networkPlanTarget{target})
+	pending := s.pendingNetworkPlans(now)
+	if len(pending) != 1 {
+		t.Fatalf("initial pending plans = %d, want 1", len(pending))
 	}
-	if slowCalls < 1 || slowCalls > 2 {
-		t.Fatalf("slow agent received %d attempts, want at most two before its deadline", slowCalls)
+	s.finishNetworkPlanAttempt(pending[0], nil)
+
+	s.setDesiredNetworkPlans([]networkPlanTarget{target})
+	if pending := s.pendingNetworkPlans(now.Add(time.Minute)); len(pending) != 0 {
+		t.Fatalf("unchanged plan was requeued: %#v", pending)
 	}
-	select {
-	case <-healthyCalled:
-	default:
-		t.Fatal("healthy agent did not receive its network plan")
+
+	changed := target
+	changed.plan = &network.Plan{
+		ListenPort: 51820,
+		Peers:      []network.PeerPlan{{PublicKey: "new-peer", AllowedIPs: []string{"10.64.1.0/24"}}},
+	}
+	s.setDesiredNetworkPlans([]networkPlanTarget{changed})
+	pending = s.pendingNetworkPlans(now.Add(time.Minute))
+	if len(pending) != 1 {
+		t.Fatalf("changed pending plans = %d, want 1", len(pending))
+	}
+	s.finishNetworkPlanAttempt(pending[0], nil)
+
+	if pending := s.pendingNetworkPlans(now.Add(networkPlanRepairInterval + time.Second)); len(pending) != 1 {
+		t.Fatalf("periodic repair pending plans = %d, want 1", len(pending))
 	}
 }
 
-func TestSendNetworkPlansConvergesMultipleNamespacesOnOneNode(t *testing.T) {
-	s := &Server{log: slog.Default()}
-	namespaces := []string{"acme", "globex", "initech"}
-	targets := make([]networkPlanTarget, 0, len(namespaces))
-	for _, namespace := range namespaces {
-		targets = append(targets, networkPlanTarget{namespace: namespace, address: "node-a", plan: &network.Plan{}})
+func TestSendNetworkPlansFailureDoesNotStarveLaterNamespaces(t *testing.T) {
+	s := &Server{
+		log:          slog.Default(),
+		now:          time.Now,
+		networkPlans: make(map[networkPlanKey]*networkPlanState),
 	}
-
-	var managerMu sync.Mutex
-	applied := make(map[string]bool)
-	update := func(ctx context.Context, address string, request *api.NetworkPlanRequest) error {
-		managerMu.Lock()
-		defer managerMu.Unlock()
-		if err := ctx.Err(); err != nil {
-			return err
+	nodeID := uuid.New()
+	var targets []networkPlanTarget
+	for _, namespace := range []string{"one", "two", "three"} {
+		targets = append(targets, networkPlanTarget{
+			key:       networkPlanKey{nodeID: nodeID, namespace: namespace},
+			namespace: namespace,
+			address:   "node-a",
+			nodeID:    nodeID,
+			plan:      &network.Plan{},
+		})
+	}
+	var called []string
+	update := func(_ context.Context, _ string, request *api.NetworkPlanRequest) error {
+		called = append(called, request.Namespace)
+		if request.Namespace == "one" {
+			return errors.New("first namespace failed")
 		}
-		if address != "node-a" || request.Epoch != 7 {
-			t.Errorf("unexpected network plan request: address=%q request=%#v", address, request)
-		}
-		select {
-		case <-time.After(750 * time.Millisecond):
-			applied[request.Namespace] = true
-			return nil
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+		return nil
 	}
 
 	s.sendNetworkPlans(context.Background(), targets, 7, update)
-	for _, namespace := range namespaces {
-		if !applied[namespace] {
-			t.Errorf("namespace %q did not receive its network plan", namespace)
+	if len(called) != 3 {
+		t.Fatalf("agent received %d updates, want all 3: %v", len(called), called)
+	}
+	for i, want := range []string{"one", "two", "three"} {
+		if called[i] != want {
+			t.Fatalf("update %d = %q, want %q", i, called[i], want)
 		}
 	}
 }
