@@ -286,7 +286,12 @@ func TestUpdatePlanAddsPeerAndRouteWithoutNewAllocation(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(runner.commands, "\n")
-	for _, want := range []string{"wg set " + attachment.WireGuardInterface + " peer new-peer allowed-ips 10.42.2.0/24 endpoint node-b:51917", "ip route replace 10.42.2.0/24 dev " + attachment.WireGuardInterface} {
+	for _, want := range []string{
+		"ip addr replace 169.254.1.1/32 dev " + attachment.WireGuardInterface,
+		"wg set " + attachment.WireGuardInterface + " private-key " + filepath.Join(manager.stateDir, "identity.key") + " listen-port 51917",
+		"wg set " + attachment.WireGuardInterface + " peer new-peer allowed-ips 10.42.2.0/24 endpoint node-b:51917",
+		"ip route replace 10.42.2.0/24 dev " + attachment.WireGuardInterface,
+	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("commands do not contain %q:\n%s", want, joined)
 		}
