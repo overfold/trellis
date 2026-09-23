@@ -398,10 +398,11 @@ type networkPlanKey struct {
 type networkPlanTarget struct {
 	key       networkPlanKey
 	namespace string
-	address   string
-	nodeID    uuid.UUID
-	plan      *network.Plan
-	hash      string
+	address            string
+	nodeID             uuid.UUID
+	wireGuardPublicKey string
+	plan               *network.Plan
+	hash               string
 }
 
 type networkPlanState struct {
@@ -432,9 +433,10 @@ func (s *Server) refreshNetworkPlans() {
 					targets = append(targets, networkPlanTarget{
 						key:       key,
 						namespace: allocation.Namespace,
-						address:   fmt.Sprintf("%s:%d", allocation.Node.Host, allocation.Node.Port),
-						nodeID:    allocation.Node.ID,
-						plan:      plan,
+						address:            fmt.Sprintf("%s:%d", allocation.Node.Host, allocation.Node.Port),
+						nodeID:             allocation.Node.ID,
+						wireGuardPublicKey: allocation.Node.WireGuardPublicKey,
+						plan:               plan,
 					})
 				}
 			}
@@ -445,11 +447,12 @@ func (s *Server) refreshNetworkPlans() {
 	s.setDesiredNetworkPlans(targets)
 }
 
-func networkPlanHash(address string, plan *network.Plan) string {
+func networkPlanHash(address, publicKey string, plan *network.Plan) string {
 	raw, _ := json.Marshal(struct {
-		Address string        `json:"address"`
-		Plan    *network.Plan `json:"plan"`
-	}{Address: address, Plan: plan})
+		Address   string        `json:"address"`
+		PublicKey string        `json:"public_key"`
+		Plan      *network.Plan `json:"plan"`
+	}{Address: address, PublicKey: publicKey, Plan: plan})
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
 }
@@ -462,7 +465,7 @@ func (s *Server) setDesiredNetworkPlans(targets []networkPlanTarget) {
 		s.networkPlans = make(map[networkPlanKey]*networkPlanState)
 	}
 	for _, target := range targets {
-		target.hash = networkPlanHash(target.address, target.plan)
+		target.hash = networkPlanHash(target.address, target.wireGuardPublicKey, target.plan)
 		desired[target.key] = true
 		state := s.networkPlans[target.key]
 		if state == nil {
