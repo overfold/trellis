@@ -323,6 +323,55 @@ func TestUpdatePlanAddsPeerAndRouteWithoutNewAllocation(t *testing.T) {
 	}
 }
 
+func TestUpdatePlanFailureDoesNotAdvancePersistedPeerPlan(t *testing.T) {
+	manager, err := NewAutomatedWireGuardManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.run = &recordingRunner{}
+	oldPlan := Plan{
+		CIDR:             "10.42.1.0/24",
+		Gateway:          "10.42.1.1",
+		WireGuardAddress: "169.254.1.1/32",
+		ListenPort:       51917,
+		Peers:            []PeerPlan{{PublicKey: "old-peer", AllowedIPs: []string{"10.42.2.0/24"}}},
+	}
+	attachment, err := manager.Attach(context.Background(), AttachRequest{Namespace: "acme", Network: "acme", AllocationID: "alloc-old", Plan: oldPlan})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newPlan := oldPlan
+	newPlan.Peers = []PeerPlan{{PublicKey: "new-peer", AllowedIPs: []string{"10.42.3.0/24"}}}
+	manager.run = &failingRunner{failCommand: "wg set"}
+	if err := manager.UpdatePlan(context.Background(), "acme", newPlan); err == nil {
+		t.Fatal("UpdatePlan reported success after batched WireGuard apply failed")
+	}
+
+	raw, err := os.ReadFile(manager.planPath("acme", "acme"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted []Peer
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if len(persisted) != 1 || persisted[0].PublicKey != "old-peer" {
+		t.Fatalf("failed apply advanced persisted plan: %#v", persisted)
+	}
+
+	runner := &recordingRunner{}
+	manager.run = runner
+	if err := manager.UpdatePlan(context.Background(), "acme", newPlan); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(runner.commands, "\n")
+	want := "wg set " + attachment.WireGuardInterface
+	if !strings.Contains(joined, want) || !strings.Contains(joined, "peer old-peer remove") || !strings.Contains(joined, "peer new-peer allowed-ips 10.42.3.0/24") {
+		t.Fatalf("retry did not reconcile stale and desired peers in one batch:\n%s", joined)
+	}
+}
+
 func TestUpdatePlanBatchesLargePeerSetWithinDeadline(t *testing.T) {
 	manager, err := NewAutomatedWireGuardManager(t.TempDir())
 	if err != nil {
