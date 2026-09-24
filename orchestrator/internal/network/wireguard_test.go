@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 type recordingRunner struct{ commands []string }
@@ -44,6 +45,20 @@ func (r *blockingRunner) Run(_ context.Context, name string, args ...string) err
 		<-r.release
 	}
 	return nil
+}
+
+type slowRecordingRunner struct {
+	recordingRunner
+	delay time.Duration
+}
+
+func (r *slowRecordingRunner) Run(ctx context.Context, name string, args ...string) error {
+	select {
+	case <-time.After(r.delay):
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return r.recordingRunner.Run(ctx, name, args...)
 }
 
 func TestWireGuardAttachBuildsIsolatedNamespace(t *testing.T) {
@@ -288,8 +303,7 @@ func TestUpdatePlanAddsPeerAndRouteWithoutNewAllocation(t *testing.T) {
 	joined := strings.Join(runner.commands, "\n")
 	for _, want := range []string{
 		"ip addr replace 169.254.1.1/32 dev " + attachment.WireGuardInterface,
-		"wg set " + attachment.WireGuardInterface + " private-key " + filepath.Join(manager.stateDir, "identity.key") + " listen-port 51917",
-		"wg set " + attachment.WireGuardInterface + " peer new-peer allowed-ips 10.42.2.0/24 endpoint node-b:51917",
+		"wg set " + attachment.WireGuardInterface + " private-key " + filepath.Join(manager.stateDir, "identity.key") + " listen-port 51917 peer new-peer allowed-ips 10.42.2.0/24 endpoint node-b:51917",
 		"ip route replace 10.42.2.0/24 dev " + attachment.WireGuardInterface,
 	} {
 		if !strings.Contains(joined, want) {
@@ -306,6 +320,49 @@ func TestUpdatePlanAddsPeerAndRouteWithoutNewAllocation(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("commands do not contain %q:\n%s", want, joined)
 		}
+	}
+}
+
+func TestUpdatePlanBatchesLargePeerSetWithinDeadline(t *testing.T) {
+	manager, err := NewAutomatedWireGuardManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.run = &recordingRunner{}
+	plan := Plan{CIDR: "10.42.1.0/24", Gateway: "10.42.1.1", WireGuardAddress: "169.254.1.1/32", ListenPort: 51917}
+	attachment, err := manager.Attach(context.Background(), AttachRequest{Namespace: "acme", Network: "acme", AllocationID: "alloc-old", Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const peerCount = 80
+	plan.Peers = make([]PeerPlan, 0, peerCount)
+	for i := 0; i < peerCount; i++ {
+		plan.Peers = append(plan.Peers, PeerPlan{
+			PublicKey:  fmt.Sprintf("peer-%03d", i),
+			Endpoint:   fmt.Sprintf("node-%03d:51917", i),
+			AllowedIPs: []string{fmt.Sprintf("10.43.%d.0/24", i)},
+		})
+	}
+	runner := &slowRecordingRunner{delay: 13 * time.Millisecond}
+	manager.run = runner
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := manager.UpdatePlan(ctx, "acme", plan); err != nil {
+		t.Fatalf("large UpdatePlan() did not converge within legacy deadline: %v", err)
+	}
+
+	wgSets := 0
+	for _, command := range runner.commands {
+		if strings.HasPrefix(command, "wg set "+attachment.WireGuardInterface+" ") {
+			wgSets++
+			if !strings.Contains(command, "peer peer-000 ") || !strings.Contains(command, "peer peer-079 ") {
+				t.Fatalf("batched WireGuard command is missing peers: %s", command)
+			}
+		}
+	}
+	if wgSets != 1 {
+		t.Fatalf("WireGuard plan used %d wg set commands, want 1", wgSets)
 	}
 }
 
