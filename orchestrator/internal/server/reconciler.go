@@ -41,11 +41,11 @@ type Action struct {
 }
 
 const (
-	allocationLossTimeout = 45 * time.Second
-	leaderRecoveryGrace   = 30 * time.Second
-	maxExecutionAttempts       = 8
+	allocationLossTimeout       = 45 * time.Second
+	leaderRecoveryGrace         = 30 * time.Second
+	maxExecutionAttempts        = 8
 	networkPlanOperationTimeout = 15 * time.Second
-	networkPlanRepairInterval  = 5 * time.Minute
+	networkPlanRepairInterval   = 5 * time.Minute
 )
 
 func retryDelay(id string, attempt int) time.Duration {
