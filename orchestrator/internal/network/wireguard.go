@@ -329,9 +329,6 @@ func (m *WireGuardManager) UpdatePlan(ctx context.Context, namespace string, pla
 	if err := m.run.Run(ctx, "ip", "addr", "replace", plan.WireGuardAddress, "dev", wg); err != nil {
 		return fmt.Errorf("configure WireGuard address: %w", err)
 	}
-	if err := m.run.Run(ctx, "wg", "set", wg, "private-key", filepath.Join(m.stateDir, "identity.key"), "listen-port", fmt.Sprint(plan.ListenPort)); err != nil {
-		return fmt.Errorf("configure WireGuard listener: %w", err)
-	}
 	peers := make([]Peer, len(plan.Peers))
 	for i, peer := range plan.Peers {
 		peers[i] = Peer(peer)
@@ -339,14 +336,17 @@ func (m *WireGuardManager) UpdatePlan(ctx context.Context, namespace string, pla
 	if err := m.reconcilePeers(ctx, wg, namespace, namespace, peers); err != nil {
 		return err
 	}
+	wgArgs := []string{"set", wg, "private-key", filepath.Join(m.stateDir, "identity.key"), "listen-port", fmt.Sprint(plan.ListenPort)}
 	for _, peer := range peers {
-		args := []string{"set", wg, "peer", peer.PublicKey, "allowed-ips", strings.Join(peer.AllowedIPs, ",")}
+		wgArgs = append(wgArgs, "peer", peer.PublicKey, "allowed-ips", strings.Join(peer.AllowedIPs, ","))
 		if peer.Endpoint != "" {
-			args = append(args, "endpoint", peer.Endpoint)
+			wgArgs = append(wgArgs, "endpoint", peer.Endpoint)
 		}
-		if err := m.run.Run(ctx, "wg", args...); err != nil {
-			return fmt.Errorf("configure WireGuard peer: %w", err)
-		}
+	}
+	if err := m.run.Run(ctx, "wg", wgArgs...); err != nil {
+		return fmt.Errorf("configure WireGuard plan: %w", err)
+	}
+	for _, peer := range peers {
 		for _, route := range peer.AllowedIPs {
 			if err := m.run.Run(ctx, "ip", "route", "replace", route, "dev", wg); err != nil {
 				return fmt.Errorf("configure WireGuard route: %w", err)
