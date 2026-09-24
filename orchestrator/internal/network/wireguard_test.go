@@ -352,7 +352,7 @@ func TestUpdatePlanAddsPeerAndRouteWithoutNewAllocation(t *testing.T) {
 	}
 }
 
-func TestUpdatePlanFailureDoesNotAdvancePersistedPeerPlan(t *testing.T) {
+func TestUpdatePlanFailurePersistsConservativePeerPlan(t *testing.T) {
 	manager, err := NewAutomatedWireGuardManager(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -385,8 +385,15 @@ func TestUpdatePlanFailureDoesNotAdvancePersistedPeerPlan(t *testing.T) {
 	if err := json.Unmarshal(raw, &persisted); err != nil {
 		t.Fatal(err)
 	}
-	if len(persisted) != 1 || persisted[0].PublicKey != "old-peer" {
-		t.Fatalf("failed apply advanced persisted plan: %#v", persisted)
+	if len(persisted) != 2 {
+		t.Fatalf("failed apply did not retain conservative peer set: %#v", persisted)
+	}
+	keys := map[string]bool{}
+	for _, peer := range persisted {
+		keys[peer.PublicKey] = true
+	}
+	if !keys["old-peer"] || !keys["new-peer"] {
+		t.Fatalf("conservative plan = %#v, want old-peer and new-peer", persisted)
 	}
 
 	runner := &recordingRunner{}
@@ -460,6 +467,81 @@ func TestUpdatePlanRetryConvergesAfterPartialRouteApply(t *testing.T) {
 	}
 }
 
+func TestUpdatePlanSupersessionCleansPartiallyAppliedPeersAndRoutes(t *testing.T) {
+	manager, err := NewAutomatedWireGuardManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.run = &recordingRunner{}
+	p1 := Plan{
+		CIDR:             "10.42.1.0/24",
+		Gateway:          "10.42.1.1",
+		WireGuardAddress: "169.254.1.1/32",
+		ListenPort:       51917,
+		Peers:            []PeerPlan{{PublicKey: "peer-a", AllowedIPs: []string{"10.42.2.0/24"}}},
+	}
+	if _, err := manager.Attach(context.Background(), AttachRequest{Namespace: "acme", Network: "acme", AllocationID: "alloc-old", Plan: p1}); err != nil {
+		t.Fatal(err)
+	}
+
+	p2 := p1
+	p2.Peers = []PeerPlan{
+		{PublicKey: "peer-a", AllowedIPs: []string{"10.42.2.0/24"}},
+		{PublicKey: "peer-b", AllowedIPs: []string{"10.42.3.0/24"}},
+		{PublicKey: "peer-c", AllowedIPs: []string{"10.42.4.0/24"}},
+	}
+	manager.run = &failingRunner{failCommand: "ip route replace 10.42.4.0/24"}
+	if err := manager.UpdatePlan(context.Background(), "acme", p2); err == nil {
+		t.Fatal("partially applied P2 unexpectedly succeeded")
+	}
+
+	raw, err := os.ReadFile(manager.planPath("acme", "acme"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var conservative []Peer
+	if err := json.Unmarshal(raw, &conservative); err != nil {
+		t.Fatal(err)
+	}
+	keys := map[string]bool{}
+	for _, peer := range conservative {
+		keys[peer.PublicKey] = true
+	}
+	if !keys["peer-a"] || !keys["peer-b"] || !keys["peer-c"] {
+		t.Fatalf("partial P2 was not conservatively persisted: %#v", conservative)
+	}
+
+	runner := &recordingRunner{}
+	manager.run = runner
+	p3 := p1
+	if err := manager.UpdatePlan(context.Background(), "acme", p3); err != nil {
+		t.Fatalf("superseding P3 did not converge: %v", err)
+	}
+	joined := strings.Join(runner.commands, "\n")
+	for _, want := range []string{
+		"peer peer-b remove",
+		"peer peer-c remove",
+		"ip route flush exact 10.42.3.0/24 dev ",
+		"ip route flush exact 10.42.4.0/24 dev ",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("superseding plan did not clean %q:\n%s", want, joined)
+		}
+	}
+
+	raw, err = os.ReadFile(manager.planPath("acme", "acme"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var exact []Peer
+	if err := json.Unmarshal(raw, &exact); err != nil {
+		t.Fatal(err)
+	}
+	if len(exact) != 1 || exact[0].PublicKey != "peer-a" {
+		t.Fatalf("converged P3 state = %#v, want only peer-a", exact)
+	}
+}
+
 func TestAtomicNetworkPlanWritePreservesPreviousFileOnCommitFailure(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "plan.json")
@@ -500,6 +582,21 @@ func TestAtomicNetworkPlanWritePreservesPreviousFileOnCommitFailure(t *testing.T
 	if string(got) != string(next) {
 		t.Fatalf("atomic replacement = %q, want %q", got, next)
 	}
+
+	err = writeAtomicFileWithOps(path, old, 0o600, os.Rename, func(string) (*os.File, error) {
+		return nil, errors.New("injected directory open failure")
+	})
+	if err == nil || !strings.Contains(err.Error(), "open network plan directory") {
+		t.Fatalf("directory open failure was not reported: %v", err)
+	}
+	got, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(old) {
+		t.Fatalf("rename before directory sync failure did not install data: %q", got)
+	}
+
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
@@ -521,16 +618,16 @@ func TestUpdatePlanBatchesLargePeerSetWithinDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	const peerCount = 80
+	const peerCount = 400
 	plan.Peers = make([]PeerPlan, 0, peerCount)
 	for i := 0; i < peerCount; i++ {
 		plan.Peers = append(plan.Peers, PeerPlan{
 			PublicKey:  fmt.Sprintf("peer-%03d", i),
-			Endpoint:   fmt.Sprintf("node-%03d:51917", i),
-			AllowedIPs: []string{fmt.Sprintf("10.43.%d.0/24", i)},
+			Endpoint:   fmt.Sprintf("node-%03d.example.test:51917", i),
+			AllowedIPs: []string{fmt.Sprintf("10.%d.%d.0/24", 50+i/256, i%256)},
 		})
 	}
-	runner := &slowRecordingRunner{delay: 13 * time.Millisecond}
+	runner := &slowRecordingRunner{delay: time.Millisecond}
 	manager.run = runner
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -539,16 +636,27 @@ func TestUpdatePlanBatchesLargePeerSetWithinDeadline(t *testing.T) {
 	}
 
 	wgSets := 0
+	seen := make(map[string]bool, peerCount)
 	for _, command := range runner.commands {
-		if strings.HasPrefix(command, "wg set "+attachment.WireGuardInterface+" ") {
-			wgSets++
-			if !strings.Contains(command, "peer peer-000 ") || !strings.Contains(command, "peer peer-079 ") {
-				t.Fatalf("batched WireGuard command is missing peers: %s", command)
+		if !strings.HasPrefix(command, "wg set "+attachment.WireGuardInterface+" ") {
+			continue
+		}
+		wgSets++
+		if len(command) > wireGuardCommandArgBudget {
+			t.Fatalf("WireGuard command exceeded argument budget: %d > %d", len(command), wireGuardCommandArgBudget)
+		}
+		for i := 0; i < peerCount; i++ {
+			key := fmt.Sprintf("peer-%03d", i)
+			if strings.Contains(command, "peer "+key+" ") {
+				seen[key] = true
 			}
 		}
 	}
-	if wgSets != 1 {
-		t.Fatalf("WireGuard plan used %d wg set commands, want 1", wgSets)
+	if wgSets < 2 {
+		t.Fatalf("large WireGuard plan used %d wg set command, want bounded batches", wgSets)
+	}
+	if len(seen) != peerCount {
+		t.Fatalf("batched WireGuard plan covered %d/%d peers", len(seen), peerCount)
 	}
 }
 
