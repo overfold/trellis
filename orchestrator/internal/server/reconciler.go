@@ -40,12 +40,26 @@ type Action struct {
 }
 
 const (
-	allocationLossTimeout       = 45 * time.Second
-	leaderRecoveryGrace         = 30 * time.Second
-	maxExecutionAttempts        = 8
-	networkPlanOperationTimeout = 15 * time.Second
-	networkPlanRepairInterval   = 5 * time.Minute
+	allocationLossTimeout          = 45 * time.Second
+	leaderRecoveryGrace            = 30 * time.Second
+	maxExecutionAttempts           = 8
+	networkPlanBaseTimeout         = 15 * time.Second
+	networkPlanPeerTimeoutBudget   = 25 * time.Millisecond
+	networkPlanRouteTimeoutBudget  = 100 * time.Millisecond
+	networkPlanRepairInterval      = 5 * time.Minute
 )
+
+func networkPlanOperationTimeout(plan *network.Plan) time.Duration {
+	timeout := networkPlanBaseTimeout
+	if plan == nil {
+		return timeout
+	}
+	timeout += time.Duration(len(plan.Peers)) * networkPlanPeerTimeoutBudget
+	for _, peer := range plan.Peers {
+		timeout += time.Duration(len(peer.AllowedIPs)) * networkPlanRouteTimeoutBudget
+	}
+	return timeout
+}
 
 func retryDelay(id string, attempt int) time.Duration {
 	if attempt < 1 {
@@ -632,7 +646,7 @@ func (s *Server) sendNetworkPlanTarget(ctx context.Context, target networkPlanTa
 	if ctx.Err() != nil || target.epoch != s.currentControlEpoch() {
 		return
 	}
-	planCtx, cancel := context.WithTimeout(ctx, networkPlanOperationTimeout)
+	planCtx, cancel := context.WithTimeout(ctx, networkPlanOperationTimeout(target.plan))
 	request := &api.NetworkPlanRequest{Epoch: target.epoch, Namespace: target.namespace, Plan: *target.plan}
 	err := update(planCtx, target.address, request)
 	cancel()
