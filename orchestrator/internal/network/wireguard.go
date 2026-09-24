@@ -281,6 +281,42 @@ func (m *WireGuardManager) peerPlanDiff(namespace, networkName string, peers []P
 	return stalePeers, staleRoutes, nil
 }
 
+func writeAtomicFile(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".network-plan-*")
+	if err != nil {
+		return fmt.Errorf("create temporary network plan: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+	}()
+
+	if err := tmp.Chmod(mode); err != nil {
+		return fmt.Errorf("chmod temporary network plan: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return fmt.Errorf("write temporary network plan: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return fmt.Errorf("sync temporary network plan: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temporary network plan: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("install network plan: %w", err)
+	}
+	if dirFile, err := os.Open(dir); err == nil {
+		defer func() { _ = dirFile.Close() }()
+		if err := dirFile.Sync(); err != nil {
+			return fmt.Errorf("sync network plan directory: %w", err)
+		}
+	}
+	return nil
+}
+
 func (m *WireGuardManager) persistPeerPlan(namespace, networkName string, peers []Peer) error {
 	planDir := filepath.Join(m.stateDir, "plans")
 	if err := os.MkdirAll(planDir, 0o700); err != nil {
@@ -290,8 +326,19 @@ func (m *WireGuardManager) persistPeerPlan(namespace, networkName string, peers 
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(m.planPath(namespace, networkName), raw, 0o600); err != nil {
+	if err := writeAtomicFile(m.planPath(namespace, networkName), raw, 0o600); err != nil {
 		return fmt.Errorf("persist applied network plan: %w", err)
+	}
+	return nil
+}
+
+func (m *WireGuardManager) removeStaleRoutes(ctx context.Context, wg string, routes []string) error {
+	for _, route := range routes {
+		// flush is idempotent when the exact route is already absent, unlike
+		// route del. That keeps retries convergent after a partial apply.
+		if err := m.run.Run(ctx, "ip", "route", "flush", "exact", route, "dev", wg); err != nil {
+			return fmt.Errorf("remove stale WireGuard route: %w", err)
+		}
 	}
 	return nil
 }
@@ -351,10 +398,8 @@ func (m *WireGuardManager) UpdatePlan(ctx context.Context, namespace string, pla
 	if err := m.run.Run(ctx, "wg", wgArgs...); err != nil {
 		return fmt.Errorf("configure WireGuard plan: %w", err)
 	}
-	for _, route := range staleRoutes {
-		if err := m.run.Run(ctx, "ip", "route", "del", route, "dev", wg); err != nil {
-			return fmt.Errorf("remove stale WireGuard route: %w", err)
-		}
+	if err := m.removeStaleRoutes(ctx, wg, staleRoutes); err != nil {
+		return err
 	}
 	for _, peer := range peers {
 		for _, route := range peer.AllowedIPs {
@@ -442,10 +487,8 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 	if err = m.run.Run(ctx, "wg", wgArgs...); err != nil {
 		return nil, err
 	}
-	for _, route := range staleRoutes {
-		if err = m.run.Run(ctx, "ip", "route", "del", route, "dev", wg); err != nil {
-			return nil, fmt.Errorf("remove stale WireGuard route: %w", err)
-		}
+	if err = m.removeStaleRoutes(ctx, wg, staleRoutes); err != nil {
+		return nil, err
 	}
 	for _, p := range cfg.Peers {
 		for _, route := range p.AllowedIPs {
