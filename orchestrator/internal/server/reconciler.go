@@ -49,14 +49,20 @@ const (
 	networkPlanRepairInterval      = 5 * time.Minute
 )
 
-func networkPlanOperationTimeout(plan *network.Plan) time.Duration {
+func networkPlanOperationTimeout(plan *network.Plan, attempt int) time.Duration {
 	timeout := networkPlanBaseTimeout
-	if plan == nil {
-		return timeout
+	if plan != nil {
+		timeout += time.Duration(len(plan.Peers)) * networkPlanPeerTimeoutBudget
+		for _, peer := range plan.Peers {
+			timeout += time.Duration(len(peer.AllowedIPs)) * networkPlanRouteTimeoutBudget
+		}
 	}
-	timeout += time.Duration(len(plan.Peers)) * networkPlanPeerTimeoutBudget
-	for _, peer := range plan.Peers {
-		timeout += time.Duration(len(peer.AllowedIPs)) * networkPlanRouteTimeoutBudget
+	const maxDuration = time.Duration(1<<63 - 1)
+	for i := 0; i < attempt; i++ {
+		if timeout > maxDuration/2 {
+			return maxDuration
+		}
+		timeout *= 2
 	}
 	return timeout
 }
@@ -417,6 +423,7 @@ type networkPlanTarget struct {
 	plan               *network.Plan
 	hash               string
 	epoch              uint64
+	attempt            int
 }
 
 type networkPlanState struct {
@@ -572,7 +579,9 @@ func (s *Server) claimPendingNetworkPlans(now time.Time, epoch uint64) []network
 	for _, nodeID := range nodeIDs {
 		state := chosen[nodeID]
 		s.networkPlanWorkers[nodeID] = epoch
-		targets = append(targets, state.target)
+		target := state.target
+		target.attempt = state.attempt
+		targets = append(targets, target)
 	}
 	return targets
 }
@@ -646,7 +655,7 @@ func (s *Server) sendNetworkPlanTarget(ctx context.Context, target networkPlanTa
 	if ctx.Err() != nil || target.epoch != s.currentControlEpoch() {
 		return
 	}
-	planCtx, cancel := context.WithTimeout(ctx, networkPlanOperationTimeout(target.plan))
+	planCtx, cancel := context.WithTimeout(ctx, networkPlanOperationTimeout(target.plan, target.attempt))
 	request := &api.NetworkPlanRequest{Epoch: target.epoch, Namespace: target.namespace, Plan: *target.plan}
 	err := update(planCtx, target.address, request)
 	cancel()
