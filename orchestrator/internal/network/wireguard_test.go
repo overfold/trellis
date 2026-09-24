@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 type recordingRunner struct{ commands []string }
@@ -28,6 +29,63 @@ func (r *failingRunner) Run(_ context.Context, name string, args ...string) erro
 	r.commands = append(r.commands, command)
 	if strings.Contains(command, r.failCommand) {
 		return errors.New("command failed")
+	}
+	return nil
+}
+
+type blockingRunner struct {
+	blockCommand string
+	entered      chan struct{}
+	release      chan struct{}
+}
+
+func (r *blockingRunner) Run(_ context.Context, name string, args ...string) error {
+	if name+" "+strings.Join(args, " ") == r.blockCommand {
+		close(r.entered)
+		<-r.release
+	}
+	return nil
+}
+
+type slowRecordingRunner struct {
+	recordingRunner
+	delay time.Duration
+}
+
+func (r *slowRecordingRunner) Run(ctx context.Context, name string, args ...string) error {
+	select {
+	case <-time.After(r.delay):
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return r.recordingRunner.Run(ctx, name, args...)
+}
+
+type partialRouteRunner struct {
+	recordingRunner
+	routes      map[string]bool
+	failReplace string
+	failed      bool
+}
+
+func (r *partialRouteRunner) Run(_ context.Context, name string, args ...string) error {
+	command := name + " " + strings.Join(args, " ")
+	r.commands = append(r.commands, command)
+	if name != "ip" || len(args) < 3 || args[0] != "route" {
+		return nil
+	}
+	switch args[1] {
+	case "flush":
+		if len(args) >= 4 && args[2] == "exact" {
+			delete(r.routes, args[3])
+		}
+	case "replace":
+		route := args[2]
+		if route == r.failReplace && !r.failed {
+			r.failed = true
+			return errors.New("injected route replace failure")
+		}
+		r.routes[route] = true
 	}
 	return nil
 }
@@ -247,10 +305,402 @@ func TestAuthoritativePlanRemovesStalePeersAndRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(runner.commands, "\n")
-	for _, want := range []string{"peer old-peer remove", "ip route del 10.42.2.0/24 dev " + first.WireGuardInterface} {
+	for _, want := range []string{"peer old-peer remove", "ip route flush exact 10.42.2.0/24 dev " + first.WireGuardInterface} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("commands do not contain %q:\n%s", want, joined)
 		}
+	}
+}
+
+func TestUpdatePlanAddsPeerAndRouteWithoutNewAllocation(t *testing.T) {
+	manager, err := NewAutomatedWireGuardManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{}
+	manager.run = runner
+	plan := Plan{CIDR: "10.42.1.0/24", Gateway: "10.42.1.1", WireGuardAddress: "169.254.1.1/32", ListenPort: 51917}
+	attachment, err := manager.Attach(context.Background(), AttachRequest{Namespace: "acme", Network: "acme", AllocationID: "alloc-old", Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.commands = nil
+	plan.Peers = []PeerPlan{{PublicKey: "new-peer", Endpoint: "node-b:51917", AllowedIPs: []string{"10.42.2.0/24"}}}
+	if err := manager.UpdatePlan(context.Background(), "acme", plan); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(runner.commands, "\n")
+	for _, want := range []string{
+		"ip addr replace 169.254.1.1/32 dev " + attachment.WireGuardInterface,
+		"wg set " + attachment.WireGuardInterface + " private-key " + filepath.Join(manager.stateDir, "identity.key") + " listen-port 51917 peer new-peer allowed-ips 10.42.2.0/24 endpoint node-b:51917",
+		"ip route replace 10.42.2.0/24 dev " + attachment.WireGuardInterface,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("commands do not contain %q:\n%s", want, joined)
+		}
+	}
+	runner.commands = nil
+	plan.Peers = nil
+	if err := manager.UpdatePlan(context.Background(), "acme", plan); err != nil {
+		t.Fatal(err)
+	}
+	joined = strings.Join(runner.commands, "\n")
+	for _, want := range []string{"peer new-peer remove", "ip route flush exact 10.42.2.0/24 dev " + attachment.WireGuardInterface} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("commands do not contain %q:\n%s", want, joined)
+		}
+	}
+}
+
+func TestUpdatePlanFailurePersistsConservativePeerPlan(t *testing.T) {
+	manager, err := NewAutomatedWireGuardManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.run = &recordingRunner{}
+	oldPlan := Plan{
+		CIDR:             "10.42.1.0/24",
+		Gateway:          "10.42.1.1",
+		WireGuardAddress: "169.254.1.1/32",
+		ListenPort:       51917,
+		Peers:            []PeerPlan{{PublicKey: "old-peer", AllowedIPs: []string{"10.42.2.0/24"}}},
+	}
+	attachment, err := manager.Attach(context.Background(), AttachRequest{Namespace: "acme", Network: "acme", AllocationID: "alloc-old", Plan: oldPlan})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newPlan := oldPlan
+	newPlan.Peers = []PeerPlan{{PublicKey: "new-peer", AllowedIPs: []string{"10.42.3.0/24"}}}
+	manager.run = &failingRunner{failCommand: "wg set"}
+	if err := manager.UpdatePlan(context.Background(), "acme", newPlan); err == nil {
+		t.Fatal("UpdatePlan reported success after batched WireGuard apply failed")
+	}
+
+	raw, err := os.ReadFile(manager.planPath("acme", "acme"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted []Peer
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if len(persisted) != 2 {
+		t.Fatalf("failed apply did not retain conservative peer set: %#v", persisted)
+	}
+	keys := map[string]bool{}
+	for _, peer := range persisted {
+		keys[peer.PublicKey] = true
+	}
+	if !keys["old-peer"] || !keys["new-peer"] {
+		t.Fatalf("conservative plan = %#v, want old-peer and new-peer", persisted)
+	}
+
+	runner := &recordingRunner{}
+	manager.run = runner
+	if err := manager.UpdatePlan(context.Background(), "acme", newPlan); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(runner.commands, "\n")
+	want := "wg set " + attachment.WireGuardInterface
+	if !strings.Contains(joined, want) || !strings.Contains(joined, "peer old-peer remove") || !strings.Contains(joined, "peer new-peer allowed-ips 10.42.3.0/24") {
+		t.Fatalf("retry did not reconcile stale and desired peers in one batch:\n%s", joined)
+	}
+}
+
+func TestUpdatePlanRetryConvergesAfterPartialRouteApply(t *testing.T) {
+	manager, err := NewAutomatedWireGuardManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.run = &recordingRunner{}
+	oldPlan := Plan{
+		CIDR:             "10.42.1.0/24",
+		Gateway:          "10.42.1.1",
+		WireGuardAddress: "169.254.1.1/32",
+		ListenPort:       51917,
+		Peers:            []PeerPlan{{PublicKey: "old-peer", AllowedIPs: []string{"10.42.2.0/24"}}},
+	}
+	if _, err := manager.Attach(context.Background(), AttachRequest{Namespace: "acme", Network: "acme", AllocationID: "alloc-old", Plan: oldPlan}); err != nil {
+		t.Fatal(err)
+	}
+
+	newPlan := oldPlan
+	newPlan.Peers = []PeerPlan{{PublicKey: "new-peer", AllowedIPs: []string{"10.42.3.0/24"}}}
+	runner := &partialRouteRunner{
+		routes:      map[string]bool{"10.42.2.0/24": true},
+		failReplace: "10.42.3.0/24",
+	}
+	manager.run = runner
+	if err := manager.UpdatePlan(context.Background(), "acme", newPlan); err == nil {
+		t.Fatal("first UpdatePlan unexpectedly succeeded")
+	}
+	if runner.routes["10.42.2.0/24"] {
+		t.Fatal("stale route was not removed before injected failure")
+	}
+	if runner.routes["10.42.3.0/24"] {
+		t.Fatal("desired route was installed despite injected failure")
+	}
+
+	runner.commands = nil
+	if err := manager.UpdatePlan(context.Background(), "acme", newPlan); err != nil {
+		t.Fatalf("retry did not converge after partial route apply: %v", err)
+	}
+	if !runner.routes["10.42.3.0/24"] {
+		t.Fatal("desired route was not installed on retry")
+	}
+	joined := strings.Join(runner.commands, "\n")
+	if !strings.Contains(joined, "ip route flush exact 10.42.2.0/24 dev ") {
+		t.Fatalf("retry did not idempotently re-remove stale route:\n%s", joined)
+	}
+
+	raw, err := os.ReadFile(manager.planPath("acme", "acme"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted []Peer
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if len(persisted) != 1 || persisted[0].PublicKey != "new-peer" {
+		t.Fatalf("retry did not persist converged plan: %#v", persisted)
+	}
+}
+
+func TestUpdatePlanSupersessionCleansPartiallyAppliedPeersAndRoutes(t *testing.T) {
+	manager, err := NewAutomatedWireGuardManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.run = &recordingRunner{}
+	p1 := Plan{
+		CIDR:             "10.42.1.0/24",
+		Gateway:          "10.42.1.1",
+		WireGuardAddress: "169.254.1.1/32",
+		ListenPort:       51917,
+		Peers:            []PeerPlan{{PublicKey: "peer-a", AllowedIPs: []string{"10.42.2.0/24"}}},
+	}
+	if _, err := manager.Attach(context.Background(), AttachRequest{Namespace: "acme", Network: "acme", AllocationID: "alloc-old", Plan: p1}); err != nil {
+		t.Fatal(err)
+	}
+
+	p2 := p1
+	p2.Peers = []PeerPlan{
+		{PublicKey: "peer-a", AllowedIPs: []string{"10.42.2.0/24"}},
+		{PublicKey: "peer-b", AllowedIPs: []string{"10.42.3.0/24"}},
+		{PublicKey: "peer-c", AllowedIPs: []string{"10.42.4.0/24"}},
+	}
+	manager.run = &failingRunner{failCommand: "ip route replace 10.42.4.0/24"}
+	if err := manager.UpdatePlan(context.Background(), "acme", p2); err == nil {
+		t.Fatal("partially applied P2 unexpectedly succeeded")
+	}
+
+	raw, err := os.ReadFile(manager.planPath("acme", "acme"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var conservative []Peer
+	if err := json.Unmarshal(raw, &conservative); err != nil {
+		t.Fatal(err)
+	}
+	keys := map[string]bool{}
+	for _, peer := range conservative {
+		keys[peer.PublicKey] = true
+	}
+	if !keys["peer-a"] || !keys["peer-b"] || !keys["peer-c"] {
+		t.Fatalf("partial P2 was not conservatively persisted: %#v", conservative)
+	}
+
+	runner := &recordingRunner{}
+	manager.run = runner
+	p3 := p1
+	if err := manager.UpdatePlan(context.Background(), "acme", p3); err != nil {
+		t.Fatalf("superseding P3 did not converge: %v", err)
+	}
+	joined := strings.Join(runner.commands, "\n")
+	for _, want := range []string{
+		"peer peer-b remove",
+		"peer peer-c remove",
+		"ip route flush exact 10.42.3.0/24 dev ",
+		"ip route flush exact 10.42.4.0/24 dev ",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("superseding plan did not clean %q:\n%s", want, joined)
+		}
+	}
+
+	raw, err = os.ReadFile(manager.planPath("acme", "acme"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var exact []Peer
+	if err := json.Unmarshal(raw, &exact); err != nil {
+		t.Fatal(err)
+	}
+	if len(exact) != 1 || exact[0].PublicKey != "peer-a" {
+		t.Fatalf("converged P3 state = %#v, want only peer-a", exact)
+	}
+}
+
+func TestAtomicNetworkPlanWritePreservesPreviousFileOnCommitFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "plan.json")
+	old := []byte(`[{"public_key":"old-peer"}]`)
+	next := []byte(`[{"public_key":"new-peer"}]`)
+	if err := os.WriteFile(path, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := writeAtomicFileWithRename(path, next, 0o600, func(string, string) error {
+		return errors.New("injected rename failure")
+	})
+	if err == nil {
+		t.Fatal("atomic write unexpectedly succeeded")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(old) {
+		t.Fatalf("failed atomic commit changed previous file: %q", got)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "plan.json" {
+		t.Fatalf("temporary network plan was not cleaned up: %#v", entries)
+	}
+
+	if err := writeAtomicFile(path, next, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(next) {
+		t.Fatalf("atomic replacement = %q, want %q", got, next)
+	}
+
+	err = writeAtomicFileWithOps(path, old, 0o600, os.Rename, func(string) (*os.File, error) {
+		return nil, errors.New("injected directory open failure")
+	})
+	if err == nil || !strings.Contains(err.Error(), "open network plan directory") {
+		t.Fatalf("directory open failure was not reported: %v", err)
+	}
+	got, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(old) {
+		t.Fatalf("rename before directory sync failure did not install data: %q", got)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("network plan mode = %o, want 600", info.Mode().Perm())
+	}
+}
+
+func TestUpdatePlanBatchesLargePeerSetWithinDeadline(t *testing.T) {
+	manager, err := NewAutomatedWireGuardManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.run = &recordingRunner{}
+	plan := Plan{CIDR: "10.42.1.0/24", Gateway: "10.42.1.1", WireGuardAddress: "169.254.1.1/32", ListenPort: 51917}
+	attachment, err := manager.Attach(context.Background(), AttachRequest{Namespace: "acme", Network: "acme", AllocationID: "alloc-old", Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const peerCount = 400
+	plan.Peers = make([]PeerPlan, 0, peerCount)
+	for i := 0; i < peerCount; i++ {
+		plan.Peers = append(plan.Peers, PeerPlan{
+			PublicKey:  fmt.Sprintf("peer-%03d", i),
+			Endpoint:   fmt.Sprintf("node-%03d.example.test:51917", i),
+			AllowedIPs: []string{fmt.Sprintf("10.%d.%d.0/24", 50+i/256, i%256)},
+		})
+	}
+	runner := &slowRecordingRunner{delay: time.Millisecond}
+	manager.run = runner
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := manager.UpdatePlan(ctx, "acme", plan); err != nil {
+		t.Fatalf("large UpdatePlan() did not converge within legacy deadline: %v", err)
+	}
+
+	wgSets := 0
+	seen := make(map[string]bool, peerCount)
+	for _, command := range runner.commands {
+		if !strings.HasPrefix(command, "wg set "+attachment.WireGuardInterface+" ") {
+			continue
+		}
+		wgSets++
+		if len(command) > wireGuardCommandArgBudget {
+			t.Fatalf("WireGuard command exceeded argument budget: %d > %d", len(command), wireGuardCommandArgBudget)
+		}
+		for i := 0; i < peerCount; i++ {
+			key := fmt.Sprintf("peer-%03d", i)
+			if strings.Contains(command, "peer "+key+" ") {
+				seen[key] = true
+			}
+		}
+	}
+	if wgSets < 2 {
+		t.Fatalf("large WireGuard plan used %d wg set command, want bounded batches", wgSets)
+	}
+	if len(seen) != peerCount {
+		t.Fatalf("batched WireGuard plan covered %d/%d peers", len(seen), peerCount)
+	}
+}
+
+func TestUpdatePlanWaitingForFinalDetachDoesNotRestorePlan(t *testing.T) {
+	manager, err := NewAutomatedWireGuardManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.run = &recordingRunner{}
+	plan := Plan{CIDR: "10.42.1.0/24", Gateway: "10.42.1.1", WireGuardAddress: "169.254.1.1/32", ListenPort: 51917,
+		Peers: []PeerPlan{{PublicKey: "old-peer", AllowedIPs: []string{"10.42.2.0/24"}}}}
+	attachment, err := manager.Attach(context.Background(), AttachRequest{Namespace: "acme", Network: "acme", AllocationID: "alloc-old", Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &blockingRunner{
+		blockCommand: "ip link del " + attachment.WireGuardInterface,
+		entered:      make(chan struct{}),
+		release:      make(chan struct{}),
+	}
+	manager.run = runner
+	detached := make(chan error, 1)
+	go func() { detached <- manager.Detach(context.Background(), attachment) }()
+	<-runner.entered
+
+	plan.Peers = []PeerPlan{{PublicKey: "intermediate-peer", AllowedIPs: []string{"10.42.3.0/24"}}}
+	updated := make(chan error, 1)
+	go func() { updated <- manager.UpdatePlan(context.Background(), "acme", plan) }()
+	close(runner.release)
+	if err := <-detached; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-updated; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(manager.planPath("acme", "acme")); !os.IsNotExist(err) {
+		t.Fatalf("plan restored after final detach: %v", err)
+	}
+
+	manager.run = &failingRunner{failCommand: "ip route flush"}
+	plan.Peers = []PeerPlan{{PublicKey: "new-peer", AllowedIPs: []string{"10.42.4.0/24"}}}
+	if _, err := manager.Attach(context.Background(), AttachRequest{Namespace: "acme", Network: "acme", AllocationID: "alloc-new", Plan: plan}); err != nil {
+		t.Fatalf("Attach() after final detach: %v", err)
 	}
 }
 

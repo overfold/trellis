@@ -44,6 +44,11 @@ type Manager interface {
 	Detach(context.Context, *Attachment) error
 }
 
+// PlanUpdater reconciles peers on an already attached namespace network.
+type PlanUpdater interface {
+	UpdatePlan(context.Context, string, Plan) error
+}
+
 // DisabledManager rejects network attachment when networking is disabled.
 type DisabledManager struct{}
 

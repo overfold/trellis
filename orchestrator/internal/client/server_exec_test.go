@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/clofour/trellis/internal/api"
 )
@@ -129,5 +130,24 @@ func TestServerClientExecSessionLifecycle(t *testing.T) {
 		if !called[name] {
 			t.Fatalf("%s request was not sent", name)
 		}
+	}
+}
+
+
+func TestAgentClientNetworkPlanTransportUsesContextDeadline(t *testing.T) {
+	client := NewAgentClient("token", nil)
+	regular, ok := client.client.client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("regular transport type = %T", client.client.client.Transport)
+	}
+	networkPlans, ok := client.networkPlanClient.client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("network-plan transport type = %T", client.networkPlanClient.client.Transport)
+	}
+	if regular.ResponseHeaderTimeout != 30*time.Second {
+		t.Fatalf("regular response header timeout = %s, want 30s", regular.ResponseHeaderTimeout)
+	}
+	if networkPlans.ResponseHeaderTimeout != 0 {
+		t.Fatalf("network-plan response header timeout = %s, want context-governed zero", networkPlans.ResponseHeaderTimeout)
 	}
 }

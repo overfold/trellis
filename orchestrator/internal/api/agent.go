@@ -31,6 +31,13 @@ type StopAllocationRequest struct {
 	Epoch        uint64 `json:"epoch"`
 }
 
+// NetworkPlanRequest updates the peers for an active namespace network.
+type NetworkPlanRequest struct {
+	Epoch     uint64       `json:"epoch"`
+	Namespace string       `json:"namespace"`
+	Plan      network.Plan `json:"plan"`
+}
+
 // OperationCode identifies the result of an agent operation.
 type OperationCode string
 

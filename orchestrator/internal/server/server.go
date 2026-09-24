@@ -78,11 +78,15 @@ type Server struct {
 	//     while mu or allocation.mu is held.
 	//   - networkPortMu serializes durable namespace WireGuard port assignment
 	//     and is never acquired while mu or allocation.mu is held.
-	mu            sync.RWMutex
-	reconcileMu   sync.Mutex
-	mutationMu    sync.Mutex
-	networkPortMu sync.Mutex
-	controlEpoch  uint64
+	mu                 sync.RWMutex
+	reconcileMu        sync.Mutex
+	mutationMu         sync.Mutex
+	networkPortMu      sync.Mutex
+	networkPlanMu      sync.Mutex
+	networkPlans       map[networkPlanKey]*networkPlanState
+	networkPlanWorkers map[uuid.UUID]uint64
+	networkPlanWake    chan struct{}
+	controlEpoch       uint64
 	leaderSince   time.Time
 	now           func() time.Time
 	metrics       *Metrics
@@ -387,6 +391,9 @@ func NewServer(log *slog.Logger, storage *storage.LocalStorage, state *StateCont
 		networkPool:        pool,
 		networkPorts:       make(map[string]int),
 		wireGuardPortCount: 256,
+		networkPlans:       make(map[networkPlanKey]*networkPlanState),
+		networkPlanWorkers: make(map[uuid.UUID]uint64),
+		networkPlanWake:    make(chan struct{}, 1),
 		tokenManager:       auth.NewTokenManager(store, cluster),
 		catalog:            catalog.New(),
 		serverAddr:         serverAddr,
@@ -445,6 +452,17 @@ func (s *Server) AcquireLeadership(ctx context.Context) error {
 	s.controlEpoch = epoch
 	s.leaderSince = s.now()
 	s.mu.Unlock()
+
+	// Desired network plans are derived from the leader's in-memory topology.
+	// Never carry them across leadership terms: doing so could wrap stale
+	// contents in the new fencing epoch before the first fresh reconcile.
+	s.networkPlanMu.Lock()
+	s.networkPlans = make(map[networkPlanKey]*networkPlanState)
+	if s.networkPlanWorkers == nil {
+		s.networkPlanWorkers = make(map[uuid.UUID]uint64)
+	}
+	s.networkPlanMu.Unlock()
+	s.wakeNetworkPlans()
 	return nil
 }
 
@@ -556,6 +574,7 @@ func validateToken(cluster *Cluster, token string) bool {
 // Run starts background reconciliation until the context ends.
 func (s *Server) Run(ctx context.Context) {
 	go s.runReconcileLoop(ctx)
+	go s.runNetworkPlanLoop(ctx)
 }
 
 // ListNodes returns registered nodes.
@@ -1362,6 +1381,13 @@ func (s *Server) SetClusterJoiner(j ClusterJoiner) {
 }
 
 func (s *Server) runReconcileLoop(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
+	// A newly elected leader must derive current network-plan state before
+	// waiting for the ordinary periodic reconciliation interval.
+	s.Reconcile(ctx)
+
 	ticker := time.NewTicker(reconcileInterval)
 	defer ticker.Stop()
 

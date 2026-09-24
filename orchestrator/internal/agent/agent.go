@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -448,6 +449,54 @@ func (a *Agent) RunGroup(ctx context.Context, request *api.AllocationRequest) er
 	return nil
 }
 
+// UpdateNetworkPlan refreshes the network shared by running allocations.
+func (a *Agent) UpdateNetworkPlan(ctx context.Context, request *api.NetworkPlanRequest) error {
+	if err := a.AcceptEpoch(request.Epoch); err != nil {
+		return err
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if request.Epoch < a.epoch {
+		return fmt.Errorf("%w: received %d, highest accepted %d", ErrStaleEpoch, request.Epoch, a.epoch)
+	}
+	active := false
+	var desiredCIDR netip.Prefix
+	if request.Plan.CIDR != "" {
+		var err error
+		desiredCIDR, err = netip.ParsePrefix(request.Plan.CIDR)
+		if err != nil {
+			return fmt.Errorf("invalid network plan CIDR %q: %w", request.Plan.CIDR, err)
+		}
+		desiredCIDR = desiredCIDR.Masked()
+	}
+	for _, allocation := range a.allocations {
+		if allocation.Namespace != request.Namespace || allocation.Network == nil {
+			continue
+		}
+		active = true
+		if request.Plan.Gateway != "" && allocation.Network.Gateway != "" && request.Plan.Gateway != allocation.Network.Gateway {
+			return fmt.Errorf("network plan would change active namespace gateway from %s to %s", allocation.Network.Gateway, request.Plan.Gateway)
+		}
+		if desiredCIDR.IsValid() && allocation.Network.Address != "" {
+			current, err := netip.ParsePrefix(allocation.Network.Address)
+			if err != nil {
+				return fmt.Errorf("invalid active network address %q: %w", allocation.Network.Address, err)
+			}
+			if current.Masked() != desiredCIDR {
+				return fmt.Errorf("network plan would change active namespace CIDR from %s to %s", current.Masked(), desiredCIDR)
+			}
+		}
+	}
+	if !active {
+		return nil
+	}
+	updater, ok := a.network.(network.PlanUpdater)
+	if !ok {
+		return network.ErrDisabled
+	}
+	return updater.UpdatePlan(ctx, request.Namespace, request.Plan)
+}
+
 // StopGroup stops all tasks in an allocation group.
 func (a *Agent) StopGroup(ctx context.Context, request *api.StopAllocationRequest) error {
 	unlock := a.lockAllocationOperation(request.AllocationID)
@@ -640,7 +689,9 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		if err != nil {
 			return fmt.Errorf("attach WireGuard network: %w", err)
 		}
+		a.mu.Lock()
 		alloc.Network = netAttachment
+		a.mu.Unlock()
 		if err := a.persistAllocation(alloc); err != nil {
 			return fmt.Errorf("persist network attachment: %w", err)
 		}

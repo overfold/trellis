@@ -18,7 +18,8 @@ import (
 
 // AgentClient sends authenticated requests to a Trellis agent.
 type AgentClient struct {
-	client *client
+	client            *client
+	networkPlanClient *client
 }
 
 // AgentOperationError reports a rejected agent operation.
@@ -69,9 +70,14 @@ func NewAgentClient(token string, tlsConfig *tls.Config) *AgentClient {
 		token:  token,
 		client: newHTTPClient(tlsConfig),
 	}
+	networkPlanClient := &client{
+		token:  token,
+		client: newHTTPClientWithResponseHeaderTimeout(tlsConfig, 0),
+	}
 
 	return &AgentClient{
-		client: c,
+		client:            c,
+		networkPlanClient: networkPlanClient,
 	}
 }
 
@@ -93,6 +99,15 @@ func (s *AgentClient) StopAllocation(ctx context.Context, address string, reques
 		return fmt.Errorf("stop allocation: %w", decodeOperationError(err))
 	}
 
+	return nil
+}
+
+// UpdateNetworkPlan reconciles an active namespace network on an agent.
+func (s *AgentClient) UpdateNetworkPlan(ctx context.Context, address string, request *api.NetworkPlanRequest) error {
+	var response api.OperationResponse
+	if err := s.networkPlanClient.request(ctx, http.MethodPost, normalizeBaseURL(address)+"/v1/network-plans", request, &response); err != nil {
+		return fmt.Errorf("update network plan: %w", decodeOperationError(err))
+	}
 	return nil
 }
 
