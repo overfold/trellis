@@ -282,6 +282,10 @@ func (m *WireGuardManager) peerPlanDiff(namespace, networkName string, peers []P
 }
 
 func writeAtomicFile(path string, data []byte, mode os.FileMode) error {
+	return writeAtomicFileWithRename(path, data, mode, os.Rename)
+}
+
+func writeAtomicFileWithRename(path string, data []byte, mode os.FileMode, rename func(string, string) error) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".network-plan-*")
 	if err != nil {
@@ -305,7 +309,7 @@ func writeAtomicFile(path string, data []byte, mode os.FileMode) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temporary network plan: %w", err)
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := rename(tmpName, path); err != nil {
 		return fmt.Errorf("install network plan: %w", err)
 	}
 	if dirFile, err := os.Open(dir); err == nil {
