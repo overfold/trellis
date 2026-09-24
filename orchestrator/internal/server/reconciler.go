@@ -43,9 +43,9 @@ type Action struct {
 const (
 	allocationLossTimeout = 45 * time.Second
 	leaderRecoveryGrace   = 30 * time.Second
-	maxExecutionAttempts      = 8
-	networkPlanTimeout        = 2 * time.Second
-	networkPlanRepairInterval = 5 * time.Minute
+	maxExecutionAttempts       = 8
+	networkPlanOperationTimeout = 15 * time.Second
+	networkPlanRepairInterval  = 5 * time.Minute
 )
 
 func retryDelay(id string, attempt int) time.Duration {
@@ -584,7 +584,7 @@ func (s *Server) sendNetworkPlans(ctx context.Context, targets []networkPlanTarg
 				if ctx.Err() != nil {
 					return
 				}
-				planCtx, cancel := context.WithTimeout(ctx, networkPlanTimeout)
+				planCtx, cancel := context.WithTimeout(ctx, networkPlanOperationTimeout)
 				request := &api.NetworkPlanRequest{Epoch: epoch, Namespace: target.namespace, Plan: *target.plan}
 				err := update(planCtx, target.address, request)
 				cancel()
