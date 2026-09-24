@@ -13,7 +13,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/clofour/trellis/internal/api"
@@ -396,21 +395,23 @@ type networkPlanKey struct {
 }
 
 type networkPlanTarget struct {
-	key       networkPlanKey
-	namespace string
+	key                networkPlanKey
+	namespace          string
 	address            string
 	nodeID             uuid.UUID
 	wireGuardPublicKey string
 	plan               *network.Plan
 	hash               string
+	epoch              uint64
 }
 
 type networkPlanState struct {
-	target      networkPlanTarget
-	appliedHash string
-	appliedAt   time.Time
-	attempt     int
-	retryAt     time.Time
+	target        networkPlanTarget
+	appliedHash   string
+	appliedAt     time.Time
+	attempt       int
+	retryAt       time.Time
+	lastAttemptAt time.Time
 }
 
 // refreshNetworkPlans computes desired network plans without performing agent
@@ -419,6 +420,7 @@ func (s *Server) refreshNetworkPlans() {
 	var targets []networkPlanTarget
 	seen := make(map[networkPlanKey]bool)
 	s.mu.RLock()
+	epoch := s.controlEpoch
 	for _, allocation := range s.allocations {
 		allocation.mu.Lock()
 		if allocation.Node != nil && allocation.Phase == lifecycle.PhaseRunning && tasksUseWireGuard(allocation.Tasks) &&
@@ -431,12 +433,13 @@ func (s *Server) refreshNetworkPlans() {
 					s.log.Error("build namespace network plan", "namespace", allocation.Namespace, "node", allocation.Node.ID, "error", err)
 				} else {
 					targets = append(targets, networkPlanTarget{
-						key:       key,
-						namespace: allocation.Namespace,
+						key:                key,
+						namespace:          allocation.Namespace,
 						address:            fmt.Sprintf("%s:%d", allocation.Node.Host, allocation.Node.Port),
 						nodeID:             allocation.Node.ID,
 						wireGuardPublicKey: allocation.Node.WireGuardPublicKey,
 						plan:               plan,
+						epoch:              epoch,
 					})
 				}
 			}
@@ -464,11 +467,14 @@ func (s *Server) setDesiredNetworkPlans(targets []networkPlanTarget) {
 	if s.networkPlans == nil {
 		s.networkPlans = make(map[networkPlanKey]*networkPlanState)
 	}
+	if s.networkPlanWorkers == nil {
+		s.networkPlanWorkers = make(map[uuid.UUID]uint64)
+	}
 	for _, target := range targets {
 		target.hash = networkPlanHash(target.address, target.wireGuardPublicKey, target.plan)
 		desired[target.key] = true
 		state := s.networkPlans[target.key]
-		if state == nil {
+		if state == nil || state.target.epoch != target.epoch {
 			state = &networkPlanState{}
 			s.networkPlans[target.key] = state
 		}
@@ -499,34 +505,82 @@ func (s *Server) wakeNetworkPlans() {
 	}
 }
 
-func (s *Server) pendingNetworkPlans(now time.Time) []networkPlanTarget {
+func networkPlanStateBefore(a, b *networkPlanState) bool {
+	if b == nil {
+		return true
+	}
+	if !a.lastAttemptAt.Equal(b.lastAttemptAt) {
+		if a.lastAttemptAt.IsZero() {
+			return true
+		}
+		if b.lastAttemptAt.IsZero() {
+			return false
+		}
+		return a.lastAttemptAt.Before(b.lastAttemptAt)
+	}
+	return a.target.namespace < b.target.namespace
+}
+
+// claimPendingNetworkPlans chooses at most one namespace per node. A node
+// worker therefore cannot monopolize the dispatcher, while lastAttemptAt makes
+// repeated failures rotate behind other dirty namespaces on the same node.
+func (s *Server) claimPendingNetworkPlans(now time.Time, epoch uint64) []networkPlanTarget {
 	s.networkPlanMu.Lock()
 	defer s.networkPlanMu.Unlock()
-	targets := make([]networkPlanTarget, 0, len(s.networkPlans))
+	if s.networkPlanWorkers == nil {
+		s.networkPlanWorkers = make(map[uuid.UUID]uint64)
+	}
+
+	chosen := make(map[uuid.UUID]*networkPlanState)
 	for _, state := range s.networkPlans {
+		if state.target.epoch != epoch {
+			continue
+		}
+		if workerEpoch, busy := s.networkPlanWorkers[state.target.nodeID]; busy && workerEpoch == epoch {
+			continue
+		}
 		dirty := state.appliedHash != state.target.hash || state.appliedAt.IsZero() || now.Sub(state.appliedAt) >= networkPlanRepairInterval
 		if !dirty || (!state.retryAt.IsZero() && now.Before(state.retryAt)) {
 			continue
 		}
+		if networkPlanStateBefore(state, chosen[state.target.nodeID]) {
+			chosen[state.target.nodeID] = state
+		}
+	}
+
+	nodeIDs := make([]uuid.UUID, 0, len(chosen))
+	for nodeID := range chosen {
+		nodeIDs = append(nodeIDs, nodeID)
+	}
+	sort.Slice(nodeIDs, func(i, j int) bool { return nodeIDs[i].String() < nodeIDs[j].String() })
+
+	targets := make([]networkPlanTarget, 0, len(nodeIDs))
+	for _, nodeID := range nodeIDs {
+		state := chosen[nodeID]
+		s.networkPlanWorkers[nodeID] = epoch
 		targets = append(targets, state.target)
 	}
-	sort.Slice(targets, func(i, j int) bool {
-		if targets[i].nodeID != targets[j].nodeID {
-			return targets[i].nodeID.String() < targets[j].nodeID.String()
-		}
-		return targets[i].namespace < targets[j].namespace
-	})
 	return targets
 }
 
+func (s *Server) currentControlEpoch() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.controlEpoch
+}
+
 func (s *Server) finishNetworkPlanAttempt(target networkPlanTarget, err error) {
+	if target.epoch != s.currentControlEpoch() {
+		return
+	}
 	now := s.now().UTC()
 	s.networkPlanMu.Lock()
 	defer s.networkPlanMu.Unlock()
 	state := s.networkPlans[target.key]
-	if state == nil || state.target.hash != target.hash {
+	if state == nil || state.target.epoch != target.epoch || state.target.hash != target.hash {
 		return
 	}
+	state.lastAttemptAt = now
 	if err == nil {
 		state.appliedHash = target.hash
 		state.appliedAt = now
@@ -536,6 +590,15 @@ func (s *Server) finishNetworkPlanAttempt(target networkPlanTarget, err error) {
 	}
 	state.attempt++
 	state.retryAt = now.Add(retryDelay("network/"+target.nodeID.String()+"/"+target.namespace, state.attempt))
+}
+
+func (s *Server) releaseNetworkPlanWorker(nodeID uuid.UUID, epoch uint64) {
+	s.networkPlanMu.Lock()
+	if s.networkPlanWorkers[nodeID] == epoch {
+		delete(s.networkPlanWorkers, nodeID)
+	}
+	s.networkPlanMu.Unlock()
+	s.wakeNetworkPlans()
 }
 
 func (s *Server) runNetworkPlanLoop(ctx context.Context) {
@@ -549,53 +612,34 @@ func (s *Server) runNetworkPlanLoop(ctx context.Context) {
 		case <-ticker.C:
 		case <-s.networkPlanWake:
 		}
-		s.sendPendingNetworkPlans(ctx)
+		s.dispatchPendingNetworkPlans(ctx, s.client.UpdateNetworkPlan)
 	}
 }
 
-func (s *Server) sendPendingNetworkPlans(ctx context.Context) {
-	targets := s.pendingNetworkPlans(s.now().UTC())
-	if len(targets) == 0 {
+func (s *Server) dispatchPendingNetworkPlans(ctx context.Context, update func(context.Context, string, *api.NetworkPlanRequest) error) {
+	if ctx.Err() != nil {
 		return
 	}
-	s.mu.RLock()
-	epoch := s.controlEpoch
-	s.mu.RUnlock()
-	s.sendNetworkPlans(ctx, targets, epoch, s.client.UpdateNetworkPlan)
-}
-
-func (s *Server) sendNetworkPlans(ctx context.Context, targets []networkPlanTarget, epoch uint64, update func(context.Context, string, *api.NetworkPlanRequest) error) {
-	if len(targets) == 0 {
-		return
-	}
-	byNode := make(map[uuid.UUID][]networkPlanTarget)
-	var nodes []uuid.UUID
+	epoch := s.currentControlEpoch()
+	targets := s.claimPendingNetworkPlans(s.now().UTC(), epoch)
 	for _, target := range targets {
-		if _, exists := byNode[target.nodeID]; !exists {
-			nodes = append(nodes, target.nodeID)
-		}
-		byNode[target.nodeID] = append(byNode[target.nodeID], target)
+		go s.sendNetworkPlanTarget(ctx, target, update)
 	}
-	var workers sync.WaitGroup
-	for _, nodeID := range nodes {
-		agentTargets := byNode[nodeID]
-		workers.Go(func() {
-			for _, target := range agentTargets {
-				if ctx.Err() != nil {
-					return
-				}
-				planCtx, cancel := context.WithTimeout(ctx, networkPlanOperationTimeout)
-				request := &api.NetworkPlanRequest{Epoch: epoch, Namespace: target.namespace, Plan: *target.plan}
-				err := update(planCtx, target.address, request)
-				cancel()
-				s.finishNetworkPlanAttempt(target, err)
-				if err != nil {
-					s.log.Error("reconcile namespace network plan", "namespace", target.namespace, "node", target.nodeID, "error", err)
-				}
-			}
-		})
+}
+
+func (s *Server) sendNetworkPlanTarget(ctx context.Context, target networkPlanTarget, update func(context.Context, string, *api.NetworkPlanRequest) error) {
+	defer s.releaseNetworkPlanWorker(target.nodeID, target.epoch)
+	if ctx.Err() != nil || target.epoch != s.currentControlEpoch() {
+		return
 	}
-	workers.Wait()
+	planCtx, cancel := context.WithTimeout(ctx, networkPlanOperationTimeout)
+	request := &api.NetworkPlanRequest{Epoch: target.epoch, Namespace: target.namespace, Plan: *target.plan}
+	err := update(planCtx, target.address, request)
+	cancel()
+	s.finishNetworkPlanAttempt(target, err)
+	if err != nil {
+		s.log.Error("reconcile namespace network plan", "namespace", target.namespace, "node", target.nodeID, "error", err)
+	}
 }
 
 func tasksUseWireGuard(tasks []spec.TaskSpec) bool {
