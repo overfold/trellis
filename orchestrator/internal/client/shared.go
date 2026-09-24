@@ -15,11 +15,15 @@ import (
 const maxResponseBody = 64 << 20
 
 func newHTTPClient(tlsConfig *tls.Config) *http.Client {
+	return newHTTPClientWithResponseHeaderTimeout(tlsConfig, 30*time.Second)
+}
+
+func newHTTPClientWithResponseHeaderTimeout(tlsConfig *tls.Config, responseHeaderTimeout time.Duration) *http.Client {
 	return &http.Client{Transport: &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second,
+		ResponseHeaderTimeout: responseHeaderTimeout,
 		IdleConnTimeout:       90 * time.Second,
 		MaxIdleConns:          100,
 		TLSClientConfig:       tlsConfig,
