@@ -250,18 +250,27 @@ func (m *WireGuardManager) ensureLink(ctx context.Context, name string, args ...
 	return nil
 }
 
-func (m *WireGuardManager) peerPlanDiff(namespace, networkName string, peers []Peer) ([]string, []string, error) {
+const wireGuardCommandArgBudget = 16 << 10
+
+func (m *WireGuardManager) readPeerPlan(namespace, networkName string) ([]Peer, error) {
 	path := m.planPath(namespace, networkName)
-	var previous []Peer
-	if raw, err := os.ReadFile(path); err == nil {
-		if err := json.Unmarshal(raw, &previous); err != nil {
-			return nil, nil, fmt.Errorf("parse applied network plan: %w", err)
-		}
-	} else if !os.IsNotExist(err) {
-		return nil, nil, fmt.Errorf("read applied network plan: %w", err)
+	raw, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil, nil
 	}
+	if err != nil {
+		return nil, fmt.Errorf("read applied network plan: %w", err)
+	}
+	var previous []Peer
+	if err := json.Unmarshal(raw, &previous); err != nil {
+		return nil, fmt.Errorf("parse applied network plan: %w", err)
+	}
+	return previous, nil
+}
+
+func peerPlanDiff(previous, desired []Peer) ([]string, []string) {
 	desiredPeers, desiredRoutes := map[string]bool{}, map[string]bool{}
-	for _, peer := range peers {
+	for _, peer := range desired {
 		desiredPeers[peer.PublicKey] = true
 		for _, route := range peer.AllowedIPs {
 			desiredRoutes[route] = true
@@ -278,14 +287,65 @@ func (m *WireGuardManager) peerPlanDiff(namespace, networkName string, peers []P
 			}
 		}
 	}
-	return stalePeers, staleRoutes, nil
+	sort.Strings(stalePeers)
+	sort.Strings(staleRoutes)
+	return stalePeers, staleRoutes
+}
+
+// conservativePeerPlan records everything that may exist after a partial
+// reconciliation. It retains routes from both the previous and desired plans
+// until the exact desired plan has fully converged.
+func conservativePeerPlan(previous, desired []Peer) []Peer {
+	type mergedPeer struct {
+		endpoint string
+		routes   map[string]bool
+	}
+	merged := make(map[string]*mergedPeer, len(previous)+len(desired))
+	add := func(peers []Peer, preferEndpoint bool) {
+		for _, peer := range peers {
+			entry := merged[peer.PublicKey]
+			if entry == nil {
+				entry = &mergedPeer{routes: make(map[string]bool)}
+				merged[peer.PublicKey] = entry
+			}
+			if entry.endpoint == "" || (preferEndpoint && peer.Endpoint != "") {
+				entry.endpoint = peer.Endpoint
+			}
+			for _, route := range peer.AllowedIPs {
+				entry.routes[route] = true
+			}
+		}
+	}
+	add(previous, false)
+	add(desired, true)
+
+	keys := make([]string, 0, len(merged))
+	for key := range merged {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	result := make([]Peer, 0, len(keys))
+	for _, key := range keys {
+		entry := merged[key]
+		routes := make([]string, 0, len(entry.routes))
+		for route := range entry.routes {
+			routes = append(routes, route)
+		}
+		sort.Strings(routes)
+		result = append(result, Peer{PublicKey: key, Endpoint: entry.endpoint, AllowedIPs: routes})
+	}
+	return result
 }
 
 func writeAtomicFile(path string, data []byte, mode os.FileMode) error {
-	return writeAtomicFileWithRename(path, data, mode, os.Rename)
+	return writeAtomicFileWithOps(path, data, mode, os.Rename, os.Open)
 }
 
 func writeAtomicFileWithRename(path string, data []byte, mode os.FileMode, rename func(string, string) error) error {
+	return writeAtomicFileWithOps(path, data, mode, rename, os.Open)
+}
+
+func writeAtomicFileWithOps(path string, data []byte, mode os.FileMode, rename func(string, string) error, openDir func(string) (*os.File, error)) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".network-plan-*")
 	if err != nil {
@@ -312,11 +372,13 @@ func writeAtomicFileWithRename(path string, data []byte, mode os.FileMode, renam
 	if err := rename(tmpName, path); err != nil {
 		return fmt.Errorf("install network plan: %w", err)
 	}
-	if dirFile, err := os.Open(dir); err == nil {
-		defer func() { _ = dirFile.Close() }()
-		if err := dirFile.Sync(); err != nil {
-			return fmt.Errorf("sync network plan directory: %w", err)
-		}
+	dirFile, err := openDir(dir)
+	if err != nil {
+		return fmt.Errorf("open network plan directory: %w", err)
+	}
+	defer func() { _ = dirFile.Close() }()
+	if err := dirFile.Sync(); err != nil {
+		return fmt.Errorf("sync network plan directory: %w", err)
 	}
 	return nil
 }
@@ -334,6 +396,63 @@ func (m *WireGuardManager) persistPeerPlan(namespace, networkName string, peers 
 		return fmt.Errorf("persist applied network plan: %w", err)
 	}
 	return nil
+}
+
+func commandArgBytes(args []string) int {
+	total := 0
+	for _, arg := range args {
+		total += len(arg) + 1
+	}
+	return total
+}
+
+func peerSetArgs(peer Peer) []string {
+	args := []string{"peer", peer.PublicKey, "allowed-ips", strings.Join(peer.AllowedIPs, ",")}
+	if peer.Endpoint != "" {
+		args = append(args, "endpoint", peer.Endpoint)
+	}
+	return args
+}
+
+func (m *WireGuardManager) applyWireGuardPlan(ctx context.Context, wg, privateKey string, listenPort int, stalePeers []string, peers []Peer) error {
+	base := []string{"set", wg, "private-key", privateKey, "listen-port", fmt.Sprint(listenPort)}
+	baseBytes := commandArgBytes(append([]string{"wg"}, base...))
+	runBatch := func(args []string) error {
+		if err := m.run.Run(ctx, "wg", args...); err != nil {
+			return fmt.Errorf("configure WireGuard plan: %w", err)
+		}
+		return nil
+	}
+
+	var operations [][]string
+	for _, publicKey := range stalePeers {
+		operations = append(operations, []string{"peer", publicKey, "remove"})
+	}
+	for _, peer := range peers {
+		operations = append(operations, peerSetArgs(peer))
+	}
+	if len(operations) == 0 {
+		return runBatch(base)
+	}
+
+	batch := append([]string(nil), base...)
+	batchBytes := baseBytes
+	for _, operation := range operations {
+		operationBytes := commandArgBytes(operation)
+		if baseBytes+operationBytes > wireGuardCommandArgBudget {
+			return fmt.Errorf("WireGuard peer configuration exceeds command argument budget")
+		}
+		if batchBytes+operationBytes > wireGuardCommandArgBudget {
+			if err := runBatch(batch); err != nil {
+				return err
+			}
+			batch = append([]string(nil), base...)
+			batchBytes = baseBytes
+		}
+		batch = append(batch, operation...)
+		batchBytes += operationBytes
+	}
+	return runBatch(batch)
 }
 
 func (m *WireGuardManager) removeStaleRoutes(ctx context.Context, wg string, routes []string) error {
@@ -385,22 +504,16 @@ func (m *WireGuardManager) UpdatePlan(ctx context.Context, namespace string, pla
 	for i, peer := range plan.Peers {
 		peers[i] = Peer(peer)
 	}
-	stalePeers, staleRoutes, err := m.peerPlanDiff(namespace, namespace, peers)
+	previous, err := m.readPeerPlan(namespace, namespace)
 	if err != nil {
 		return err
 	}
-	wgArgs := []string{"set", wg, "private-key", filepath.Join(m.stateDir, "identity.key"), "listen-port", fmt.Sprint(plan.ListenPort)}
-	for _, publicKey := range stalePeers {
-		wgArgs = append(wgArgs, "peer", publicKey, "remove")
+	stalePeers, staleRoutes := peerPlanDiff(previous, peers)
+	if err := m.persistPeerPlan(namespace, namespace, conservativePeerPlan(previous, peers)); err != nil {
+		return err
 	}
-	for _, peer := range peers {
-		wgArgs = append(wgArgs, "peer", peer.PublicKey, "allowed-ips", strings.Join(peer.AllowedIPs, ","))
-		if peer.Endpoint != "" {
-			wgArgs = append(wgArgs, "endpoint", peer.Endpoint)
-		}
-	}
-	if err := m.run.Run(ctx, "wg", wgArgs...); err != nil {
-		return fmt.Errorf("configure WireGuard plan: %w", err)
+	if err := m.applyWireGuardPlan(ctx, wg, filepath.Join(m.stateDir, "identity.key"), plan.ListenPort, stalePeers, peers); err != nil {
+		return err
 	}
 	if err := m.removeStaleRoutes(ctx, wg, staleRoutes); err != nil {
 		return err
@@ -473,22 +586,16 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 	}
 	var stalePeers, staleRoutes []string
 	if request.Plan.CIDR != "" {
-		stalePeers, staleRoutes, err = m.peerPlanDiff(namespace, networkName, cfg.Peers)
-		if err != nil {
+		previous, readErr := m.readPeerPlan(namespace, networkName)
+		if readErr != nil {
+			return nil, readErr
+		}
+		stalePeers, staleRoutes = peerPlanDiff(previous, cfg.Peers)
+		if err = m.persistPeerPlan(namespace, networkName, conservativePeerPlan(previous, cfg.Peers)); err != nil {
 			return nil, err
 		}
 	}
-	wgArgs := []string{"set", wg, "private-key", cfg.PrivateKeyFile, "listen-port", fmt.Sprint(cfg.ListenPort)}
-	for _, publicKey := range stalePeers {
-		wgArgs = append(wgArgs, "peer", publicKey, "remove")
-	}
-	for _, p := range cfg.Peers {
-		wgArgs = append(wgArgs, "peer", p.PublicKey, "allowed-ips", strings.Join(p.AllowedIPs, ","))
-		if p.Endpoint != "" {
-			wgArgs = append(wgArgs, "endpoint", p.Endpoint)
-		}
-	}
-	if err = m.run.Run(ctx, "wg", wgArgs...); err != nil {
+	if err = m.applyWireGuardPlan(ctx, wg, cfg.PrivateKeyFile, cfg.ListenPort, stalePeers, cfg.Peers); err != nil {
 		return nil, err
 	}
 	if err = m.removeStaleRoutes(ctx, wg, staleRoutes); err != nil {
