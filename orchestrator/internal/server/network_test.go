@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/netip"
 	"testing"
@@ -71,6 +72,70 @@ func TestNetworkPlanUsesDifferentPortsForDifferentNamespaces(t *testing.T) {
 	}
 	if acme.ListenPort != 51823 || globex.ListenPort != 51831 || acme.ListenPort == globex.ListenPort {
 		t.Fatalf("unexpected namespace ports: acme=%d globex=%d", acme.ListenPort, globex.ListenPort)
+	}
+}
+
+func TestNetworkPlanOperationTimeoutScalesWithWorkAndRetry(t *testing.T) {
+	if got := networkPlanOperationTimeout(&network.Plan{}, 0); got != networkPlanBaseTimeout {
+		t.Fatalf("empty plan timeout = %s, want %s", got, networkPlanBaseTimeout)
+	}
+
+	plan := &network.Plan{Peers: make([]network.PeerPlan, 400)}
+	for i := range plan.Peers {
+		plan.Peers[i] = network.PeerPlan{
+			PublicKey:  fmt.Sprintf("peer-%03d", i),
+			AllowedIPs: []string{fmt.Sprintf("10.%d.%d.0/24", 50+i/256, i%256)},
+		}
+	}
+	first := networkPlanOperationTimeout(plan, 0)
+	if first <= networkPlanBaseTimeout {
+		t.Fatalf("large plan timeout = %s, want > %s", first, networkPlanBaseTimeout)
+	}
+	second := networkPlanOperationTimeout(plan, 1)
+	if second != 2*first {
+		t.Fatalf("retry timeout = %s, want %s", second, 2*first)
+	}
+}
+
+func TestSendNetworkPlanTargetUsesScaledDeadline(t *testing.T) {
+	s := &Server{
+		log:          slog.Default(),
+		now:          time.Now,
+		controlEpoch: 7,
+	}
+	plan := &network.Plan{Peers: make([]network.PeerPlan, 400)}
+	for i := range plan.Peers {
+		plan.Peers[i] = network.PeerPlan{
+			PublicKey:  fmt.Sprintf("peer-%03d", i),
+			AllowedIPs: []string{fmt.Sprintf("10.%d.%d.0/24", 50+i/256, i%256)},
+		}
+	}
+	target := networkPlanTarget{
+		key:       networkPlanKey{nodeID: uuid.New(), namespace: "acme"},
+		namespace: "acme",
+		address:   "node-a:8127",
+		nodeID:    uuid.New(),
+		plan:      plan,
+		epoch:     7,
+		attempt:   1,
+	}
+
+	started := time.Now()
+	called := false
+	s.sendNetworkPlanTarget(context.Background(), target, func(ctx context.Context, _ string, _ *api.NetworkPlanRequest) error {
+		called = true
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("network plan request has no deadline")
+		}
+		want := networkPlanOperationTimeout(plan, 1)
+		if got := deadline.Sub(started); got < want-time.Second {
+			t.Fatalf("network plan deadline budget = %s, want approximately %s", got, want)
+		}
+		return nil
+	})
+	if !called {
+		t.Fatal("network plan update was not called")
 	}
 }
 
