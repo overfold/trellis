@@ -34,6 +34,31 @@ type failingStopRuntime struct {
 	removeCount int
 }
 
+type stoppedWithErrorRuntime struct {
+	*reconcilerRuntime
+	stopErr    error
+	startCount int
+	managedID  string
+}
+
+func (r *stoppedWithErrorRuntime) Stop(context.Context, string) error {
+	r.status = runtime.StatusStopped
+	return r.stopErr
+}
+
+func (r *stoppedWithErrorRuntime) Start(context.Context, string) error {
+	r.startCount++
+	r.status = runtime.StatusRunning
+	return nil
+}
+
+func (r *stoppedWithErrorRuntime) ListManaged(context.Context, string) ([]runtime.ContainerInfo, error) {
+	if r.managedID == "" {
+		return nil, nil
+	}
+	return []runtime.ContainerInfo{{ID: r.managedID, Status: r.status}}, nil
+}
+
 type blockingStopRuntime struct {
 	*reconcilerRuntime
 	stopped chan struct{}
@@ -371,8 +396,8 @@ func TestFailedRunStopPreservesStartedAllocationResources(t *testing.T) {
 	if errors.Is(err, ErrAllocationExists) {
 		t.Fatalf("retry surfaced terminal allocation conflict: %v", err)
 	}
-	if got := agent.allocations[id].Status; got != "starting" {
-		t.Fatalf("retained allocation status = %q, want starting", got)
+	if got := agent.allocations[id].Status; got != "stopping" {
+		t.Fatalf("retained allocation status = %q, want stopping", got)
 	}
 
 	rt.stopErr = nil
@@ -444,6 +469,9 @@ func TestAmbiguousStartFailedStopRemainsTracked(t *testing.T) {
 	if _, ok := agent.reconciler.states[id]; !ok {
 		t.Fatal("ambiguous started allocation was left untracked after failed stop")
 	}
+	if got := agent.allocations[id].Status; got != "stopping" {
+		t.Fatalf("ambiguous allocation status = %q, want stopping", got)
+	}
 
 	rt.stopErr = nil
 	if err := agent.StopAllocation(context.Background(), id); err != nil {
@@ -451,6 +479,83 @@ func TestAmbiguousStartFailedStopRemainsTracked(t *testing.T) {
 	}
 	if _, ok := agent.reconciler.states[id]; ok {
 		t.Fatal("allocation remained tracked after successful retry stop")
+	}
+}
+
+func TestStopErrorAfterExitDoesNotRestartAllocation(t *testing.T) {
+	stopErr := errors.New("task delete failed")
+	rt := &stoppedWithErrorRuntime{
+		reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning},
+		stopErr:           stopErr,
+	}
+	agent := newOperationTestAgent(t, rt)
+	agent.allocations["task"] = &Allocation{
+		ID: "task", AllocationID: "allocation", ContainerID: "task", Status: "running",
+	}
+	agent.reconciler.Track("task", false, nil)
+
+	if err := agent.StopAllocation(context.Background(), "task"); !errors.Is(err, stopErr) {
+		t.Fatalf("stop error = %v, want %v", err, stopErr)
+	}
+	if got := agent.allocations["task"].Status; got != "stopping" {
+		t.Fatalf("allocation status = %q, want stopping", got)
+	}
+	if err := agent.reconciler.Reconcile(context.Background(), "task"); err != nil {
+		t.Fatalf("reconcile after ambiguous stop: %v", err)
+	}
+	if rt.restartCount != 0 {
+		t.Fatalf("allocation restarted %d times after stop intent", rt.restartCount)
+	}
+}
+
+func TestRecoverStoppingAllocationDoesNotStartOrRestart(t *testing.T) {
+	stopErr := errors.New("task delete failed")
+	rt := &stoppedWithErrorRuntime{
+		reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning},
+		stopErr:           stopErr,
+		managedID:         "task",
+	}
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+
+	first := newOperationTestAgent(t, rt)
+	first.ConfigureDurability(local, "test")
+	first.allocations["task"] = &Allocation{
+		ID: "task", AllocationID: "allocation", ContainerID: "task",
+		Generation: 1, JobRevision: 1, ExecutionHash: "hash",
+		Spec: &spec.TaskSpec{Name: "task", Image: "image"},
+		Status: "running", Health: "healthy",
+	}
+	first.reconciler.Track("task", false, nil)
+	if err := first.persistAllocation(first.allocations["task"]); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.StopAllocation(context.Background(), "task"); !errors.Is(err, stopErr) {
+		t.Fatalf("stop error = %v, want %v", err, stopErr)
+	}
+	if rt.status != runtime.StatusStopped {
+		t.Fatalf("runtime status after failed stop = %q, want stopped", rt.status)
+	}
+
+	second := newOperationTestAgent(t, rt)
+	second.ConfigureDurability(local, "test")
+	if err := second.recover(context.Background()); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	recovered := second.allocations["task"]
+	if recovered == nil || recovered.Status != "stopping" {
+		t.Fatalf("recovered allocation = %+v, want stopping", recovered)
+	}
+	if rt.startCount != 0 {
+		t.Fatalf("recovery started stopping allocation %d times", rt.startCount)
+	}
+	if err := second.reconciler.Reconcile(context.Background(), "task"); err != nil {
+		t.Fatalf("reconcile recovered stopping allocation: %v", err)
+	}
+	if rt.restartCount != 0 {
+		t.Fatalf("recovered stopping allocation restarted %d times", rt.restartCount)
 	}
 }
 
