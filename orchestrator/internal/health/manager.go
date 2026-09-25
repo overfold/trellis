@@ -191,7 +191,7 @@ func (h *HealthManager) runHealthCheck(ctx context.Context, trackedTask *tracked
 	defer cancel()
 	var dial func(context.Context, string, string) (net.Conn, error)
 	if config.Isolated && config.Runtime == "runsc" && (config.Type == "http" || config.Type == "tcp") {
-		code, err := h.runtime.Exec(ctx, trackedTask.containerID, []string{ProbePath, "__health-probe", config.Type, fmt.Sprint(config.Port), config.Path})
+		code, err := h.runtime.Exec(ctx, trackedTask.containerID, []string{ProbePath, "__health-probe", config.Type, fmt.Sprint(config.Port), config.Path, config.Timeout.String()})
 		if err != nil {
 			return false, fmt.Errorf("probe runsc task %s: %w", trackedTask.containerID, err)
 		}

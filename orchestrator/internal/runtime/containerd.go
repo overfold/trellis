@@ -352,7 +352,11 @@ func (c *ContainerdRuntime) Exec(ctx context.Context, containerID string, comman
 	if err != nil {
 		return 1, fmt.Errorf("constructing command %s: %w", command, err)
 	}
-	defer func() { _, _ = taskExec.Delete(ctx) }()
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_, _ = taskExec.Delete(cleanupCtx)
+	}()
 
 	exitChannel, err := taskExec.Wait(ctx)
 	if err != nil {
@@ -364,13 +368,25 @@ func (c *ContainerdRuntime) Exec(ctx context.Context, containerID string, comman
 		return 1, fmt.Errorf("executing command %s: %w", command, err)
 	}
 
-	status := <-exitChannel
-	code, _, err := status.Result()
-	if err != nil {
-		return 1, fmt.Errorf("extracting status %s: %w", command, err)
+	select {
+	case status := <-exitChannel:
+		code, _, err := status.Result()
+		if err != nil {
+			return 1, fmt.Errorf("extracting status %s: %w", command, err)
+		}
+		return int(code), nil
+	case <-ctx.Done():
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if err := taskExec.Kill(cleanupCtx, syscall.SIGKILL); err != nil && !errdefs.IsNotFound(err) {
+			return 1, fmt.Errorf("killing command %s after context cancellation: %w", command, err)
+		}
+		select {
+		case <-exitChannel:
+		case <-cleanupCtx.Done():
+		}
+		return 1, fmt.Errorf("command %s: %w", command, ctx.Err())
 	}
-
-	return int(code), nil
 }
 
 func execProcessSpec(containerSpec *specs.Spec, command []string, terminal bool) *specs.Process {

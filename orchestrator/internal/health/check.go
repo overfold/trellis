@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/clofour/trellis/internal/runtime"
 )
@@ -16,9 +17,15 @@ const ProbePath = "/trellis-health-probe"
 
 // RunProbe executes an HTTP or TCP check from inside a runsc sandbox.
 func RunProbe(ctx context.Context, args []string) (bool, error) {
-	if len(args) != 3 {
-		return false, fmt.Errorf("probe requires type, port, and path")
+	if len(args) != 4 {
+		return false, fmt.Errorf("probe requires type, port, path, and timeout")
 	}
+	timeout, err := time.ParseDuration(args[3])
+	if err != nil || timeout <= 0 {
+		return false, fmt.Errorf("invalid probe timeout %q", args[3])
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	port, err := strconv.Atoi(args[1])
 	if err != nil || port < 1 || port > 65535 {
 		return false, fmt.Errorf("invalid probe port %q", args[1])

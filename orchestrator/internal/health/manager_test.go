@@ -43,7 +43,7 @@ func TestIsolatedRunscNetworkChecksExecInsideSandbox(t *testing.T) {
 			if err != nil || !ok {
 				t.Fatalf("runsc check = %v, %v", ok, err)
 			}
-			want := []string{ProbePath, "__health-probe", string(kind), "8080", "/health"}
+			want := []string{ProbePath, "__health-probe", string(kind), "8080", "/health", defaultCheckTimeout.String()}
 			if !slices.Equal(rt.command, want) {
 				t.Fatalf("exec command = %q, want %q", rt.command, want)
 			}
@@ -110,11 +110,49 @@ func TestRunProbeChecksSandboxLoopback(t *testing.T) {
 	}
 	for _, kind := range []string{"http", "tcp"} {
 		t.Run(kind, func(t *testing.T) {
-			ok, err := RunProbe(context.Background(), []string{kind, port, "/health"})
+			ok, err := RunProbe(context.Background(), []string{kind, port, "/health", time.Second.String()})
 			if err != nil || !ok {
 				t.Fatalf("probe = %v, %v", ok, err)
 			}
 		})
+	}
+}
+
+func TestRunProbeTimesOutWhenHTTPServerDoesNotRespond(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		close(entered)
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(server.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		ok, err := RunProbe(context.Background(), []string{"http", port, "/health", "100ms"})
+		if ok {
+			result <- fmt.Errorf("unresponsive endpoint reported healthy")
+			return
+		}
+		result <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("probe did not reach the server")
+	}
+	select {
+	case err := <-result:
+		if err == nil || !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
+			t.Fatalf("probe error = %v, want deadline exceeded", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("probe did not time out")
 	}
 }
 
