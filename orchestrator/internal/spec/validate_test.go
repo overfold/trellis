@@ -88,6 +88,40 @@ func TestValidateRejectsInvalidJobs(t *testing.T) {
 	}
 }
 
+func TestValidateNetworkHealthCheckNetworking(t *testing.T) {
+	for _, mode := range []TaskNetworkMode{TaskNetworkHost, TaskNetworkWireGuard} {
+		t.Run(string(mode), func(t *testing.T) {
+			job := validJob()
+			job.TaskGroups[0].Tasks[0].Networking = &TaskNetworkingSpec{Mode: mode}
+			job.TaskGroups[0].Tasks[0].HealthCheck = &HealthCheckSpec{Type: HealthCheckHTTP, Port: 8080, Path: "/health"}
+			if err := Validate(job); err != nil {
+				t.Fatalf("network health check rejected for %q networking: %v", mode, err)
+			}
+		})
+	}
+
+	for _, networking := range []*TaskNetworkingSpec{nil, {Mode: TaskNetworkIsolated}} {
+		name := "default"
+		if networking != nil {
+			name = "isolated"
+		}
+		t.Run(name, func(t *testing.T) {
+			job := validJob()
+			job.TaskGroups[0].Tasks[0].Networking = networking
+			job.TaskGroups[0].Tasks[0].HealthCheck = &HealthCheckSpec{Type: HealthCheckTCP, Port: 8080}
+			if err := Validate(job); err == nil {
+				t.Fatal("expected isolated network health check to be rejected")
+			}
+		})
+	}
+
+	job := validJob()
+	job.TaskGroups[0].Tasks[0].HealthCheck = &HealthCheckSpec{Type: HealthCheckScript, Command: []string{"/bin/check-ready"}}
+	if err := Validate(job); err != nil {
+		t.Fatalf("script health check rejected for isolated networking: %v", err)
+	}
+}
+
 func TestValidateAggregatesErrors(t *testing.T) {
 	job := &JobSpec{Namespace: "", Name: "bad name", TaskGroups: []TaskGroupSpec{{Name: "api", Count: 0}}}
 	err := Validate(job)
@@ -101,7 +135,7 @@ func TestValidateAggregatesErrors(t *testing.T) {
 }
 
 func TestParseConfigurableHealthAndRestartPolicy(t *testing.T) {
-	raw := []byte("namespace: default\nname: web\ntask_groups:\n  - name: api\n    count: 1\n    restart:\n      max_restarts: 5\n      window: 2m\n    tasks:\n      - name: server\n        image: example/server:1\n        health_check:\n          type: tcp\n          port: 8080\n          interval: 15s\n          timeout: 3s\n          threshold: 2\n")
+	raw := []byte("namespace: default\nname: web\ntask_groups:\n  - name: api\n    count: 1\n    restart:\n      max_restarts: 5\n      window: 2m\n    tasks:\n      - name: server\n        image: example/server:1\n        networking:\n          mode: host\n        health_check:\n          type: tcp\n          port: 8080\n          interval: 15s\n          timeout: 3s\n          threshold: 2\n")
 	job, err := ParseYAML(raw)
 	if err != nil {
 		t.Fatalf("parse manifest: %v", err)
