@@ -43,7 +43,7 @@ var transitions = map[Phase]map[Phase]bool{
 	PhasePending:  {PhasePlaced: true, PhaseStopping: true},
 	PhasePlaced:   {PhaseStarting: true, PhaseStopping: true, PhaseFailed: true, PhaseLost: true},
 	PhaseStarting: {PhaseRunning: true, PhaseStopping: true, PhaseFailed: true, PhaseLost: true},
-	PhaseRunning:  {PhaseStopping: true, PhaseFailed: true, PhaseLost: true},
+	PhaseRunning:  {PhaseStarting: true, PhaseStopping: true, PhaseFailed: true, PhaseLost: true},
 	PhaseStopping: {PhaseStopped: true, PhaseFailed: true, PhaseLost: true},
 	PhaseStopped:  {PhaseStarting: true},
 	PhaseFailed:   {PhaseStarting: true, PhaseStopping: true, PhaseLost: true},

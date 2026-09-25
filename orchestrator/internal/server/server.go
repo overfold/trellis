@@ -728,6 +728,7 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 		for _, task := range a.Tasks {
 			if !info.ObservedTasks[task.Name] {
 				if info.Phase == lifecycle.PhaseRunning {
+					// Retry the incomplete allocation on the next reconciliation pass.
 					info.Phase = lifecycle.PhaseStarting
 				}
 				info.Health = lifecycle.HealthUnknown
