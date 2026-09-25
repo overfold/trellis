@@ -174,6 +174,24 @@ func (c *ContainerdRuntime) Start(ctx context.Context, containerID string) error
 	if err != nil {
 		return fmt.Errorf("creating task for %s: %w", containerID, err)
 	}
+	info, err := container.Info(ctx)
+	if err != nil {
+		_, _ = task.Delete(ctx)
+		return fmt.Errorf("getting container info for %s: %w", containerID, err)
+	}
+	if info.Runtime.Name == "io.containerd.runc.v2" {
+		containerSpec, specErr := container.Spec(ctx)
+		if specErr != nil {
+			_, _ = task.Delete(ctx)
+			return fmt.Errorf("getting container spec for %s: %w", containerID, specErr)
+		}
+		if hasPrivateNetworkNamespace(containerSpec) {
+			if err := bringUpLoopback(fmt.Sprintf("/proc/%d/ns/net", task.Pid())); err != nil {
+				_, _ = task.Delete(ctx)
+				return fmt.Errorf("configuring loopback for %s: %w", containerID, err)
+			}
+		}
+	}
 
 	err = task.Start(ctx)
 	if err != nil {
