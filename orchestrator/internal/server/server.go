@@ -676,12 +676,12 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 		return fmt.Errorf("persist node heartbeat: %w", err)
 	}
 	type statusInfo struct {
-		Generation uint64
-		Phase      lifecycle.Phase
-		Health     lifecycle.Health
-		Endpoints  []api.AllocationEndpoint
-		Ports      []api.PortMapping
-		Tasks      int
+		Generation    uint64
+		Phase         lifecycle.Phase
+		Health        lifecycle.Health
+		Endpoints     []api.AllocationEndpoint
+		Ports         []api.PortMapping
+		ObservedTasks map[string]bool
 	}
 	statuses := make(map[string]statusInfo, len(actual))
 	for _, a := range actual {
@@ -691,7 +691,7 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 		phase, health := a.Phase, a.Health
 		key := fmt.Sprintf("%s/%d", a.ID, a.Generation)
 		info := statuses[key]
-		if info.Tasks == 0 {
+		if len(info.ObservedTasks) == 0 {
 			info.Generation, info.Phase, info.Health = a.Generation, phase, health
 		} else {
 			if phase != lifecycle.PhaseRunning {
@@ -705,7 +705,10 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 				info.Health = lifecycle.HealthHealthy
 			}
 		}
-		info.Tasks++
+		if info.ObservedTasks == nil {
+			info.ObservedTasks = make(map[string]bool)
+		}
+		info.ObservedTasks[a.Task] = true
 		info.Ports = append(info.Ports, a.Ports...)
 		if a.Task != "" || a.Address != "" || len(a.Ports) > 0 {
 			info.Endpoints = append(info.Endpoints, api.AllocationEndpoint{
@@ -721,6 +724,15 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 		if !ok {
 			a.mu.Unlock()
 			continue // absence is not proof of loss or failure
+		}
+		for _, task := range a.Tasks {
+			if !info.ObservedTasks[task.Name] {
+				if info.Phase == lifecycle.PhaseRunning {
+					info.Phase = lifecycle.PhaseStarting
+				}
+				info.Health = lifecycle.HealthUnknown
+				break
+			}
 		}
 		if info.Phase.Valid() && lifecycle.CanTransition(a.Phase, info.Phase) {
 			_ = a.Transition(info.Phase, time.Now().UTC(), "", "")

@@ -346,3 +346,34 @@ func TestHeartbeatPreservesTaskEndpointIdentity(t *testing.T) {
 		t.Fatalf("stale app address was retained: %#v", allocation.Endpoints)
 	}
 }
+
+func TestHeartbeatRequiresEveryTaskForRunningHealth(t *testing.T) {
+	nodeID := uuid.MustParse("99999999-9999-9999-9999-999999999999")
+	node := &Node{ID: nodeID, Host: "node-a", Status: NodeStatusHealthy}
+	allocation := &Allocation{
+		ID: "demo-web-1", Node: node, Generation: 1,
+		Tasks: []spec.TaskSpec{{Name: "app"}, {Name: "sidecar"}},
+		Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown,
+	}
+	s := &Server{
+		state: NewStateController(memoryStore{}, "test"),
+		nodes: map[uuid.UUID]*Node{nodeID: node}, allocations: []*Allocation{allocation},
+		catalog: catalog.New(),
+	}
+	app := api.AllocationStatus{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
+	sidecar := api.AllocationStatus{ID: allocation.ID, Generation: 1, Task: "sidecar", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
+	for _, actual := range [][]api.AllocationStatus{{app}, {app, app}} {
+		if err := s.Heartbeat(context.Background(), nodeID, actual, "test", nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		if allocation.Phase != lifecycle.PhaseStarting || allocation.Health != lifecycle.HealthUnknown {
+			t.Fatalf("partial heartbeat: phase=%s health=%s, want starting/unknown", allocation.Phase, allocation.Health)
+		}
+	}
+	if err := s.Heartbeat(context.Background(), nodeID, []api.AllocationStatus{app, sidecar}, "test", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if allocation.Phase != lifecycle.PhaseRunning || allocation.Health != lifecycle.HealthHealthy {
+		t.Fatalf("complete heartbeat: phase=%s health=%s, want running/healthy", allocation.Phase, allocation.Health)
+	}
+}
