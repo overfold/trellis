@@ -7,6 +7,7 @@ WORK_TMP=""
 ROLLBACK_NEEDED=false
 drained=false
 node_id=""
+had_health_probe=false
 
 cleanup() {
     local rc=$?
@@ -59,6 +60,7 @@ require_root_linux_amd64
 require_commands curl tar systemctl install mktemp ctr
 [ -x "${INSTALL_DIR}/trellis" ] || ui_die "Trellis is not installed at ${INSTALL_DIR}/trellis."
 [ -x "${INSTALL_DIR}/trellisctl" ] || ui_die "trellisctl is not installed at ${INSTALL_DIR}/trellisctl."
+[ ! -e "${INSTALL_DIR}/trellis-health-probe" ] || had_health_probe=true
 [ -f "$CONFIG_FILE" ] || ui_die "Node configuration is missing at ${CONFIG_FILE}."
 load_node_config_paths
 
@@ -109,6 +111,7 @@ fi
 
 cp -a "${INSTALL_DIR}/trellis" "${WORK_TMP}/trellis.old"
 cp -a "${INSTALL_DIR}/trellisctl" "${WORK_TMP}/trellisctl.old"
+if [ "$had_health_probe" = true ]; then cp -a "${INSTALL_DIR}/trellis-health-probe" "${WORK_TMP}/trellis-health-probe.old"; fi
 [ ! -f "$SERVICE_FILE" ] || cp -a "$SERVICE_FILE" "${WORK_TMP}/trellis.service.old"
 
 rollback() {
@@ -118,6 +121,11 @@ rollback() {
     systemctl stop trellis >/dev/null 2>&1 || true
     install -m 0755 "${WORK_TMP}/trellis.old" "${INSTALL_DIR}/trellis"
     install -m 0755 "${WORK_TMP}/trellisctl.old" "${INSTALL_DIR}/trellisctl"
+    if [ "$had_health_probe" = true ]; then
+        install -m 0755 "${WORK_TMP}/trellis-health-probe.old" "${INSTALL_DIR}/trellis-health-probe"
+    else
+        rm -f "${INSTALL_DIR}/trellis-health-probe"
+    fi
     if [ -f "${WORK_TMP}/trellis.service.old" ]; then cp -a "${WORK_TMP}/trellis.service.old" "$SERVICE_FILE"; else rm -f "$SERVICE_FILE"; fi
     systemctl daemon-reload
     if [ "$was_running" = true ]; then systemctl start trellis >/dev/null 2>&1 || true; fi
@@ -134,8 +142,10 @@ ROLLBACK_NEEDED=true
 if [ "$was_running" = true ]; then systemctl stop trellis; fi
 install -m 0755 "${WORK_TMP}/trellis" "${INSTALL_DIR}/.trellis.new"
 install -m 0755 "${WORK_TMP}/trellisctl" "${INSTALL_DIR}/.trellisctl.new"
+install -m 0755 "${WORK_TMP}/trellis-health-probe" "${INSTALL_DIR}/.trellis-health-probe.new"
 mv "${INSTALL_DIR}/.trellis.new" "${INSTALL_DIR}/trellis"
 mv "${INSTALL_DIR}/.trellisctl.new" "${INSTALL_DIR}/trellisctl"
+mv "${INSTALL_DIR}/.trellis-health-probe.new" "${INSTALL_DIR}/trellis-health-probe"
 write_service
 chmod 600 "$CONFIG_FILE"
 [ ! -f "$SECRETS_KEY_FILE" ] || chmod 600 "$SECRETS_KEY_FILE"

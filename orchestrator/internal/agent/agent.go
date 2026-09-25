@@ -34,6 +34,7 @@ type Agent struct {
 	nodeID       uuid.UUID
 	allocations  map[string]*Allocation
 	execSessions map[string]*execSession
+	healthProbe  string
 
 	log *slog.Logger
 
@@ -189,10 +190,12 @@ func (a *Agent) deleteAllocationRecord(id string) error {
 
 // NewAgent creates an allocation agent.
 func NewAgent(log *slog.Logger, runtime runtime.ContainerRuntime, health *health.HealthManager, reconciler *AllocationReconciler, ports *PortManager, volumes *VolumeManager, server *client.ServerClient, nodeID uuid.UUID) *Agent {
+	executable, _ := os.Executable()
 	agent := &Agent{
 		nodeID:       nodeID,
 		allocations:  make(map[string]*Allocation),
 		execSessions: make(map[string]*execSession),
+		healthProbe:  filepath.Join(filepath.Dir(executable), "trellis-health-probe"),
 		orphans:      make(map[string]int),
 		operations:   make(map[string]*allocationOperation),
 
@@ -733,11 +736,17 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 			extraHosts["trellis"] = networkPlan.Gateway
 		}
 	}
+	runtimeMounts := append([]*runtime.Mount(nil), mounts...)
+	runtimeMounts = append(runtimeMounts, &runtime.Mount{
+		HostPath:      a.healthProbe,
+		ContainerPath: health.ProbeContainerPath,
+		ReadOnly:      true,
+	})
 	_, err = a.runtime.Create(ctx, runtime.CreateOptions{
 		ID:     containerID,
 		Image:  ts.Image,
 		Env:    env,
-		Mounts: mounts,
+		Mounts: runtimeMounts,
 		CPU: func() int {
 			if ts.Resources != nil {
 				return ts.Resources.CPU
@@ -783,12 +792,6 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 
 	if ts.HealthCheck != nil {
 		check := *ts.HealthCheck
-		for _, p := range ports {
-			if p.ContainerPort == check.Port {
-				check.Port = p.HostPort
-				break
-			}
-		}
 		a.health.RegisterTask(allocID, containerID, &check)
 		healthRegistered = true
 	}

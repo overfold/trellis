@@ -142,7 +142,7 @@ fi
 rm -f "$SERVICE_FILE"
 systemctl daemon-reload
 systemctl reset-failed >/dev/null 2>&1 || true
-rm -f "${INSTALL_DIR}/trellis" "${INSTALL_DIR}/trellisctl"
+rm -f "${INSTALL_DIR}/trellis" "${INSTALL_DIR}/trellisctl" "${INSTALL_DIR}/trellis-health-probe"
 rm -rf "$RUN_DIR"
 ui_step "Removed Trellis service and binaries"
 remove_owned_dependencies

@@ -242,7 +242,7 @@ health_check:
   command: ["/usr/local/bin/check-ready"]
 ```
 
-`interval` and `timeout` are positive Go-style durations in the YAML representation when set; `threshold` is at least one. A running task without an explicit health check is treated as healthy, which is useful for the first tutorial but weaker than application-aware readiness for a service.
+`interval` and `timeout` are positive Go-style durations in the YAML representation when set; `threshold` is at least one. HTTP and TCP checks target the configured port on loopback inside the task's own network environment, regardless of networking mode or runtime. Script checks execute the supplied command in the task normally. `/run/trellis` is reserved for Trellis-managed task files and cannot be used as a volume destination. A running task without an explicit health check is treated as healthy, which is useful for the first tutorial but weaker than application-aware readiness for a service.
 
 ## Validation and editor tooling
 

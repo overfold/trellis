@@ -24,7 +24,7 @@ trellisctl context current
 trellisctl nodes list
 ```
 
-`trellis` and `trellisctl` are installed in `/usr/local/bin`. The daemon keeps its bootstrap credential root-readable under `/etc/trellis`; your user context contains the scoped operator token plus the cluster CA.
+`trellis`, `trellisctl`, and the internal `trellis-health-probe` helper are installed in `/usr/local/bin`. The daemon mounts the helper read-only into managed tasks for HTTP and TCP health checks; it is not an operator CLI. The daemon keeps its bootstrap credential root-readable under `/etc/trellis`; your user context contains the scoped operator token plus the cluster CA.
 
 ## 2. Create the first manifest
 

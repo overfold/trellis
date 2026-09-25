@@ -30,7 +30,6 @@ type HealthSubscriber interface {
 //nolint:revive // The established name emphasizes that this type belongs to health checking.
 type HealthConfig struct {
 	Type      string
-	Addr      string
 	Port      int
 	Path      string
 	Command   []string
@@ -109,7 +108,6 @@ func (h *HealthManager) RegisterTask(allocID string, containerID string, spec *s
 func newHealthConfig(spec *spec.HealthCheckSpec) HealthConfig {
 	config := HealthConfig{
 		Type:      string(spec.Type),
-		Addr:      "127.0.0.1",
 		Port:      spec.Port,
 		Path:      spec.Path,
 		Command:   spec.Command,
@@ -184,9 +182,9 @@ func (h *HealthManager) runHealthCheck(ctx context.Context, trackedTask *tracked
 
 	switch config.Type {
 	case "http":
-		return CheckHTTP(ctx, config.Addr, config.Port, config.Path)
+		return CheckHTTP(ctx, h.runtime, trackedTask.containerID, config.Port, config.Path, config.Timeout)
 	case "tcp":
-		return CheckTCP(ctx, config.Addr, config.Port)
+		return CheckTCP(ctx, h.runtime, trackedTask.containerID, config.Port, config.Timeout)
 	case "script":
 		return CheckScript(ctx, h.runtime, trackedTask.containerID, config.Command)
 	default:
