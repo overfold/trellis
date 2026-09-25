@@ -811,6 +811,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		Generation:    generation,
 		JobRevision:   jobRevision,
 		ExecutionHash: executionHash,
+		Runtime:       groupRuntime,
 		Restart:       restartPolicy,
 		Namespace:     namespace,
 
