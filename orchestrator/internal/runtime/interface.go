@@ -39,6 +39,7 @@ type ContainerInfo struct {
 	ID     string
 	Status ContainerStatus
 	Labels map[string]string
+	PID    uint32
 }
 
 // ManagedRuntime is implemented by runtimes that can inventory Trellis-owned

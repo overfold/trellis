@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/clofour/trellis/internal/network"
+	"github.com/clofour/trellis/internal/spec"
 )
 
 func TestAllocationNetworkAddress(t *testing.T) {
@@ -16,5 +17,27 @@ func TestAllocationNetworkAddress(t *testing.T) {
 	allocation := &Allocation{Network: &network.Attachment{Address: "10.86.213.2/24"}}
 	if got := allocationNetworkAddress(allocation); got != "10.86.213.2" {
 		t.Fatalf("namespace allocation address = %q, want 10.86.213.2", got)
+	}
+}
+
+func TestHealthCheckAddress(t *testing.T) {
+	tests := []struct {
+		name    string
+		mode    spec.TaskNetworkMode
+		address string
+		want    string
+	}{
+		{name: "host", mode: spec.TaskNetworkHost, want: "127.0.0.1"},
+		{name: "namespace", mode: spec.TaskNetworkWireGuard, address: "10.86.213.2", want: "10.86.213.2"},
+		{name: "isolated", mode: spec.TaskNetworkIsolated, want: ""},
+		{name: "default", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			task := &spec.TaskSpec{Networking: &spec.TaskNetworkingSpec{Mode: tt.mode}}
+			if got := healthCheckAddress(task, tt.address); got != tt.want {
+				t.Fatalf("health check address = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

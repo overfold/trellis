@@ -130,6 +130,13 @@ func allocationNetworkAddress(allocation *Allocation) string {
 	return address
 }
 
+func healthCheckAddress(task *spec.TaskSpec, networkAddress string) string {
+	if task.Networking != nil && task.Networking.Mode == spec.TaskNetworkHost {
+		return "127.0.0.1"
+	}
+	return networkAddress
+}
+
 var (
 	// ErrAllocationNotFound indicates that an allocation does not exist.
 	ErrAllocationNotFound = errors.New("allocation not found")
@@ -331,7 +338,7 @@ func (a *Agent) recover(ctx context.Context) error {
 							break
 						}
 					}
-					a.health.RegisterTask(allocation.ID, allocation.ContainerID, &check)
+					a.health.RegisterTask(allocation.ID, allocation.ContainerID, &check, healthCheckAddress(allocation.Spec, allocationNetworkAddress(allocation)))
 				}
 				a.reconciler.TrackRecovered(allocation.ID, allocation.Spec.HealthCheck != nil, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow)
 			} else {
@@ -789,7 +796,11 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 				break
 			}
 		}
-		a.health.RegisterTask(allocID, containerID, &check)
+		addr := ""
+		if netAttachment != nil {
+			addr, _, _ = strings.Cut(netAttachment.Address, "/")
+		}
+		a.health.RegisterTask(allocID, containerID, &check, healthCheckAddress(ts, addr))
 		healthRegistered = true
 	}
 

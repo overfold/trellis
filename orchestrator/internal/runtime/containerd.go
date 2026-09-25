@@ -392,6 +392,7 @@ func (c *ContainerdRuntime) Inspect(ctx context.Context, containerID string) (*C
 	if err != nil {
 		return nil, fmt.Errorf("getting task status for %s: %w", containerID, err)
 	}
+	result.PID = task.Pid()
 
 	switch rawStatus.Status {
 	case containerd.Created:

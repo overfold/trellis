@@ -80,7 +80,7 @@ func (h *HealthManager) SetContext(ctx context.Context) {
 }
 
 // RegisterTask starts health checking an allocation task.
-func (h *HealthManager) RegisterTask(allocID string, containerID string, spec *spec.HealthCheckSpec) {
+func (h *HealthManager) RegisterTask(allocID string, containerID string, spec *spec.HealthCheckSpec, addr string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -92,7 +92,7 @@ func (h *HealthManager) RegisterTask(allocID string, containerID string, spec *s
 		delete(h.tasks, allocID)
 	}
 
-	config := newHealthConfig(spec)
+	config := newHealthConfig(spec, addr)
 
 	newTrackedTask := &trackedTask{
 		allocID:     allocID,
@@ -106,10 +106,10 @@ func (h *HealthManager) RegisterTask(allocID string, containerID string, spec *s
 	go h.runHealthCheckLoop(ctx, newTrackedTask)
 }
 
-func newHealthConfig(spec *spec.HealthCheckSpec) HealthConfig {
+func newHealthConfig(spec *spec.HealthCheckSpec, addr string) HealthConfig {
 	config := HealthConfig{
 		Type:      string(spec.Type),
-		Addr:      "127.0.0.1",
+		Addr:      addr,
 		Port:      spec.Port,
 		Path:      spec.Path,
 		Command:   spec.Command,
@@ -184,12 +184,33 @@ func (h *HealthManager) runHealthCheck(ctx context.Context, trackedTask *tracked
 
 	switch config.Type {
 	case "http":
+		if config.Addr == "" {
+			return h.checkInTaskNamespace(ctx, trackedTask, true)
+		}
 		return CheckHTTP(ctx, config.Addr, config.Port, config.Path)
 	case "tcp":
+		if config.Addr == "" {
+			return h.checkInTaskNamespace(ctx, trackedTask, false)
+		}
 		return CheckTCP(ctx, config.Addr, config.Port)
 	case "script":
 		return CheckScript(ctx, h.runtime, trackedTask.containerID, config.Command)
 	default:
 		return false, fmt.Errorf("unknown check type %s", config.Type)
 	}
+}
+
+func (h *HealthManager) checkInTaskNamespace(ctx context.Context, task *trackedTask, httpCheck bool) (bool, error) {
+	info, err := h.runtime.Inspect(ctx, task.containerID)
+	if err != nil {
+		return false, fmt.Errorf("inspect container %s for health check: %w", task.containerID, err)
+	}
+	if info.PID == 0 {
+		return false, fmt.Errorf("container %s has no running process for health check", task.containerID)
+	}
+	dial := taskNamespaceDialer(info.PID)
+	if httpCheck {
+		return checkHTTP(ctx, "127.0.0.1", task.config.Port, task.config.Path, dial)
+	}
+	return checkTCP(ctx, "127.0.0.1", task.config.Port, dial)
 }
