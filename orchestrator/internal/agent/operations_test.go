@@ -31,6 +31,7 @@ type blockingStartRuntime struct {
 type failingStopRuntime struct {
 	*reconcilerRuntime
 	stopErr     error
+	stopCount   int
 	removeCount int
 }
 
@@ -106,6 +107,7 @@ func (r *ambiguousStartRuntime) Stop(context.Context, string) error {
 }
 
 func (r *failingStopRuntime) Stop(context.Context, string) error {
+	r.stopCount++
 	if r.stopErr != nil {
 		return r.stopErr
 	}
@@ -266,6 +268,47 @@ func TestStopGroupWaitsForInProgressRun(t *testing.T) {
 	}
 }
 
+func TestStopAttemptsRuntimeWhenStoppingPersistenceFails(t *testing.T) {
+	stopErr := errors.New("stop failed")
+	rt := &failingStopRuntime{reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning}, stopErr: stopErr}
+	agent := newOperationTestAgent(t, rt)
+	root := t.TempDir()
+	local := storage.NewLocalStorage(root)
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	agent.ConfigureDurability(local, "test")
+	agent.allocations["task"] = &Allocation{
+		ID: "task", AllocationID: "allocation", ContainerID: "task", Status: "running",
+	}
+	agent.reconciler.Track("task", false, nil)
+	if err := agent.persistAllocation(agent.allocations["task"]); err != nil {
+		t.Fatal(err)
+	}
+
+	recordDir := filepath.Join(root, "agent", "allocations")
+	if err := os.RemoveAll(recordDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(recordDir, []byte("blocked"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := agent.StopAllocation(context.Background(), "task")
+	if !errors.Is(err, stopErr) || !strings.Contains(err.Error(), "persist stopping allocation") {
+		t.Fatalf("stop error = %v, want persistence and runtime stop failures", err)
+	}
+	if rt.stopCount != 1 {
+		t.Fatalf("stop attempts = %d, want 1 despite persistence failure", rt.stopCount)
+	}
+	if got := agent.allocations["task"].Status; got != "stopping" {
+		t.Fatalf("allocation status = %q, want stopping", got)
+	}
+	if _, ok := agent.reconciler.states["task"]; !ok {
+		t.Fatal("allocation was untracked after failed runtime stop")
+	}
+}
+
 func TestFailedStopKeepsAllocationResourcesAndObservation(t *testing.T) {
 	rt := &failingStopRuntime{reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning}, stopErr: errors.New("stop failed")}
 	agent := newOperationTestAgent(t, rt)
@@ -363,8 +406,11 @@ func TestFailedRunStopPreservesStartedAllocationResources(t *testing.T) {
 		return os.WriteFile(recordDir, []byte("blocked"), 0o600)
 	}
 	err := agent.RunGroup(context.Background(), request)
-	if !errors.Is(err, stopErr) || !strings.Contains(err.Error(), "persist allocation") {
+	if !errors.Is(err, stopErr) || !strings.Contains(err.Error(), "persist allocation") || !strings.Contains(err.Error(), "persist stopping allocation") {
 		t.Fatalf("run error = %v, want persistence and stop failures", err)
+	}
+	if rt.stopCount != 1 {
+		t.Fatalf("stop attempts after persistence failure = %d, want 1", rt.stopCount)
 	}
 	alloc := agent.allocations[id]
 	if alloc == nil || len(alloc.Ports) != 1 || alloc.SecretDir == "" {
