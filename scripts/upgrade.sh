@@ -7,6 +7,7 @@ WORK_TMP=""
 ROLLBACK_NEEDED=false
 drained=false
 node_id=""
+had_health_probe=false
 
 cleanup() {
     local rc=$?
@@ -59,7 +60,7 @@ require_root_linux_amd64
 require_commands curl tar systemctl install mktemp ctr
 [ -x "${INSTALL_DIR}/trellis" ] || ui_die "Trellis is not installed at ${INSTALL_DIR}/trellis."
 [ -x "${INSTALL_DIR}/trellisctl" ] || ui_die "trellisctl is not installed at ${INSTALL_DIR}/trellisctl."
-[ -x "${INSTALL_DIR}/trellis-health-probe" ] || ui_die "trellis-health-probe is not installed at ${INSTALL_DIR}/trellis-health-probe."
+[ ! -e "${INSTALL_DIR}/trellis-health-probe" ] || had_health_probe=true
 [ -f "$CONFIG_FILE" ] || ui_die "Node configuration is missing at ${CONFIG_FILE}."
 load_node_config_paths
 
@@ -110,7 +111,7 @@ fi
 
 cp -a "${INSTALL_DIR}/trellis" "${WORK_TMP}/trellis.old"
 cp -a "${INSTALL_DIR}/trellisctl" "${WORK_TMP}/trellisctl.old"
-cp -a "${INSTALL_DIR}/trellis-health-probe" "${WORK_TMP}/trellis-health-probe.old"
+if [ "$had_health_probe" = true ]; then cp -a "${INSTALL_DIR}/trellis-health-probe" "${WORK_TMP}/trellis-health-probe.old"; fi
 [ ! -f "$SERVICE_FILE" ] || cp -a "$SERVICE_FILE" "${WORK_TMP}/trellis.service.old"
 
 rollback() {
@@ -120,7 +121,11 @@ rollback() {
     systemctl stop trellis >/dev/null 2>&1 || true
     install -m 0755 "${WORK_TMP}/trellis.old" "${INSTALL_DIR}/trellis"
     install -m 0755 "${WORK_TMP}/trellisctl.old" "${INSTALL_DIR}/trellisctl"
-    install -m 0755 "${WORK_TMP}/trellis-health-probe.old" "${INSTALL_DIR}/trellis-health-probe"
+    if [ "$had_health_probe" = true ]; then
+        install -m 0755 "${WORK_TMP}/trellis-health-probe.old" "${INSTALL_DIR}/trellis-health-probe"
+    else
+        rm -f "${INSTALL_DIR}/trellis-health-probe"
+    fi
     if [ -f "${WORK_TMP}/trellis.service.old" ]; then cp -a "${WORK_TMP}/trellis.service.old" "$SERVICE_FILE"; else rm -f "$SERVICE_FILE"; fi
     systemctl daemon-reload
     if [ "$was_running" = true ]; then systemctl start trellis >/dev/null 2>&1 || true; fi

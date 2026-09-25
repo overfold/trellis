@@ -48,8 +48,11 @@ jobs:
       - name: Start containerd
         run: sudo systemctl start containerd
 
-      - name: Run containerd allocation-adoption E2E
+      - name: Build static health probe
+        run: CGO_ENABLED=0 go build -o /tmp/trellis-health-probe ./cmd/trellis-health-probe
+
+      - name: Run containerd E2E tests
         # Pulling and unpacking an image with containerd's overlayfs snapshotter
         # mounts snapshot filesystems in the calling process. Socket access by
         # itself is therefore insufficient; this boundary test must run as root.
-        run: sudo "$(command -v go)" test -tags=containerd_e2e ./internal/runtime -run TestContainerdAllocationAdoption -count=1 -timeout=3m
+        run: sudo env TRELLIS_HEALTH_PROBE=/tmp/trellis-health-probe "$(command -v go)" test -tags=containerd_e2e ./internal/runtime -run 'TestContainerd(AllocationAdoption|HealthProbe)' -count=1 -timeout=3m
