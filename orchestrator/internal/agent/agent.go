@@ -188,6 +188,20 @@ func (a *Agent) deleteAllocationRecord(id string) error {
 	return a.local.Delete(allocationRecordKey(id))
 }
 
+func (a *Agent) markAllocationStopping(id string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	allocation := a.allocations[id]
+	if allocation == nil {
+		return fmt.Errorf("%w: %s", ErrAllocationNotFound, id)
+	}
+	allocation.Status = "stopping"
+	if err := a.persistAllocation(allocation); err != nil {
+		return fmt.Errorf("persist stopping allocation: %w", err)
+	}
+	return nil
+}
+
 // NewAgent creates an allocation agent.
 func NewAgent(log *slog.Logger, runtime runtime.ContainerRuntime, health *health.HealthManager, reconciler *AllocationReconciler, ports *PortManager, volumes *VolumeManager, server *client.ServerClient, nodeID uuid.UUID) *Agent {
 	executable, _ := os.Executable()
@@ -310,7 +324,8 @@ func (a *Agent) recover(ctx context.Context) error {
 			a.log.Warn("leave unidentifiable Trellis container untouched", "container", container.ID)
 			continue
 		}
-		if hadRecord && allocation.Status == "starting" && (container.Status == runtime.StatusCreated || container.Status == runtime.StatusStopped) {
+		stopping := hadRecord && allocation.Status == "stopping"
+		if hadRecord && !stopping && allocation.Status == "starting" && (container.Status == runtime.StatusCreated || container.Status == runtime.StatusStopped) {
 			if err := a.runtime.Start(ctx, container.ID); err != nil {
 				a.log.Error("resume interrupted allocation start", "container", container.ID, "error", err)
 				continue
@@ -326,7 +341,7 @@ func (a *Agent) recover(ctx context.Context) error {
 			}
 			a.allocations[allocation.ID] = allocation
 			if allocation.Spec != nil {
-				if allocation.Spec.HealthCheck != nil {
+				if !stopping && allocation.Spec.HealthCheck != nil {
 					check := *allocation.Spec.HealthCheck
 					for _, port := range allocation.Ports {
 						if port.ContainerPort == check.Port {
@@ -336,7 +351,13 @@ func (a *Agent) recover(ctx context.Context) error {
 					}
 					a.health.RegisterTask(allocation.ID, allocation.ContainerID, &check)
 				}
-				a.reconciler.TrackRecovered(allocation.ID, allocation.Spec.HealthCheck != nil, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow)
+				if stopping {
+					a.reconciler.TrackStopping(allocation.ID, allocation.Spec.HealthCheck != nil, allocation.Restart)
+				} else {
+					a.reconciler.TrackRecovered(allocation.ID, allocation.Spec.HealthCheck != nil, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow)
+				}
+			} else if stopping {
+				a.reconciler.TrackStopping(allocation.ID, false, nil)
 			} else {
 				a.reconciler.Track(allocation.ID, false, nil)
 			}
@@ -630,16 +651,18 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		if startAttempted {
 			if tracked {
 				a.reconciler.BeginStop(allocID)
+			} else {
+				// Start may have succeeded even if its response was lost. Track
+				// the retained allocation as stopping from the outset so an
+				// observed stopped task can never be restarted.
+				a.reconciler.TrackStopping(allocID, false, restartPolicy)
+				tracked = true
+			}
+			if err := a.markAllocationStopping(allocID); err != nil {
+				runErr = errors.Join(runErr, err)
+				return
 			}
 			if err := a.runtime.Stop(context.WithoutCancel(ctx), allocID); err != nil {
-				if tracked {
-					a.reconciler.CancelStop(allocID)
-				} else {
-					// The runtime may have accepted Start even when its response
-					// was lost. Keep the retained allocation under observation
-					// until the control plane retries cleanup.
-					a.reconciler.Track(allocID, false, restartPolicy)
-				}
 				runErr = errors.Join(runErr, fmt.Errorf("stop container %s during failed start: %w", allocID, err))
 				return
 			}
@@ -1069,8 +1092,10 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string) error {
 
 	containerID := alloc.ContainerID
 	a.reconciler.BeginStop(allocID)
+	if err := a.markAllocationStopping(allocID); err != nil {
+		return err
+	}
 	if err := a.runtime.Stop(ctx, containerID); err != nil {
-		a.reconciler.CancelStop(allocID)
 		return fmt.Errorf("stop container %s: %w", containerID, err)
 	}
 
