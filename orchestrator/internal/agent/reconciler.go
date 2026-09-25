@@ -58,11 +58,20 @@ func NewAllocationReconciler(runtime runtime.ContainerRuntime, subscriber Alloca
 
 // Track begins reconciliation for an allocation.
 func (r *AllocationReconciler) Track(allocID string, healthManaged bool, policy *spec.RestartPolicySpec) {
-	r.TrackRecovered(allocID, healthManaged, policy, 0, time.Time{})
+	r.trackRecovered(allocID, healthManaged, policy, 0, time.Time{}, false)
+}
+
+// TrackStopping observes an allocation while permanently suppressing automatic restarts.
+func (r *AllocationReconciler) TrackStopping(allocID string, healthManaged bool, policy *spec.RestartPolicySpec) {
+	r.trackRecovered(allocID, healthManaged, policy, 0, time.Time{}, true)
 }
 
 // TrackRecovered restores reconciliation state for an allocation.
 func (r *AllocationReconciler) TrackRecovered(allocID string, healthManaged bool, policy *spec.RestartPolicySpec, attempts int, window time.Time) {
+	r.trackRecovered(allocID, healthManaged, policy, attempts, window, false)
+}
+
+func (r *AllocationReconciler) trackRecovered(allocID string, healthManaged bool, policy *spec.RestartPolicySpec, attempts int, window time.Time, stopping bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -76,6 +85,7 @@ func (r *AllocationReconciler) TrackRecovered(allocID string, healthManaged bool
 		window = time.Now()
 	}
 	r.states[allocID] = &allocationReconcileState{
+		stopping:      stopping,
 		healthManaged: healthManaged,
 		attempts:      attempts,
 		window:        window,
@@ -109,15 +119,6 @@ func (r *AllocationReconciler) BeginStop(allocID string) {
 	state.stopping = true
 	r.mu.Unlock()
 	state.operation.Unlock()
-}
-
-// CancelStop restores reconciliation after a failed runtime stop.
-func (r *AllocationReconciler) CancelStop(allocID string) {
-	r.mu.Lock()
-	if state := r.states[allocID]; state != nil {
-		state.stopping = false
-	}
-	r.mu.Unlock()
 }
 
 // ObserveHealth records a health observation. The health manager owns how an
