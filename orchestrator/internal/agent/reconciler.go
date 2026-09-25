@@ -36,6 +36,8 @@ type AllocationReconcileSubscriber interface {
 }
 
 type allocationReconcileState struct {
+	operation     sync.Mutex
+	stopping      bool
 	healthManaged bool
 	restarting    bool
 	attempts      int
@@ -94,6 +96,30 @@ func (r *AllocationReconciler) Untrack(allocID string) error {
 	return nil
 }
 
+// BeginStop waits for an active reconciliation pass and prevents further restarts.
+func (r *AllocationReconciler) BeginStop(allocID string) {
+	r.mu.Lock()
+	state := r.states[allocID]
+	r.mu.Unlock()
+	if state == nil {
+		return
+	}
+	state.operation.Lock()
+	r.mu.Lock()
+	state.stopping = true
+	r.mu.Unlock()
+	state.operation.Unlock()
+}
+
+// CancelStop restores reconciliation after a failed runtime stop.
+func (r *AllocationReconciler) CancelStop(allocID string) {
+	r.mu.Lock()
+	if state := r.states[allocID]; state != nil {
+		state.stopping = false
+	}
+	r.mu.Unlock()
+}
+
 // ObserveHealth records a health observation. The health manager owns how an
 // observation is produced; the reconciler owns what that observation means for
 // allocation lifecycle state.
@@ -148,10 +174,18 @@ func (r *AllocationReconciler) trackedAllocations() []string {
 // Reconcile performs one local desired-vs-actual pass for an allocation.
 func (r *AllocationReconciler) Reconcile(ctx context.Context, allocID string) error {
 	r.mu.Lock()
-	_, tracked := r.states[allocID]
+	state := r.states[allocID]
 	r.mu.Unlock()
-	if !tracked {
+	if state == nil {
 		return fmt.Errorf("alloc %s not tracked", allocID)
+	}
+	state.operation.Lock()
+	defer state.operation.Unlock()
+	r.mu.Lock()
+	active := r.states[allocID] == state && !state.stopping
+	r.mu.Unlock()
+	if !active {
+		return nil
 	}
 
 	containerState, err := r.runtime.Inspect(ctx, allocID)

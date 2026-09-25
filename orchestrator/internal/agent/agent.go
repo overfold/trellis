@@ -569,7 +569,7 @@ func (a *Agent) reconcileDesired(ctx context.Context, response *api.HeartbeatRes
 }
 
 // RunAllocation creates and starts one allocation task.
-func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, generation uint64, jobRevision int, executionHash, namespace, jobName, groupName, taskName string, taskSpec *spec.TaskSpec, groupRuntime string, networkPlan *network.Plan, envOverrides map[string]string, delivered []api.DeliveredSecret, restartPolicy *spec.RestartPolicySpec) error {
+func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, generation uint64, jobRevision int, executionHash, namespace, jobName, groupName, taskName string, taskSpec *spec.TaskSpec, groupRuntime string, networkPlan *network.Plan, envOverrides map[string]string, delivered []api.DeliveredSecret, restartPolicy *spec.RestartPolicySpec) (runErr error) {
 	ts := taskSpec
 	if ts == nil {
 		return fmt.Errorf("task spec is required")
@@ -586,7 +586,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		}
 		return fmt.Errorf("%w: %s", ErrAllocationExists, allocID)
 	}
-	alloc := &Allocation{ID: allocID, ContainerID: allocID, AllocationID: schedulerID, Generation: generation, JobRevision: jobRevision, ExecutionHash: executionHash, Namespace: namespace, JobName: jobName, GroupName: groupName, TaskName: taskName, Spec: ts, Status: "starting", Health: "unknown"}
+	alloc := &Allocation{ID: allocID, ContainerID: allocID, AllocationID: schedulerID, Generation: generation, JobRevision: jobRevision, ExecutionHash: executionHash, Restart: restartPolicy, Namespace: namespace, JobName: jobName, GroupName: groupName, TaskName: taskName, Spec: ts, Status: "starting", Health: "unknown"}
 	a.allocations[allocID] = alloc
 	a.mu.Unlock()
 	if err := a.persistAllocation(alloc); err != nil {
@@ -612,14 +612,23 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		if committed {
 			return
 		}
+		if containerStarted {
+			if tracked {
+				a.reconciler.BeginStop(allocID)
+			}
+			if err := a.runtime.Stop(context.WithoutCancel(ctx), allocID); err != nil {
+				if tracked {
+					a.reconciler.CancelStop(allocID)
+				}
+				runErr = errors.Join(runErr, fmt.Errorf("stop container %s during failed start: %w", allocID, err))
+				return
+			}
+		}
 		if healthRegistered {
 			a.health.DeregisterTask(allocID)
 		}
 		if tracked {
 			_ = a.reconciler.Untrack(allocID)
-		}
-		if containerStarted {
-			_ = a.runtime.Stop(context.WithoutCancel(ctx), allocID)
 		}
 		if containerCreated {
 			_ = a.runtime.Remove(context.WithoutCancel(ctx), allocID)
@@ -708,6 +717,9 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		return err
 	}
 	alloc.SecretDir = secretDir
+	if err := a.persistAllocation(alloc); err != nil {
+		return fmt.Errorf("persist secret metadata: %w", err)
+	}
 	for k, v := range secretEnv {
 		env[k] = v
 	}
@@ -1037,7 +1049,9 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string) error {
 	}
 
 	containerID := alloc.ContainerID
+	a.reconciler.BeginStop(allocID)
 	if err := a.runtime.Stop(ctx, containerID); err != nil {
+		a.reconciler.CancelStop(allocID)
 		return fmt.Errorf("stop container %s: %w", containerID, err)
 	}
 
