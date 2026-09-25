@@ -53,6 +53,26 @@ type startHookRuntime struct {
 
 func (r *startHookRuntime) Start(context.Context, string) error { return r.onStart() }
 
+type ambiguousStartRuntime struct {
+	*reconcilerRuntime
+	stopCount int
+	onStop    func()
+}
+
+func (r *ambiguousStartRuntime) Start(context.Context, string) error {
+	r.status = runtime.StatusRunning
+	return errors.New("start response lost")
+}
+func (r *ambiguousStartRuntime) Inspect(context.Context, string) (*runtime.ContainerInfo, error) {
+	return nil, errors.New("inspect unavailable")
+}
+func (r *ambiguousStartRuntime) Stop(context.Context, string) error {
+	r.stopCount++
+	r.onStop()
+	r.status = runtime.StatusStopped
+	return nil
+}
+
 func (r *failingStopRuntime) Stop(context.Context, string) error { return r.stopErr }
 func (r *failingStopRuntime) Remove(context.Context, string) error {
 	r.removeCount++
@@ -277,6 +297,12 @@ func TestFailedRunStopPreservesStartedAllocationResources(t *testing.T) {
 	if err := os.Mkdir(recordDir, 0o750); err != nil {
 		t.Fatal(err)
 	}
+	if err := agent.RunGroup(context.Background(), request); !errors.Is(err, ErrAllocationExists) || !strings.Contains(err.Error(), "remains starting") {
+		t.Fatalf("retry run error = %v, want retained starting allocation", err)
+	}
+	if got := agent.allocations[id].Status; got != "starting" {
+		t.Fatalf("retained allocation status = %q, want starting", got)
+	}
 	rt.stopErr = nil
 	if err := agent.StopAllocation(context.Background(), id); err != nil {
 		t.Fatalf("retry stop: %v", err)
@@ -286,6 +312,41 @@ func TestFailedRunStopPreservesStartedAllocationResources(t *testing.T) {
 	}
 	if _, err := os.Stat(alloc.SecretDir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("secret directory after retry: %v", err)
+	}
+}
+
+func TestAmbiguousStartStopsBeforeReleasingResources(t *testing.T) {
+	rt := &ambiguousStartRuntime{reconcilerRuntime: &reconcilerRuntime{}}
+	agent := newOperationTestAgent(t, rt)
+	manager := &countingNetworkManager{}
+	agent.SetNetworkManager(manager)
+	request := operationTestRequest()
+	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image", Networking: &spec.TaskNetworkingSpec{Ports: []spec.PortSpec{{}}}}}
+	request.Secrets = []api.DeliveredSecret{{Task: "first", Name: "key", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Value: []byte("secret")}}
+	id := "allocation-g2-first"
+	rt.onStop = func() {
+		alloc := agent.allocations[id]
+		if alloc == nil || len(alloc.Ports) != 1 || alloc.SecretDir == "" {
+			t.Fatalf("resources missing before stop: %+v", alloc)
+		}
+		if _, ok := agent.ports.claims[alloc.Ports[0].HostPort]; !ok {
+			t.Fatal("port released before stop")
+		}
+		if _, err := os.Stat(alloc.SecretDir); err != nil {
+			t.Fatalf("secret files removed before stop: %v", err)
+		}
+		if manager.detachCount != 0 {
+			t.Fatal("network detached before stop")
+		}
+	}
+	if err := agent.RunGroup(context.Background(), request); err == nil || !strings.Contains(err.Error(), "start container") {
+		t.Fatalf("run error = %v, want start failure", err)
+	}
+	if rt.stopCount != 1 {
+		t.Fatalf("stop count = %d, want 1", rt.stopCount)
+	}
+	if len(agent.GetAllocations()) != 0 || len(agent.ports.claims) != 0 || manager.detachCount != 1 {
+		t.Fatalf("resources retained after successful stop: allocations=%d ports=%d detach=%d", len(agent.GetAllocations()), len(agent.ports.claims), manager.detachCount)
 	}
 }
 

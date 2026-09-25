@@ -580,9 +580,14 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	a.mu.Lock()
 	existing := a.allocations[allocID]
 	if existing != nil {
+		matching := existing.AllocationID == schedulerID && existing.Generation == generation && existing.ExecutionHash == executionHash
+		status := existing.Status
 		a.mu.Unlock()
-		if existing.AllocationID == schedulerID && existing.Generation == generation && existing.ExecutionHash == executionHash {
-			return nil
+		if matching {
+			if status == "running" {
+				return nil
+			}
+			return fmt.Errorf("%w: %s remains %s; stop it before retrying", ErrAllocationExists, allocID, status)
 		}
 		return fmt.Errorf("%w: %s", ErrAllocationExists, allocID)
 	}
@@ -597,7 +602,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	}
 	committed := false
 	containerCreated := false
-	containerStarted := false
+	startAttempted := false
 	tracked := false
 	healthRegistered := false
 	var netAttachment *network.Attachment
@@ -612,7 +617,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		if committed {
 			return
 		}
-		if containerStarted {
+		if startAttempted {
 			if tracked {
 				a.reconciler.BeginStop(allocID)
 			}
@@ -784,6 +789,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	}
 	containerCreated = true
 
+	startAttempted = true
 	err = a.runtime.Start(ctx, containerID)
 	if err != nil {
 		observed, inspectErr := a.runtime.Inspect(context.WithoutCancel(ctx), containerID)
@@ -791,8 +797,6 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 			return fmt.Errorf("start container %s: %w", containerID, err)
 		}
 	}
-	containerStarted = true
-
 	if ts.HealthCheck != nil {
 		check := *ts.HealthCheck
 		for _, p := range ports {
