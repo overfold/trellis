@@ -71,6 +71,9 @@ func TestValidateRejectsInvalidJobs(t *testing.T) {
 			j.TaskGroups[0].Tasks[0].Networking = &TaskNetworkingSpec{Ports: []PortSpec{{Port: 8080}}}
 		}},
 		{"invalid networking", func(j *JobSpec) { j.TaskGroups[0].Tasks[0].Networking = &TaskNetworkingSpec{Mode: "bridge"} }},
+		{"reserved health probe volume path", func(j *JobSpec) {
+			j.TaskGroups[0].Tasks[0].Volumes = []VolumeSpec{{Name: "data", HostPath: "/srv/data", ContainerPath: "/run/trellis"}}
+		}},
 		{"invalid label", func(j *JobSpec) { j.TaskGroups[0].Labels = map[string]string{"123bad": "v"} }},
 		{"invalid api scope", func(j *JobSpec) { j.TaskGroups[0].APIAccess = &APIAccessSpec{Scope: "other", Access: APIAccessRead} }},
 		{"invalid api access", func(j *JobSpec) {

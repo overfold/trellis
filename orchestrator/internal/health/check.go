@@ -4,48 +4,31 @@ package health
 import (
 	"context"
 	"fmt"
-	"net"
-	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/clofour/trellis/internal/runtime"
 )
 
-// CheckHTTP runs an HTTP health check.
-func CheckHTTP(ctx context.Context, addr string, port int, path string) (bool, error) {
-	client := &http.Client{}
-	url := fmt.Sprintf("http://%s:%d%s", addr, port, path)
+// ProbeContainerPath is the reserved path of the health probe inside tasks.
+const ProbeContainerPath = "/run/trellis/health-probe"
 
-	request, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return false, fmt.Errorf("constructing request %s: %w", url, err)
-	}
-
-	response, err := client.Do(request)
-	if err != nil {
-		return false, fmt.Errorf("executing request %s: %w", url, err)
-	}
-	defer func() {
-		_ = response.Body.Close()
-	}()
-
-	return response.StatusCode >= 200 && response.StatusCode < 300, nil
+// CheckHTTP runs an HTTP health check inside a task.
+func CheckHTTP(ctx context.Context, c runtime.ContainerRuntime, containerID string, port int, path string, timeout time.Duration) (bool, error) {
+	return checkProbe(ctx, c, containerID, []string{ProbeContainerPath, "http", strconv.Itoa(port), path, timeout.String()})
 }
 
-// CheckTCP runs a TCP health check.
-func CheckTCP(ctx context.Context, addr string, port int) (bool, error) {
-	url := net.JoinHostPort(addr, strconv.Itoa(port))
+// CheckTCP runs a TCP health check inside a task.
+func CheckTCP(ctx context.Context, c runtime.ContainerRuntime, containerID string, port int, timeout time.Duration) (bool, error) {
+	return checkProbe(ctx, c, containerID, []string{ProbeContainerPath, "tcp", strconv.Itoa(port), timeout.String()})
+}
 
-	dialer := net.Dialer{}
-	conn, err := dialer.DialContext(ctx, "tcp", url)
+func checkProbe(ctx context.Context, c runtime.ContainerRuntime, containerID string, command []string) (bool, error) {
+	code, err := c.Exec(ctx, containerID, command)
 	if err != nil {
-		return false, fmt.Errorf("executing request %s: %w", url, err)
+		return false, fmt.Errorf("executing health probe: %w", err)
 	}
-	defer func() {
-		_ = conn.Close()
-	}()
-
-	return true, nil
+	return code == 0, nil
 }
 
 // CheckScript runs a command health check in a container.

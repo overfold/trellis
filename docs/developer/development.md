@@ -11,6 +11,7 @@ go vet ./...
 golangci-lint run
 
 go build ./cmd/trellis ./cmd/trellisctl ./cmd/trellis-proxy-sync
+CGO_ENABLED=0 go build ./cmd/trellis-health-probe
 
 cd ../ui
 npm ci

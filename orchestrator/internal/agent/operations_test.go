@@ -4,11 +4,13 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/clofour/trellis/internal/api"
 	"github.com/clofour/trellis/internal/health"
+	"github.com/clofour/trellis/internal/network"
 	"github.com/clofour/trellis/internal/runtime"
 	"github.com/clofour/trellis/internal/spec"
 	"github.com/google/uuid"
@@ -19,10 +21,14 @@ type blockingStartRuntime struct {
 	started chan string
 	release chan struct{}
 	labels  map[string]map[string]string
+	created map[string]runtime.CreateOptions
 }
 
 func (r *blockingStartRuntime) Create(_ context.Context, options runtime.CreateOptions) (string, error) {
 	r.labels[options.ID] = options.Labels
+	if r.created != nil {
+		r.created[options.ID] = options
+	}
 	return options.ID, nil
 }
 
@@ -31,6 +37,14 @@ func (r *blockingStartRuntime) Start(_ context.Context, id string) error {
 	<-r.release
 	return nil
 }
+
+type staticNetworkManager struct{}
+
+func (staticNetworkManager) Attach(_ context.Context, request network.AttachRequest) (*network.Attachment, error) {
+	return &network.Attachment{AllocationID: request.AllocationID, NetworkNamespace: "/var/run/netns/" + request.AllocationID}, nil
+}
+
+func (staticNetworkManager) Detach(context.Context, *network.Attachment) error { return nil }
 
 func newOperationTestAgent(t *testing.T, rt runtime.ContainerRuntime) *Agent {
 	t.Helper()
@@ -44,6 +58,48 @@ func operationTestRequest() *api.AllocationRequest {
 		AllocationID: "allocation", Generation: 2, JobRevision: 7, ExecutionHash: "execution-hash",
 		Namespace: "default", JobName: "job", GroupName: "group",
 		Tasks: []spec.TaskSpec{{Name: "first", Image: "image"}, {Name: "second", Image: "image"}},
+	}
+}
+
+func TestRunAllocationMountsHealthProbeForEveryNetworkAndRuntime(t *testing.T) {
+	for _, mode := range []spec.TaskNetworkMode{spec.TaskNetworkHost, spec.TaskNetworkIsolated, spec.TaskNetworkWireGuard} {
+		for _, taskRuntime := range []string{"runc", "runsc"} {
+			t.Run(string(mode)+"/"+taskRuntime, func(t *testing.T) {
+				rt := &blockingStartRuntime{
+					reconcilerRuntime: &reconcilerRuntime{},
+					started:           make(chan string, 1),
+					release:           make(chan struct{}, 1),
+					labels:            map[string]map[string]string{},
+					created:           map[string]runtime.CreateOptions{},
+				}
+				rt.release <- struct{}{}
+				agent := newOperationTestAgent(t, rt)
+				agent.SetNetworkManager(staticNetworkManager{})
+				task := &spec.TaskSpec{Name: "web", Image: "image", Networking: &spec.TaskNetworkingSpec{Mode: mode}}
+				var plan *network.Plan
+				if mode == spec.TaskNetworkWireGuard {
+					plan = &network.Plan{}
+				}
+				if err := agent.RunAllocation(context.Background(), "alloc", "scheduler", 1, 1, "hash", "default", "job", "group", "web", task, taskRuntime, plan, nil, nil, nil); err != nil {
+					t.Fatal(err)
+				}
+
+				options := rt.created["alloc"]
+				if options.Runtime != taskRuntime {
+					t.Fatalf("runtime = %q, want %q", options.Runtime, taskRuntime)
+				}
+				var probeMount *runtime.Mount
+				for _, mount := range options.Mounts {
+					if mount.ContainerPath == health.ProbeContainerPath {
+						probeMount = mount
+						break
+					}
+				}
+				if probeMount == nil || !probeMount.ReadOnly || filepath.Base(probeMount.HostPath) != "trellis-health-probe" {
+					t.Fatalf("health probe mount = %#v", probeMount)
+				}
+			})
+		}
 	}
 }
 
