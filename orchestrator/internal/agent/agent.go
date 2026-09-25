@@ -658,10 +658,8 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 				a.reconciler.TrackStopping(allocID, false, restartPolicy)
 				tracked = true
 			}
-			if err := a.markAllocationStopping(allocID); err != nil {
-				runErr = errors.Join(runErr, err)
-				return
-			}
+			persistStopErr := a.markAllocationStopping(allocID)
+			runErr = errors.Join(runErr, persistStopErr)
 			if err := a.runtime.Stop(context.WithoutCancel(ctx), allocID); err != nil {
 				runErr = errors.Join(runErr, fmt.Errorf("stop container %s during failed start: %w", allocID, err))
 				return
@@ -1092,11 +1090,9 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string) error {
 
 	containerID := alloc.ContainerID
 	a.reconciler.BeginStop(allocID)
-	if err := a.markAllocationStopping(allocID); err != nil {
-		return err
-	}
+	persistStopErr := a.markAllocationStopping(allocID)
 	if err := a.runtime.Stop(ctx, containerID); err != nil {
-		return fmt.Errorf("stop container %s: %w", containerID, err)
+		return errors.Join(persistStopErr, fmt.Errorf("stop container %s: %w", containerID, err))
 	}
 
 	var errs []error
@@ -1125,16 +1121,16 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string) error {
 		}
 	}
 	if err := errors.Join(errs...); err != nil {
-		return err
+		return errors.Join(persistStopErr, err)
 	}
 	if err := a.deleteAllocationRecord(allocID); err != nil {
-		return fmt.Errorf("delete allocation record: %w", err)
+		return errors.Join(persistStopErr, fmt.Errorf("delete allocation record: %w", err))
 	}
 	a.mu.Lock()
 	delete(a.allocations, allocID)
 	a.mu.Unlock()
 
-	return nil
+	return persistStopErr
 }
 
 func prepareSecrets(allocID, taskName string, delivered []api.DeliveredSecret) (string, map[string]string, []*runtime.Mount, error) {
