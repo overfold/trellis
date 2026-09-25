@@ -1,6 +1,8 @@
 package health
 
 import (
+	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,5 +31,21 @@ func TestNewHealthConfigUsesConfiguredValues(t *testing.T) {
 	}, "127.0.0.1")
 	if config.Interval != 2*time.Second || config.Timeout != time.Second || config.Threshold != 5 {
 		t.Fatalf("unexpected health config: %#v", config)
+	}
+}
+
+func TestNetworkCheckWithoutReachableAddressFailsClosed(t *testing.T) {
+	h := NewHealthManager(nil, nil, nil)
+	for _, kind := range []spec.HealthCheckType{spec.HealthCheckHTTP, spec.HealthCheckTCP} {
+		t.Run(string(kind), func(t *testing.T) {
+			config := newHealthConfig(&spec.HealthCheckSpec{Type: kind, Port: 8080}, "")
+			ok, err := h.runHealthCheck(context.Background(), &trackedTask{config: config})
+			if ok || err == nil {
+				t.Fatalf("check = %v, %v; want explicit unreachable-address failure", ok, err)
+			}
+			if !strings.Contains(err.Error(), "no agent-reachable network address") {
+				t.Fatalf("error = %q, want unreachable-address explanation", err)
+			}
+		})
 	}
 }
