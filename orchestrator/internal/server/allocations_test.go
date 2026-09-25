@@ -376,6 +376,13 @@ func TestHeartbeatRequiresEveryTaskForRunningHealth(t *testing.T) {
 	if allocation.Phase != lifecycle.PhaseRunning || allocation.Health != lifecycle.HealthHealthy {
 		t.Fatalf("complete heartbeat: phase=%s health=%s, want running/healthy", allocation.Phase, allocation.Health)
 	}
+	app.Health = lifecycle.HealthUnhealthy
+	if err := s.Heartbeat(context.Background(), nodeID, []api.AllocationStatus{app}, "test", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if allocation.Phase != lifecycle.PhaseStarting || allocation.Health != lifecycle.HealthUnhealthy {
+		t.Fatalf("unhealthy partial heartbeat: phase=%s health=%s, want starting/unhealthy", allocation.Phase, allocation.Health)
+	}
 }
 
 func TestHeartbeatMissingTaskRetriesRunningAllocation(t *testing.T) {
@@ -427,7 +434,7 @@ func TestHeartbeatEmptyTaskReportRetriesRunningAllocation(t *testing.T) {
 
 	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
 	s.nodes[node.ID] = node
-	tasks := []spec.TaskSpec{{Name: "app", Image: "app"}}
+	tasks := []spec.TaskSpec{{Name: "app", Image: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkHost, Ports: []spec.PortSpec{{Port: 8080}}}}}
 	s.jobs[jobKey("default", "web")] = &Job{
 		Spec: &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "web", Count: 1, Tasks: tasks}}},
 		Revision: 1,
@@ -436,13 +443,13 @@ func TestHeartbeatEmptyTaskReportRetriesRunningAllocation(t *testing.T) {
 		ID: "default-web-1", Namespace: "default", JobName: "web", TaskGroupName: "web",
 		Node: node, Tasks: tasks, Generation: 1, JobRevision: 1,
 		Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy,
-		Endpoints: []api.AllocationEndpoint{{Task: "app", Address: "10.0.0.1"}},
+		Endpoints: []api.AllocationEndpoint{{Task: "app", Address: node.Host, Ports: []api.PortMapping{{HostPort: 8080, ContainerPort: 8080}}}},
 		Ports: []api.PortMapping{{HostPort: 8080, ContainerPort: 8080}},
 	}
 	s.allocations = []*Allocation{allocation}
 	s.refreshCatalog()
-	if services := s.ListServices("default", nil); len(services) != 1 {
-		t.Fatalf("initial catalog = %#v, want one service", services)
+	if services := s.ListServices("default", nil); len(services) != 1 || services[0].Address != node.Host {
+		t.Fatalf("initial catalog = %#v, want one service at %s", services, node.Host)
 	}
 
 	if err := s.Heartbeat(context.Background(), node.ID, nil, "test", nil, nil); err != nil {

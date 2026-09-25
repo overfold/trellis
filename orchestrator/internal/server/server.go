@@ -734,7 +734,9 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 					// Retry the incomplete allocation on the next reconciliation pass.
 					info.Phase = lifecycle.PhaseStarting
 				}
-				info.Health = lifecycle.HealthUnknown
+				if info.Health != lifecycle.HealthUnhealthy {
+					info.Health = lifecycle.HealthUnknown
+				}
 				break
 			}
 		}
