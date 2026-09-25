@@ -13,7 +13,13 @@ import (
 
 // CheckHTTP runs an HTTP health check.
 func CheckHTTP(ctx context.Context, addr string, port int, path string) (bool, error) {
-	client := &http.Client{}
+	return checkHTTP(ctx, addr, port, path, nil)
+}
+
+func checkHTTP(ctx context.Context, addr string, port int, path string, dial func(context.Context, string, string) (net.Conn, error)) (bool, error) {
+	transport := &http.Transport{DialContext: dial}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport}
 	url := fmt.Sprintf("http://%s:%d%s", addr, port, path)
 
 	request, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -34,10 +40,13 @@ func CheckHTTP(ctx context.Context, addr string, port int, path string) (bool, e
 
 // CheckTCP runs a TCP health check.
 func CheckTCP(ctx context.Context, addr string, port int) (bool, error) {
+	return checkTCP(ctx, addr, port, (&net.Dialer{}).DialContext)
+}
+
+func checkTCP(ctx context.Context, addr string, port int, dial func(context.Context, string, string) (net.Conn, error)) (bool, error) {
 	url := net.JoinHostPort(addr, strconv.Itoa(port))
 
-	dialer := net.Dialer{}
-	conn, err := dialer.DialContext(ctx, "tcp", url)
+	conn, err := dial(ctx, "tcp", url)
 	if err != nil {
 		return false, fmt.Errorf("executing request %s: %w", url, err)
 	}

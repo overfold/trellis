@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"sync"
 	"time"
 
@@ -31,6 +32,7 @@ type HealthSubscriber interface {
 type HealthConfig struct {
 	Type      string
 	Addr      string
+	Isolated  bool
 	Port      int
 	Path      string
 	Command   []string
@@ -80,7 +82,7 @@ func (h *HealthManager) SetContext(ctx context.Context) {
 }
 
 // RegisterTask starts health checking an allocation task.
-func (h *HealthManager) RegisterTask(allocID string, containerID string, spec *spec.HealthCheckSpec) {
+func (h *HealthManager) RegisterTask(allocID string, containerID string, spec *spec.HealthCheckSpec, addr string, isolated bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -93,6 +95,10 @@ func (h *HealthManager) RegisterTask(allocID string, containerID string, spec *s
 	}
 
 	config := newHealthConfig(spec)
+	if addr != "" {
+		config.Addr = addr
+	}
+	config.Isolated = isolated
 
 	newTrackedTask := &trackedTask{
 		allocID:     allocID,
@@ -181,12 +187,31 @@ func (h *HealthManager) runHealthCheck(ctx context.Context, trackedTask *tracked
 
 	ctx, cancel := context.WithTimeout(ctx, config.Timeout)
 	defer cancel()
+	var dial func(context.Context, string, string) (net.Conn, error)
+	if config.Isolated && (config.Type == "http" || config.Type == "tcp") {
+		provider, ok := h.runtime.(interface {
+			NetworkNamespace(context.Context, string) (string, error)
+		})
+		if !ok {
+			return false, fmt.Errorf("runtime cannot locate network namespace for %s", trackedTask.containerID)
+		}
+		path, err := provider.NetworkNamespace(ctx, trackedTask.containerID)
+		if err != nil {
+			return false, err
+		}
+		dial = func(ctx context.Context, network, address string) (net.Conn, error) {
+			return dialInNamespace(ctx, path, network, address)
+		}
+	}
 
 	switch config.Type {
 	case "http":
-		return CheckHTTP(ctx, config.Addr, config.Port, config.Path)
+		return checkHTTP(ctx, config.Addr, config.Port, config.Path, dial)
 	case "tcp":
-		return CheckTCP(ctx, config.Addr, config.Port)
+		if dial == nil {
+			return CheckTCP(ctx, config.Addr, config.Port)
+		}
+		return checkTCP(ctx, config.Addr, config.Port, dial)
 	case "script":
 		return CheckScript(ctx, h.runtime, trackedTask.containerID, config.Command)
 	default:

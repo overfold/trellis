@@ -331,7 +331,8 @@ func (a *Agent) recover(ctx context.Context) error {
 							break
 						}
 					}
-					a.health.RegisterTask(allocation.ID, allocation.ContainerID, &check)
+					isolated := allocation.Spec.Networking == nil || (allocation.Spec.Networking.Mode != spec.TaskNetworkHost && allocation.Spec.Networking.Mode != spec.TaskNetworkWireGuard)
+					a.health.RegisterTask(allocation.ID, allocation.ContainerID, &check, allocationNetworkAddress(allocation), isolated)
 				}
 				a.reconciler.TrackRecovered(allocation.ID, allocation.Spec.HealthCheck != nil, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow)
 			} else {
@@ -789,7 +790,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 				break
 			}
 		}
-		a.health.RegisterTask(allocID, containerID, &check)
+		a.health.RegisterTask(allocID, containerID, &check, allocationNetworkAddress(alloc), !hostMode && !wireGuard)
 		healthRegistered = true
 	}
 

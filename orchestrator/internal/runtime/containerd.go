@@ -298,6 +298,20 @@ func (c *ContainerdRuntime) Remove(ctx context.Context, containerID string) erro
 	return nil
 }
 
+// NetworkNamespace returns the running task's network namespace path.
+func (c *ContainerdRuntime) NetworkNamespace(ctx context.Context, containerID string) (string, error) {
+	ctx = c.withNamespace(ctx)
+	container, err := c.client.LoadContainer(ctx, containerID)
+	if err != nil {
+		return "", fmt.Errorf("loading container %s: %w", containerID, err)
+	}
+	task, err := container.Task(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("getting task for %s: %w", containerID, err)
+	}
+	return fmt.Sprintf("/proc/%d/ns/net", task.Pid()), nil
+}
+
 // Exec runs a command in a container and returns its exit code.
 func (c *ContainerdRuntime) Exec(ctx context.Context, containerID string, command []string) (int, error) {
 	ctx = c.withNamespace(ctx)
