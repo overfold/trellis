@@ -80,7 +80,7 @@ func (h *HealthManager) SetContext(ctx context.Context) {
 }
 
 // RegisterTask starts health checking an allocation task.
-func (h *HealthManager) RegisterTask(allocID string, containerID string, spec *spec.HealthCheckSpec) {
+func (h *HealthManager) RegisterTask(allocID string, containerID string, spec *spec.HealthCheckSpec, addr string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -92,7 +92,7 @@ func (h *HealthManager) RegisterTask(allocID string, containerID string, spec *s
 		delete(h.tasks, allocID)
 	}
 
-	config := newHealthConfig(spec)
+	config := newHealthConfig(spec, addr)
 
 	newTrackedTask := &trackedTask{
 		allocID:     allocID,
@@ -106,10 +106,10 @@ func (h *HealthManager) RegisterTask(allocID string, containerID string, spec *s
 	go h.runHealthCheckLoop(ctx, newTrackedTask)
 }
 
-func newHealthConfig(spec *spec.HealthCheckSpec) HealthConfig {
+func newHealthConfig(spec *spec.HealthCheckSpec, addr string) HealthConfig {
 	config := HealthConfig{
 		Type:      string(spec.Type),
-		Addr:      "127.0.0.1",
+		Addr:      addr,
 		Port:      spec.Port,
 		Path:      spec.Path,
 		Command:   spec.Command,
