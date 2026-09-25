@@ -222,7 +222,7 @@ An environment target requires only a valid `env` name and may not collide with 
 
 ### Health checks
 
-HTTP and TCP checks require a port:
+HTTP and TCP checks require a port and a network endpoint the agent can reach. They are supported with `networking.mode: host` (checked through node loopback) and `networking.mode: namespace` (checked through the allocation's namespace-network address). Omitted/`isolated` networking intentionally has no agent-reachable endpoint, so use a script health check for those tasks; script checks execute inside the task.
 
 ```yaml
 health_check:
