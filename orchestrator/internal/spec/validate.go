@@ -295,6 +295,13 @@ func Validate(job *JobSpec) error {
 					if task.HealthCheck.Port < 1 || task.HealthCheck.Port > 65535 {
 						add(checkPath+".port", "out_of_range", "port is required and must be between 1 and 65535")
 					}
+					mode := TaskNetworkDefault
+					if task.Networking != nil {
+						mode = task.Networking.Mode
+					}
+					if mode.Valid() && mode != TaskNetworkHost && mode != TaskNetworkWireGuard {
+						add(checkPath+".type", "incompatible", "http and tcp health checks require host or namespace networking; use a script health check for isolated tasks")
+					}
 				case HealthCheckScript:
 					if len(task.HealthCheck.Command) == 0 {
 						add(checkPath+".command", "required", "command is required for a script health check")
