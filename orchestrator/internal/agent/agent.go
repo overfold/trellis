@@ -34,6 +34,7 @@ type Agent struct {
 	nodeID       uuid.UUID
 	allocations  map[string]*Allocation
 	execSessions map[string]*execSession
+	healthProbe  string
 
 	log *slog.Logger
 
@@ -189,10 +190,12 @@ func (a *Agent) deleteAllocationRecord(id string) error {
 
 // NewAgent creates an allocation agent.
 func NewAgent(log *slog.Logger, runtime runtime.ContainerRuntime, health *health.HealthManager, reconciler *AllocationReconciler, ports *PortManager, volumes *VolumeManager, server *client.ServerClient, nodeID uuid.UUID) *Agent {
+	executable, _ := os.Executable()
 	agent := &Agent{
 		nodeID:       nodeID,
 		allocations:  make(map[string]*Allocation),
 		execSessions: make(map[string]*execSession),
+		healthProbe:  filepath.Join(filepath.Dir(executable), "trellis-health-probe"),
 		orphans:      make(map[string]int),
 		operations:   make(map[string]*allocationOperation),
 
@@ -583,13 +586,20 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		matching := existing.AllocationID == schedulerID && existing.Generation == generation && existing.ExecutionHash == executionHash
 		status := existing.Status
 		a.mu.Unlock()
-		if matching {
-			if status == "running" {
-				return nil
-			}
-			return fmt.Errorf("%w: %s remains %s; stop it before retrying", ErrAllocationExists, allocID, status)
+		if !matching {
+			return fmt.Errorf("%w: %s", ErrAllocationExists, allocID)
 		}
-		return fmt.Errorf("%w: %s", ErrAllocationExists, allocID)
+		if status == "running" {
+			return nil
+		}
+		// A previous start may have reached the runtime but failed before it
+		// could be committed. Preserve its resources while Stop is uncertain,
+		// then finish that cleanup on a later retry instead of converting the
+		// retry into a terminal execution conflict.
+		if err := a.stopAllocation(context.WithoutCancel(ctx), allocID); err != nil {
+			return fmt.Errorf("clean up incomplete allocation %s before retry: %w", allocID, err)
+		}
+		a.mu.Lock()
 	}
 	alloc := &Allocation{ID: allocID, ContainerID: allocID, AllocationID: schedulerID, Generation: generation, JobRevision: jobRevision, ExecutionHash: executionHash, Restart: restartPolicy, Namespace: namespace, JobName: jobName, GroupName: groupName, TaskName: taskName, Spec: ts, Status: "starting", Health: "unknown"}
 	a.allocations[allocID] = alloc
@@ -624,6 +634,11 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 			if err := a.runtime.Stop(context.WithoutCancel(ctx), allocID); err != nil {
 				if tracked {
 					a.reconciler.CancelStop(allocID)
+				} else {
+					// The runtime may have accepted Start even when its response
+					// was lost. Keep the retained allocation under observation
+					// until the control plane retries cleanup.
+					a.reconciler.Track(allocID, false, restartPolicy)
 				}
 				runErr = errors.Join(runErr, fmt.Errorf("stop container %s during failed start: %w", allocID, err))
 				return
@@ -750,11 +765,17 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 			extraHosts["trellis"] = networkPlan.Gateway
 		}
 	}
+	runtimeMounts := append([]*runtime.Mount(nil), mounts...)
+	runtimeMounts = append(runtimeMounts, &runtime.Mount{
+		HostPath:      a.healthProbe,
+		ContainerPath: health.ProbeContainerPath,
+		ReadOnly:      true,
+	})
 	_, err = a.runtime.Create(ctx, runtime.CreateOptions{
 		ID:     containerID,
 		Image:  ts.Image,
 		Env:    env,
-		Mounts: mounts,
+		Mounts: runtimeMounts,
 		CPU: func() int {
 			if ts.Resources != nil {
 				return ts.Resources.CPU
@@ -799,12 +820,6 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	}
 	if ts.HealthCheck != nil {
 		check := *ts.HealthCheck
-		for _, p := range ports {
-			if p.ContainerPort == check.Port {
-				check.Port = p.HostPort
-				break
-			}
-		}
 		a.health.RegisterTask(allocID, containerID, &check)
 		healthRegistered = true
 	}

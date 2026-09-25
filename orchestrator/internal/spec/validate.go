@@ -238,6 +238,8 @@ func Validate(job *JobSpec) error {
 				}
 				if strings.TrimSpace(volume.ContainerPath) == "" || !filepath.IsAbs(volume.ContainerPath) || filepath.Clean(volume.ContainerPath) != volume.ContainerPath {
 					add(path+".container_path", "invalid", "clean absolute container path is required")
+				} else if volume.ContainerPath == "/" || volume.ContainerPath == "/run" || volume.ContainerPath == "/run/trellis" || strings.HasPrefix(volume.ContainerPath, "/run/trellis/") {
+					add(path+".container_path", "reserved", "volume path must not contain or use the reserved /run/trellis path")
 				}
 				if strings.HasPrefix(volume.HostPath, "@/") {
 					rel := strings.TrimPrefix(volume.HostPath, "@/")

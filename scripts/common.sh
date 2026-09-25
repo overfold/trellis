@@ -205,8 +205,8 @@ download_release() {
     local dir="$1"
     curl -fsSL -o "${dir}/trellis_linux_x64.tar.gz" "$BIN_URL"
     tar -xzf "${dir}/trellis_linux_x64.tar.gz" -C "$dir"
-    [ -x "${dir}/trellis" ] && [ -x "${dir}/trellisctl" ] ||
-        ui_die "Release archive does not contain trellis and trellisctl."
+    [ -x "${dir}/trellis" ] && [ -x "${dir}/trellisctl" ] && [ -x "${dir}/trellis-health-probe" ] ||
+        ui_die "Release archive does not contain trellis, trellisctl, and trellis-health-probe."
     local reported
     reported="$("${dir}/trellis" --version 2>/dev/null | awk '{print $NF}' || true)"
     [ "$reported" = "$RELEASE_TAG" ] ||

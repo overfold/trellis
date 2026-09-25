@@ -320,7 +320,15 @@ func (c *ContainerdRuntime) Exec(ctx context.Context, containerID string, comman
 	if err != nil {
 		return 1, fmt.Errorf("constructing command %s: %w", command, err)
 	}
-	defer func() { _, _ = taskExec.Delete(ctx) }()
+	cleanupExec := true
+	defer func() {
+		if !cleanupExec {
+			return
+		}
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cleanupCancel()
+		_, _ = taskExec.Delete(cleanupCtx)
+	}()
 
 	exitChannel, err := taskExec.Wait(ctx)
 	if err != nil {
@@ -332,7 +340,24 @@ func (c *ContainerdRuntime) Exec(ctx context.Context, containerID string, comman
 		return 1, fmt.Errorf("executing command %s: %w", command, err)
 	}
 
-	status := <-exitChannel
+	var status containerd.ExitStatus
+	select {
+	case status = <-exitChannel:
+	case <-ctx.Done():
+		cleanupExec = false
+		go func() {
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cleanupCancel()
+			_ = taskExec.Kill(cleanupCtx, syscall.SIGKILL)
+			select {
+			case <-exitChannel:
+			case <-cleanupCtx.Done():
+				return
+			}
+			_, _ = taskExec.Delete(cleanupCtx)
+		}()
+		return 1, ctx.Err()
+	}
 	code, _, err := status.Result()
 	if err != nil {
 		return 1, fmt.Errorf("extracting status %s: %w", command, err)

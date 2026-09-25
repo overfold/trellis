@@ -28,10 +28,11 @@ jobs:
           LDFLAGS="-X github.com/clofour/trellis/internal/version.version=${VERSION}"
           go build -ldflags "${LDFLAGS}" -o bin/trellis ./cmd/trellis
           go build -ldflags "${LDFLAGS}" -o bin/trellisctl ./cmd/trellisctl
+          CGO_ENABLED=0 go build -o bin/trellis-health-probe ./cmd/trellis-health-probe
 
       - name: Package binaries
         working-directory: orchestrator
-        run: tar -czf ../trellis_linux_x64.tar.gz -C bin trellis trellisctl
+        run: tar -czf ../trellis_linux_x64.tar.gz -C bin trellis trellisctl trellis-health-probe
 
       - name: Package UI source
         run: tar -czf trellis_ui.tar.gz -C ui --exclude node_modules --exclude .next .

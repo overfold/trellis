@@ -29,6 +29,10 @@ jobs:
         working-directory: orchestrator
         run: go build -o bin/trellisctl ./cmd/trellisctl
 
+      - name: Build Trellis health probe
+        working-directory: orchestrator
+        run: CGO_ENABLED=0 go build -o bin/trellis-health-probe ./cmd/trellis-health-probe
+
       - name: Upload build artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -36,3 +40,4 @@ jobs:
           path: |
             orchestrator/bin/trellis
             orchestrator/bin/trellisctl
+            orchestrator/bin/trellis-health-probe

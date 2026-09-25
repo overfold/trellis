@@ -25,6 +25,7 @@ type blockingStartRuntime struct {
 	started chan string
 	release chan struct{}
 	labels  map[string]map[string]string
+	created map[string]runtime.CreateOptions
 }
 
 type failingStopRuntime struct {
@@ -56,6 +57,7 @@ func (r *startHookRuntime) Start(context.Context, string) error { return r.onSta
 type ambiguousStartRuntime struct {
 	*reconcilerRuntime
 	stopCount int
+	stopErr   error
 	onStop    func()
 }
 
@@ -68,12 +70,23 @@ func (r *ambiguousStartRuntime) Inspect(context.Context, string) (*runtime.Conta
 }
 func (r *ambiguousStartRuntime) Stop(context.Context, string) error {
 	r.stopCount++
-	r.onStop()
+	if r.onStop != nil {
+		r.onStop()
+	}
+	if r.stopErr != nil {
+		return r.stopErr
+	}
 	r.status = runtime.StatusStopped
 	return nil
 }
 
-func (r *failingStopRuntime) Stop(context.Context, string) error { return r.stopErr }
+func (r *failingStopRuntime) Stop(context.Context, string) error {
+	if r.stopErr != nil {
+		return r.stopErr
+	}
+	r.status = runtime.StatusStopped
+	return nil
+}
 func (r *failingStopRuntime) Remove(context.Context, string) error {
 	r.removeCount++
 	return nil
@@ -91,6 +104,9 @@ func (m *countingNetworkManager) Detach(context.Context, *network.Attachment) er
 
 func (r *blockingStartRuntime) Create(_ context.Context, options runtime.CreateOptions) (string, error) {
 	r.labels[options.ID] = options.Labels
+	if r.created != nil {
+		r.created[options.ID] = options
+	}
 	return options.ID, nil
 }
 
@@ -99,6 +115,14 @@ func (r *blockingStartRuntime) Start(_ context.Context, id string) error {
 	<-r.release
 	return nil
 }
+
+type staticNetworkManager struct{}
+
+func (staticNetworkManager) Attach(_ context.Context, request network.AttachRequest) (*network.Attachment, error) {
+	return &network.Attachment{AllocationID: request.AllocationID, NetworkNamespace: "/var/run/netns/" + request.AllocationID}, nil
+}
+
+func (staticNetworkManager) Detach(context.Context, *network.Attachment) error { return nil }
 
 func newOperationTestAgent(t *testing.T, rt runtime.ContainerRuntime) *Agent {
 	t.Helper()
@@ -112,6 +136,48 @@ func operationTestRequest() *api.AllocationRequest {
 		AllocationID: "allocation", Generation: 2, JobRevision: 7, ExecutionHash: "execution-hash",
 		Namespace: "default", JobName: "job", GroupName: "group",
 		Tasks: []spec.TaskSpec{{Name: "first", Image: "image"}, {Name: "second", Image: "image"}},
+	}
+}
+
+func TestRunAllocationMountsHealthProbeForEveryNetworkAndRuntime(t *testing.T) {
+	for _, mode := range []spec.TaskNetworkMode{spec.TaskNetworkHost, spec.TaskNetworkIsolated, spec.TaskNetworkWireGuard} {
+		for _, taskRuntime := range []string{"runc", "runsc"} {
+			t.Run(string(mode)+"/"+taskRuntime, func(t *testing.T) {
+				rt := &blockingStartRuntime{
+					reconcilerRuntime: &reconcilerRuntime{},
+					started:           make(chan string, 1),
+					release:           make(chan struct{}, 1),
+					labels:            map[string]map[string]string{},
+					created:           map[string]runtime.CreateOptions{},
+				}
+				rt.release <- struct{}{}
+				agent := newOperationTestAgent(t, rt)
+				agent.SetNetworkManager(staticNetworkManager{})
+				task := &spec.TaskSpec{Name: "web", Image: "image", Networking: &spec.TaskNetworkingSpec{Mode: mode}}
+				var plan *network.Plan
+				if mode == spec.TaskNetworkWireGuard {
+					plan = &network.Plan{}
+				}
+				if err := agent.RunAllocation(context.Background(), "alloc", "scheduler", 1, 1, "hash", "default", "job", "group", "web", task, taskRuntime, plan, nil, nil, nil); err != nil {
+					t.Fatal(err)
+				}
+
+				options := rt.created["alloc"]
+				if options.Runtime != taskRuntime {
+					t.Fatalf("runtime = %q, want %q", options.Runtime, taskRuntime)
+				}
+				var probeMount *runtime.Mount
+				for _, mount := range options.Mounts {
+					if mount.ContainerPath == health.ProbeContainerPath {
+						probeMount = mount
+						break
+					}
+				}
+				if probeMount == nil || !probeMount.ReadOnly || filepath.Base(probeMount.HostPath) != "trellis-health-probe" {
+					t.Fatalf("health probe mount = %#v", probeMount)
+				}
+			})
+		}
 	}
 }
 
@@ -297,21 +363,31 @@ func TestFailedRunStopPreservesStartedAllocationResources(t *testing.T) {
 	if err := os.Mkdir(recordDir, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := agent.RunGroup(context.Background(), request); !errors.Is(err, ErrAllocationExists) || !strings.Contains(err.Error(), "remains starting") {
-		t.Fatalf("retry run error = %v, want retained starting allocation", err)
+
+	err = agent.RunGroup(context.Background(), request)
+	if !errors.Is(err, stopErr) || !strings.Contains(err.Error(), "clean up incomplete allocation") {
+		t.Fatalf("retry run error = %v, want retryable cleanup failure", err)
+	}
+	if errors.Is(err, ErrAllocationExists) {
+		t.Fatalf("retry surfaced terminal allocation conflict: %v", err)
 	}
 	if got := agent.allocations[id].Status; got != "starting" {
 		t.Fatalf("retained allocation status = %q, want starting", got)
 	}
+
 	rt.stopErr = nil
-	if err := agent.StopAllocation(context.Background(), id); err != nil {
-		t.Fatalf("retry stop: %v", err)
+	rt.onStart = func() error {
+		rt.status = runtime.StatusRunning
+		return nil
+	}
+	if err := agent.RunGroup(context.Background(), request); err != nil {
+		t.Fatalf("retry after cleanup became possible: %v", err)
+	}
+	if current := agent.allocations[id]; current == nil || current.Status != "running" {
+		t.Fatalf("allocation after successful retry = %+v, want running", current)
 	}
 	if rt.removeCount != 1 || manager.detachCount != 1 {
-		t.Fatalf("retry removed container %d times, detached network %d times", rt.removeCount, manager.detachCount)
-	}
-	if _, err := os.Stat(alloc.SecretDir); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("secret directory after retry: %v", err)
+		t.Fatalf("successful retry removed old container %d times, detached old network %d times", rt.removeCount, manager.detachCount)
 	}
 }
 
@@ -347,6 +423,34 @@ func TestAmbiguousStartStopsBeforeReleasingResources(t *testing.T) {
 	}
 	if len(agent.GetAllocations()) != 0 || len(agent.ports.claims) != 0 || manager.detachCount != 1 {
 		t.Fatalf("resources retained after successful stop: allocations=%d ports=%d detach=%d", len(agent.GetAllocations()), len(agent.ports.claims), manager.detachCount)
+	}
+}
+
+func TestAmbiguousStartFailedStopRemainsTracked(t *testing.T) {
+	stopErr := errors.New("stop failed")
+	rt := &ambiguousStartRuntime{reconcilerRuntime: &reconcilerRuntime{}, stopErr: stopErr}
+	agent := newOperationTestAgent(t, rt)
+	request := operationTestRequest()
+	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image"}}
+	id := "allocation-g2-first"
+
+	err := agent.RunGroup(context.Background(), request)
+	if !errors.Is(err, stopErr) || !strings.Contains(err.Error(), "start container") {
+		t.Fatalf("run error = %v, want ambiguous start and failed cleanup", err)
+	}
+	if agent.allocations[id] == nil {
+		t.Fatal("ambiguous started allocation was discarded after failed stop")
+	}
+	if _, ok := agent.reconciler.states[id]; !ok {
+		t.Fatal("ambiguous started allocation was left untracked after failed stop")
+	}
+
+	rt.stopErr = nil
+	if err := agent.StopAllocation(context.Background(), id); err != nil {
+		t.Fatalf("retry stop: %v", err)
+	}
+	if _, ok := agent.reconciler.states[id]; ok {
+		t.Fatal("allocation remained tracked after successful retry stop")
 	}
 }
 

@@ -200,9 +200,11 @@ download_release "$WORK_TMP"
 install -d -m 0755 "$INSTALL_DIR"
 install -m 0755 "${WORK_TMP}/trellis" "${INSTALL_DIR}/.trellis.new"
 install -m 0755 "${WORK_TMP}/trellisctl" "${INSTALL_DIR}/.trellisctl.new"
+install -m 0755 "${WORK_TMP}/trellis-health-probe" "${INSTALL_DIR}/.trellis-health-probe.new"
 mv "${INSTALL_DIR}/.trellis.new" "${INSTALL_DIR}/trellis"
 mv "${INSTALL_DIR}/.trellisctl.new" "${INSTALL_DIR}/trellisctl"
-ui_step "Installed trellis and trellisctl"
+mv "${INSTALL_DIR}/.trellis-health-probe.new" "${INSTALL_DIR}/trellis-health-probe"
+ui_step "Installed trellis, trellisctl, and trellis-health-probe"
 
 install -d -m 0750 "$DATA_DIR" "$CONFIG_DIR"
 
