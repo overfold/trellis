@@ -94,7 +94,7 @@ func TestRunscProbeRecoversFromReadyAllocation(t *testing.T) {
 	}
 	select {
 	case command := <-probeRuntime.execs:
-		want := []string{health.ProbePath, "__health-probe", "http", "8080", "/health"}
+		want := []string{health.ProbePath, "__health-probe", "http", "8080", "/health", "5s"}
 		if !slices.Equal(command, want) {
 			t.Fatalf("recovered probe command = %q, want %q", command, want)
 		}
