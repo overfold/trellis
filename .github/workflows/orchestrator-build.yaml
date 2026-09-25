@@ -23,7 +23,11 @@ jobs:
 
       - name: Build Trellis node
         working-directory: orchestrator
-        run: go build -o bin/trellis ./cmd/trellis
+        run: CGO_ENABLED=0 go build -o bin/trellis ./cmd/trellis
+
+      - name: Verify Trellis node is static
+        working-directory: orchestrator
+        run: '! readelf -l bin/trellis | grep -q INTERP'
 
       - name: Build Trellis CLI
         working-directory: orchestrator

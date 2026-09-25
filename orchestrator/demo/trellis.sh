@@ -15,7 +15,7 @@ if [ ! -s "${TOKEN_FILE}" ]; then
 fi
 
 # Install binaries from the shared folder.
-# Build them first on the host: cd orchestrator && go build -o bin/trellis ./cmd/trellis && go build -o bin/trellisctl ./cmd/trellisctl
+# Build them first on the host: cd orchestrator && CGO_ENABLED=0 go build -o bin/trellis ./cmd/trellis && go build -o bin/trellisctl ./cmd/trellisctl
 install -m 0755 "${SHARE_DIR}/trellis"      /usr/local/bin/trellis
 install -m 0755 "${SHARE_DIR}/trellisctl"   /usr/local/bin/trellisctl
 

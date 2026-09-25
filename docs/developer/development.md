@@ -10,13 +10,15 @@ go test ./...
 go vet ./...
 golangci-lint run
 
-go build ./cmd/trellis ./cmd/trellisctl ./cmd/trellis-proxy-sync
+CGO_ENABLED=0 go build ./cmd/trellis ./cmd/trellisctl ./cmd/trellis-proxy-sync
 
 cd ../ui
 npm ci
 npm run lint
 npm run build
 ```
+
+Build the `trellis` node with `CGO_ENABLED=0` when creating a binary for use on a node. The agent mounts that executable into isolated runsc workloads for HTTP and TCP health checks, where the workload image may not contain a dynamic loader.
 
 Containerd end-to-end tests need a Linux host, containerd, permissions on its socket, and `CONTAINERD_ADDRESS`. Multi-node integration uses the test/injected runtime and is separated in CI. Tests beside each package document state-machine invariants, Raft persistence, scheduler behavior, network planning, durability, update regressions, and security validation.
 
