@@ -33,6 +33,7 @@ type HealthConfig struct {
 	Type      string
 	Addr      string
 	Isolated  bool
+	Runtime   string
 	Port      int
 	Path      string
 	Command   []string
@@ -82,7 +83,7 @@ func (h *HealthManager) SetContext(ctx context.Context) {
 }
 
 // RegisterTask starts health checking an allocation task.
-func (h *HealthManager) RegisterTask(allocID string, containerID string, spec *spec.HealthCheckSpec, addr string, isolated bool) {
+func (h *HealthManager) RegisterTask(allocID string, containerID string, spec *spec.HealthCheckSpec, addr string, isolated bool, taskRuntime string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -99,6 +100,7 @@ func (h *HealthManager) RegisterTask(allocID string, containerID string, spec *s
 		config.Addr = addr
 	}
 	config.Isolated = isolated
+	config.Runtime = taskRuntime
 
 	newTrackedTask := &trackedTask{
 		allocID:     allocID,
@@ -188,6 +190,13 @@ func (h *HealthManager) runHealthCheck(ctx context.Context, trackedTask *tracked
 	ctx, cancel := context.WithTimeout(ctx, config.Timeout)
 	defer cancel()
 	var dial func(context.Context, string, string) (net.Conn, error)
+	if config.Isolated && config.Runtime == "runsc" && (config.Type == "http" || config.Type == "tcp") {
+		code, err := h.runtime.Exec(ctx, trackedTask.containerID, []string{ProbePath, "__health-probe", config.Type, fmt.Sprint(config.Port), config.Path})
+		if err != nil {
+			return false, fmt.Errorf("probe runsc task %s: %w", trackedTask.containerID, err)
+		}
+		return code == 0, nil
+	}
 	if config.Isolated && (config.Type == "http" || config.Type == "tcp") {
 		provider, ok := h.runtime.(interface {
 			NetworkNamespace(context.Context, string) (string, error)

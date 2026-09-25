@@ -98,6 +98,7 @@ type Allocation struct {
 	Generation      uint64
 	JobRevision     int
 	ExecutionHash   string
+	Runtime         string
 	Restart         *spec.RestartPolicySpec
 	RestartAttempts int
 	RestartWindow   time.Time
@@ -332,7 +333,7 @@ func (a *Agent) recover(ctx context.Context) error {
 						}
 					}
 					isolated := allocation.Spec.Networking == nil || (allocation.Spec.Networking.Mode != spec.TaskNetworkHost && allocation.Spec.Networking.Mode != spec.TaskNetworkWireGuard)
-					a.health.RegisterTask(allocation.ID, allocation.ContainerID, &check, allocationNetworkAddress(allocation), isolated)
+					a.health.RegisterTask(allocation.ID, allocation.ContainerID, &check, allocationNetworkAddress(allocation), isolated, allocation.Runtime)
 				}
 				a.reconciler.TrackRecovered(allocation.ID, allocation.Spec.HealthCheck != nil, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow)
 			} else {
@@ -587,7 +588,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		}
 		return fmt.Errorf("%w: %s", ErrAllocationExists, allocID)
 	}
-	alloc := &Allocation{ID: allocID, ContainerID: allocID, AllocationID: schedulerID, Generation: generation, JobRevision: jobRevision, ExecutionHash: executionHash, Namespace: namespace, JobName: jobName, GroupName: groupName, TaskName: taskName, Spec: ts, Status: "starting", Health: "unknown"}
+	alloc := &Allocation{ID: allocID, ContainerID: allocID, AllocationID: schedulerID, Generation: generation, JobRevision: jobRevision, ExecutionHash: executionHash, Runtime: groupRuntime, Namespace: namespace, JobName: jobName, GroupName: groupName, TaskName: taskName, Spec: ts, Status: "starting", Health: "unknown"}
 	a.allocations[allocID] = alloc
 	a.mu.Unlock()
 	if err := a.persistAllocation(alloc); err != nil {
@@ -713,6 +714,13 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		env[k] = v
 	}
 	mounts = append(mounts, secretMounts...)
+	if groupRuntime == "runsc" && !hostMode && !wireGuard && ts.HealthCheck != nil && (ts.HealthCheck.Type == "http" || ts.HealthCheck.Type == "tcp") {
+		executable, err := os.Executable()
+		if err != nil {
+			return fmt.Errorf("locate health probe executable: %w", err)
+		}
+		mounts = append(mounts, &runtime.Mount{HostPath: executable, ContainerPath: health.ProbePath, ReadOnly: true})
+	}
 	alloc.Mounts = append([]*runtime.Mount(nil), mounts...)
 	labels := map[string]string{
 		"trellis.cluster":               a.cluster,
@@ -790,7 +798,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 				break
 			}
 		}
-		a.health.RegisterTask(allocID, containerID, &check, allocationNetworkAddress(alloc), !hostMode && !wireGuard)
+		a.health.RegisterTask(allocID, containerID, &check, allocationNetworkAddress(alloc), !hostMode && !wireGuard, groupRuntime)
 		healthRegistered = true
 	}
 

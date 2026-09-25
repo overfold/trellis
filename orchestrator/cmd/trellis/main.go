@@ -75,6 +75,16 @@ type config struct {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "__health-probe" {
+		ok, err := health.RunProbe(context.Background(), os.Args[2:])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+		}
+		if !ok || err != nil {
+			os.Exit(1)
+		}
+		return
+	}
 	cfg := &config{}
 	root := &cobra.Command{
 		Use:     "trellis",

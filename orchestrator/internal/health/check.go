@@ -11,6 +11,28 @@ import (
 	"github.com/clofour/trellis/internal/runtime"
 )
 
+// ProbePath is the read-only Trellis executable mounted in isolated runsc tasks.
+const ProbePath = "/trellis-health-probe"
+
+// RunProbe executes an HTTP or TCP check from inside a runsc sandbox.
+func RunProbe(ctx context.Context, args []string) (bool, error) {
+	if len(args) != 3 {
+		return false, fmt.Errorf("probe requires type, port, and path")
+	}
+	port, err := strconv.Atoi(args[1])
+	if err != nil || port < 1 || port > 65535 {
+		return false, fmt.Errorf("invalid probe port %q", args[1])
+	}
+	switch args[0] {
+	case "http":
+		return CheckHTTP(ctx, "127.0.0.1", port, args[2])
+	case "tcp":
+		return CheckTCP(ctx, "127.0.0.1", port)
+	default:
+		return false, fmt.Errorf("invalid probe type %q", args[0])
+	}
+}
+
 // CheckHTTP runs an HTTP health check.
 func CheckHTTP(ctx context.Context, addr string, port int, path string) (bool, error) {
 	return checkHTTP(ctx, addr, port, path, nil)

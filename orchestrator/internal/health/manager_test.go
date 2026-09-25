@@ -2,17 +2,54 @@ package health
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/clofour/trellis/internal/runtime"
 	"github.com/clofour/trellis/internal/spec"
 )
+
+type runscProbeRuntime struct {
+	runtime.ContainerRuntime
+	command []string
+}
+
+func (r *runscProbeRuntime) Exec(_ context.Context, _ string, command []string) (int, error) {
+	r.command = command
+	return 0, nil
+}
+
+func (r *runscProbeRuntime) NetworkNamespace(context.Context, string) (string, error) {
+	return "", fmt.Errorf("runsc probe must not enter the Linux network namespace")
+}
+
+func TestIsolatedRunscNetworkChecksExecInsideSandbox(t *testing.T) {
+	for _, kind := range []spec.HealthCheckType{"http", "tcp"} {
+		t.Run(string(kind), func(t *testing.T) {
+			rt := &runscProbeRuntime{}
+			h := NewHealthManager(nil, rt, nil)
+			config := newHealthConfig(&spec.HealthCheckSpec{Type: kind, Port: 8080, Path: "/health"})
+			config.Isolated = true
+			config.Runtime = "runsc"
+			ok, err := h.runHealthCheck(context.Background(), &trackedTask{containerID: "task", config: config})
+			if err != nil || !ok {
+				t.Fatalf("runsc check = %v, %v", ok, err)
+			}
+			want := []string{ProbePath, "__health-probe", string(kind), "8080", "/health"}
+			if !slices.Equal(rt.command, want) {
+				t.Fatalf("exec command = %q, want %q", rt.command, want)
+			}
+		})
+	}
+}
 
 func TestNewHealthConfigUsesDefaults(t *testing.T) {
 	config := newHealthConfig(&spec.HealthCheckSpec{Type: "tcp", Port: 8080})
@@ -57,6 +94,27 @@ func TestNetworkChecksUseProvidedDialer(t *testing.T) {
 	}
 	if called.Load() != 2 {
 		t.Fatalf("dial calls = %d, want 2", called.Load())
+	}
+}
+
+func TestRunProbeChecksSandboxLoopback(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(server.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{"http", "tcp"} {
+		t.Run(kind, func(t *testing.T) {
+			ok, err := RunProbe(context.Background(), []string{kind, port, "/health"})
+			if err != nil || !ok {
+				t.Fatalf("probe = %v, %v", ok, err)
+			}
+		})
 	}
 }
 

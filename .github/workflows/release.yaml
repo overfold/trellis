@@ -23,6 +23,7 @@ jobs:
         working-directory: orchestrator
         env:
           VERSION: ${{ github.ref_name }}
+          CGO_ENABLED: "0"
         run: |
           mkdir -p bin
           LDFLAGS="-X github.com/clofour/trellis/internal/version.version=${VERSION}"
