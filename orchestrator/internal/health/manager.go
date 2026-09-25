@@ -184,8 +184,14 @@ func (h *HealthManager) runHealthCheck(ctx context.Context, trackedTask *tracked
 
 	switch config.Type {
 	case "http":
+		if config.Addr == "" {
+			return false, fmt.Errorf("http health check has no agent-reachable network address")
+		}
 		return CheckHTTP(ctx, config.Addr, config.Port, config.Path)
 	case "tcp":
+		if config.Addr == "" {
+			return false, fmt.Errorf("tcp health check has no agent-reachable network address")
+		}
 		return CheckTCP(ctx, config.Addr, config.Port)
 	case "script":
 		return CheckScript(ctx, h.runtime, trackedTask.containerID, config.Command)
