@@ -28,7 +28,8 @@ func taskNamespaceDialer(pid uint32) func(context.Context, string, string) (net.
 		if err != nil {
 			return nil, err
 		}
-		defer func() { _ = unix.Close(fd) }()
+		file := os.NewFile(uintptr(fd), "health-check")
+		defer file.Close()
 
 		err = unix.Connect(fd, &unix.SockaddrInet4{Port: port, Addr: [4]byte{127, 0, 0, 1}})
 		if err != nil && err != unix.EINPROGRESS {
@@ -59,9 +60,7 @@ func taskNamespaceDialer(pid uint32) func(context.Context, string, string) (net.
 				break
 			}
 		}
-		file := os.NewFile(uintptr(fd), "health-check")
 		conn, err := net.FileConn(file)
-		_ = file.Close()
 		if err != nil {
 			return nil, err
 		}
