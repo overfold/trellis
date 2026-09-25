@@ -1012,11 +1012,11 @@ func (s *Server) ListJobs(namespace string) api.JobListResponse {
 	defer s.mu.RUnlock()
 	result := make(api.JobListResponse, 0, len(s.jobs))
 	for key, job := range s.jobs {
-		if job.Spec.Namespace != namespace {
+		if namespace != "" && job.Spec.Namespace != namespace {
 			continue
 		}
 		name := job.Spec.Name
-		r := api.JobStatusResponse{Name: name, Revision: job.Revision}
+		r := api.JobStatusResponse{Namespace: job.Spec.Namespace, Name: name, Revision: job.Revision}
 		for _, g := range job.Spec.TaskGroups {
 			r.Desired += g.Count
 		}
@@ -1050,7 +1050,7 @@ func (s *Server) GetJob(namespace, name string) (*api.JobStatusResponse, bool) {
 		return nil, false
 	}
 	specCopy := *job.Spec
-	r := &api.JobStatusResponse{Name: name, Revision: job.Revision, Spec: &specCopy}
+	r := &api.JobStatusResponse{Namespace: namespace, Name: name, Revision: job.Revision, Spec: &specCopy}
 	for _, g := range job.Spec.TaskGroups {
 		r.Desired += g.Count
 	}

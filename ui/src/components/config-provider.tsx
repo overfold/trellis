@@ -114,6 +114,10 @@ export function ConfigProvider({
   const setNamespace = (next: string) => {
     if (apiAccess !== "cluster") return;
     const candidate = next.trim();
+    if (candidate === "") {
+      setSelectedNamespace("");
+      return;
+    }
     if (!namespacePattern.test(candidate)) return;
     if (!allowAnyNamespace && !namespaces.includes(candidate)) return;
     setSelectedNamespace(candidate);

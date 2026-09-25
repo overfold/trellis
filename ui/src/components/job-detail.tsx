@@ -12,6 +12,7 @@ import { Skeleton } from "./skeleton";
 import { EmptyState } from "./empty-state";
 import { JobForm } from "./job-form";
 import { ConfirmDialog } from "./confirm-dialog";
+import { JsonInspection } from "./json-inspection";
 import { deleteJob } from "@/lib/api";
 import {
   attentionAllocations,
@@ -120,10 +121,10 @@ export function JobDetail({
             <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Revision {job.revision}</p>
             <h2 className="mt-1 text-base font-semibold text-foreground">
               {state === "ready"
-                ? "Deployment is ready"
+                ? "Revision is healthy"
                 : state === "degraded"
-                  ? "Deployment needs attention"
-                  : "Deployment is converging"}
+                  ? "Revision needs attention"
+                  : "Revision is reconciling"}
             </h2>
             <p className="mt-1 text-sm text-muted-foreground">{jobStateDescription(job)}</p>
           </div>
@@ -191,6 +192,8 @@ export function JobDetail({
           </div>
         </details>
       )}
+
+      <JsonInspection title="Canonical job JSON" value={job} />
 
       {allowWrites && job.spec && (
         <JobForm

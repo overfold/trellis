@@ -6,7 +6,7 @@ export default function OverviewPage() {
       <div className="mb-6">
         <h1 className="text-xl font-semibold text-foreground">Operations</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Deployment progress, failures, and the next useful action
+          Reconciliation state, failures, and the next useful action
         </p>
       </div>
       <DashboardContent />

@@ -204,10 +204,10 @@ function JobFormPanel({
           <div className="flex-1 overflow-y-auto px-6 py-5">
             <div className="mb-4 rounded-lg border border-border bg-background/60 p-4 text-xs text-muted-foreground">
               <p>
-                Active namespace: <span className="font-mono text-foreground">{namespace || "(unscoped)"}</span>. The manifest namespace must match; the dashboard never rewrites it.
+                Active namespace: <span className="font-mono text-foreground">{namespace || "(unscoped)"}</span>. The manifest namespace must match; the console never rewrites it.
               </p>
               <p className="mt-2">
-                YAML is a human-authored representation. Duration fields accept strings such as <span className="font-mono">10s</span> and <span className="font-mono">1m30s</span>; memory accepts values such as <span className="font-mono">64MiB</span> and <span className="font-mono">1GiB</span>. The generated authoring schema identifies those conversions; the dashboard produces canonical JSON, then Trellis validates and plans the result.
+                YAML is a human-authored representation. Duration fields accept strings such as <span className="font-mono">10s</span> and <span className="font-mono">1m30s</span>; memory accepts values such as <span className="font-mono">64MiB</span> and <span className="font-mono">1GiB</span>. The generated authoring schema identifies those conversions; the console produces canonical JSON, then Trellis validates and plans the result.
               </p>
             </div>
 

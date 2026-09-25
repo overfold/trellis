@@ -6,8 +6,6 @@ import { cn } from "@/lib/utils";
 import { useOrchestratorStatus } from "@/hooks/use-api";
 import { useConfig } from "./config-provider";
 
-const namespacePattern = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/;
-
 const navigation = [
   {
     name: "Operations",
@@ -62,35 +60,15 @@ export function Sidebar() {
   const {
     allowWrites,
     apiAccess,
-    accessLevel,
     clusterName,
     namespace,
     namespaces,
-    allowAnyNamespace,
     setNamespace,
   } = useConfig();
 
   const visibleNavigation = navigation.filter(
     (item) => !item.clusterOnly || apiAccess === "cluster",
   );
-
-  const commitNamespace = (value: string, input: HTMLInputElement) => {
-    const candidate = value.trim();
-    if (!namespacePattern.test(candidate)) {
-      input.value = namespace;
-      return;
-    }
-    if (!allowAnyNamespace && !namespaces.includes(candidate)) {
-      input.value = namespace;
-      return;
-    }
-    if (candidate === namespace) {
-      input.value = namespace;
-      return;
-    }
-    setNamespace(candidate);
-    router.push("/");
-  };
 
   return (
     <aside className="flex h-full w-56 shrink-0 flex-col border-r border-border bg-card">
@@ -100,7 +78,10 @@ export function Sidebar() {
             <path d="M2 7h10M7 2v10M2 2l10 10M12 2L2 12" />
           </svg>
         </div>
-        <span className="text-[15px] font-semibold tracking-tight text-foreground">Trellis</span>
+        <div className="leading-tight">
+          <span className="block text-[15px] font-semibold tracking-tight text-foreground">Trellis</span>
+          <span className="block text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Console</span>
+        </div>
       </div>
 
       <nav className="flex flex-1 flex-col gap-0.5 p-3">
@@ -124,54 +105,38 @@ export function Sidebar() {
         })}
       </nav>
 
-      <div className="border-t border-border p-4">
-        <div className="mb-3 rounded-md border border-border bg-background/60 p-3">
-          <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Context</p>
-          <div className="mt-1.5 flex items-center gap-2">
-            <span
-              className={`h-2 w-2 shrink-0 rounded-full ${
-                cluster.connected
-                  ? "bg-emerald-500"
-                  : cluster.loading
-                    ? "bg-zinc-400"
-                    : "bg-red-500"
-              }`}
-            />
-            <p className="truncate text-xs font-medium text-foreground" title={clusterName}>
-              {clusterName}
-            </p>
+      <div className="space-y-4 border-t border-border p-4">
+        <div>
+          <div>
+            <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Cluster</p>
+            <div className="mt-1.5 flex items-center gap-2">
+              <span
+                aria-label={cluster.connected ? "Connected" : cluster.loading ? "Connecting" : "Unavailable"}
+                className={`h-2 w-2 shrink-0 rounded-full ${
+                  cluster.connected
+                    ? "bg-emerald-500"
+                    : cluster.loading
+                      ? "bg-zinc-400"
+                      : "bg-red-500"
+                }`}
+              />
+              <p className="truncate font-mono text-xs font-medium text-foreground" title={clusterName}>
+                {clusterName}
+              </p>
+            </div>
           </div>
+          <p className="mt-1.5 text-xs text-muted-foreground">
+            {allowWrites ? "Read-write mode" : "Read-only mode"}
+          </p>
+        </div>
+        <div>
           <label
             htmlFor="namespace-context"
-            className="mt-3 block text-[10px] font-medium uppercase tracking-wider text-muted-foreground"
+            className="block text-[10px] font-medium uppercase tracking-wider text-muted-foreground"
           >
             Namespace
           </label>
-          {apiAccess === "cluster" && allowAnyNamespace ? (
-            <>
-              <input
-                key={namespace}
-                id="namespace-context"
-                list="namespace-context-options"
-                defaultValue={namespace}
-                onBlur={(event) => commitNamespace(event.currentTarget.value, event.currentTarget)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    commitNamespace(event.currentTarget.value, event.currentTarget);
-                    event.currentTarget.blur();
-                  }
-                }}
-                className="mt-1.5 w-full rounded-md border border-border bg-card px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:ring-2 focus:ring-emerald-500/40"
-                aria-label="Namespace"
-              />
-              <datalist id="namespace-context-options">
-                {namespaces.filter(Boolean).map((item) => (
-                  <option key={item} value={item} />
-                ))}
-              </datalist>
-            </>
-          ) : apiAccess === "cluster" ? (
+          {apiAccess === "cluster" ? (
             <select
               id="namespace-context"
               value={namespace}
@@ -181,37 +146,15 @@ export function Sidebar() {
               }}
               className="mt-1.5 w-full rounded-md border border-border bg-card px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:ring-2 focus:ring-emerald-500/40"
             >
+              <option value="">All namespaces</option>
               {namespaces.map((item) => (
-                <option key={item} value={item}>
-                  {item || "unscoped"}
-                </option>
+                item && <option key={item} value={item}>{item}</option>
               ))}
             </select>
           ) : (
-            <p className="mt-1.5 truncate font-mono text-xs text-foreground" title={namespace || "unscoped"}>
+            <p className="mt-1.5 truncate rounded-md border border-border bg-background px-2 py-1.5 font-mono text-xs text-foreground" title={namespace || "unscoped"}>
               {namespace || "unscoped"}
             </p>
-          )}
-          <p className="mt-2 text-[10px] text-muted-foreground">
-            {apiAccess === "cluster" ? "Cluster API access" : "Own namespace only"}
-          </p>
-        </div>
-        <div className="flex items-center gap-1.5 text-xs">
-          {allowWrites ? (
-            <>
-              <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
-              <span className="font-medium text-amber-600 dark:text-amber-400">Read-write</span>
-            </>
-          ) : accessLevel === "write" ? (
-            <>
-              <span className="h-1.5 w-1.5 rounded-full bg-zinc-400" />
-              <span className="text-muted-foreground">UI read-only · write credential</span>
-            </>
-          ) : (
-            <>
-              <span className="h-1.5 w-1.5 rounded-full bg-zinc-400" />
-              <span className="text-muted-foreground">Read-only credential</span>
-            </>
           )}
         </div>
       </div>

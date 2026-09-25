@@ -6,6 +6,7 @@ import { useConfig } from "@/components/config-provider";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { EmptyState } from "@/components/empty-state";
 import { Skeleton } from "@/components/skeleton";
+import { JsonInspection } from "@/components/json-inspection";
 import { deleteSecret, setSecret } from "@/lib/api";
 import type { SecretMetadata } from "@/lib/types";
 import { formatBytes, timeAgo } from "@/lib/utils";
@@ -26,7 +27,7 @@ export default function SecretsPage() {
         </div>
         <EmptyState
           title="Cluster access required"
-          description="Secret management is available only to dashboards using cluster API access."
+          description="Secret management is available only to consoles using cluster API access."
         />
       </div>
     );
@@ -71,7 +72,7 @@ export default function SecretsPage() {
       </div>
 
       <div className="mb-5 rounded-lg border border-border bg-card p-4 text-sm text-muted-foreground">
-        Trellis never returns secret values. The dashboard can list metadata and, in read-write mode, create, rotate, or delete values. Running allocations retain values already delivered until they are replaced.
+        Trellis never returns secret values. The console can list metadata and, in read-write mode, create, rotate, or delete values. Running allocations retain values already delivered until they are replaced.
       </div>
 
       {actionError && (
@@ -83,7 +84,7 @@ export default function SecretsPage() {
       {!namespace ? (
         <EmptyState
           title="Namespace required"
-          description="Select a non-empty configured namespace to manage secrets from the dashboard."
+          description="Select a non-empty configured namespace to manage secrets from the console."
         />
       ) : isLoading ? (
         <SecretsSkeleton />
@@ -147,6 +148,16 @@ export default function SecretsPage() {
             </tbody>
           </table>
         </div>
+      )}
+
+      {data && data.length > 0 && (
+        <section className="mt-5 space-y-3">
+          <div>
+            <h2 className="text-sm font-medium text-foreground">Secret metadata inspection</h2>
+            <p className="mt-1 text-xs text-muted-foreground">API metadata only; secret values are never returned.</p>
+          </div>
+          {data.map((secret) => <JsonInspection key={secret.name} title={`Raw metadata JSON: ${secret.name}`} value={secret} />)}
+        </section>
       )}
 
       {editor && (

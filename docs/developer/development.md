@@ -2,7 +2,7 @@
 
 ## Toolchains
 
-The orchestrator module targets Go 1.26.4. The dashboard uses Next.js 16, React 19, TypeScript, Tailwind CSS, ESLint, and npm's lockfile.
+The orchestrator module targets Go 1.26.4. The Trellis Console uses Next.js 16, React 19, TypeScript, Tailwind CSS, ESLint, and npm's lockfile.
 
 ```sh
 cd orchestrator
@@ -46,4 +46,4 @@ The Vagrant environment provisions `control`, `worker-1`, and `worker-2` Debian 
 - `cmd/trellis`: production node composition and flags.
 - `cmd/trellisctl`: CLI, precedence-aware config, TLS setup.
 - `cmd/trellis-proxy-sync`: polling service-catalog consumer for external proxies.
-- `ui/src/app/api`: dashboard's authenticated server-side forwarding layer.
+- `ui/src/app/api`: Console's authenticated server-side forwarding layer.

@@ -1,6 +1,6 @@
 # Trellis user model
 
-Trellis has several interfaces — YAML manifests, the `trellisctl` CLI, the dashboard, and the HTTP API — but they describe the same model. This page defines the user-facing vocabulary those interfaces should share.
+Trellis has several interfaces — YAML manifests, the `trellisctl` CLI, the Trellis Console, and the HTTP API — but they describe the same model. This page defines the user-facing vocabulary those interfaces should share.
 
 ## The hierarchy
 
@@ -44,7 +44,7 @@ cluster
 
 ## Manifest versus API representation
 
-**YAML is the canonical human-authored representation of a job.** Documentation, examples, the CLI, and dashboard authoring should call it a **job manifest** and show YAML by default.
+**YAML is the canonical human-authored representation of a job.** Documentation, examples, the CLI, and Console authoring should call it a **job manifest** and show YAML by default.
 
 The HTTP API uses JSON because it is a transport API. JSON field names intentionally mirror the YAML schema, but JSON should be described as the **API representation**, not as a second job format users must learn.
 

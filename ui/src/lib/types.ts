@@ -13,6 +13,7 @@ export interface Node {
   labels?: Record<string, string>;
   volumes?: string[];
   capabilities?: string[];
+  version?: string;
 }
 
 export interface PortMapping {
@@ -68,6 +69,7 @@ export interface AllocationEvent {
 }
 
 export interface Job {
+  namespace?: string;
   name: string;
   revision: number;
   desired: number;

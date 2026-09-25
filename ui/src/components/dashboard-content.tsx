@@ -27,7 +27,7 @@ export function DashboardContent() {
     mutate: refreshJobs,
   } = useJobs();
   const cluster = useOrchestratorStatus();
-  const { allowWrites, apiAccess, clusterName, namespace } = useConfig();
+  const { allowWrites, apiAccess, clusterName, namespace, setNamespace } = useConfig();
   const [formOpen, setFormOpen] = useState(false);
   const clusterScope = apiAccess === "cluster";
 
@@ -82,7 +82,7 @@ export function DashboardContent() {
 
       <div className={`grid grid-cols-1 gap-3 sm:grid-cols-3 ${clusterScope ? "lg:grid-cols-4" : ""}`}>
         <StateCard label="Ready" value={states.ready} tone="ready" detail="jobs at desired health" />
-        <StateCard label="Converging" value={states.converging} tone="converging" detail="deployments in progress" />
+        <StateCard label="Reconciling" value={states.converging} tone="converging" detail="jobs advancing toward desired state" />
         <StateCard label="Degraded" value={states.degraded} tone="degraded" detail="jobs with explicit failures" />
         {clusterScope && (
           <StateCard
@@ -99,7 +99,7 @@ export function DashboardContent() {
         {disconnected ? (
           <div className="px-5 py-5">
             <p className="text-sm font-medium text-red-600 dark:text-red-400">Cluster data is unavailable</p>
-            <p className="mt-1 text-sm text-muted-foreground">Check the dashboard service connection and the configured cluster API node.</p>
+            <p className="mt-1 text-sm text-muted-foreground">Check the console service connection and the configured cluster API node.</p>
           </div>
         ) : actionIssues.length === 0 ? (
           <div className="flex items-start gap-3 px-5 py-5">
@@ -108,7 +108,7 @@ export function DashboardContent() {
               <p className="text-sm font-medium text-foreground">No explicit failures detected</p>
               <p className="mt-1 text-sm text-muted-foreground">
                 {states.converging > 0
-                  ? "Some deployments are still converging; their progress is shown below."
+                  ? "Some job revisions are still reconciling; their progress is shown below."
                   : clusterScope
                     ? "Desired capacity is healthy and no nodes require attention."
                     : "Desired workload capacity in this namespace is healthy."}
@@ -125,7 +125,7 @@ export function DashboardContent() {
       <section className="rounded-lg border border-border bg-card">
         <div className="flex items-center justify-between border-b border-border px-5 py-4">
           <div>
-            <h2 className="text-sm font-semibold text-card-foreground">Deployments</h2>
+            <h2 className="text-sm font-semibold text-card-foreground">Jobs</h2>
             <p className="mt-0.5 text-xs text-muted-foreground">Current job revision progress in this namespace.</p>
           </div>
           <Link href="/jobs" className="text-xs font-medium text-emerald-600 hover:underline dark:text-emerald-400">View all jobs</Link>
@@ -133,11 +133,11 @@ export function DashboardContent() {
         {jobList.length === 0 ? (
           <div className="px-5 py-8 text-center">
             <p className="text-sm font-medium text-foreground">No jobs applied</p>
-            <p className="mt-1 text-sm text-muted-foreground">Apply a YAML manifest to start a deployment.</p>
+            <p className="mt-1 text-sm text-muted-foreground">Apply a YAML job manifest to create desired state.</p>
           </div>
         ) : (
           <div className="divide-y divide-border">
-            {[...jobList].sort(compareJobs).map((job) => <DeploymentRow key={job.name} job={job} />)}
+            {[...jobList].sort(compareJobs).map((job) => <JobRow key={`${job.namespace}/${job.name}`} job={job} setNamespace={setNamespace} />)}
           </div>
         )}
       </section>
@@ -201,12 +201,18 @@ function IssueRow({ issue }: { issue: OperationalIssue }) {
   );
 }
 
-function DeploymentRow({ job }: { job: Job }) {
+function JobRow({ job, setNamespace }: { job: Job; setNamespace: (namespace: string) => void }) {
   const state = jobState(job);
   const tone: Record<JobState, string> = { ready: "bg-emerald-500", converging: "bg-amber-500", degraded: "bg-red-500" };
   const pct = job.desired > 0 ? Math.min(100, Math.round((job.healthy / job.desired) * 100)) : 0;
   return (
-    <Link href={`/jobs/${encodeURIComponent(job.name)}`} className="block px-5 py-4 transition-colors hover:bg-muted/30">
+    <Link
+      href={`/jobs/${encodeURIComponent(job.name)}`}
+      onClick={() => {
+        if (job.namespace) setNamespace(job.namespace);
+      }}
+      className="block px-5 py-4 transition-colors hover:bg-muted/30"
+    >
       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
@@ -246,11 +252,11 @@ function operationalSummary({ disconnected, actionIssues, converging, healthyNod
   totalNodes: number;
   clusterScope: boolean;
 }) {
-  if (disconnected) return { title: "Cluster unavailable", description: "The dashboard cannot currently read its authorized Trellis state.", style: "border-red-500/30 bg-red-500/5", dot: "bg-red-500" };
+  if (disconnected) return { title: "Cluster unavailable", description: "The console cannot currently read its authorized Trellis state.", style: "border-red-500/30 bg-red-500/5", dot: "bg-red-500" };
   const critical = actionIssues.filter((issue) => issue.severity === "critical").length;
   if (critical > 0) return { title: "Cluster needs attention", description: `${critical} explicit failure${critical === 1 ? "" : "s"} detected. Start with the diagnostics below.`, style: "border-red-500/30 bg-red-500/5", dot: "bg-red-500" };
-  if (actionIssues.length > 0) return { title: "Progress is blocked", description: `${actionIssues.length} deployment${actionIssues.length === 1 ? "" : "s"} report a placement or retry condition.`, style: "border-amber-500/30 bg-amber-500/5", dot: "bg-amber-500" };
-  if (converging > 0) return { title: "Changes in progress", description: `${converging} deployment${converging === 1 ? " is" : "s are"} converging toward desired state.`, style: "border-amber-500/30 bg-amber-500/5", dot: "bg-amber-500" };
+  if (actionIssues.length > 0) return { title: "Progress is blocked", description: `${actionIssues.length} job${actionIssues.length === 1 ? "" : "s"} report a placement or retry condition.`, style: "border-amber-500/30 bg-amber-500/5", dot: "bg-amber-500" };
+  if (converging > 0) return { title: "Reconciliation in progress", description: `${converging} job${converging === 1 ? " is" : "s are"} advancing toward desired state.`, style: "border-amber-500/30 bg-amber-500/5", dot: "bg-amber-500" };
   if (clusterScope && (totalNodes === 0 || healthyNodes === 0)) return { title: "No healthy nodes", description: "Register a healthy node before applying workloads.", style: "border-amber-500/30 bg-amber-500/5", dot: "bg-amber-500" };
   return { title: "All systems ready", description: clusterScope ? "Desired workload capacity is healthy and no cluster problems are reported." : "Desired workload capacity in this namespace is healthy.", style: "border-emerald-500/30 bg-emerald-500/5", dot: "bg-emerald-500" };
 }

@@ -5,16 +5,18 @@ import { useJobs } from "@/hooks/use-api";
 import { EmptyState } from "./empty-state";
 import { Skeleton } from "./skeleton";
 import { jobState, jobStateLabel, type JobState } from "@/lib/operations";
+import { useConfig } from "./config-provider";
 
 export function JobsTable() {
   const { data: jobs, isLoading, error } = useJobs();
+  const { namespace, setNamespace } = useConfig();
 
   if (isLoading) return <TableSkeleton />;
   if (error) {
     return (
       <EmptyState
         title="Unable to load jobs"
-        description="Could not connect to the cluster. Ensure the dashboard connection is configured and reachable."
+        description="Could not connect to the cluster. Ensure the console connection is configured and reachable."
       />
     );
   }
@@ -35,6 +37,7 @@ export function JobsTable() {
             <th className="px-4 py-3 text-left font-medium text-muted-foreground">
               Name
             </th>
+            {!namespace && <th className="px-4 py-3 text-left font-medium text-muted-foreground">Namespace</th>}
             <th className="px-4 py-3 text-right font-medium text-muted-foreground">
               Desired
             </th>
@@ -58,17 +61,21 @@ export function JobsTable() {
 
             return (
               <tr
-                key={job.name}
+                key={`${job.namespace}/${job.name}`}
                 className="transition-colors hover:bg-muted/30"
               >
                 <td className="px-4 py-3">
                   <Link
                     href={`/jobs/${encodeURIComponent(job.name)}`}
+                    onClick={() => {
+                      if (job.namespace) setNamespace(job.namespace);
+                    }}
                     className="font-medium text-card-foreground hover:underline"
                   >
                     {job.name}
                   </Link>
                 </td>
+                {!namespace && <td className="px-4 py-3 font-mono text-xs text-muted-foreground">{job.namespace}</td>}
                 <td className="px-4 py-3 text-right tabular-nums text-card-foreground">
                   {job.desired}
                 </td>

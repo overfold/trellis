@@ -108,6 +108,23 @@ func TestListJobsIncludesAllocationDiagnostics(t *testing.T) {
 	}
 }
 
+func TestListJobsAcrossNamespacesIncludesNamespace(t *testing.T) {
+	s := &Server{jobs: map[string]*Job{
+		jobKey("acme", "web"): {Spec: &spec.JobSpec{Namespace: "acme", Name: "web"}},
+		jobKey("staging", "web"): {Spec: &spec.JobSpec{Namespace: "staging", Name: "web"}},
+	}}
+
+	jobs := s.ListJobs("")
+	if len(jobs) != 2 {
+		t.Fatalf("expected jobs across namespaces, got %#v", jobs)
+	}
+	for _, job := range jobs {
+		if job.Namespace == "" {
+			t.Fatalf("job namespace missing: %#v", job)
+		}
+	}
+}
+
 func TestAllocationEvents(t *testing.T) {
 	now := time.Now().UTC()
 	alloc := &Allocation{Namespace: "acme", JobName: "web", TaskGroupName: "frontend", ID: "acme-web-1", Phase: lifecycle.PhasePlaced,
