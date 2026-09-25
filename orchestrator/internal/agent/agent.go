@@ -1037,19 +1037,17 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string) error {
 	}
 
 	containerID := alloc.ContainerID
-	a.closeExecSessionsForAllocation(ctx, alloc.AllocationID)
+	if err := a.runtime.Stop(ctx, containerID); err != nil {
+		return fmt.Errorf("stop container %s: %w", containerID, err)
+	}
 
 	var errs []error
-	// Stop observation and reconciliation before tearing down runtime state so a
-	// periodic reconcile cannot race an intentional stop and restart the task.
+	a.closeExecSessionsForAllocation(ctx, alloc.AllocationID)
 	a.health.DeregisterTask(allocID)
 	if err := a.reconciler.Untrack(allocID); err != nil {
 		errs = append(errs, fmt.Errorf("untrack allocation %s: %w", allocID, err))
 	}
 
-	if err := a.runtime.Stop(ctx, containerID); err != nil {
-		errs = append(errs, fmt.Errorf("stop container %s: %w", containerID, err))
-	}
 	if err := a.network.Detach(ctx, alloc.Network); err != nil {
 		errs = append(errs, fmt.Errorf("detach allocation network: %w", err))
 	}

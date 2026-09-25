@@ -2,13 +2,17 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/clofour/trellis/internal/api"
 	"github.com/clofour/trellis/internal/health"
+	"github.com/clofour/trellis/internal/network"
 	"github.com/clofour/trellis/internal/runtime"
 	"github.com/clofour/trellis/internal/spec"
 	"github.com/google/uuid"
@@ -19,6 +23,28 @@ type blockingStartRuntime struct {
 	started chan string
 	release chan struct{}
 	labels  map[string]map[string]string
+}
+
+type failingStopRuntime struct {
+	*reconcilerRuntime
+	stopErr     error
+	removeCount int
+}
+
+func (r *failingStopRuntime) Stop(context.Context, string) error { return r.stopErr }
+func (r *failingStopRuntime) Remove(context.Context, string) error {
+	r.removeCount++
+	return nil
+}
+
+type countingNetworkManager struct{ detachCount int }
+
+func (*countingNetworkManager) Attach(context.Context, network.AttachRequest) (*network.Attachment, error) {
+	return nil, nil
+}
+func (m *countingNetworkManager) Detach(context.Context, *network.Attachment) error {
+	m.detachCount++
+	return nil
 }
 
 func (r *blockingStartRuntime) Create(_ context.Context, options runtime.CreateOptions) (string, error) {
@@ -104,6 +130,59 @@ func TestStopGroupWaitsForInProgressRun(t *testing.T) {
 	}
 	if got := len(agent.GetAllocations()); got != 0 {
 		t.Fatalf("allocations after stop = %d, want 0", got)
+	}
+}
+
+func TestFailedStopKeepsAllocationResourcesAndObservation(t *testing.T) {
+	rt := &failingStopRuntime{reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning}, stopErr: errors.New("stop failed")}
+	agent := newOperationTestAgent(t, rt)
+	networkManager := &countingNetworkManager{}
+	agent.SetNetworkManager(networkManager)
+	port, err := agent.ports.Claim(spec.PortSpec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secretDir := filepath.Join(t.TempDir(), "secrets")
+	if err := os.Mkdir(secretDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	agent.allocations["task"] = &Allocation{
+		ID: "task", AllocationID: "allocation", ContainerID: "task",
+		Ports: []*runtime.Port{port}, SecretDir: secretDir, Network: &network.Attachment{},
+	}
+	agent.reconciler.Track("task", false, nil)
+
+	if err := agent.StopAllocation(context.Background(), "task"); !errors.Is(err, rt.stopErr) {
+		t.Fatalf("stop error = %v, want %v", err, rt.stopErr)
+	}
+	if networkManager.detachCount != 0 || rt.removeCount != 0 {
+		t.Fatalf("failed stop detached network %d times and removed container %d times", networkManager.detachCount, rt.removeCount)
+	}
+	if _, err := os.Stat(secretDir); err != nil {
+		t.Fatalf("secret directory after failed stop: %v", err)
+	}
+	if _, ok := agent.ports.claims[port.HostPort]; !ok {
+		t.Fatal("port claim released after failed stop")
+	}
+	if _, ok := agent.reconciler.states["task"]; !ok {
+		t.Fatal("allocation untracked after failed stop")
+	}
+	if len(agent.GetAllocations()) != 1 {
+		t.Fatal("allocation removed after failed stop")
+	}
+
+	rt.stopErr = nil
+	if err := agent.StopAllocation(context.Background(), "task"); err != nil {
+		t.Fatalf("retry stop: %v", err)
+	}
+	if networkManager.detachCount != 1 || rt.removeCount != 1 {
+		t.Fatalf("retry detached network %d times and removed container %d times", networkManager.detachCount, rt.removeCount)
+	}
+	if _, err := os.Stat(secretDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("secret directory after retry: %v", err)
+	}
+	if _, ok := agent.ports.claims[port.HostPort]; ok {
+		t.Fatal("port claim retained after retry")
 	}
 }
 
