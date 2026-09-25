@@ -420,3 +420,53 @@ func TestHeartbeatMissingTaskRetriesRunningAllocation(t *testing.T) {
 		t.Fatalf("complete heartbeat: phase=%s health=%s, want running/healthy", allocation.Phase, allocation.Health)
 	}
 }
+
+func TestHeartbeatEmptyTaskReportRetriesRunningAllocation(t *testing.T) {
+	s, agent := newTestServerWithAgent()
+	defer agent.server.Close()
+
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
+	s.nodes[node.ID] = node
+	tasks := []spec.TaskSpec{{Name: "app", Image: "app"}}
+	s.jobs[jobKey("default", "web")] = &Job{
+		Spec: &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "web", Count: 1, Tasks: tasks}}},
+		Revision: 1,
+	}
+	allocation := &Allocation{
+		ID: "default-web-1", Namespace: "default", JobName: "web", TaskGroupName: "web",
+		Node: node, Tasks: tasks, Generation: 1, JobRevision: 1,
+		Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy,
+		Endpoints: []api.AllocationEndpoint{{Task: "app", Address: "10.0.0.1"}},
+		Ports: []api.PortMapping{{HostPort: 8080, ContainerPort: 8080}},
+	}
+	s.allocations = []*Allocation{allocation}
+	s.refreshCatalog()
+	if services := s.ListServices("default", nil); len(services) != 1 {
+		t.Fatalf("initial catalog = %#v, want one service", services)
+	}
+
+	if err := s.Heartbeat(context.Background(), node.ID, nil, "test", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if allocation.Phase != lifecycle.PhaseStarting || allocation.Health != lifecycle.HealthUnknown {
+		t.Fatalf("empty heartbeat: phase=%s health=%s, want starting/unknown", allocation.Phase, allocation.Health)
+	}
+	if len(allocation.Endpoints) != 0 || len(allocation.Ports) != 0 {
+		t.Fatalf("stale endpoint data retained: endpoints=%#v ports=%#v", allocation.Endpoints, allocation.Ports)
+	}
+	if services := s.ListServices("default", nil); len(services) != 0 {
+		t.Fatalf("catalog after empty heartbeat = %#v, want no services", services)
+	}
+	persisted, err := s.state.ListAllocations(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := persisted[allocation.ID]; got == nil || got.Phase != lifecycle.PhaseStarting || got.Health != lifecycle.HealthUnknown {
+		t.Fatalf("persisted empty observation = %#v, want starting/unknown", got)
+	}
+
+	s.Reconcile(context.Background())
+	if allocation.Phase != lifecycle.PhaseRunning || len(s.allocations) != 1 {
+		t.Fatalf("after retry: phase=%s allocations=%d, want running allocation reused", allocation.Phase, len(s.allocations))
+	}
+}

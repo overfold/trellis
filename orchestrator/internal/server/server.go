@@ -722,8 +722,11 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 		a.mu.Lock()
 		info, ok := statuses[fmt.Sprintf("%s/%d", a.ID, a.Generation)]
 		if !ok {
-			a.mu.Unlock()
-			continue // absence is not proof of loss or failure
+			if a.Phase != lifecycle.PhaseRunning && a.Phase != lifecycle.PhaseStarting {
+				a.mu.Unlock()
+				continue
+			}
+			info = statusInfo{Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown}
 		}
 		for _, task := range a.Tasks {
 			if !info.ObservedTasks[task.Name] {
