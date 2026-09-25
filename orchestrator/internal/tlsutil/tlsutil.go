@@ -12,11 +12,16 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"net/url"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // ServerName is the DNS identity used by Trellis node certificates.
 const ServerName = "trellis"
+
+const nodeIdentityScheme = "trellis-node"
 
 // Materials contains a CA and node certificate key pair.
 type Materials struct {
@@ -62,7 +67,10 @@ func GenerateCA() (certPEM, keyPEM []byte, err error) {
 // GenerateNodeCert generates a node certificate signed by the cluster CA.
 // Extra SANs may be passed as "host:port" or bare host strings; the host
 // portion is added as an IP SAN or DNS SAN as appropriate.
-func GenerateNodeCert(caCertPEM, caKeyPEM []byte, extraSANs ...string) (certPEM, keyPEM []byte, err error) {
+func GenerateNodeCert(caCertPEM, caKeyPEM []byte, nodeID uuid.UUID, extraSANs ...string) (certPEM, keyPEM []byte, err error) {
+	if nodeID == uuid.Nil {
+		return nil, nil, fmt.Errorf("node ID is required")
+	}
 	caBlock, _ := pem.Decode(caCertPEM)
 	if caBlock == nil {
 		return nil, nil, fmt.Errorf("decode CA certificate PEM")
@@ -109,6 +117,7 @@ func GenerateNodeCert(caCertPEM, caKeyPEM []byte, extraSANs ...string) (certPEM,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 		DNSNames:     dnsNames,
 		IPAddresses:  ips,
+		URIs:         []*url.URL{{Scheme: nodeIdentityScheme, Opaque: nodeID.String()}},
 	}
 	certDER, err := x509.CreateCertificate(rand.Reader, template, caCert, &nodeKey.PublicKey, caKey)
 	if err != nil {
@@ -121,6 +130,54 @@ func GenerateNodeCert(caCertPEM, caKeyPEM []byte, extraSANs ...string) (certPEM,
 	}
 	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 	return certPEM, keyPEM, nil
+}
+
+// NodeID returns the immutable node identity encoded in a node certificate.
+func NodeID(cert *x509.Certificate) (uuid.UUID, error) {
+	if cert == nil {
+		return uuid.Nil, fmt.Errorf("node certificate is required")
+	}
+	for _, uri := range cert.URIs {
+		if uri.Scheme != nodeIdentityScheme {
+			continue
+		}
+		id, err := uuid.Parse(uri.Opaque)
+		if err != nil || id == uuid.Nil {
+			return uuid.Nil, fmt.Errorf("invalid node identity URI")
+		}
+		return id, nil
+	}
+	return uuid.Nil, fmt.Errorf("certificate does not contain a Trellis node identity")
+}
+
+// ValidateMaterials verifies that the node key pair chains to the configured
+// CA and identifies the expected immutable node ID.
+func ValidateMaterials(m *Materials, expectedNodeID uuid.UUID) error {
+	cert, pool, err := buildCertAndPool(m)
+	if err != nil {
+		return err
+	}
+	if len(cert.Certificate) == 0 {
+		return fmt.Errorf("node certificate chain is empty")
+	}
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		return fmt.Errorf("parse node certificate: %w", err)
+	}
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: pool, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
+		return fmt.Errorf("verify node certificate: %w", err)
+	}
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: pool, DNSName: ServerName, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}); err != nil {
+		return fmt.Errorf("verify node server certificate: %w", err)
+	}
+	id, err := NodeID(leaf)
+	if err != nil {
+		return err
+	}
+	if id != expectedNodeID {
+		return fmt.Errorf("node certificate identifies %s, expected %s", id, expectedNodeID)
+	}
+	return nil
 }
 
 func buildCertAndPool(m *Materials) (tls.Certificate, *x509.CertPool, error) {
@@ -149,7 +206,8 @@ func ServerTLSConfig(m *Materials) (*tls.Config, error) {
 	}, nil
 }
 
-// LeaderTLSConfig creates a server configuration that permits unauthenticated bootstrap clients.
+// LeaderTLSConfig creates a server configuration that permits enrollment
+// clients authenticated by a bearer credential over pinned server TLS.
 func LeaderTLSConfig(m *Materials) (*tls.Config, error) {
 	cert, pool, err := buildCertAndPool(m)
 	if err != nil {

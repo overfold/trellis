@@ -14,7 +14,7 @@ The default plan is the feature-complete beginner path: create a new single-node
 
 For automation, the same choices are available as flags. `--without-networking` and `--without-gvisor` opt out of the two default capabilities, while `--with-dashboard` or `--dashboard-write` enable the dashboard.
 
-The installer uses a root-only bootstrap credential for node/cluster bootstrap, then mints a normal `cluster/write` operator credential and saves a `local` context for the user who invoked `sudo`. Routine `trellisctl` commands therefore do **not** need `sudo` and do not receive the bootstrap credential.
+The installer keeps administrator and node-enrollment credentials separate, then mints a normal `cluster/write` operator credential and saves a `local` context for the user who invoked `sudo`. Routine `trellisctl` commands therefore do **not** need `sudo` and do not receive either privileged credential.
 
 Verify the service and saved context:
 
@@ -24,7 +24,7 @@ trellisctl context current
 trellisctl nodes list
 ```
 
-`trellis`, `trellisctl`, and the internal `trellis-health-probe` helper are installed in `/usr/local/bin`. The daemon mounts the helper read-only into managed tasks for HTTP and TCP health checks; it is not an operator CLI. The daemon keeps its bootstrap credential root-readable under `/etc/trellis`; your user context contains the scoped operator token plus the cluster CA.
+`trellis`, `trellisctl`, and the internal `trellis-health-probe` helper are installed in `/usr/local/bin`. The daemon mounts the helper read-only into managed tasks for HTTP and TCP health checks; it is not an operator CLI. The daemon keeps its administrator and enrollment credentials root-readable under `/etc/trellis`; your user context contains the scoped operator token plus the cluster CA.
 
 ## 2. Create the first manifest
 
@@ -99,7 +99,7 @@ You have now completed the full workload lifecycle: install → connect → depl
 
 ## Optional: dashboard
 
-If you installed the dashboard through **Customize** or with `--with-dashboard`, open `http://NODE_ADDRESS:3000`. The default dashboard mode uses a real `cluster/read` credential, not the bootstrap token. Choosing read/write access (or using `--dashboard-write`) instead uses `cluster/write` and enables mutation controls. In either mode the dashboard stays close to `trellisctl`: it edits the same YAML, asks the control plane for the same semantic plan, and exposes Trellis resources rather than adding application-platform abstractions.
+If you installed the dashboard through **Customize** or with `--with-dashboard`, open `http://NODE_ADDRESS:3000`. The default dashboard mode uses a real `cluster/read` credential, not the administrator token. Choosing read/write access (or using `--dashboard-write`) instead uses `cluster/write` and enables mutation controls. In either mode the dashboard stays close to `trellisctl`: it edits the same YAML, asks the control plane for the same semantic plan, and exposes Trellis resources rather than adding application-platform abstractions.
 
 ## Troubleshooting
 

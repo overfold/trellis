@@ -4,7 +4,7 @@ The `trellisctl` CLI is the first-party operator interface to the [Trellis user 
 
 ## Named cluster contexts
 
-A **context** stores the connection information needed to operate one cluster/namespace: API address, cluster token, namespace, CA certificate, and optional client certificate/key paths.
+A **context** stores the connection information needed to operate one cluster/namespace: API address, bearer token, namespace, CA certificate, and optional client certificate/key paths.
 
 Save the effective connection and select it:
 

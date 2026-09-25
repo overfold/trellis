@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/clofour/trellis/internal/tlsutil"
+	"github.com/google/uuid"
 )
 
 var (
@@ -26,7 +27,7 @@ func init() {
 
 func testTLSConfig(t *testing.T) *tls.Config {
 	t.Helper()
-	cert, key, err := tlsutil.GenerateNodeCert(testCACert, testCAKey)
+	cert, key, err := tlsutil.GenerateNodeCert(testCACert, testCAKey, uuid.New())
 	if err != nil {
 		t.Fatal(err)
 	}

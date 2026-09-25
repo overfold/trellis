@@ -41,7 +41,9 @@ type nodeConfigFile struct {
 	Join               *string              `yaml:"join"`
 	DataDir            *string              `yaml:"data_dir"`
 	Cluster            *string              `yaml:"cluster"`
-	BootstrapToken     *string              `yaml:"bootstrap_token"`
+	AdminToken         *string              `yaml:"admin_token"`
+	EnrollmentToken    *string              `yaml:"enrollment_token"`
+	NodeSigningMode    *string              `yaml:"node_signing_mode"`
 	ContainerdSock     *string              `yaml:"containerd_socket"`
 	Runtime            *string              `yaml:"runtime"`
 	RuntimeFaults      *string              `yaml:"runtime_faults"`
@@ -89,7 +91,9 @@ func loadNodeConfig(path string, cfg *config, flags *pflag.FlagSet) error {
 	setString("join", parsed.Join, &cfg.Join)
 	setString("data-dir", parsed.DataDir, &cfg.DataDir)
 	setString("cluster", parsed.Cluster, &cfg.Cluster)
-	setString("bootstrap-token", parsed.BootstrapToken, &cfg.ClusterToken)
+	setString("admin-token", parsed.AdminToken, &cfg.AdminToken)
+	setString("enrollment-token", parsed.EnrollmentToken, &cfg.EnrollmentToken)
+	setString("node-signing-mode", parsed.NodeSigningMode, &cfg.SigningMode)
 	setString("containerd-sock", parsed.ContainerdSock, &cfg.ContainerdSock)
 	setString("runtime", parsed.Runtime, &cfg.Runtime)
 	setString("runtime-faults", parsed.RuntimeFaults, &cfg.RuntimeFaults)

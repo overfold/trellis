@@ -2,7 +2,7 @@ package api
 
 import "time"
 
-// CredentialCreateRequest asks the bootstrap administrator to mint a scoped API credential.
+// CredentialCreateRequest asks the administrator to mint a scoped API credential.
 type CredentialCreateRequest struct {
 	Scope     string `json:"scope"`
 	Access    string `json:"access"`

@@ -19,13 +19,15 @@ Commands with a coherent structured result expose a local `--output json` flag; 
 
 ## Node configuration
 
-Installer-managed nodes keep their durable daemon configuration at `/etc/trellis/trellis.yaml`. The file is root-readable and contains the node's bootstrap credential together with operator-managed settings such as advertise addresses, labels, secret-encryption key path, and WireGuard transport settings. Volume placement is not configured here; namespace-scoped volume ownership is established by first placement and stored in the control plane.
+Installer-managed nodes keep their durable daemon configuration at `/etc/trellis/trellis.yaml`. The file is root-readable and contains separate administrator and managed-enrollment credentials together with operator-managed settings such as advertise addresses, labels, secret-encryption key path, and WireGuard transport settings. Volume placement is not configured here; namespace-scoped volume ownership is established by first placement and stored in the control plane.
 
 A minimal installed node resembles:
 
 ```yaml
 cluster: default
-bootstrap_token: trls_boot_...
+admin_token: trls_admin_...
+enrollment_token: trls_enroll_...
+node_signing_mode: managed
 data_dir: /var/lib/trellis/data
 agent_advertise: node-a:8127
 server_advertise: node-a:8128
@@ -61,10 +63,14 @@ Installer-created nodes also keep `/var/lib/trellis/install-state`. It records o
 
 ## Add a node
 
-Adding a server is explicit rather than another branch in the first-install questionnaire. The joining server needs three pieces of information from an existing member:
+### Managed signing (default)
+
+Adding a server is explicit rather than another branch in the first-install questionnaire. The joining server needs five pieces of information from an existing member:
 
 - an existing control-plane address such as `node-a:8128`;
-- the root bootstrap credential;
+- the administrator credential used by a node if it later becomes leader;
+- the dedicated node-enrollment credential;
+- a pinned copy of the trusted node CA certificate;
 - the **same secrets-encryption key used by the existing servers**.
 
 The last requirement is important: encrypted secret records are replicated cluster state, so every server that may lead the cluster must be able to decrypt them with the same key/key ID. A joining server must not generate its own key.
@@ -72,20 +78,26 @@ The last requirement is important: encrypted secret records are replicated clust
 On an existing node, make temporary root-readable copies for secure transfer:
 
 ```sh
-sudo awk -F': ' '$1 == "bootstrap_token" { print $2; exit }' \
+sudo awk -F': ' '$1 == "admin_token" { print $2; exit }' \
   /etc/trellis/trellis.yaml | \
-  sudo tee /root/trellis-bootstrap-token >/dev/null
-sudo chmod 600 /root/trellis-bootstrap-token
+  sudo tee /root/trellis-admin-token >/dev/null
+sudo awk -F': ' '$1 == "enrollment_token" { print $2; exit }' \
+  /etc/trellis/trellis.yaml | \
+  sudo tee /root/trellis-enrollment-token >/dev/null
+sudo chmod 600 /root/trellis-admin-token /root/trellis-enrollment-token
+sudo install -m 644 /var/lib/trellis/data/node-ca.crt /root/trellis-node-ca.crt
 sudo install -m 600 /etc/trellis/secrets.key /root/trellis-secrets.key
 ```
 
-Transfer those two files to the new machine over a secure channel, then run:
+Transfer those files to the new machine over a secure channel, then run:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/clofour/trellis/main/scripts/setup.sh | \
   sudo bash -s -- \
     --join node-a:8128 \
-    --bootstrap-token-file /root/trellis-bootstrap-token \
+    --admin-token-file /root/trellis-admin-token \
+    --enrollment-token-file /root/trellis-enrollment-token \
+    --ca-cert-file /root/trellis-node-ca.crt \
     --secrets-key-file /root/trellis-secrets.key
 ```
 
@@ -99,13 +111,29 @@ After the daemon starts, verify membership from any operator context:
 trellisctl nodes list
 ```
 
-A joining node must use the bootstrap credential; minting an ordinary operator/workload token does not create or join a cluster.
+The enrollment credential is accepted only by the managed enrollment endpoint and is never administrator API authority. Enrollment sends it only over TLS authenticated by the pinned CA. After enrollment, node registration, heartbeats, Raft joins, and node-to-agent traffic use the node's unique certificate-bound UUID instead of a shared bearer token. Managed mode deliberately trusts every Trellis node and makes the CA signing key available to every leader-capable member so failover does not disable enrollment. Treat compromise of any node in managed mode as compromise of the cluster.
+
+### External signing
+
+Set `node_signing_mode: external` when the operator owns the node CA. Every node configuration must provide `ca_cert`, `cert`, and `key`; omit `ca_key` and `enrollment_token`. Trellis verifies the key pair, trust chain, client-auth usage, and immutable node ID at startup, stores the trusted CA certificate and node key pair, and does not require or persist the CA private key.
+
+Before first start, choose a UUID, write it to `<data_dir>/node-id` with mode `0600`, and have the external signer issue a certificate containing that UUID as URI SAN `trellis-node:UUID`. The certificate must allow TLS client and server authentication and include `trellis` plus the node's advertised DNS names or IP addresses as SANs. A minimal configuration is:
+
+```yaml
+node_signing_mode: external
+admin_token: trls_admin_...
+ca_cert: /etc/trellis/node-ca.crt
+cert: /etc/trellis/node.crt
+key: /etc/trellis/node.key
+```
+
+For another pre-issued node, add `join: node-a:8128`; its authenticated node certificate authorizes the Raft join. Loss of the external signer prevents issuing certificates for new nodes but does not affect operation or leader failover among nodes that already have certificates. A certificate from any other CA, or one whose node ID differs from `<data_dir>/node-id`, is rejected.
 
 ## Mint operator credentials
 
 The installer creates one normal `cluster/write` credential for the installing user, but operators often need narrower credentials for another human, a read-only dashboard, or automation. `trellisctl credentials create` is the explicit administrative workflow for that.
 
-Credential minting requires the **bootstrap** credential. On an installed Trellis node, running the command as root automatically uses the root-readable local node connection, so the bootstrap value does not need to be copied into shell history:
+Credential minting requires the **administrator** credential. On an installed Trellis node, running the command as root automatically uses the root-readable local node connection, so the administrator value does not need to be copied into shell history:
 
 ```sh
 # Read-only cluster observer
@@ -132,7 +160,7 @@ trellisctl --token "$TOKEN" --namespace staging context save staging --use
 unset TOKEN
 ```
 
-A remote bootstrap administrator may instead supply the bootstrap bearer credential through `TRELLIS_TOKEN` or `--token`, but it should be handled as a root secret. Ordinary `cluster/write` credentials cannot mint more credentials, join nodes, change Raft membership, or perform backup/restore.
+A remote administrator may instead supply the administrator bearer credential through `TRELLIS_TOKEN` or `--token`, but it should be handled as a root secret. Enrollment credentials and ordinary `cluster/write` credentials cannot mint credentials, change Raft membership, or perform backup/restore.
 
 ## Drain and maintenance
 
@@ -204,7 +232,7 @@ For normal workload diagnosis, start and usually finish with `jobs status`. `rea
 
 ## Networking and TLS
 
-Ports `8127`, `8128`, and `8129` must be reachable between appropriate cluster members. Namespace networking gives each namespace its own WireGuard interface and UDP port. Allow the configured WireGuard port range between participating nodes; by default `wireguard_port: 51820` with `wireguard_port_count: 256` uses UDP `51820-52075`. `wireguard_port_count` must match on every cluster node so a namespace slot means the same offset everywhere; the base port may differ per node. `wireguard_endpoint` is the externally reachable host or base `host:port`; Trellis applies the namespace's stable port offset to that base when building peer endpoints. Workloads use Trellis's node-local DNS resolver on the reserved internal address `198.18.0.53:53`; it is not intended to be exposed on external interfaces. Never expose the unauthenticated transport surface to an untrusted network. Configure a CA and node certificates on every node and pass the CA/client certificate flags to the CLI. Advertised addresses must be routable from peers, not wildcard bind addresses. Automatic setup chooses a non-loopback IPv4 address instead of falling back to the machine hostname; use `--advertise` when the detected address is not the one other nodes should use.
+Ports `8127`, `8128`, and `8129` must be reachable between appropriate cluster members. Namespace networking gives each namespace its own WireGuard interface and UDP port. Allow the configured WireGuard port range between participating nodes; by default `wireguard_port: 51820` with `wireguard_port_count: 256` uses UDP `51820-52075`. `wireguard_port_count` must match on every cluster node so a namespace slot means the same offset everywhere; the base port may differ per node. `wireguard_endpoint` is the externally reachable host or base `host:port`; Trellis applies the namespace's stable port offset to that base when building peer endpoints. Workloads use Trellis's node-local DNS resolver on the reserved internal address `198.18.0.53:53`; it is not intended to be exposed on external interfaces. Node and Raft transports require mutually authenticated TLS. Possession of the CA key is not API or leader authorization: requests still need a certificate identifying one immutable node ID, and leader work is executed only by the current Raft leader with control-epoch, generation, revision, and execution-hash fencing where applicable. Administrator and enrollment bearer credentials are separate from node identity. Advertised addresses must be routable from peers, not wildcard bind addresses.
 
 ## Failure recovery
 

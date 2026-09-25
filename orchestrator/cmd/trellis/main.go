@@ -58,7 +58,7 @@ type config struct {
 	ConfigFile                                                                     string
 	AgentListen, AgentAdvertise, ServerListen, ServerAdvertise                     string
 	RaftListen, RaftAdvertise, Join                                                string
-	DataDir, Cluster, ClusterToken, ContainerdSock                                 string
+	DataDir, Cluster, AdminToken, EnrollmentToken, SigningMode, ContainerdSock     string
 	Runtime, RuntimeFaults                                                         string
 	WireGuardPool, WireGuardEndpoint                                               string
 	WireGuardPort, WireGuardPortCount                                              int
@@ -106,7 +106,9 @@ func main() {
 	f.StringVar(&cfg.Join, "join", "", "Address of an existing cluster member to join (server API address)")
 	f.StringVar(&cfg.DataDir, "data-dir", "/var/lib/trellis/data", "Directory for local state and volumes")
 	f.StringVar(&cfg.Cluster, "cluster", "default", "Cluster name")
-	f.StringVar(&cfg.ClusterToken, "bootstrap-token", "", "Bootstrap credential shared by Trellis nodes")
+	f.StringVar(&cfg.AdminToken, "admin-token", "", "Administrator API credential")
+	f.StringVar(&cfg.EnrollmentToken, "enrollment-token", "", "Managed-mode node enrollment credential")
+	f.StringVar(&cfg.SigningMode, "node-signing-mode", "managed", "Node certificate signing mode: managed or external")
 	f.StringVar(&cfg.ContainerdSock, "containerd-sock", "/run/containerd/containerd.sock", "Containerd socket path")
 	f.StringVar(&cfg.Runtime, "runtime", "containerd", "Workload runtime: containerd or injected (test only)")
 	f.StringVar(&cfg.RuntimeFaults, "runtime-faults", "", "Injected runtime fault-control file")
@@ -140,8 +142,14 @@ func main() {
 func run(parent context.Context, cfg *config) error {
 	ctx, stop := signal.NotifyContext(parent, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	if cfg.ClusterToken == "" {
-		return fmt.Errorf("bootstrap_token or --bootstrap-token is required")
+	if cfg.AdminToken == "" {
+		return fmt.Errorf("admin_token or --admin-token is required")
+	}
+	if cfg.SigningMode != "managed" && cfg.SigningMode != "external" {
+		return fmt.Errorf("node_signing_mode must be managed or external")
+	}
+	if cfg.SigningMode == "managed" && cfg.EnrollmentToken == "" {
+		return fmt.Errorf("enrollment_token or --enrollment-token is required in managed mode")
 	}
 	if cfg.WireGuardPort < 1 || cfg.WireGuardPort > 65535 {
 		return fmt.Errorf("--wireguard-port must be between 1 and 65535")
@@ -195,9 +203,12 @@ func run(parent context.Context, cfg *config) error {
 		return fmt.Errorf("init local storage: %w", err)
 	}
 
-	tlsMaterials, err := loadOrBootstrapTLS(ctx, log, cfg, local)
+	tlsMaterials, err := loadOrBootstrapTLS(ctx, log, cfg, local, id)
 	if err != nil {
 		return fmt.Errorf("TLS bootstrap: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.DataDir, "node-ca.crt"), tlsMaterials.CACert, 0o644); err != nil {
+		return fmt.Errorf("write trusted node CA certificate: %w", err)
 	}
 
 	_, serverPort, err := splitAddress(cfg.ServerListen)
@@ -207,7 +218,7 @@ func run(parent context.Context, cfg *config) error {
 	runFile := localconfig.DefaultPath
 	if writeErr := localconfig.Write(runFile, &localconfig.Config{
 		ServerAddr:   net.JoinHostPort("localhost", strconv.Itoa(serverPort)),
-		ClusterToken: cfg.ClusterToken,
+		ClusterToken: cfg.AdminToken,
 		CACert:       string(tlsMaterials.CACert),
 	}); writeErr != nil {
 		log.Warn("could not write local connection file", "path", runFile, "error", writeErr)
@@ -247,7 +258,7 @@ func run(parent context.Context, cfg *config) error {
 
 	if cfg.Join != "" && !raftStore.HadExistingState() {
 		log.Info("joining cluster", "address", cfg.Join)
-		if err := joinClusterRaft(ctx, log, cfg.Join, cfg.ClusterToken, cfg.ServerAdvertise, raftStore.LocalAddr(), clientTLS); err != nil {
+		if err := joinClusterRaft(ctx, log, cfg.Join, id, cfg.ServerAdvertise, raftStore.LocalAddr(), clientTLS); err != nil {
 			return fmt.Errorf("join cluster: %w", err)
 		}
 	}
@@ -279,6 +290,7 @@ func run(parent context.Context, cfg *config) error {
 		log.Info("secrets enabled", "key_id", keyID)
 	}
 	control.SetClusterJoiner(raftStore)
+	control.SetNodeID(id)
 	control.SetClientTLS(clientTLS)
 	if err := control.SetNetworkPool(cfg.WireGuardPool); err != nil {
 		return err
@@ -290,7 +302,7 @@ func run(parent context.Context, cfg *config) error {
 	server.RegisterMetrics(control, prometheus.DefaultRegisterer)
 
 	for i := 0; ; i++ {
-		if _, err := control.InitWithToken(ctx, cfg.ClusterToken); err == nil {
+		if _, err := control.InitWithToken(ctx, cfg.AdminToken); err == nil {
 			break
 		} else if i >= 30 {
 			return fmt.Errorf("initialize control plane: %w", err)
@@ -327,7 +339,7 @@ func run(parent context.Context, cfg *config) error {
 	}()
 	healthMgr := health.NewHealthManager(log, runtimeClient, nil)
 	restartCtl := agent.NewAllocationReconciler(runtimeClient, nil)
-	leaderClient := client.NewServerClient(cfg.ClusterToken, "", clientTLS)
+	leaderClient := client.NewServerClient("", "", clientTLS)
 	volumeManager := agent.NewVolumeManager(cfg.DataDir)
 	ag := agent.NewAgent(log, runtimeClient, healthMgr, restartCtl, agent.NewPortManager(runtimeClient, 0, 0, 0), volumeManager, leaderClient, id)
 	ag.SetVersion(version.Current())
@@ -410,7 +422,7 @@ func run(parent context.Context, cfg *config) error {
 	}()
 
 	agentHTTP := echo.New()
-	agentHTTP.Use(middleware.Recover(), clusterAuthMiddleware(cfg.ClusterToken))
+	agentHTTP.Use(middleware.Recover(), nodeAuthMiddleware(ag.AuthorizeLeader))
 	agent.NewHandler(ag).Register(agentHTTP)
 	go func() {
 		if err := (echo.StartConfig{Address: cfg.AgentListen, TLSConfig: agentServerTLS, GracefulTimeout: shutdownTime}).Start(ctx, agentHTTP); err != nil && ctx.Err() == nil {
@@ -421,7 +433,7 @@ func run(parent context.Context, cfg *config) error {
 
 	elector := election.NewRaftElector(raftStore.Raft(), election.Leader{NodeID: id, Address: cfg.ServerAdvertise})
 	leaderHTTP := echo.New()
-	leaderHTTP.Use(middleware.Recover(), leaderAuthMiddleware(cfg.ClusterToken, control.TokenManager()))
+	leaderHTTP.Use(middleware.Recover(), leaderAuthMiddleware(cfg.AdminToken, cfg.EnrollmentToken, control.TokenManager()))
 	leaderHTTP.GET("/v1/auth/whoami", server.HandleWhoAmI)
 	server.NewHandler(control).Register(leaderHTTP)
 	apiProxy := newControlPlaneProxy(elector, cfg.ServerAdvertise, leaderHTTP, newHTTPTransport(clientTLS), log)
@@ -591,26 +603,49 @@ func loadSecretsKey(path, configuredID string) ([]byte, string, error) {
 	return key, keyID, nil
 }
 
-func loadOrBootstrapTLS(ctx context.Context, log *slog.Logger, cfg *config, local *storage.LocalStorage) (*tlsutil.Materials, error) {
-	if cfg.CACert != "" {
-		return loadTLSFromFiles(cfg)
+func loadOrBootstrapTLS(ctx context.Context, log *slog.Logger, cfg *config, local *storage.LocalStorage, nodeID uuid.UUID) (*tlsutil.Materials, error) {
+	if cfg.Cert != "" || cfg.Key != "" || cfg.SigningMode == "external" {
+		m, err := loadTLSFromFiles(cfg)
+		if err != nil {
+			return nil, err
+		}
+		if cfg.SigningMode == "external" && len(m.CAKey) != 0 {
+			return nil, fmt.Errorf("external signing mode must not configure a CA private key")
+		}
+		if err := tlsutil.ValidateMaterials(m, nodeID); err != nil {
+			return nil, err
+		}
+		if err := saveTLSToStorage(local, m); err != nil {
+			return nil, fmt.Errorf("save TLS materials: %w", err)
+		}
+		return m, nil
 	}
 	m, err := loadTLSFromStorage(local)
 	if err == nil {
+		if cfg.SigningMode == "managed" && len(m.CAKey) == 0 {
+			return nil, fmt.Errorf("managed signing mode requires the stored CA private key")
+		}
+		if err := tlsutil.ValidateMaterials(m, nodeID); err != nil {
+			return nil, err
+		}
 		return m, nil
 	}
 	if cfg.Join != "" {
-		resp, err := joinClusterTLS(ctx, log, cfg.Join, cfg.ClusterToken, cfg.ServerAdvertise, cfg.RaftAdvertise)
+		if cfg.CACert == "" {
+			return nil, fmt.Errorf("managed enrollment requires ca_cert to pin the existing cluster CA")
+		}
+		caCert, err := os.ReadFile(cfg.CACert)
+		if err != nil {
+			return nil, fmt.Errorf("read pinned CA cert: %w", err)
+		}
+		resp, err := joinClusterTLS(ctx, log, cfg.Join, cfg.EnrollmentToken, caCert, nodeID, cfg.ServerAdvertise, cfg.AgentAdvertise)
 		if err != nil {
 			return nil, fmt.Errorf("join cluster for TLS: %w", err)
 		}
-		caCert := []byte(resp.CACert)
-		caKey := []byte(resp.CAKey)
-		nodeCert, nodeKey, err := tlsutil.GenerateNodeCert(caCert, caKey, cfg.ServerAdvertise, cfg.AgentAdvertise)
-		if err != nil {
-			return nil, fmt.Errorf("generate node cert: %w", err)
+		m := &tlsutil.Materials{CACert: []byte(resp.CACert), CAKey: []byte(resp.CAKey), Cert: []byte(resp.Cert), Key: []byte(resp.Key)}
+		if err := tlsutil.ValidateMaterials(m, nodeID); err != nil {
+			return nil, fmt.Errorf("validate enrolled node certificate: %w", err)
 		}
-		m := &tlsutil.Materials{CACert: caCert, CAKey: caKey, Cert: nodeCert, Key: nodeKey}
 		if err := saveTLSToStorage(local, m); err != nil {
 			return nil, fmt.Errorf("save TLS materials: %w", err)
 		}
@@ -621,7 +656,7 @@ func loadOrBootstrapTLS(ctx context.Context, log *slog.Logger, cfg *config, loca
 	if err != nil {
 		return nil, fmt.Errorf("generate CA: %w", err)
 	}
-	nodeCert, nodeKey, err := tlsutil.GenerateNodeCert(caCert, caKey, cfg.ServerAdvertise, cfg.AgentAdvertise)
+	nodeCert, nodeKey, err := tlsutil.GenerateNodeCert(caCert, caKey, nodeID, cfg.ServerAdvertise, cfg.AgentAdvertise)
 	if err != nil {
 		return nil, fmt.Errorf("generate node cert: %w", err)
 	}
@@ -634,13 +669,19 @@ func loadOrBootstrapTLS(ctx context.Context, log *slog.Logger, cfg *config, loca
 }
 
 func loadTLSFromFiles(cfg *config) (*tlsutil.Materials, error) {
+	if cfg.CACert == "" || cfg.Cert == "" || cfg.Key == "" {
+		return nil, fmt.Errorf("ca_cert, cert, and key are required for configured node certificates")
+	}
 	caCert, err := os.ReadFile(cfg.CACert)
 	if err != nil {
 		return nil, fmt.Errorf("read CA cert: %w", err)
 	}
-	caKey, err := os.ReadFile(cfg.CAKey)
-	if err != nil {
-		return nil, fmt.Errorf("read CA key: %w", err)
+	var caKey []byte
+	if cfg.CAKey != "" {
+		caKey, err = os.ReadFile(cfg.CAKey)
+		if err != nil {
+			return nil, fmt.Errorf("read CA key: %w", err)
+		}
 	}
 	cert, err := os.ReadFile(cfg.Cert)
 	if err != nil {
@@ -658,9 +699,7 @@ func loadTLSFromStorage(local *storage.LocalStorage) (*tlsutil.Materials, error)
 	if err := local.Get("tls/ca-cert", &caCert); err != nil {
 		return nil, err
 	}
-	if err := local.Get("tls/ca-key", &caKey); err != nil {
-		return nil, err
-	}
+	_ = local.Get("tls/ca-key", &caKey)
 	if err := local.Get("tls/node-cert", &cert); err != nil {
 		return nil, err
 	}
@@ -679,7 +718,11 @@ func saveTLSToStorage(local *storage.LocalStorage, m *tlsutil.Materials) error {
 	if err := local.Put("tls/ca-cert", string(m.CACert)); err != nil {
 		return err
 	}
-	if err := local.Put("tls/ca-key", string(m.CAKey)); err != nil {
+	if len(m.CAKey) != 0 {
+		if err := local.Put("tls/ca-key", string(m.CAKey)); err != nil {
+			return err
+		}
+	} else if err := local.Delete("tls/ca-key"); err != nil {
 		return err
 	}
 	if err := local.Put("tls/node-cert", string(m.Cert)); err != nil {
@@ -688,8 +731,8 @@ func saveTLSToStorage(local *storage.LocalStorage, m *tlsutil.Materials) error {
 	return local.Put("tls/node-key", string(m.Key))
 }
 
-func joinClusterTLS(ctx context.Context, log *slog.Logger, joinAddr, clusterToken, serverID, raftAddr string) (*api.RaftJoinResponse, error) {
-	body, err := json.Marshal(api.RaftJoinRequest{ID: serverID, RaftAddress: raftAddr})
+func joinClusterTLS(ctx context.Context, log *slog.Logger, joinAddr, enrollmentToken string, caCert []byte, nodeID uuid.UUID, serverAdvertise, agentAdvertise string) (*api.NodeEnrollmentResponse, error) {
+	body, err := json.Marshal(api.NodeEnrollmentRequest{NodeID: nodeID, ServerAdvertise: serverAdvertise, AgentAdvertise: agentAdvertise})
 	if err != nil {
 		return nil, err
 	}
@@ -697,21 +740,21 @@ func joinClusterTLS(ctx context.Context, log *slog.Logger, joinAddr, clusterToke
 	if !strings.Contains(base, "://") {
 		base = "https://" + base
 	}
-	httpClient := &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS13},
-		},
+	tlsConfig, err := tlsutil.CAClientTLSConfig(caCert)
+	if err != nil {
+		return nil, err
 	}
+	httpClient := &http.Client{Transport: &http.Transport{TLSClientConfig: tlsConfig}}
 	for i := 0; ; i++ {
-		req, _ := http.NewRequestWithContext(ctx, "POST", base+"/v1/raft/join", bytes.NewReader(body))
+		req, _ := http.NewRequestWithContext(ctx, "POST", base+"/v1/nodes/enroll", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+clusterToken)
+		req.Header.Set("Authorization", "Bearer "+enrollmentToken)
 		resp, err := httpClient.Do(req)
 		if err == nil {
 			respBody, _ := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				var joinResp api.RaftJoinResponse
+			if resp.StatusCode == http.StatusCreated {
+				var joinResp api.NodeEnrollmentResponse
 				if err := json.Unmarshal(respBody, &joinResp); err != nil {
 					return nil, fmt.Errorf("decode join response: %w", err)
 				}
@@ -732,8 +775,8 @@ func joinClusterTLS(ctx context.Context, log *slog.Logger, joinAddr, clusterToke
 	}
 }
 
-func joinClusterRaft(ctx context.Context, log *slog.Logger, joinAddr, clusterToken, serverID, raftAddr string, tlsConfig *tls.Config) error {
-	body, err := json.Marshal(api.RaftJoinRequest{ID: serverID, RaftAddress: raftAddr})
+func joinClusterRaft(ctx context.Context, log *slog.Logger, joinAddr string, nodeID uuid.UUID, serverID, raftAddr string, tlsConfig *tls.Config) error {
+	body, err := json.Marshal(api.RaftJoinRequest{ID: serverID, NodeID: nodeID, RaftAddress: raftAddr})
 	if err != nil {
 		return err
 	}
@@ -747,12 +790,11 @@ func joinClusterRaft(ctx context.Context, log *slog.Logger, joinAddr, clusterTok
 	for i := 0; ; i++ {
 		req, _ := http.NewRequestWithContext(ctx, "POST", base+"/v1/raft/join", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+clusterToken)
 		resp, err := httpClient.Do(req)
 		if err == nil {
 			_, _ = io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
+			if resp.StatusCode == http.StatusNoContent {
 				log.Info("joined cluster successfully")
 				return nil
 			}
@@ -824,6 +866,13 @@ func (p *controlPlaneProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.local.ServeHTTP(w, r)
 		return
 	}
+	// Raft join authorization is bound to the joining node certificate. Redirect
+	// rather than proxy so the leader verifies that original certificate instead
+	// of the forwarding member's transport identity.
+	if r.Method == http.MethodPost && r.URL.Path == "/v1/raft/join" {
+		http.Redirect(w, r, target+r.URL.RequestURI(), http.StatusTemporaryRedirect)
+		return
+	}
 
 	targetURL, err := url.Parse(target)
 	if err != nil {
@@ -859,39 +908,78 @@ func newHTTPTransport(tlsConfig *tls.Config) *http.Transport {
 	}
 }
 
-func clusterAuthMiddleware(token string) echo.MiddlewareFunc {
-	return middleware.KeyAuthWithConfig(middleware.KeyAuthConfig{KeyLookup: "header:Authorization:Bearer ", Validator: func(_ *echo.Context, key string, _ middleware.ExtractorSource) (bool, error) {
-		return subtle.ConstantTimeCompare([]byte(key), []byte(token)) == 1, nil
-	}})
+func authenticatedNodeID(r *http.Request) (uuid.UUID, bool) {
+	if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 || len(r.TLS.VerifiedChains[0]) == 0 {
+		return uuid.Nil, false
+	}
+	id, err := tlsutil.NodeID(r.TLS.VerifiedChains[0][0])
+	return id, err == nil
 }
 
-func leaderAuthMiddleware(bootstrapToken string, tokenManager *auth.TokenManager) echo.MiddlewareFunc {
-	return middleware.KeyAuthWithConfig(middleware.KeyAuthConfig{
-		KeyLookup: "header:Authorization:Bearer ",
-		Skipper: func(c *echo.Context) bool {
-			return c.Request().URL.Path == "/metrics"
-		},
-		Validator: func(c *echo.Context, key string, _ middleware.ExtractorSource) (bool, error) {
-			if subtle.ConstantTimeCompare([]byte(key), []byte(bootstrapToken)) == 1 {
-				principal := auth.BootstrapPrincipal()
+func nodeAuthMiddleware(authorize func(uuid.UUID) bool) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c *echo.Context) error {
+			id, ok := authenticatedNodeID(c.Request())
+			if !ok {
+				return echo.NewHTTPError(http.StatusUnauthorized, "authenticated node certificate required")
+			}
+			if authorize != nil && !authorize(id) {
+				return echo.NewHTTPError(http.StatusForbidden, "agent operation requires the current Raft leader identity")
+			}
+			ctx := context.WithValue(c.Request().Context(), server.NodeContextKey, id)
+			c.SetRequest(c.Request().WithContext(ctx))
+			return next(c)
+		}
+	}
+}
+
+func nodeControlPlaneRoute(r *http.Request) bool {
+	path := r.URL.Path
+	return (r.Method == http.MethodPost && path == "/v1/nodes") ||
+		(r.Method == http.MethodPost && strings.HasPrefix(path, "/v1/nodes/") && strings.HasSuffix(path, "/heartbeat")) ||
+		(r.Method == http.MethodGet && path == "/v1/internal/discovery") ||
+		(r.Method == http.MethodPost && path == "/v1/raft/join")
+}
+
+func leaderAuthMiddleware(adminToken, enrollmentToken string, tokenManager *auth.TokenManager) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c *echo.Context) error {
+			if c.Request().URL.Path == "/metrics" {
+				return next(c)
+			}
+			key := strings.TrimPrefix(c.Request().Header.Get("Authorization"), "Bearer ")
+			if enrollmentToken != "" && c.Request().URL.Path == "/v1/nodes/enroll" && subtle.ConstantTimeCompare([]byte(key), []byte(enrollmentToken)) == 1 {
+				ctx := context.WithValue(c.Request().Context(), server.EnrollmentContextKey, true)
+				c.SetRequest(c.Request().WithContext(ctx))
+				return next(c)
+			}
+			if key != "" && subtle.ConstantTimeCompare([]byte(key), []byte(adminToken)) == 1 {
+				principal := auth.AdministratorPrincipal()
 				ctx := context.WithValue(c.Request().Context(), server.AdminContextKey, true)
 				ctx = context.WithValue(ctx, server.PrincipalContextKey, principal)
 				c.SetRequest(c.Request().WithContext(ctx))
-				return true, nil
+				return next(c)
 			}
-			principal, err := tokenManager.ValidateToken(c.Request().Context(), key)
-			if err != nil {
-				return false, nil
+			if key != "" && tokenManager != nil {
+				principal, err := tokenManager.ValidateToken(c.Request().Context(), key)
+				if err == nil && principal != nil {
+					ctx := context.WithValue(c.Request().Context(), server.NamespaceContextKey, auth.EncodeScope(principal.Scope, principal.Access, principal.Namespace))
+					ctx = context.WithValue(ctx, server.PrincipalContextKey, *principal)
+					c.SetRequest(c.Request().WithContext(ctx))
+					return next(c)
+				}
 			}
-			if principal != nil {
-				ctx := context.WithValue(c.Request().Context(), server.NamespaceContextKey, auth.EncodeScope(principal.Scope, principal.Access, principal.Namespace))
-				ctx = context.WithValue(ctx, server.PrincipalContextKey, *principal)
+			if id, ok := authenticatedNodeID(c.Request()); ok {
+				if !nodeControlPlaneRoute(c.Request()) {
+					return echo.NewHTTPError(http.StatusForbidden, "node identity is not authorized for this API operation")
+				}
+				ctx := context.WithValue(c.Request().Context(), server.NodeContextKey, id)
 				c.SetRequest(c.Request().WithContext(ctx))
-				return true, nil
+				return next(c)
 			}
-			return false, nil
-		},
-	})
+			return echo.NewHTTPError(http.StatusUnauthorized, "invalid credential")
+		}
+	}
 }
 
 func splitAddress(address string) (string, int, error) {

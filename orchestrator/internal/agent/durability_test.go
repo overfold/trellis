@@ -7,6 +7,7 @@ import (
 
 	"github.com/clofour/trellis/internal/api"
 	"github.com/clofour/trellis/internal/storage"
+	"github.com/google/uuid"
 )
 
 func TestEpochFenceSurvivesRestart(t *testing.T) {
@@ -48,5 +49,22 @@ func TestLeaderUnavailableDoesNotConfirmOrphan(t *testing.T) {
 	agent.reconcileDesired(context.Background(), &api.HeartbeatResponse{OrphanConfirmation: false})
 	if len(agent.allocations) != 1 || len(agent.orphans) != 0 {
 		t.Fatal("an unconfirmed allocation was considered orphaned")
+	}
+}
+
+func TestHeartbeatMovesAgentAuthorityToNewLeader(t *testing.T) {
+	agent := &Agent{}
+	oldLeader, newLeader := uuid.New(), uuid.New()
+	agent.reconcileDesired(context.Background(), &api.HeartbeatResponse{Epoch: 4, LeaderID: oldLeader})
+	if !agent.AuthorizeLeader(oldLeader) || agent.AuthorizeLeader(newLeader) {
+		t.Fatal("initial leader identity was not enforced")
+	}
+	agent.reconcileDesired(context.Background(), &api.HeartbeatResponse{Epoch: 5, LeaderID: newLeader})
+	if agent.AuthorizeLeader(oldLeader) || !agent.AuthorizeLeader(newLeader) {
+		t.Fatal("agent retained stale leader authority after failover")
+	}
+	agent.reconcileDesired(context.Background(), &api.HeartbeatResponse{Epoch: 4, LeaderID: oldLeader})
+	if agent.AuthorizeLeader(oldLeader) || !agent.AuthorizeLeader(newLeader) {
+		t.Fatal("stale epoch restored former leader authority")
 	}
 }

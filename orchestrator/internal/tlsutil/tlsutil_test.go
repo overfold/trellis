@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"testing"
+
+	"github.com/google/uuid"
 )
 
 func generateTestMaterials(t *testing.T) *Materials {
@@ -16,7 +18,7 @@ func generateTestMaterials(t *testing.T) *Materials {
 	if err != nil {
 		t.Fatal(err)
 	}
-	nodeCert, nodeKey, err := GenerateNodeCert(caCert, caKey)
+	nodeCert, nodeKey, err := GenerateNodeCert(caCert, caKey, uuid.New())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +43,8 @@ func TestGenerateNodeCert(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	certPEM, keyPEM, err := GenerateNodeCert(caCert, caKey)
+	nodeID := uuid.New()
+	certPEM, keyPEM, err := GenerateNodeCert(caCert, caKey, nodeID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,6 +53,9 @@ func TestGenerateNodeCert(t *testing.T) {
 	}
 	if len(keyPEM) == 0 {
 		t.Fatal("empty node key")
+	}
+	if err := ValidateMaterials(&Materials{CACert: caCert, Cert: certPEM, Key: keyPEM}, nodeID); err != nil {
+		t.Fatalf("validate node materials: %v", err)
 	}
 }
 
@@ -196,7 +202,7 @@ func TestGenerateNodeCertExtraSANs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	certPEM, _, err := GenerateNodeCert(caCert, caKey, "10.19.0.5:8128", "myhost:8127")
+	certPEM, _, err := GenerateNodeCert(caCert, caKey, uuid.New(), "10.19.0.5:8128", "myhost:8127")
 	if err != nil {
 		t.Fatal(err)
 	}

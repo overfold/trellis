@@ -12,7 +12,9 @@ import (
 func TestLoadNodeConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "trellis.yaml")
 	if err := os.WriteFile(path, []byte(`cluster: production
-bootstrap_token: trls_boot_test
+admin_token: trls_admin_test
+enrollment_token: trls_enroll_test
+node_signing_mode: managed
 agent_advertise: node-a:8127
 wireguard_port: 51900
 wireguard_port_count: 64
@@ -29,7 +31,7 @@ resources:
 	if err := loadNodeConfig(path, cfg, pflag.NewFlagSet("test", pflag.ContinueOnError)); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Cluster != "production" || cfg.ClusterToken != "trls_boot_test" || cfg.AgentAdvertise != "node-a:8127" || cfg.WireGuardPort != 51900 || cfg.WireGuardPortCount != 64 {
+	if cfg.Cluster != "production" || cfg.AdminToken != "trls_admin_test" || cfg.EnrollmentToken != "trls_enroll_test" || cfg.SigningMode != "managed" || cfg.AgentAdvertise != "node-a:8127" || cfg.WireGuardPort != 51900 || cfg.WireGuardPortCount != 64 {
 		t.Fatalf("unexpected config: %#v", cfg)
 	}
 	if len(cfg.Labels) != 1 || cfg.Labels[0] != "storage=fast" {
@@ -65,7 +67,7 @@ func TestLoadNodeConfigFlagsOverrideFile(t *testing.T) {
 
 func TestLoadNodeConfigRejectsUnknownFields(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "trellis.yaml")
-	if err := os.WriteFile(path, []byte("bootstrap_token: token\nclustr: typo\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("admin_token: token\nclustr: typo\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := loadNodeConfig(path, &config{}, pflag.NewFlagSet("test", pflag.ContinueOnError)); err == nil {

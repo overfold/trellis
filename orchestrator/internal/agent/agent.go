@@ -51,6 +51,7 @@ type Agent struct {
 	cluster     string
 	version     string
 	epoch       uint64
+	leaderID    uuid.UUID
 	orphans     map[string]int
 	mu          sync.RWMutex
 	operationMu sync.Mutex
@@ -168,6 +169,14 @@ func (a *Agent) AcceptEpoch(epoch uint64) error {
 	}
 	a.epoch = epoch
 	return nil
+}
+
+// AuthorizeLeader reports whether id is the current Raft leader learned from
+// the latest authenticated heartbeat response.
+func (a *Agent) AuthorizeLeader(id uuid.UUID) bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return id != uuid.Nil && id == a.leaderID
 }
 
 func allocationRecordKey(id string) string {
@@ -532,10 +541,16 @@ func (a *Agent) StopGroup(ctx context.Context, request *api.StopAllocationReques
 }
 
 func (a *Agent) reconcileDesired(ctx context.Context, response *api.HeartbeatResponse) {
-	if response == nil || !response.OrphanConfirmation {
+	if response == nil || response.LeaderID == uuid.Nil {
 		return
 	}
 	if err := a.AcceptEpoch(response.Epoch); err != nil {
+		return
+	}
+	a.mu.Lock()
+	a.leaderID = response.LeaderID
+	a.mu.Unlock()
+	if !response.OrphanConfirmation {
 		return
 	}
 	type desiredState struct {

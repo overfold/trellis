@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -39,8 +38,8 @@ const (
 type CredentialKind string
 
 const (
-	// CredentialBootstrap is the root credential shared by Trellis nodes.
-	CredentialBootstrap CredentialKind = "bootstrap"
+	// CredentialAdministrator is the root operator credential.
+	CredentialAdministrator CredentialKind = "administrator"
 	// CredentialOperator is an explicitly minted human or external-client credential.
 	CredentialOperator CredentialKind = "operator"
 	// CredentialWorkload is injected into a task group through api_access.
@@ -64,9 +63,9 @@ type Principal struct {
 	CreatedAt time.Time          `json:"created_at,omitempty"`
 }
 
-// BootstrapPrincipal returns the effective principal for the node bootstrap credential.
-func BootstrapPrincipal() Principal {
-	return Principal{Kind: CredentialBootstrap, Scope: AccessCluster, Access: AccessWrite}
+// AdministratorPrincipal returns the effective principal for the administrator credential.
+func AdministratorPrincipal() Principal {
+	return Principal{Kind: CredentialAdministrator, Scope: AccessCluster, Access: AccessWrite}
 }
 
 // Validate checks that a persisted principal is internally consistent.
@@ -200,11 +199,4 @@ func (m *TokenManager) GetOrCreateWorkloadToken(ctx context.Context, scope Acces
 		return "", fmt.Errorf("store workload token mapping: %w", err)
 	}
 	return token, nil
-}
-
-// ValidateBootstrapToken compares a token with the stored bootstrap token hash.
-func ValidateBootstrapToken(clusterHash, candidate string) bool {
-	hash := sha256.Sum256([]byte(candidate))
-	hashHex := hex.EncodeToString(hash[:])
-	return subtle.ConstantTimeCompare([]byte(hashHex), []byte(clusterHash)) == 1
 }

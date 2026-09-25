@@ -27,6 +27,7 @@ import (
 	"github.com/clofour/trellis/internal/spec"
 	"github.com/clofour/trellis/internal/state"
 	"github.com/clofour/trellis/internal/storage"
+	"github.com/clofour/trellis/internal/tlsutil"
 
 	"github.com/google/uuid"
 )
@@ -63,6 +64,7 @@ type Server struct {
 	tokenManager       *auth.TokenManager
 	catalog            *catalog.ServiceCatalog
 	serverAddr         string
+	nodeID             uuid.UUID
 	clusterName        string
 	jobLimits          spec.Limits
 	joiner             ClusterJoiner
@@ -87,11 +89,11 @@ type Server struct {
 	networkPlanWorkers map[uuid.UUID]uint64
 	networkPlanWake    chan struct{}
 	controlEpoch       uint64
-	leaderSince   time.Time
-	now           func() time.Time
-	metrics       *Metrics
-	secrets       *secretstore.Store
-	events        *EventBus
+	leaderSince        time.Time
+	now                func() time.Time
+	metrics            *Metrics
+	secrets            *secretstore.Store
+	events             *EventBus
 }
 
 // SetSecretStore configures encrypted secret storage.
@@ -486,12 +488,12 @@ func (s *Server) SetWireGuardPortCount(count int) error {
 	return nil
 }
 
-// Init initializes cluster state and returns its token.
+// Init initializes cluster state and returns its administrator token.
 func (s *Server) Init(ctx context.Context) (string, error) {
 	return s.InitWithToken(ctx, "")
 }
 
-// InitWithToken initializes cluster state with an optional configured token.
+// InitWithToken initializes cluster state with an optional configured administrator token.
 func (s *Server) InitWithToken(ctx context.Context, configuredToken string) (string, error) {
 	cluster, err := s.state.GetCluster(ctx)
 	if err != nil {
@@ -505,13 +507,13 @@ func (s *Server) InitWithToken(ctx context.Context, configuredToken string) (str
 		token := configuredToken
 		if token == "" {
 			if err := s.storage.Get("token", &token); err != nil && !os.IsNotExist(unwrapPathError(err)) {
-				return "", fmt.Errorf("load local cluster token: %w", err)
+				return "", fmt.Errorf("load local administrator token: %w", err)
 			}
 		}
 		if token == "" || !validateToken(cluster, token) {
-			return "", fmt.Errorf("cluster token is missing or does not match cluster")
+			return "", fmt.Errorf("administrator token is missing or does not match cluster")
 		}
-		s.client = client.NewAgentClient(token, s.clientTLS)
+		s.client = client.NewAgentClient("", s.clientTLS)
 		s.controlEpoch = cluster.ControlEpoch
 		return "", nil
 	}
@@ -520,7 +522,7 @@ func (s *Server) InitWithToken(ctx context.Context, configuredToken string) (str
 	if token == "" {
 		b := make([]byte, 32)
 		if _, err = rand.Read(b); err != nil {
-			return "", fmt.Errorf("generate cluster token: %w", err)
+			return "", fmt.Errorf("generate administrator token: %w", err)
 		}
 		token = base64.RawURLEncoding.EncodeToString(b)
 	}
@@ -544,7 +546,7 @@ func (s *Server) InitWithToken(ctx context.Context, configuredToken string) (str
 
 	s.cluster = cluster
 	s.controlEpoch = cluster.ControlEpoch
-	s.client = client.NewAgentClient(token, s.clientTLS)
+	s.client = client.NewAgentClient("", s.clientTLS)
 
 	return token, nil
 }
@@ -554,15 +556,43 @@ func (s *Server) SetClientTLS(cfg *tls.Config) {
 	s.clientTLS = cfg
 }
 
+// SetNodeID configures the immutable identity of this control-plane member.
+func (s *Server) SetNodeID(id uuid.UUID) { s.nodeID = id }
+
 // ClusterCA returns the cluster certificate authority materials.
 func (s *Server) ClusterCA() (certPEM, keyPEM string, err error) {
 	if err := s.storage.Get("tls/ca-cert", &certPEM); err != nil {
 		return "", "", fmt.Errorf("load CA cert: %w", err)
 	}
 	if err := s.storage.Get("tls/ca-key", &keyPEM); err != nil {
+		if os.IsNotExist(unwrapPathError(err)) {
+			return certPEM, "", nil
+		}
 		return "", "", fmt.Errorf("load CA key: %w", err)
 	}
 	return certPEM, keyPEM, nil
+}
+
+// EnrollNode issues a unique node certificate in managed signing mode. An
+// external-signing node has no local CA key, so enrollment is unavailable.
+func (s *Server) EnrollNode(nodeID uuid.UUID, advertised ...string) (*api.NodeEnrollmentResponse, error) {
+	if nodeID == uuid.Nil {
+		return nil, fmt.Errorf("node_id is required")
+	}
+	caCert, caKey, err := s.ClusterCA()
+	if err != nil || caKey == "" {
+		return nil, fmt.Errorf("managed node signer is unavailable")
+	}
+	cert, key, err := tlsutil.GenerateNodeCert([]byte(caCert), []byte(caKey), nodeID, advertised...)
+	if err != nil {
+		return nil, fmt.Errorf("sign node certificate: %w", err)
+	}
+	return &api.NodeEnrollmentResponse{
+		CACert: caCert,
+		CAKey:  caKey,
+		Cert:   string(cert),
+		Key:    string(key),
+	}, nil
 }
 
 func validateToken(cluster *Cluster, token string) bool {
@@ -769,7 +799,7 @@ func (s *Server) HeartbeatResponse(nodeID uuid.UUID) api.HeartbeatResponse {
 	epoch, leaderSince := s.controlEpoch, s.leaderSince
 	allocations := append([]*Allocation(nil), s.allocations...)
 	s.mu.RUnlock()
-	response := api.HeartbeatResponse{Epoch: epoch, OrphanConfirmation: !leaderSince.IsZero() && s.now().Sub(leaderSince) >= leaderRecoveryGrace}
+	response := api.HeartbeatResponse{Epoch: epoch, LeaderID: s.nodeID, OrphanConfirmation: !leaderSince.IsZero() && s.now().Sub(leaderSince) >= leaderRecoveryGrace}
 	for _, allocation := range allocations {
 		allocation.mu.Lock()
 		if allocation.Node != nil && allocation.Node.ID == nodeID && allocation.Phase != lifecycle.PhaseStopped && allocation.Phase != lifecycle.PhaseFailed && allocation.Phase != lifecycle.PhaseLost {

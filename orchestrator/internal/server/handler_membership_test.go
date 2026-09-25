@@ -7,6 +7,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/clofour/trellis/internal/storage"
+	"github.com/clofour/trellis/internal/tlsutil"
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 )
 
@@ -73,5 +76,48 @@ func TestHandleRaftMemberRemoveRequiresClusterAuthorization(t *testing.T) {
 	}
 	if joiner.removedID != "" {
 		t.Fatalf("unexpected removal of %q", joiner.removedID)
+	}
+}
+
+func TestManagedNodeEnrollmentIssuesCertificateForRequestedIdentity(t *testing.T) {
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	caCert, caKey, err := tlsutil.GenerateCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := local.Put("tls/ca-cert", string(caCert)); err != nil {
+		t.Fatal(err)
+	}
+	if err := local.Put("tls/ca-key", string(caKey)); err != nil {
+		t.Fatal(err)
+	}
+	id := uuid.New()
+	response, err := (&Server{storage: local}).EnrollNode(id, "node-b:8128", "node-b:8127")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &tlsutil.Materials{CACert: []byte(response.CACert), Cert: []byte(response.Cert), Key: []byte(response.Key)}
+	if err := tlsutil.ValidateMaterials(m, id); err != nil {
+		t.Fatalf("enrolled certificate: %v", err)
+	}
+}
+
+func TestExternalSigningCannotEnrollWithoutCAKey(t *testing.T) {
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	caCert, _, err := tlsutil.GenerateCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := local.Put("tls/ca-cert", string(caCert)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&Server{storage: local}).EnrollNode(uuid.New()); err == nil {
+		t.Fatal("external-signing node unexpectedly enrolled another node")
 	}
 }

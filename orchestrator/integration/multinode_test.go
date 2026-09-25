@@ -118,9 +118,9 @@ func newHarness(t *testing.T, count int) *harness {
 		for p, listener := range listeners {
 			n.ports[p] = listener.Addr().(*net.TCPAddr).Port
 		}
-		n.args = []string{"--bootstrap-token", h.token, "--cluster", "integration", "--data-dir", n.dir, "--runtime", "injected", "--runtime-faults", filepath.Join(n.dir, "fault.json"), "--agent-listen", addr(n.ports[0]), "--agent-advertise", addr(n.ports[0]), "--server-listen", addr(n.ports[1]), "--server-advertise", addr(n.ports[1]), "--raft-listen", addr(n.ports[2]), "--raft-advertise", addr(n.ports[2]), "--dns-listen", addr(n.ports[3]), "--wireguard-port", fmt.Sprint(n.ports[4]), "--wireguard-port-count", "1"}
+		n.args = []string{"--admin-token", h.token, "--enrollment-token", "integration-enrollment", "--cluster", "integration", "--data-dir", n.dir, "--runtime", "injected", "--runtime-faults", filepath.Join(n.dir, "fault.json"), "--agent-listen", addr(n.ports[0]), "--agent-advertise", addr(n.ports[0]), "--server-listen", addr(n.ports[1]), "--server-advertise", addr(n.ports[1]), "--raft-listen", addr(n.ports[2]), "--raft-advertise", addr(n.ports[2]), "--dns-listen", addr(n.ports[3]), "--wireguard-port", fmt.Sprint(n.ports[4]), "--wireguard-port-count", "1"}
 		if i > 0 {
-			n.args = append(n.args, "--join", addr(h.nodes[0].ports[1]))
+			n.args = append(n.args, "--join", addr(h.nodes[0].ports[1]), "--ca-cert", filepath.Join(h.nodes[0].dir, "node-ca.crt"))
 		}
 		for _, listener := range listeners {
 			_ = listener.Close()
