@@ -255,6 +255,20 @@ func (s *Server) Reconcile(ctx context.Context) {
 			continue
 		}
 		if allocation.Phase == lifecycle.PhasePending {
+			groupExists := false
+			for _, group := range job.Spec.TaskGroups {
+				if group.Name == allocation.TaskGroupName {
+					groupExists = true
+					break
+				}
+			}
+			if !groupExists {
+				_ = allocation.Transition(lifecycle.PhaseStopping, now, "group_removed", "task group was removed")
+				_ = allocation.Transition(lifecycle.PhaseStopped, now, "group_removed", "task group was removed")
+				_ = s.state.PutAllocation(context.WithoutCancel(ctx), allocation)
+				allocation.mu.Unlock()
+				continue
+			}
 			valid = append(valid, allocation)
 			allocation.mu.Unlock()
 			continue
@@ -381,6 +395,13 @@ func (s *Server) Reconcile(ctx context.Context) {
 				actions = append(actions, Action{Type: ActionStop, Allocation: current[len(current)-1]})
 				current = current[:len(current)-1]
 			}
+			for len(pending) > max(group.Count-len(current), 0) {
+				allocation := pending[len(pending)-1]
+				_ = allocation.Transition(lifecycle.PhaseStopping, now, "scale_down", "allocation exceeds desired replica count")
+				_ = allocation.Transition(lifecycle.PhaseStopped, now, "scale_down", "allocation exceeds desired replica count")
+				_ = s.state.PutAllocation(context.WithoutCancel(ctx), allocation)
+				pending = pending[:len(pending)-1]
+			}
 			if len(draining) > 0 {
 				healthyNew := 0
 				for _, alloc := range current {
@@ -419,6 +440,8 @@ func (s *Server) Reconcile(ctx context.Context) {
 				node := s.nodes[placement.NodeID]
 				if i < len(pending) {
 					allocation := pending[i]
+					allocation.Tasks = group.Tasks
+					allocation.JobRevision = job.Revision
 					allocation.Node = node
 					_ = allocation.Transition(lifecycle.PhasePlaced, now, "", "")
 					actions = append(actions, Action{Type: ActionStart, Allocation: allocation})

@@ -2,11 +2,13 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/clofour/trellis/internal/api"
 	"github.com/clofour/trellis/internal/lifecycle"
 	"github.com/clofour/trellis/internal/spec"
 	"github.com/google/uuid"
@@ -91,6 +93,62 @@ func TestReconcileEnforcesNamespaceDesiredAllocationLimit(t *testing.T) {
 				t.Fatalf("excluded allocation phase = %s, want stopped", allocation.Phase)
 			}
 		}
+	}
+}
+
+func TestReconcileRetiresSurplusAndRemovedPendingAllocations(t *testing.T) {
+	s, agent := newTestServerWithAgent()
+	defer agent.server.Close()
+	s.jobs[jobKey("default", "web")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}, Revision: 2}
+	for _, group := range []string{"api", "api", "api", "removed"} {
+		s.allocations = append(s.allocations, &Allocation{ID: group + string(rune('a'+len(s.allocations))), Namespace: "default", JobName: "web", TaskGroupName: group, Generation: 1, JobRevision: 1, Phase: lifecycle.PhasePending})
+	}
+
+	s.Reconcile(context.Background())
+
+	persisted, err := s.state.ListAllocations(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := 0
+	for _, allocation := range s.allocations {
+		if allocation.Phase == lifecycle.PhasePending {
+			active++
+		} else if allocation.Phase != lifecycle.PhaseStopped || persisted[allocation.ID] == nil || persisted[allocation.ID].Phase != lifecycle.PhaseStopped {
+			t.Errorf("allocation %s was not retired and persisted: phase=%s", allocation.ID, allocation.Phase)
+		}
+	}
+	if active != 1 {
+		t.Fatalf("pending allocations = %d, want 1", active)
+	}
+}
+
+func TestReconcileRefreshesPendingAllocationBeforePlacement(t *testing.T) {
+	s, agent := newTestServerWithAgent()
+	defer agent.server.Close()
+	oldTasks := []spec.TaskSpec{{Name: "server", Image: "app:v1"}}
+	newTasks := []spec.TaskSpec{{Name: "server", Image: "app:v2"}}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Runtime: spec.RuntimeRunsc, Tasks: newTasks}}}, Revision: 2}
+	allocation := &Allocation{ID: "pending", Namespace: "default", JobName: "web", TaskGroupName: "api", Tasks: oldTasks, Generation: 1, JobRevision: 1, Phase: lifecycle.PhasePending}
+	s.allocations = []*Allocation{allocation}
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now(), Capabilities: []spec.NodeCapability{spec.CapabilityRunsc}}
+	s.nodes[node.ID] = node
+
+	s.Reconcile(context.Background())
+
+	if allocation.JobRevision != 2 || allocation.Tasks[0].Image != "app:v2" {
+		t.Fatalf("placed allocation retained stale manifest: revision=%d tasks=%#v", allocation.JobRevision, allocation.Tasks)
+	}
+	calls := agent.recordedCalls()
+	if len(calls) != 1 {
+		t.Fatalf("agent calls = %d, want 1", len(calls))
+	}
+	var request api.AllocationRequest
+	if err := json.Unmarshal(calls[0].body, &request); err != nil {
+		t.Fatal(err)
+	}
+	if request.JobRevision != 2 || len(request.Tasks) != 1 || request.Tasks[0].Image != "app:v2" {
+		t.Fatalf("agent received stale manifest: revision=%d tasks=%#v", request.JobRevision, request.Tasks)
 	}
 }
 
