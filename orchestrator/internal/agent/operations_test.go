@@ -779,19 +779,77 @@ func TestRecoverRetainsFailedStartRecordUntilNetworkDetachSucceeds(t *testing.T)
 	if err := local.Get(allocationRecordKey(id), &recorded); err != nil {
 		t.Fatalf("record removed after failed recovery detach: %v", err)
 	}
+	if recovered := second.allocations[id]; recovered == nil || recovered.Status != "stopping" {
+		t.Fatalf("failed cleanup is not reachable after recovery: %+v", recovered)
+	}
+	if err := second.RunGroup(context.Background(), request); !errors.Is(err, detachErr) {
+		t.Fatalf("retry start error = %v, want cleanup failure", err)
+	}
+	if err := local.Get(allocationRecordKey(id), &recorded); err != nil || recorded.Network == nil {
+		t.Fatalf("retry start overwrote cleanup record: %+v, error = %v", recorded, err)
+	}
 
 	manager.detachErr = nil
-	third := newOperationTestAgent(t, rt)
-	third.SetNetworkManager(manager)
-	third.ConfigureDurability(local, "test")
-	if err := third.recover(context.Background()); err != nil {
-		t.Fatalf("recover after detach became possible: %v", err)
+	if err := second.StopGroup(context.Background(), &api.StopAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation}); err != nil {
+		t.Fatalf("retry stop after recovery: %v", err)
 	}
 	if err := local.Get(allocationRecordKey(id), &recorded); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("record after successful recovery detach: %v, want not found", err)
+		t.Fatalf("record after successful retry stop: %v, want not found", err)
 	}
-	if manager.detachCount != 3 {
-		t.Fatalf("network detaches = %d, want initial cleanup and two recovery attempts", manager.detachCount)
+	if manager.detachCount != 4 {
+		t.Fatalf("network detaches = %d, want initial cleanup, recovery, retry start, and retry stop", manager.detachCount)
+	}
+}
+
+func TestRecoverMissingContainerRemovesSecretDirectoryBeforeRecord(t *testing.T) {
+	rt := &removedStartRuntime{ambiguousStartRuntime: &ambiguousStartRuntime{reconcilerRuntime: &reconcilerRuntime{}}}
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	secretDir := filepath.Join(t.TempDir(), "blocked", "secrets")
+	if err := os.WriteFile(filepath.Dir(secretDir), []byte("blocked"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	id := "allocation-g2-first"
+	allocation := &Allocation{ID: id, ContainerID: id, AllocationID: "allocation", Generation: 2, Status: "stopping", SecretDir: secretDir}
+	first := newOperationTestAgent(t, rt)
+	first.ConfigureDurability(local, "test")
+	if err := first.persistAllocation(allocation); err != nil {
+		t.Fatal(err)
+	}
+
+	second := newOperationTestAgent(t, rt)
+	second.ConfigureDurability(local, "test")
+	if err := second.recover(context.Background()); err != nil {
+		t.Fatalf("recover with failed secret removal: %v", err)
+	}
+	var recorded Allocation
+	if err := local.Get(allocationRecordKey(id), &recorded); err != nil || recorded.SecretDir != secretDir {
+		t.Fatalf("record after failed secret removal = %+v, error = %v", recorded, err)
+	}
+	if second.allocations[id] == nil {
+		t.Fatal("failed secret cleanup is not reachable after recovery")
+	}
+	if err := os.Remove(filepath.Dir(secretDir)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(secretDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(secretDir, "key"), []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	third := newOperationTestAgent(t, rt)
+	third.ConfigureDurability(local, "test")
+	if err := third.recover(context.Background()); err != nil {
+		t.Fatalf("recover after secret removal became possible: %v", err)
+	}
+	if _, err := os.Stat(secretDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("secret directory after recovery retry: %v", err)
+	}
+	if err := local.Get(allocationRecordKey(id), &recorded); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("record after recovery retry: %v", err)
 	}
 }
 

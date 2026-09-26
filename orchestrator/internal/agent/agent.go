@@ -379,11 +379,26 @@ func (a *Agent) recover(ctx context.Context) error {
 			_ = a.ports.Adopt(port)
 			_ = a.ports.Release(port)
 		}
+		var cleanupErr error
 		if err := a.network.Detach(context.WithoutCancel(ctx), allocation.Network); err != nil {
-			a.log.Error("detach network for missing allocation container", "allocation", allocation.AllocationID, "error", err)
-			continue
+			cleanupErr = fmt.Errorf("detach network for missing allocation container: %w", err)
+		} else if allocation.SecretDir != "" {
+			if err := os.RemoveAll(allocation.SecretDir); err != nil {
+				cleanupErr = fmt.Errorf("remove secret files for missing allocation container: %w", err)
+			}
 		}
-		_ = a.deleteAllocationRecord(allocation.ID)
+		if cleanupErr == nil {
+			if err := a.deleteAllocationRecord(allocation.ID); err != nil {
+				cleanupErr = fmt.Errorf("delete missing allocation record: %w", err)
+			}
+		}
+		if cleanupErr != nil {
+			a.log.Error("recover missing allocation container", "allocation", allocation.AllocationID, "error", cleanupErr)
+			allocation.Status = "stopping"
+			a.mu.Lock()
+			a.allocations[allocation.ID] = allocation
+			a.mu.Unlock()
+		}
 	}
 	return nil
 }
