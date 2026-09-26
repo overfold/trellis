@@ -4,6 +4,7 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/netip"
@@ -30,8 +31,9 @@ const gracePeriod = 10 * time.Second
 
 // ContainerdRuntime implements container lifecycle operations with containerd.
 type ContainerdRuntime struct {
-	client *containerd.Client
-	logDir string
+	client        *containerd.Client
+	logDir        string
+	legacyLogDir string
 }
 
 // Port maps a host port to a container port.
@@ -55,8 +57,9 @@ func NewContainerdRuntime(socketPath string) (*ContainerdRuntime, error) {
 	}
 
 	return &ContainerdRuntime{
-		client: client,
-		logDir: "/var/lib/trellis/runtime",
+		client:        client,
+		logDir:        "/var/lib/trellis/runtime",
+		legacyLogDir: filepath.Join(os.TempDir(), "trellis-logs"),
 	}, nil
 }
 
@@ -78,7 +81,7 @@ func (c *ContainerdRuntime) Pull(ctx context.Context, image string) error {
 }
 
 // Create creates a container from the supplied options.
-func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (string, error) {
+func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (id string, err error) {
 	ctx = c.withNamespace(ctx)
 	if err := ensureRuntimeDir(c.logDir); err != nil {
 		return "", fmt.Errorf("create runtime directory: %w", err)
@@ -90,8 +93,15 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 	}
 
 	allMounts := convertMounts(options.Mounts)
+	var createdFiles []string
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, removeRuntimeFiles(createdFiles...))
+		}
+	}()
 	if len(options.DNSServers) > 0 {
 		resolvPath := filepath.Join(c.logDir, options.ID+"-resolv.conf")
+		createdFiles = append(createdFiles, resolvPath)
 		if err := writeDNSConfig(resolvPath, options.DNSServers); err != nil {
 			return "", fmt.Errorf("write resolv.conf for %s: %w", options.ID, err)
 		}
@@ -104,6 +114,7 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 	}
 	if len(options.ExtraHosts) > 0 {
 		hostsPath := filepath.Join(c.logDir, options.ID+"-hosts")
+		createdFiles = append(createdFiles, hostsPath)
 		if err := writeHostsConfig(hostsPath, options.ExtraHosts); err != nil {
 			return "", fmt.Errorf("write hosts file for %s: %w", options.ID, err)
 		}
@@ -228,6 +239,9 @@ func checkOwnedDir(path string, info os.FileInfo, uid uint32, private bool) erro
 // Logs opens the log stream for a container.
 func (c *ContainerdRuntime) Logs(ctx context.Context, containerID string, follow bool, tail int) (io.ReadCloser, error) {
 	file, err := os.Open(c.logPath(containerID))
+	if os.IsNotExist(err) {
+		file, err = os.Open(filepath.Join(c.legacyLogDir, filepath.Base(containerID)+".log"))
+	}
 	if err != nil {
 		return nil, fmt.Errorf("open logs for %s: %w", containerID, err)
 	}
@@ -321,18 +335,40 @@ func (c *ContainerdRuntime) Remove(ctx context.Context, containerID string) erro
 
 	container, err := c.client.LoadContainer(ctx, containerID)
 	if err != nil {
-		if errdefs.IsNotFound(err) {
-			return nil
+		if !errdefs.IsNotFound(err) {
+			return fmt.Errorf("loading container %s: %w", containerID, err)
 		}
-		return fmt.Errorf("loading container %s: %w", containerID, err)
+	} else {
+		err = container.Delete(ctx, containerd.WithSnapshotCleanup)
+		if err != nil && !errdefs.IsNotFound(err) {
+			return fmt.Errorf("deleting container %s: %w", containerID, err)
+		}
 	}
 
-	err = container.Delete(ctx, containerd.WithSnapshotCleanup)
-	if err != nil && !errdefs.IsNotFound(err) {
-		return fmt.Errorf("deleting container %s: %w", containerID, err)
-	}
+	return c.removeAllocationFiles(containerID)
+}
 
-	return nil
+func (c *ContainerdRuntime) removeAllocationFiles(containerID string) error {
+	name := filepath.Base(containerID)
+	var paths []string
+	for _, dir := range []string{c.logDir, c.legacyLogDir} {
+		paths = append(paths,
+			filepath.Join(dir, name+".log"),
+			filepath.Join(dir, name+"-resolv.conf"),
+			filepath.Join(dir, name+"-hosts"),
+		)
+	}
+	return removeRuntimeFiles(paths...)
+}
+
+func removeRuntimeFiles(paths ...string) error {
+	var errs []error
+	for _, path := range paths {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("remove runtime file %s: %w", path, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // Exec runs a command in a container and returns its exit code.
