@@ -325,13 +325,16 @@ func (a *Agent) recover(ctx context.Context) error {
 			continue
 		}
 		stopping := hadRecord && allocation.Status == "stopping"
-		if hadRecord && !stopping && allocation.Status == "starting" && (container.Status == runtime.StatusCreated || container.Status == runtime.StatusStopped) {
-			if err := a.runtime.Start(ctx, container.ID); err != nil {
-				a.log.Error("resume interrupted allocation start", "container", container.ID, "error", err)
-				continue
-			}
+		recoveryPending := !stopping && (container.Status == runtime.StatusCreated || container.Status == runtime.StatusStopped)
+		if recoveryPending {
+			// Recovery reports observation; it does not invent desired state.
+			// A non-running recovered task stays restart-suppressed until the
+			// control plane observes "starting" and reconciliation reissues the
+			// appropriate start or stop action.
+			allocation.Status = "starting"
+			allocation.Health = "unknown"
+		} else if !stopping && container.Status == runtime.StatusRunning {
 			allocation.Status = "running"
-			container.Status = runtime.StatusRunning
 		}
 		if container.Status == runtime.StatusRunning || container.Status == runtime.StatusCreated || container.Status == runtime.StatusStopped {
 			for _, port := range allocation.Ports {
@@ -341,7 +344,7 @@ func (a *Agent) recover(ctx context.Context) error {
 			}
 			a.allocations[allocation.ID] = allocation
 			if allocation.Spec != nil {
-				if !stopping && allocation.Spec.HealthCheck != nil {
+				if !stopping && !recoveryPending && allocation.Spec.HealthCheck != nil {
 					check := *allocation.Spec.HealthCheck
 					for _, port := range allocation.Ports {
 						if port.ContainerPort == check.Port {
@@ -353,12 +356,12 @@ func (a *Agent) recover(ctx context.Context) error {
 				}
 				if stopping {
 					a.reconciler.TrackStopping(allocation.ID, allocation.Spec.HealthCheck != nil, allocation.Restart)
-				} else {
+				} else if !recoveryPending {
 					a.reconciler.TrackRecovered(allocation.ID, allocation.Spec.HealthCheck != nil, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow)
 				}
 			} else if stopping {
 				a.reconciler.TrackStopping(allocation.ID, false, nil)
-			} else {
+			} else if !recoveryPending {
 				a.reconciler.Track(allocation.ID, false, nil)
 			}
 			if err := a.persistAllocation(allocation); err != nil {
