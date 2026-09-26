@@ -197,6 +197,20 @@ func (a *Agent) deleteAllocationRecord(id string) error {
 	return a.local.Delete(allocationRecordKey(id))
 }
 
+func (a *Agent) markAllocationStopping(id string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	allocation := a.allocations[id]
+	if allocation == nil {
+		return fmt.Errorf("%w: %s", ErrAllocationNotFound, id)
+	}
+	allocation.Status = "stopping"
+	if err := a.persistAllocation(allocation); err != nil {
+		return fmt.Errorf("persist stopping allocation: %w", err)
+	}
+	return nil
+}
+
 // NewAgent creates an allocation agent.
 func NewAgent(log *slog.Logger, runtime runtime.ContainerRuntime, health *health.HealthManager, reconciler *AllocationReconciler, ports *PortManager, volumes *VolumeManager, server *client.ServerClient, nodeID uuid.UUID) *Agent {
 	executable, _ := os.Executable()
@@ -319,13 +333,17 @@ func (a *Agent) recover(ctx context.Context) error {
 			a.log.Warn("leave unidentifiable Trellis container untouched", "container", container.ID)
 			continue
 		}
-		if hadRecord && allocation.Status == "starting" && (container.Status == runtime.StatusCreated || container.Status == runtime.StatusStopped) {
-			if err := a.runtime.Start(ctx, container.ID); err != nil {
-				a.log.Error("resume interrupted allocation start", "container", container.ID, "error", err)
-				continue
-			}
+		stopping := hadRecord && allocation.Status == "stopping"
+		recoveryPending := !stopping && (container.Status == runtime.StatusCreated || container.Status == runtime.StatusStopped)
+		if recoveryPending {
+			// Recovery reports observation; it does not invent desired state.
+			// A non-running recovered task stays restart-suppressed until the
+			// control plane observes "starting" and reconciliation reissues the
+			// appropriate start or stop action.
+			allocation.Status = "starting"
+			allocation.Health = "unknown"
+		} else if !stopping && container.Status == runtime.StatusRunning {
 			allocation.Status = "running"
-			container.Status = runtime.StatusRunning
 		}
 		if container.Status == runtime.StatusRunning || container.Status == runtime.StatusCreated || container.Status == runtime.StatusStopped {
 			for _, port := range allocation.Ports {
@@ -335,7 +353,7 @@ func (a *Agent) recover(ctx context.Context) error {
 			}
 			a.allocations[allocation.ID] = allocation
 			if allocation.Spec != nil {
-				if allocation.Spec.HealthCheck != nil {
+				if !stopping && !recoveryPending && allocation.Spec.HealthCheck != nil {
 					check := *allocation.Spec.HealthCheck
 					for _, port := range allocation.Ports {
 						if port.ContainerPort == check.Port {
@@ -345,8 +363,14 @@ func (a *Agent) recover(ctx context.Context) error {
 					}
 					a.health.RegisterTask(allocation.ID, allocation.ContainerID, &check)
 				}
-				a.reconciler.TrackRecovered(allocation.ID, allocation.Spec.HealthCheck != nil, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow)
-			} else {
+				if stopping {
+					a.reconciler.TrackStopping(allocation.ID, allocation.Spec.HealthCheck != nil, allocation.Restart)
+				} else if !recoveryPending {
+					a.reconciler.TrackRecovered(allocation.ID, allocation.Spec.HealthCheck != nil, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow)
+				}
+			} else if stopping {
+				a.reconciler.TrackStopping(allocation.ID, false, nil)
+			} else if !recoveryPending {
 				a.reconciler.Track(allocation.ID, false, nil)
 			}
 			if err := a.persistAllocation(allocation); err != nil {
@@ -587,7 +611,7 @@ func (a *Agent) reconcileDesired(ctx context.Context, response *api.HeartbeatRes
 }
 
 // RunAllocation creates and starts one allocation task.
-func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, generation uint64, jobRevision int, executionHash, namespace, jobName, groupName, taskName string, taskSpec *spec.TaskSpec, groupRuntime string, networkPlan *network.Plan, envOverrides map[string]string, delivered []api.DeliveredSecret, restartPolicy *spec.RestartPolicySpec) error {
+func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, generation uint64, jobRevision int, executionHash, namespace, jobName, groupName, taskName string, taskSpec *spec.TaskSpec, groupRuntime string, networkPlan *network.Plan, envOverrides map[string]string, delivered []api.DeliveredSecret, restartPolicy *spec.RestartPolicySpec) (runErr error) {
 	ts := taskSpec
 	if ts == nil {
 		return fmt.Errorf("task spec is required")
@@ -598,13 +622,25 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	a.mu.Lock()
 	existing := a.allocations[allocID]
 	if existing != nil {
+		matching := existing.AllocationID == schedulerID && existing.Generation == generation && existing.ExecutionHash == executionHash
+		status := existing.Status
 		a.mu.Unlock()
-		if existing.AllocationID == schedulerID && existing.Generation == generation && existing.ExecutionHash == executionHash {
+		if !matching {
+			return fmt.Errorf("%w: %s", ErrAllocationExists, allocID)
+		}
+		if status == "running" {
 			return nil
 		}
-		return fmt.Errorf("%w: %s", ErrAllocationExists, allocID)
+		// A previous start may have reached the runtime but failed before it
+		// could be committed. Preserve its resources while Stop is uncertain,
+		// then finish that cleanup on a later retry instead of converting the
+		// retry into a terminal execution conflict.
+		if err := a.stopAllocation(context.WithoutCancel(ctx), allocID); err != nil {
+			return fmt.Errorf("clean up incomplete allocation %s before retry: %w", allocID, err)
+		}
+		a.mu.Lock()
 	}
-	alloc := &Allocation{ID: allocID, ContainerID: allocID, AllocationID: schedulerID, Generation: generation, JobRevision: jobRevision, ExecutionHash: executionHash, Namespace: namespace, JobName: jobName, GroupName: groupName, TaskName: taskName, Spec: ts, Status: "starting", Health: "unknown"}
+	alloc := &Allocation{ID: allocID, ContainerID: allocID, AllocationID: schedulerID, Generation: generation, JobRevision: jobRevision, ExecutionHash: executionHash, Restart: restartPolicy, Namespace: namespace, JobName: jobName, GroupName: groupName, TaskName: taskName, Spec: ts, Status: "starting", Health: "unknown"}
 	a.allocations[allocID] = alloc
 	a.mu.Unlock()
 	if err := a.persistAllocation(alloc); err != nil {
@@ -615,7 +651,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	}
 	committed := false
 	containerCreated := false
-	containerStarted := false
+	startAttempted := false
 	tracked := false
 	healthRegistered := false
 	var netAttachment *network.Attachment
@@ -630,14 +666,28 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		if committed {
 			return
 		}
+		if startAttempted {
+			if tracked {
+				a.reconciler.BeginStop(allocID)
+			} else {
+				// Start may have succeeded even if its response was lost. Track
+				// the retained allocation as stopping from the outset so an
+				// observed stopped task can never be restarted.
+				a.reconciler.TrackStopping(allocID, false, restartPolicy)
+				tracked = true
+			}
+			persistStopErr := a.markAllocationStopping(allocID)
+			runErr = errors.Join(runErr, persistStopErr)
+			if err := a.runtime.Stop(context.WithoutCancel(ctx), allocID); err != nil {
+				runErr = errors.Join(runErr, fmt.Errorf("stop container %s during failed start: %w", allocID, err))
+				return
+			}
+		}
 		if healthRegistered {
 			a.health.DeregisterTask(allocID)
 		}
 		if tracked {
 			_ = a.reconciler.Untrack(allocID)
-		}
-		if containerStarted {
-			_ = a.runtime.Stop(context.WithoutCancel(ctx), allocID)
 		}
 		if containerCreated {
 			_ = a.runtime.Remove(context.WithoutCancel(ctx), allocID)
@@ -726,6 +776,9 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		return err
 	}
 	alloc.SecretDir = secretDir
+	if err := a.persistAllocation(alloc); err != nil {
+		return fmt.Errorf("persist secret metadata: %w", err)
+	}
 	for k, v := range secretEnv {
 		env[k] = v
 	}
@@ -796,6 +849,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	}
 	containerCreated = true
 
+	startAttempted = true
 	err = a.runtime.Start(ctx, containerID)
 	if err != nil {
 		observed, inspectErr := a.runtime.Inspect(context.WithoutCancel(ctx), containerID)
@@ -803,8 +857,6 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 			return fmt.Errorf("start container %s: %w", containerID, err)
 		}
 	}
-	containerStarted = true
-
 	if ts.HealthCheck != nil {
 		check := *ts.HealthCheck
 		a.health.RegisterTask(allocID, containerID, &check)
@@ -1055,19 +1107,19 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string) error {
 	}
 
 	containerID := alloc.ContainerID
-	a.closeExecSessionsForAllocation(ctx, alloc.AllocationID)
+	a.reconciler.BeginStop(allocID)
+	persistStopErr := a.markAllocationStopping(allocID)
+	if err := a.runtime.Stop(ctx, containerID); err != nil {
+		return errors.Join(persistStopErr, fmt.Errorf("stop container %s: %w", containerID, err))
+	}
 
 	var errs []error
-	// Stop observation and reconciliation before tearing down runtime state so a
-	// periodic reconcile cannot race an intentional stop and restart the task.
+	a.closeExecSessionsForAllocation(ctx, alloc.AllocationID)
 	a.health.DeregisterTask(allocID)
 	if err := a.reconciler.Untrack(allocID); err != nil {
 		errs = append(errs, fmt.Errorf("untrack allocation %s: %w", allocID, err))
 	}
 
-	if err := a.runtime.Stop(ctx, containerID); err != nil {
-		errs = append(errs, fmt.Errorf("stop container %s: %w", containerID, err))
-	}
 	if err := a.network.Detach(ctx, alloc.Network); err != nil {
 		errs = append(errs, fmt.Errorf("detach allocation network: %w", err))
 	}
@@ -1087,16 +1139,16 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string) error {
 		}
 	}
 	if err := errors.Join(errs...); err != nil {
-		return err
+		return errors.Join(persistStopErr, err)
 	}
 	if err := a.deleteAllocationRecord(allocID); err != nil {
-		return fmt.Errorf("delete allocation record: %w", err)
+		return errors.Join(persistStopErr, fmt.Errorf("delete allocation record: %w", err))
 	}
 	a.mu.Lock()
 	delete(a.allocations, allocID)
 	a.mu.Unlock()
 
-	return nil
+	return persistStopErr
 }
 
 func prepareSecrets(allocID, taskName string, delivered []api.DeliveredSecret) (string, map[string]string, []*runtime.Mount, error) {

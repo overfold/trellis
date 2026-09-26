@@ -36,6 +36,8 @@ type AllocationReconcileSubscriber interface {
 }
 
 type allocationReconcileState struct {
+	operation     sync.Mutex
+	stopping      bool
 	healthManaged bool
 	restarting    bool
 	attempts      int
@@ -56,24 +58,50 @@ func NewAllocationReconciler(runtime runtime.ContainerRuntime, subscriber Alloca
 
 // Track begins reconciliation for an allocation.
 func (r *AllocationReconciler) Track(allocID string, healthManaged bool, policy *spec.RestartPolicySpec) {
-	r.TrackRecovered(allocID, healthManaged, policy, 0, time.Time{})
+	r.trackRecovered(allocID, healthManaged, policy, 0, time.Time{}, false)
+}
+
+// TrackStopping observes an allocation while permanently suppressing automatic restarts.
+func (r *AllocationReconciler) TrackStopping(allocID string, healthManaged bool, policy *spec.RestartPolicySpec) {
+	r.trackRecovered(allocID, healthManaged, policy, 0, time.Time{}, true)
 }
 
 // TrackRecovered restores reconciliation state for an allocation.
 func (r *AllocationReconciler) TrackRecovered(allocID string, healthManaged bool, policy *spec.RestartPolicySpec, attempts int, window time.Time) {
+	r.trackRecovered(allocID, healthManaged, policy, attempts, window, false)
+}
+
+func restartPolicyLimits(policy *spec.RestartPolicySpec) (int, time.Duration) {
+	if policy == nil {
+		return defaultMaxRestarts, defaultRestartWindow
+	}
+	return policy.MaxRestarts, policy.Window
+}
+
+func advanceRestartState(attempts int, window time.Time, maxRestarts int, restartWindow time.Duration, now time.Time) (int, time.Time, bool) {
+	if window.IsZero() {
+		window = now
+	}
+	if now.Sub(window) > restartWindow {
+		attempts = 0
+		window = now
+	}
+	if attempts >= maxRestarts {
+		return attempts, window, false
+	}
+	return attempts + 1, window, true
+}
+
+func (r *AllocationReconciler) trackRecovered(allocID string, healthManaged bool, policy *spec.RestartPolicySpec, attempts int, window time.Time, stopping bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	maxRestarts := defaultMaxRestarts
-	restartWindow := defaultRestartWindow
-	if policy != nil {
-		maxRestarts = policy.MaxRestarts
-		restartWindow = policy.Window
-	}
+	maxRestarts, restartWindow := restartPolicyLimits(policy)
 	if window.IsZero() {
 		window = time.Now()
 	}
 	r.states[allocID] = &allocationReconcileState{
+		stopping:      stopping,
 		healthManaged: healthManaged,
 		attempts:      attempts,
 		window:        window,
@@ -92,6 +120,21 @@ func (r *AllocationReconciler) Untrack(allocID string) error {
 	}
 	delete(r.states, allocID)
 	return nil
+}
+
+// BeginStop waits for an active reconciliation pass and prevents further restarts.
+func (r *AllocationReconciler) BeginStop(allocID string) {
+	r.mu.Lock()
+	state := r.states[allocID]
+	r.mu.Unlock()
+	if state == nil {
+		return
+	}
+	state.operation.Lock()
+	r.mu.Lock()
+	state.stopping = true
+	r.mu.Unlock()
+	state.operation.Unlock()
 }
 
 // ObserveHealth records a health observation. The health manager owns how an
@@ -148,10 +191,18 @@ func (r *AllocationReconciler) trackedAllocations() []string {
 // Reconcile performs one local desired-vs-actual pass for an allocation.
 func (r *AllocationReconciler) Reconcile(ctx context.Context, allocID string) error {
 	r.mu.Lock()
-	_, tracked := r.states[allocID]
+	state := r.states[allocID]
 	r.mu.Unlock()
-	if !tracked {
+	if state == nil {
 		return fmt.Errorf("alloc %s not tracked", allocID)
+	}
+	state.operation.Lock()
+	defer state.operation.Unlock()
+	r.mu.Lock()
+	active := r.states[allocID] == state && !state.stopping
+	r.mu.Unlock()
+	if !active {
+		return nil
 	}
 
 	containerState, err := r.runtime.Inspect(ctx, allocID)
@@ -179,18 +230,15 @@ func (r *AllocationReconciler) restart(ctx context.Context, allocID string) erro
 	state.restarting = true
 
 	now := time.Now()
-	if now.Sub(state.window) > state.restartWindow {
-		state.attempts = 0
-		state.window = now
-	}
-	if state.attempts >= state.maxRestarts {
+	attempts, window, allowed := advanceRestartState(state.attempts, state.window, state.maxRestarts, state.restartWindow, now)
+	if !allowed {
 		state.restarting = false
+		state.window = window
 		r.mu.Unlock()
 		r.publishStatus(allocID, "unhealthy")
 		return nil
 	}
-	state.attempts++
-	attempts, window := state.attempts, state.window
+	state.attempts, state.window = attempts, window
 	healthManaged := state.healthManaged
 	r.mu.Unlock()
 	if subscriber, ok := r.Subscriber.(interface{ OnRestartState(string, int, time.Time) }); ok {

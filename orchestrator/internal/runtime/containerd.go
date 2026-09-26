@@ -237,12 +237,12 @@ func (c *ContainerdRuntime) Stop(ctx context.Context, containerID string) error 
 		return fmt.Errorf("getting task status for %s: %w", containerID, err)
 	}
 
-	// Only signal and wait if the process is still running. A task whose
-	// process has already exited (Stopped) must be deleted without signaling —
-	// sending SIGTERM to a dead process returns a FailedPrecondition error
-	// from containerd that is not errdefs.IsNotFound, which would cause Stop
-	// to fail and leave the exited task un-deleted, blocking future restarts.
-	if rawStatus.Status != containerd.Stopped {
+	// Only signal and wait for active tasks. Created tasks have not started
+	// their user process, and Stopped tasks have already exited; both should
+	// skip Trellis's graceful TERM/KILL sequence and go straight to containerd
+	// task deletion below. WithProcessKill handles Created tasks whose shim PID
+	// is already nonzero while remaining safe for Stopped tasks.
+	if rawStatus.Status != containerd.Created && rawStatus.Status != containerd.Stopped {
 		exitChannel, err := task.Wait(ctx)
 		if err != nil {
 			return fmt.Errorf("waiting on task for %s: %w", containerID, err)
