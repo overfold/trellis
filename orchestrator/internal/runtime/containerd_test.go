@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -8,6 +9,72 @@ import (
 
 	"github.com/opencontainers/runtime-spec/specs-go"
 )
+
+func TestOpenLogFileUsesLegacyPathOnlyWhenCurrentLogIsMissing(t *testing.T) {
+	dir := t.TempDir()
+	current := filepath.Join(dir, "current.log")
+	legacy := filepath.Join(dir, "legacy.log")
+	if err := os.WriteFile(legacy, []byte("legacy"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := openLogFile(current, legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(file)
+	_ = file.Close()
+	if err != nil || string(data) != "legacy" {
+		t.Fatalf("legacy log = %q, %v", data, err)
+	}
+
+	if err := os.WriteFile(current, []byte("current"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err = openLogFile(current, legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err = io.ReadAll(file)
+	_ = file.Close()
+	if err != nil || string(data) != "current" {
+		t.Fatalf("current log = %q, %v", data, err)
+	}
+}
+
+func TestRemoveRuntimeFilesCleansCurrentAndLegacyFiles(t *testing.T) {
+	dir := t.TempDir()
+	current := filepath.Join(dir, "current")
+	legacy := filepath.Join(dir, "legacy")
+	for _, path := range []string{current, legacy} {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for _, suffix := range []string{".log", "-resolv.conf", "-hosts"} {
+			if err := os.WriteFile(filepath.Join(path, "allocation"+suffix), []byte("data"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(path, "other.log"), []byte("keep"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := removeRuntimeFiles("allocation", current, legacy); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeRuntimeFiles("allocation", current, legacy); err != nil {
+		t.Fatalf("retry cleanup: %v", err)
+	}
+	for _, path := range []string{current, legacy} {
+		for _, suffix := range []string{".log", "-resolv.conf", "-hosts"} {
+			if _, err := os.Lstat(filepath.Join(path, "allocation"+suffix)); !os.IsNotExist(err) {
+				t.Fatalf("runtime file %s remains: %v", filepath.Join(path, "allocation"+suffix), err)
+			}
+		}
+		if _, err := os.Stat(filepath.Join(path, "other.log")); err != nil {
+			t.Fatalf("unrelated log removed from %s: %v", path, err)
+		}
+	}
+}
 
 func TestWriteDNSConfigCreatesParentDirectory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "logs", "allocation-resolv.conf")

@@ -28,6 +28,7 @@ import (
 
 const trellisNamespace = "trellis"
 const gracePeriod = 10 * time.Second
+const legacyRuntimeDir = "/tmp/trellis-logs"
 
 // ContainerdRuntime implements container lifecycle operations with containerd.
 type ContainerdRuntime struct {
@@ -196,11 +197,20 @@ func (c *ContainerdRuntime) logPath(containerID string) string {
 
 // Logs opens the log stream for a container.
 func (c *ContainerdRuntime) Logs(ctx context.Context, containerID string, follow bool, tail int) (io.ReadCloser, error) {
-	file, err := os.Open(c.logPath(containerID))
+	file, err := openLogFile(c.logPath(containerID), filepath.Join(legacyRuntimeDir, filepath.Base(containerID)+".log"))
 	if err != nil {
 		return nil, fmt.Errorf("open logs for %s: %w", containerID, err)
 	}
 	return newLogReader(ctx, file, follow, tail)
+}
+
+func openLogFile(path, legacyPath string) (*os.File, error) {
+	file, err := os.Open(path)
+	if err == nil || !errors.Is(err, os.ErrNotExist) {
+		return file, err
+	}
+	// Tasks started before the runtime directory moved keep writing to this path.
+	return os.Open(legacyPath)
 }
 
 // Restart stops and starts a container.
@@ -291,7 +301,7 @@ func (c *ContainerdRuntime) Remove(ctx context.Context, containerID string) erro
 	container, err := c.client.LoadContainer(ctx, containerID)
 	if err != nil {
 		if errdefs.IsNotFound(err) {
-			return nil
+			return c.removeRuntimeFiles(containerID)
 		}
 		return fmt.Errorf("loading container %s: %w", containerID, err)
 	}
@@ -301,7 +311,25 @@ func (c *ContainerdRuntime) Remove(ctx context.Context, containerID string) erro
 		return fmt.Errorf("deleting container %s: %w", containerID, err)
 	}
 
-	return nil
+	return c.removeRuntimeFiles(containerID)
+}
+
+func (c *ContainerdRuntime) removeRuntimeFiles(containerID string) error {
+	return removeRuntimeFiles(containerID, c.logDir, legacyRuntimeDir)
+}
+
+func removeRuntimeFiles(containerID string, dirs ...string) error {
+	name := filepath.Base(containerID)
+	var errs []error
+	for _, dir := range dirs {
+		for _, suffix := range []string{".log", "-resolv.conf", "-hosts"} {
+			path := filepath.Join(dir, name+suffix)
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				errs = append(errs, fmt.Errorf("remove runtime file %s: %w", path, err))
+			}
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // Exec runs a command in a container and returns its exit code.
