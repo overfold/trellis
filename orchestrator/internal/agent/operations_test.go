@@ -56,6 +56,18 @@ type recoveryProbeRuntime struct {
 	commands chan []string
 }
 
+type blockingRecoveryDetach struct {
+	network.DisabledManager
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (m *blockingRecoveryDetach) Detach(context.Context, *network.Attachment) error {
+	close(m.entered)
+	<-m.release
+	return nil
+}
+
 func (r *recoveryProbeRuntime) Exec(_ context.Context, _ string, command []string) (int, error) {
 	select {
 	case r.commands <- command:
@@ -760,6 +772,86 @@ func TestRecoverRunningAllocationResetsHealthUntilProbe(t *testing.T) {
 	}
 	if persisted.Health != "unknown" {
 		t.Fatalf("persisted health = %q, want unknown", persisted.Health)
+	}
+}
+
+func TestRecoverPersistsProbeResultBeforeReturning(t *testing.T) {
+	rt := &createdRecoveryRuntime{
+		reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning},
+		managedID:         "task",
+	}
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	first := newOperationTestAgent(t, rt)
+	first.ConfigureDurability(local, "test")
+	if err := first.persistAllocation(&Allocation{
+		ID: "task", AllocationID: "allocation", ContainerID: "task",
+		Spec: &spec.TaskSpec{Name: "task", HealthCheck: &spec.HealthCheckSpec{
+			Type: "script", Command: []string{"true"}, Interval: time.Millisecond, Threshold: 1,
+		}},
+		Status: "running", Health: "healthy",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.persistAllocation(&Allocation{
+		ID: "stale", AllocationID: "stale", ContainerID: "stale",
+		Network: &network.Attachment{AllocationID: "stale"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	second := newOperationTestAgent(t, rt)
+	second.ConfigureDurability(local, "test")
+	second.health.Subscriber = second
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	second.health.SetContext(ctx)
+	detach := &blockingRecoveryDetach{entered: make(chan struct{}), release: make(chan struct{})}
+	second.SetNetworkManager(detach)
+	done := make(chan error, 1)
+	go func() { done <- second.recover(ctx) }()
+	defer func() {
+		select {
+		case <-detach.release:
+		default:
+			close(detach.release)
+		}
+	}()
+
+	select {
+	case <-detach.entered:
+	case err := <-done:
+		t.Fatalf("recovery finished before stale cleanup: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("recovery did not reach stale cleanup")
+	}
+
+	deadline := time.After(time.Second)
+	for {
+		var persisted Allocation
+		if err := local.Get(allocationRecordKey("task"), &persisted); err != nil {
+			t.Fatal(err)
+		}
+		if persisted.Health == "healthy" {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("probe did not persist healthy during recovery")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	second.mu.RLock()
+	got := second.allocations["task"].Health
+	second.mu.RUnlock()
+	if got != "healthy" {
+		t.Fatalf("recovered health = %q, want healthy", got)
+	}
+	close(detach.release)
+	if err := <-done; err != nil {
+		t.Fatalf("recover: %v", err)
 	}
 }
 

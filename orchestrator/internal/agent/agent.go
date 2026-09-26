@@ -347,11 +347,15 @@ func (a *Agent) recover(ctx context.Context) error {
 					a.log.Error("recover port claim", "allocation", allocation.AllocationID, "error", err)
 				}
 			}
+			// Persist the initial observation before a probe can publish a result.
+			a.mu.Lock()
 			a.allocations[allocation.ID] = allocation
+			persistErr := a.persistAllocation(allocation)
+			a.mu.Unlock()
+			if persistErr != nil {
+				a.log.Error("refresh recovered allocation record", "allocation", allocation.AllocationID, "error", persistErr)
+			}
 			if allocation.Spec != nil {
-				if !stopping && !recoveryPending && allocation.Spec.HealthCheck != nil {
-					a.health.RegisterTask(allocation.ID, allocation.ContainerID, allocation.Spec.HealthCheck)
-				}
 				if restartSuppressed {
 					a.reconciler.TrackStopping(allocation.ID, allocation.Spec.HealthCheck != nil, allocation.Restart)
 				} else if !recoveryPending {
@@ -362,8 +366,8 @@ func (a *Agent) recover(ctx context.Context) error {
 			} else if !recoveryPending {
 				a.reconciler.Track(allocation.ID, false, nil)
 			}
-			if err := a.persistAllocation(allocation); err != nil {
-				a.log.Error("refresh recovered allocation record", "allocation", allocation.AllocationID, "error", err)
+			if allocation.Spec != nil && !stopping && !recoveryPending && allocation.Spec.HealthCheck != nil {
+				a.health.RegisterTask(allocation.ID, allocation.ContainerID, allocation.Spec.HealthCheck)
 			}
 		}
 	}
