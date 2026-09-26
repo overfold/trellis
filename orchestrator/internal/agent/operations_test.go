@@ -42,6 +42,40 @@ type stoppedWithErrorRuntime struct {
 	managedID  string
 }
 
+type createdRecoveryRuntime struct {
+	*reconcilerRuntime
+	managedID   string
+	stopCount   int
+	startCount  int
+	removeCount int
+}
+
+func (r *createdRecoveryRuntime) ListManaged(context.Context, string) ([]runtime.ContainerInfo, error) {
+	return []runtime.ContainerInfo{{ID: r.managedID, Status: r.status}}, nil
+}
+
+func (r *createdRecoveryRuntime) Stop(context.Context, string) error {
+	r.stopCount++
+	r.status = runtime.StatusStopped
+	return nil
+}
+
+func (r *createdRecoveryRuntime) Remove(context.Context, string) error {
+	r.removeCount++
+	return nil
+}
+
+func (r *createdRecoveryRuntime) Create(_ context.Context, options runtime.CreateOptions) (string, error) {
+	r.status = runtime.StatusCreated
+	return options.ID, nil
+}
+
+func (r *createdRecoveryRuntime) Start(context.Context, string) error {
+	r.startCount++
+	r.status = runtime.StatusRunning
+	return nil
+}
+
 func (r *stoppedWithErrorRuntime) Stop(context.Context, string) error {
 	r.status = runtime.StatusStopped
 	return r.stopErr
@@ -551,6 +585,59 @@ func TestStopErrorAfterExitDoesNotRestartAllocation(t *testing.T) {
 	}
 	if rt.restartCount != 0 {
 		t.Fatalf("allocation restarted %d times after stop intent", rt.restartCount)
+	}
+}
+
+func TestRecoverCreatedAllocationCanBeRetriedByControlPlane(t *testing.T) {
+	id := "allocation-g2-first"
+	rt := &createdRecoveryRuntime{
+		reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusCreated},
+		managedID:         id,
+	}
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	request := operationTestRequest()
+	request.Tasks = request.Tasks[:1]
+	stale := &Allocation{
+		ID: id, AllocationID: request.AllocationID, ContainerID: id,
+		Generation: request.Generation, JobRevision: request.JobRevision, ExecutionHash: request.ExecutionHash,
+		Spec: &request.Tasks[0], Status: "starting", Health: "unknown",
+	}
+
+	first := newOperationTestAgent(t, rt)
+	first.ConfigureDurability(local, "test")
+	if err := first.persistAllocation(stale); err != nil {
+		t.Fatal(err)
+	}
+
+	second := newOperationTestAgent(t, rt)
+	second.ConfigureDurability(local, "test")
+	if err := second.recover(context.Background()); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if rt.startCount != 0 {
+		t.Fatalf("recovery started created task %d times, want 0", rt.startCount)
+	}
+	if got := second.allocations[id]; got == nil || got.Status != "starting" {
+		t.Fatalf("recovered allocation = %+v, want starting", got)
+	}
+
+	// The server's normal reconciliation reissues ActionStart, which reaches
+	// RunGroup. The old Created task must be cleanly stopped/removed before
+	// recreating and starting the allocation.
+	if err := second.RunGroup(context.Background(), request); err != nil {
+		t.Fatalf("control-plane start retry: %v", err)
+	}
+	if rt.stopCount != 1 || rt.removeCount != 1 || rt.startCount != 1 {
+		t.Fatalf("retry operations stop=%d remove=%d start=%d, want 1/1/1", rt.stopCount, rt.removeCount, rt.startCount)
+	}
+	if rt.status != runtime.StatusRunning {
+		t.Fatalf("runtime status after retry = %q, want running", rt.status)
+	}
+	if got := second.allocations[id]; got == nil || got.Status != "running" {
+		t.Fatalf("allocation after retry = %+v, want running", got)
 	}
 }
 
