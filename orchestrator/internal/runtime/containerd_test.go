@@ -78,3 +78,71 @@ func TestWriteDNSConfigRejectsNameserverPorts(t *testing.T) {
 		t.Fatal("expected nameserver with port to be rejected")
 	}
 }
+
+func TestRuntimeDirectoryRejectsUnsafeExistingPaths(t *testing.T) {
+	dir := t.TempDir()
+	uid := uint32(os.Geteuid())
+	info, err := os.Lstat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkOwnedDir(dir, info, uid, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkOwnedDir(dir, info, uid+1, true); err == nil {
+		t.Fatal("accepted a directory owned by another user")
+	}
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	info, err = os.Lstat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkOwnedDir(dir, info, uid, true); err == nil {
+		t.Fatal("accepted a writable directory")
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	info, err = os.Lstat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkOwnedDir(dir, info, uid, true); err == nil {
+		t.Fatal("accepted a publicly accessible runtime directory")
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatal(err)
+	}
+	info, err = os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkOwnedDir(link, info, uid, true); err == nil {
+		t.Fatal("accepted a symlink")
+	}
+}
+
+func TestWriteRuntimeFileRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "resolv.conf")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeDNSConfig(link, []string{"198.18.0.53"}); err == nil {
+		t.Fatal("followed a symlink")
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "original" {
+		t.Fatalf("target changed to %q", got)
+	}
+}

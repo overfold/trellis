@@ -56,7 +56,7 @@ func NewContainerdRuntime(socketPath string) (*ContainerdRuntime, error) {
 
 	return &ContainerdRuntime{
 		client: client,
-		logDir: filepath.Join(os.TempDir(), "trellis-logs"),
+		logDir: "/var/lib/trellis/runtime",
 	}, nil
 }
 
@@ -80,6 +80,9 @@ func (c *ContainerdRuntime) Pull(ctx context.Context, image string) error {
 // Create creates a container from the supplied options.
 func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (string, error) {
 	ctx = c.withNamespace(ctx)
+	if err := ensureRuntimeDir(c.logDir); err != nil {
+		return "", fmt.Errorf("create runtime directory: %w", err)
+	}
 
 	image, err := c.client.GetImage(ctx, options.Image)
 	if err != nil {
@@ -167,7 +170,7 @@ func (c *ContainerdRuntime) Start(ctx context.Context, containerID string) error
 		return fmt.Errorf("loading container %s: %w", containerID, err)
 	}
 
-	if err := os.MkdirAll(c.logDir, 0o750); err != nil {
+	if err := ensureRuntimeDir(c.logDir); err != nil {
 		return fmt.Errorf("create log directory: %w", err)
 	}
 	task, err := container.NewTask(ctx, cio.LogFile(c.logPath(containerID)))
@@ -186,6 +189,40 @@ func (c *ContainerdRuntime) Start(ctx context.Context, containerID string) error
 
 func (c *ContainerdRuntime) logPath(containerID string) string {
 	return filepath.Join(c.logDir, filepath.Base(containerID)+".log")
+}
+
+func ensureRuntimeDir(path string) error {
+	return ensureOwnedDir(path, true)
+}
+
+func ensureOwnedDir(path string, private bool) error {
+	if parent := filepath.Dir(path); parent != path {
+		if err := ensureOwnedDir(parent, false); err != nil {
+			return err
+		}
+	}
+	if err := os.Mkdir(path, 0o750); err != nil && !os.IsExist(err) {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	return checkOwnedDir(path, info, 0, private)
+}
+
+func checkOwnedDir(path string, info os.FileInfo, uid uint32, private bool) error {
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", path)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uid || info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("%s must be owned by UID %d and not writable by other users", path, uid)
+	}
+	if private && info.Mode().Perm()&0o007 != 0 {
+		return fmt.Errorf("%s must not be accessible by other users", path)
+	}
+	return nil
 }
 
 // Logs opens the log stream for a container.
@@ -500,7 +537,7 @@ func writeDNSConfig(path string, servers []string) error {
 		}
 		content += "nameserver " + server + "\n"
 	}
-	return os.WriteFile(path, []byte(content), 0o644)
+	return writeRuntimeFile(path, content)
 }
 
 func writeHostsConfig(path string, hosts map[string]string) error {
@@ -516,7 +553,20 @@ func writeHostsConfig(path string, hosts map[string]string) error {
 	for _, name := range names {
 		content += hosts[name] + " " + name + "\n"
 	}
-	return os.WriteFile(path, []byte(content), 0o644)
+	return writeRuntimeFile(path, content)
+}
+
+func writeRuntimeFile(path, content string) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0o644)
+	if err != nil {
+		return err
+	}
+	_, err = io.WriteString(file, content)
+	closeErr := file.Close()
+	if err != nil {
+		return err
+	}
+	return closeErr
 }
 
 // ExecOutput runs a command in a container and returns its captured output.
