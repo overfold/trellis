@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/errdefs"
 	"github.com/opencontainers/runtime-spec/specs-go"
 )
@@ -349,5 +350,39 @@ func TestFailedCreateRemovesFilesWhenContainerIsAbsentForRetry(t *testing.T) {
 				t.Fatalf("file %s was removed without confirmed absence: %v", path, err)
 			}
 		}
+	}
+}
+
+func TestFailedCreateWithCanceledContextAllowsRetry(t *testing.T) {
+	dir := t.TempDir()
+	dns := filepath.Join(dir, "allocation-resolv.conf")
+	hosts := filepath.Join(dir, "allocation-hosts")
+	if err := writeDNSConfig(dns, []string{"198.18.0.53"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHostsConfig(hosts, map[string]string{"trellis": "127.0.0.1"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(namespaces.WithNamespace(context.Background(), trellisNamespace))
+	cancel()
+	if err := removeCreateFilesAfterFailedCreate(ctx, []string{dns, hosts}, func(cleanupCtx context.Context) error {
+		if err := cleanupCtx.Err(); err != nil {
+			t.Fatalf("container lookup inherited canceled context: %v", err)
+		}
+		if _, ok := cleanupCtx.Deadline(); !ok {
+			t.Fatal("container lookup has no deadline")
+		}
+		if namespace, ok := namespaces.Namespace(cleanupCtx); !ok || namespace != trellisNamespace {
+			t.Fatalf("container lookup namespace = %q, present = %v", namespace, ok)
+		}
+		return errdefs.ErrNotFound
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeDNSConfig(dns, []string{"198.18.0.53"}); err != nil {
+		t.Fatalf("retry DNS config for same allocation: %v", err)
+	}
+	if err := writeHostsConfig(hosts, map[string]string{"trellis": "127.0.0.1"}); err != nil {
+		t.Fatalf("retry hosts config for same allocation: %v", err)
 	}
 }

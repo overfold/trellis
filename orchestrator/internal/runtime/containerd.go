@@ -102,8 +102,10 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 		if creationAttempted {
 			// A failed response may still have created the container. Only
 			// remove its mount sources when containerd confirms it is absent.
-			_, loadErr := c.client.LoadContainer(ctx, options.ID)
-			err = errors.Join(err, removeCreateFilesIfAbsent(createdFiles, loadErr))
+			err = errors.Join(err, removeCreateFilesAfterFailedCreate(ctx, createdFiles, func(cleanupCtx context.Context) error {
+				_, loadErr := c.client.LoadContainer(cleanupCtx, options.ID)
+				return loadErr
+			}))
 			return
 		}
 		err = errors.Join(err, removeRuntimeFiles(createdFiles...))
@@ -426,6 +428,12 @@ func removeCreateFilesIfAbsent(paths []string, loadErr error) error {
 		return nil
 	}
 	return removeRuntimeFiles(paths...)
+}
+
+func removeCreateFilesAfterFailedCreate(ctx context.Context, paths []string, load func(context.Context) error) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	return removeCreateFilesIfAbsent(paths, load(cleanupCtx))
 }
 
 // Exec runs a command in a container and returns its exit code.
