@@ -4,10 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net/url"
 	"sort"
 )
+
+var errNetworkPortExhausted = errors.New("WireGuard namespace port range is exhausted")
 
 // NetworkPortRegistration durably assigns one namespace to a slot in the
 // configured WireGuard UDP port range. The same slot is used on every node;
@@ -128,7 +131,7 @@ func (s *Server) ensureNetworkPortRegistrations(ctx context.Context, namespaces 
 			}
 		}
 		if assigned < 0 {
-			return nil, fmt.Errorf("WireGuard namespace port range is exhausted (%d ports); increase wireguard_port_count on every node", count)
+			return registrations, fmt.Errorf("%w (%d ports); increase wireguard_port_count on every node", errNetworkPortExhausted, count)
 		}
 		if err := s.state.PutNetworkPortRegistration(ctx, &NetworkPortRegistration{Namespace: namespace, Slot: assigned}); err != nil {
 			return nil, err

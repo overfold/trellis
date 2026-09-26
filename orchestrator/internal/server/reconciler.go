@@ -172,7 +172,9 @@ func (s *Server) Reconcile(ctx context.Context) {
 	networkPorts, err := s.ensureNetworkPortRegistrations(ctx, networkNamespaces)
 	if err != nil {
 		s.log.Error("prepare namespace WireGuard ports", "error", err)
-		return
+		if !errors.Is(err, errNetworkPortExhausted) {
+			return
+		}
 	}
 	persistedVolumeOwners := make(map[string]uuid.UUID, len(volumeOwners))
 	for key, owner := range volumeOwners {
@@ -434,6 +436,11 @@ func (s *Server) Reconcile(ctx context.Context) {
 				_ = allocation.Transition(lifecycle.PhaseStopped, now, "scaled_down", "pending allocation exceeds the desired count")
 				_ = s.state.PutAllocation(context.WithoutCancel(ctx), allocation)
 			}
+			if spec.GroupUsesWireGuard(&group) {
+				if _, assigned := networkPorts[namespace]; !assigned {
+					continue
+				}
+			}
 			requiredCapabilities := spec.GroupRequiredCapabilities(&group)
 			placements := Schedule(&PlacementIntent{Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Count: deficit, Nodes: s.nodePointers(), Allocations: valid, Tasks: group.Tasks, Constraints: group.Constraints, RequiredCapabilities: requiredCapabilities, VolumeOwners: volumeOwners})
 			for i, placement := range placements {
@@ -493,6 +500,11 @@ func (s *Server) Reconcile(ctx context.Context) {
 	}
 
 	for i := range actions {
+		if actions[i].Type == ActionStart && tasksUseWireGuard(actions[i].Allocation.Tasks) {
+			if _, assigned := networkPorts[actions[i].Allocation.Namespace]; !assigned {
+				continue
+			}
+		}
 		if err := s.Execute(ctx, &actions[i]); err != nil {
 			allocationID := actions[i].ID
 			if actions[i].Allocation != nil {
