@@ -123,6 +123,36 @@ func TestReconcileRetiresSurplusAndRemovedPendingAllocations(t *testing.T) {
 	}
 }
 
+func TestReconcileRetiresSurplusDrainingPendingAllocation(t *testing.T) {
+	s, agent := newTestServerWithAgent()
+	defer agent.server.Close()
+	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 2, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: jobSpec, Revision: 1}
+	first := &Allocation{ID: "pending-first", Namespace: "default", JobName: "web", TaskGroupName: "api", Generation: 1, JobRevision: 1, Phase: lifecycle.PhasePending}
+	surplus := &Allocation{ID: "pending-surplus", Namespace: "default", JobName: "web", TaskGroupName: "api", Generation: 1, JobRevision: 1, Phase: lifecycle.PhasePending}
+	s.allocations = []*Allocation{first, surplus}
+	if err := s.RestartJob(context.Background(), "default", "web"); err != nil {
+		t.Fatal(err)
+	}
+	if !surplus.Draining || surplus.DrainReason != "restart" {
+		t.Fatalf("restart did not mark pending allocation draining: draining=%t reason=%q", surplus.Draining, surplus.DrainReason)
+	}
+
+	jobSpec.TaskGroups[0].Count = 1
+	s.Reconcile(context.Background())
+
+	if first.Phase != lifecycle.PhasePending || surplus.Phase != lifecycle.PhaseStopped || surplus.Reason != "scale_down" {
+		t.Fatalf("pending allocations after scale-down: first=%s surplus=%s reason=%q", first.Phase, surplus.Phase, surplus.Reason)
+	}
+	persisted, err := s.state.ListAllocations(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted[surplus.ID] == nil || persisted[surplus.ID].Phase != lifecycle.PhaseStopped {
+		t.Fatalf("surplus pending allocation was not persisted as stopped: %#v", persisted[surplus.ID])
+	}
+}
+
 func TestReconcileRefreshesPendingAllocationBeforePlacement(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()

@@ -382,10 +382,10 @@ func (s *Server) Reconcile(ctx context.Context) {
 			var draining []*Allocation
 			for _, alloc := range valid {
 				if alloc.Namespace == namespace && alloc.JobName == jobName && alloc.TaskGroupName == group.Name {
-					if alloc.Draining {
-						draining = append(draining, alloc)
-					} else if alloc.Phase == lifecycle.PhasePending {
+					if alloc.Phase == lifecycle.PhasePending {
 						pending = append(pending, alloc)
+					} else if alloc.Draining {
+						draining = append(draining, alloc)
 					} else {
 						current = append(current, alloc)
 					}
