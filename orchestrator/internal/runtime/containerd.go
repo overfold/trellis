@@ -94,8 +94,9 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 
 	allMounts := convertMounts(options.Mounts)
 	var createdFiles []string
+	creationAttempted := false
 	defer func() {
-		if err != nil {
+		if err != nil && !creationAttempted {
 			err = errors.Join(err, removeRuntimeFiles(createdFiles...))
 		}
 	}()
@@ -164,6 +165,9 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 			return "", fmt.Errorf("unsupported runtime %q", options.Runtime)
 		}
 	}
+	// A failed response can still mean containerd created the container. Keep
+	// its bind-mount sources for the agent to inspect and start on retry.
+	creationAttempted = true
 	container, err := c.client.NewContainer(ctx, options.ID, containerOpts...)
 	if err != nil {
 		return "", fmt.Errorf("creating container %s: %w", options.ID, err)

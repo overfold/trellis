@@ -59,6 +59,15 @@ func TestContainerdAllocationAdoption(t *testing.T) {
 	if _, err := r.Create(ctx, options); err == nil {
 		t.Fatal("retry unexpectedly created the existing container")
 	}
+	if _, err := r.Inspect(ctx, created); err != nil {
+		t.Fatalf("inspect after create retry: %v", err)
+	}
+	for _, suffix := range []string{"-resolv.conf", "-hosts"} {
+		path := filepath.Join("/var/lib/trellis/runtime", created+suffix)
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("mount source %s after create retry: %v", path, err)
+		}
+	}
 	if err := r.Start(ctx, created); err != nil {
 		t.Fatalf("start after create retry: %v", err)
 	}
