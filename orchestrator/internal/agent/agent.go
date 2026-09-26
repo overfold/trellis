@@ -715,8 +715,10 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 				a.reconciler.TrackStopping(allocID, false, restartPolicy)
 				tracked = true
 			}
-			persistStopErr := a.markAllocationStopping(allocID)
-			runErr = errors.Join(runErr, persistStopErr)
+		}
+		persistStopErr := a.markAllocationStopping(allocID)
+		runErr = errors.Join(runErr, persistStopErr)
+		if startAttempted {
 			if err := a.runtime.Stop(context.WithoutCancel(ctx), allocID); err != nil {
 				runErr = errors.Join(runErr, fmt.Errorf("stop container %s during failed start: %w", allocID, err))
 				return
@@ -725,23 +727,41 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		if healthRegistered {
 			a.health.DeregisterTask(allocID)
 		}
+		var cleanupErrs []error
 		if tracked {
-			_ = a.reconciler.Untrack(allocID)
+			if err := a.reconciler.Untrack(allocID); err != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("untrack allocation %s: %w", allocID, err))
+			}
 		}
 		if containerCreated {
-			_ = a.runtime.Remove(context.WithoutCancel(ctx), allocID)
+			if err := a.runtime.Remove(context.WithoutCancel(ctx), allocID); err != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove container %s: %w", allocID, err))
+			}
 		}
-		_ = a.network.Detach(context.WithoutCancel(ctx), netAttachment)
+		if err := a.network.Detach(context.WithoutCancel(ctx), netAttachment); err != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("detach allocation network: %w", err))
+		}
 		for _, p := range ports {
-			_ = a.ports.Release(p)
+			if err := a.ports.Release(p); err != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("release port %d: %w", p.HostPort, err))
+			}
 		}
 		if secretDir != "" {
-			_ = os.RemoveAll(secretDir)
+			if err := os.RemoveAll(secretDir); err != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove secret files: %w", err))
+			}
+		}
+		if err := errors.Join(cleanupErrs...); err != nil {
+			runErr = errors.Join(runErr, err)
+			return
+		}
+		if err := a.deleteAllocationRecord(allocID); err != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("delete allocation record: %w", err))
+			return
 		}
 		a.mu.Lock()
 		delete(a.allocations, allocID)
 		a.mu.Unlock()
-		_ = a.deleteAllocationRecord(allocID)
 	}()
 
 	var taskPorts []spec.PortSpec

@@ -35,6 +35,23 @@ type failingStopRuntime struct {
 	removeCount int
 }
 
+type failingRemoveRuntime struct {
+	*ambiguousStartRuntime
+	removeErr error
+}
+
+func (r *failingRemoveRuntime) Remove(context.Context, string) error { return r.removeErr }
+
+type failingDetachNetworkManager struct {
+	countingNetworkManager
+	detachErr error
+}
+
+func (m *failingDetachNetworkManager) Detach(ctx context.Context, attachment *network.Attachment) error {
+	m.countingNetworkManager.Detach(ctx, attachment)
+	return m.detachErr
+}
+
 type stoppedWithErrorRuntime struct {
 	*reconcilerRuntime
 	stopErr    error
@@ -664,6 +681,47 @@ func TestAmbiguousStartFailedStopRemainsTracked(t *testing.T) {
 	}
 	if _, ok := agent.reconciler.states[id]; ok {
 		t.Fatal("allocation remained tracked after successful retry stop")
+	}
+}
+
+func TestFailedStartCleanupRetainsAllocationForRetry(t *testing.T) {
+	removeErr := errors.New("remove failed")
+	detachErr := errors.New("detach failed")
+	rt := &failingRemoveRuntime{ambiguousStartRuntime: &ambiguousStartRuntime{reconcilerRuntime: &reconcilerRuntime{}}, removeErr: removeErr}
+	agent := newOperationTestAgent(t, rt)
+	manager := &failingDetachNetworkManager{detachErr: detachErr}
+	agent.SetNetworkManager(manager)
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	agent.ConfigureDurability(local, "test")
+	request := operationTestRequest()
+	request.Tasks = request.Tasks[:1]
+	id := "allocation-g2-first"
+
+	err := agent.RunGroup(context.Background(), request)
+	if !errors.Is(err, removeErr) || !errors.Is(err, detachErr) {
+		t.Fatalf("run error = %v, want removal and detach errors", err)
+	}
+	if allocation := agent.allocations[id]; allocation == nil || allocation.Status != "stopping" {
+		t.Fatalf("retained allocation = %+v, want stopping", allocation)
+	}
+	var recorded Allocation
+	if err := local.Get(allocationRecordKey(id), &recorded); err != nil || recorded.Status != "stopping" {
+		t.Fatalf("recorded allocation = %+v, error = %v, want stopping", recorded, err)
+	}
+
+	rt.removeErr = nil
+	manager.detachErr = nil
+	if err := agent.StopAllocation(context.Background(), id); err != nil {
+		t.Fatalf("retry cleanup: %v", err)
+	}
+	if agent.allocations[id] != nil {
+		t.Fatal("allocation retained after successful cleanup")
+	}
+	if err := local.Get(allocationRecordKey(id), &recorded); err == nil {
+		t.Fatal("allocation record retained after successful cleanup")
 	}
 }
 
