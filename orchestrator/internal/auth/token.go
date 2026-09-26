@@ -1,4 +1,4 @@
-// Package auth creates and validates Trellis authentication tokens.
+// Package auth implements Trellis bearer credentials and administrator request signing.
 package auth
 
 import (

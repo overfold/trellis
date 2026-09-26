@@ -2,6 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -11,7 +15,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/clofour/trellis/internal/api"
+	"github.com/clofour/trellis/internal/auth"
 	"github.com/clofour/trellis/internal/election"
+	"github.com/clofour/trellis/internal/server"
 	"github.com/clofour/trellis/internal/storage"
 	"github.com/clofour/trellis/internal/tlsutil"
 	"github.com/google/uuid"
@@ -170,6 +177,9 @@ func TestControlPlaneFollowerProxiesToLeader(t *testing.T) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/jobs" {
 			t.Errorf("proxied request = %s %s", r.Method, r.URL.Path)
 		}
+		if r.Header.Get(auth.AdministratorChallengeHeader) != "challenge" || r.Header.Get(auth.AdministratorSignatureHeader) != "signature" {
+			t.Error("administrator signing headers were not proxied unchanged")
+		}
 		w.Header().Set("X-Executed-By", "leader")
 		_, _ = io.WriteString(w, `{"ok":true}`)
 	}))
@@ -184,6 +194,8 @@ func TestControlPlaneFollowerProxiesToLeader(t *testing.T) {
 	)
 	req := httptest.NewRequest(http.MethodGet, "https://follower.example/v1/jobs", nil)
 	req.Header.Set("Authorization", "Bearer workload-token")
+	req.Header.Set(auth.AdministratorChallengeHeader, "challenge")
+	req.Header.Set(auth.AdministratorSignatureHeader, "signature")
 	recorder := httptest.NewRecorder()
 	proxy.ServeHTTP(recorder, req)
 
@@ -220,8 +232,14 @@ func TestControlPlaneExecutesLocallyOnlyWhenLeaderIsActive(t *testing.T) {
 }
 
 func TestEnrollmentCredentialIsNotAdministratorCredential(t *testing.T) {
+	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	e := echo.New()
-	e.Use(leaderAuthMiddleware(func(token string) bool { return token == "admin-secret" }, "enroll-secret", nil))
+	e.Use(leaderAuthMiddleware(auth.NewAdministratorAuthenticator(), func() (ed25519.PublicKey, uint64, bool) {
+		return publicKey, 1, true
+	}, "enroll-secret", nil))
 	e.POST("/v1/jobs", func(c *echo.Context) error { return c.NoContent(http.StatusNoContent) })
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/jobs", nil)
@@ -233,10 +251,100 @@ func TestEnrollmentCredentialIsNotAdministratorCredential(t *testing.T) {
 	}
 
 	req = httptest.NewRequest(http.MethodPost, "/v1/jobs", nil)
-	req.Header.Set("Authorization", "Bearer admin-secret")
+	req.Header.Set("Authorization", "Bearer former-admin-secret")
 	rec = httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("former administrator bearer status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestAdministratorRequestSignatures(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, wrongKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	epoch := uint64(7)
+	e := echo.New()
+	e.Use(leaderAuthMiddleware(auth.NewAdministratorAuthenticator(), func() (ed25519.PublicKey, uint64, bool) {
+		return publicKey, epoch, true
+	}, "", nil))
+	e.POST("/v1/root", func(c *echo.Context) error {
+		if admin, _ := c.Request().Context().Value(server.AdminContextKey).(bool); !admin {
+			t.Fatal("valid signature did not grant administrator context")
+		}
+		return c.NoContent(http.StatusNoContent)
+	})
+
+	challenge := func() string {
+		req := httptest.NewRequest(http.MethodPost, "/v1/auth/administrator/challenge", nil)
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("challenge status = %d", rec.Code)
+		}
+		var response api.AdministratorChallengeResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		return response.Challenge
+	}
+	signedRequest := func(actualMethod, actualTarget string, actualBody []byte, signedMethod, signedTarget string, signedBody []byte, key ed25519.PrivateKey, challenge string) *http.Request {
+		req := httptest.NewRequest(actualMethod, actualTarget, strings.NewReader(string(actualBody)))
+		payload := auth.AdministratorSigningPayload(challenge, signedMethod, signedTarget, signedBody)
+		req.Header.Set(auth.AdministratorChallengeHeader, challenge)
+		req.Header.Set(auth.AdministratorSignatureHeader, base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, payload)))
+		return req
+	}
+
+	validChallenge := challenge()
+	valid := signedRequest(http.MethodPost, "/v1/root?mode=safe", []byte(`{"value":1}`), http.MethodPost, "/v1/root?mode=safe", []byte(`{"value":1}`), privateKey, validChallenge)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, valid)
 	if rec.Code != http.StatusNoContent {
-		t.Fatalf("administrator credential status = %d, want %d", rec.Code, http.StatusNoContent)
+		t.Fatalf("valid signature status = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	e.ServeHTTP(rec, signedRequest(http.MethodPost, "/v1/root?mode=safe", []byte(`{"value":1}`), http.MethodPost, "/v1/root?mode=safe", []byte(`{"value":1}`), privateKey, validChallenge))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("replay status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+
+	oldTermChallenge := challenge()
+	epoch++
+	rec = httptest.NewRecorder()
+	e.ServeHTTP(rec, signedRequest(http.MethodPost, "/v1/root", nil, http.MethodPost, "/v1/root", nil, privateKey, oldTermChallenge))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("old leadership term challenge status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+
+	tests := []struct {
+		name         string
+		actualMethod string
+		actualTarget string
+		actualBody   []byte
+		signedMethod string
+		signedTarget string
+		signedBody   []byte
+		key          ed25519.PrivateKey
+	}{
+		{name: "method", actualMethod: http.MethodPost, actualTarget: "/v1/root", signedMethod: http.MethodDelete, signedTarget: "/v1/root", key: privateKey},
+		{name: "path and query", actualMethod: http.MethodPost, actualTarget: "/v1/root?mode=unsafe", signedMethod: http.MethodPost, signedTarget: "/v1/root?mode=safe", key: privateKey},
+		{name: "body", actualMethod: http.MethodPost, actualTarget: "/v1/root", actualBody: []byte("changed"), signedMethod: http.MethodPost, signedTarget: "/v1/root", signedBody: []byte("original"), key: privateKey},
+		{name: "wrong key", actualMethod: http.MethodPost, actualTarget: "/v1/root", signedMethod: http.MethodPost, signedTarget: "/v1/root", key: wrongKey},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			e.ServeHTTP(rec, signedRequest(test.actualMethod, test.actualTarget, test.actualBody, test.signedMethod, test.signedTarget, test.signedBody, test.key, challenge()))
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+			}
+		})
 	}
 }

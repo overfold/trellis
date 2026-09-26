@@ -19,13 +19,13 @@ Commands with a coherent structured result expose a local `--output json` flag; 
 
 ## Node configuration
 
-Installer-managed nodes keep their durable daemon configuration at `/etc/trellis/trellis.yaml`. The file is root-readable and contains the managed-enrollment credential and operator-managed settings such as advertise addresses, labels, secret-encryption key path, and WireGuard transport settings. The first node also contains only the SHA-256 administrator verification hash used to initialize replicated cluster state; the raw administrator credential remains operator-side and is not retained by any daemon. Volume placement is not configured here; namespace-scoped volume ownership is established by first placement and stored in the control plane.
+Installer-managed nodes keep their durable daemon configuration at `/etc/trellis/trellis.yaml`. The file is root-readable and contains the managed-enrollment credential and operator-managed settings such as advertise addresses, labels, secret-encryption key path, and WireGuard transport settings. The first node also contains only the Ed25519 administrator public key used to initialize replicated cluster state; the private key remains operator-side and is never retained by a daemon. Volume placement is not configured here; namespace-scoped volume ownership is established by first placement and stored in the control plane.
 
 A minimal installed node resembles:
 
 ```yaml
 cluster: default
-admin_token_hash: 0123456789abcdef...
+administrator_public_key: MCowBQYDK2VwAyEA...
 enrollment_token: trls_enroll_...
 node_signing_mode: managed
 data_dir: /var/lib/trellis/data
@@ -106,7 +106,7 @@ After the daemon starts, verify membership from any operator context:
 trellisctl nodes list
 ```
 
-The enrollment credential is accepted only by the managed enrollment endpoint and is never administrator API authority. Enrollment sends it only over TLS authenticated by the pinned CA. After enrollment, node registration, heartbeats, Raft joins, and node-to-agent traffic use the node's unique certificate-bound UUID instead of a shared bearer token. Administrator requests are checked against replicated verification material, so followers do not need or retain the raw administrator credential. Managed mode deliberately trusts every Trellis node and makes the CA signing key available to every leader-capable member so failover does not disable enrollment. Treat compromise of any node in managed mode as compromise of the cluster.
+The enrollment credential is accepted only by the managed enrollment endpoint and is never administrator API authority. Enrollment sends it only over TLS authenticated by the pinned CA. After enrollment, node registration, heartbeats, Raft joins, and node-to-agent traffic use the node's unique certificate-bound UUID instead of a shared bearer token. Administrator requests are checked by the current leader against the replicated public key, so followers do not need or retain the administrator private key. Managed mode deliberately trusts every Trellis node and makes the CA signing key available to every leader-capable member so failover does not disable enrollment. Treat compromise of any node in managed mode as compromise of the cluster.
 
 ### External signing
 
@@ -116,28 +116,33 @@ Before first start, choose a UUID, write it to `<data_dir>/node-id` with mode `0
 
 ```yaml
 node_signing_mode: external
-admin_token_hash: 0123456789abcdef...
+administrator_public_key: MCowBQYDK2VwAyEA...
 ca_cert: /etc/trellis/node-ca.crt
 cert: /etc/trellis/node.crt
 key: /etc/trellis/node.key
 ```
 
-Generate a strong administrator credential on the operator workstation and set `admin_token_hash` to `printf %s "$ADMIN_TOKEN" | sha256sum | awk '{print $1}'`. Keep the raw value in the operator's password manager, not in node configuration.
+Generate the administrator key on the operator workstation, keep the private key in a password manager, and put only its unpadded base64 PKIX public key in node configuration:
 
-For another pre-issued node, omit `admin_token_hash` and add `join: node-a:8128`; its authenticated node certificate authorizes only that certificate's UUID as the Raft voter ID. Its advertised control-plane and Raft hosts must match certificate SANs. Loss of the external signer prevents issuing certificates for new nodes but does not affect operation or leader failover among nodes that already have certificates. A certificate from any other CA, or one whose node ID differs from `<data_dir>/node-id`, is rejected.
+```sh
+openssl genpkey -algorithm ED25519 -out trellis-administrator.pem
+openssl pkey -in trellis-administrator.pem -pubout -outform DER | base64 | tr -d '=\n'
+```
+
+For another pre-issued node, omit `administrator_public_key` and add `join: node-a:8128`; its authenticated node certificate authorizes only that certificate's UUID as the Raft voter ID. Its advertised control-plane and Raft hosts must match certificate SANs. Loss of the external signer prevents issuing certificates for new nodes but does not affect operation or leader failover among nodes that already have certificates. A certificate from any other CA, or one whose node ID differs from `<data_dir>/node-id`, is rejected.
 
 ## Mint operator credentials
 
 The installer creates one normal `cluster/write` credential for the installing user, but operators often need narrower credentials for another human, a read-only dashboard, or automation. `trellisctl credentials create` is the explicit administrative workflow for that.
 
-Credential minting requires the **administrator** credential held by the operator. Supply it from a password manager or protected environment variable; Trellis nodes do not store it:
+Credential minting requires the **administrator private key** held by the operator. Supply a PKCS#8 PEM file, or place unpadded base64 PKCS#8 DER in `TRELLIS_ADMINISTRATOR_KEY`; Trellis nodes do not store it:
 
 ```sh
 # Read-only cluster observer
-TRELLIS_TOKEN="$ADMIN_TOKEN" trellisctl credentials create --scope cluster --access read
+trellisctl --administrator-key ./trellis-administrator.pem credentials create --scope cluster --access read
 
 # Writer restricted to one namespace
-TRELLIS_TOKEN="$ADMIN_TOKEN" trellisctl credentials create \
+trellisctl --administrator-key ./trellis-administrator.pem credentials create \
   --scope namespace \
   --namespace-scope staging \
   --access write
@@ -146,22 +151,22 @@ TRELLIS_TOKEN="$ADMIN_TOKEN" trellisctl credentials create \
 The default output is the newly minted bearer token so it can be handed directly to a password manager or context setup. Use `--output json` when automation needs the response object instead:
 
 ```sh
-TRELLIS_TOKEN="$ADMIN_TOKEN" trellisctl credentials create --scope cluster --access read --output json
+trellisctl --administrator-key ./trellis-administrator.pem credentials create --scope cluster --access read --output json
 ```
 
 To save a generated credential as an ordinary user context without leaving it in command history:
 
 ```sh
-TOKEN="$(TRELLIS_TOKEN="$ADMIN_TOKEN" trellisctl credentials create --scope namespace --namespace-scope staging --access write)"
+TOKEN="$(trellisctl --administrator-key ./trellis-administrator.pem credentials create --scope namespace --namespace-scope staging --access write)"
 trellisctl --token "$TOKEN" --namespace staging context save staging --use
 unset TOKEN
 ```
 
-A remote administrator may instead supply the administrator bearer credential through `TRELLIS_TOKEN` or `--token`, but it should be handled as a root secret. Enrollment credentials and ordinary `cluster/write` credentials cannot mint credentials, change Raft membership, or perform backup/restore.
+Administrator signing is accepted through any node; followers proxy the challenge and signed request unchanged to the current leader. `trellisctl` automatically fetches a fresh challenge and retries if leadership changes between those requests. Enrollment credentials and ordinary `cluster/write` bearer credentials cannot mint credentials, change Raft membership, or perform backup/restore.
 
 ## Drain and maintenance
 
-`trellisctl nodes drain NODE` prevents new placement and migrates allocations. `NODE` may be the host/address displayed by `nodes list`, a unique UUID prefix, or a complete UUID. Wait until workloads have healthy replacements before maintenance. `trellisctl nodes undrain NODE` re-enables scheduling. `nodes remove NODE` permanently removes a node from the cluster and is different from draining.
+`trellisctl nodes drain NODE` prevents new placement and migrates allocations. `NODE` may be the host/address displayed by `nodes list`, a unique UUID prefix, or a complete UUID. Wait until workloads have healthy replacements before maintenance. `trellisctl nodes undrain NODE` re-enables scheduling. `nodes remove NODE` permanently removes a node from the cluster, requires the administrator key, and is different from draining.
 
 ## Upgrade a node
 
@@ -198,15 +203,15 @@ curl -fsSL https://raw.githubusercontent.com/clofour/trellis/main/scripts/uninst
 
 ## Advanced control-plane maintenance
 
-Trellis uses Raft internally. If an operator deliberately needs to move control-plane leadership before maintenance, the advanced command `trellisctl nodes transfer-leadership` requests a transfer to another voter. It is intentionally hidden from normal CLI help because workload operations should not require understanding Raft leadership.
+Trellis uses Raft internally. If an operator deliberately needs to move control-plane leadership before maintenance, the advanced command `trellisctl --administrator-key ./trellis-administrator.pem nodes transfer-leadership` requests a transfer to another voter. It is intentionally hidden from normal CLI help because workload operations should not require understanding Raft leadership.
 
 Preserve quorum: operate an odd number of Raft voters and avoid removing several members together.
 
 ## Backups
 
 ```sh
-trellisctl backup create --file trellis-backup.json
-trellisctl backup restore trellis-backup.json
+trellisctl --administrator-key ./trellis-administrator.pem backup create trellis-backup.json
+trellisctl --administrator-key ./trellis-administrator.pem backup restore trellis-backup.json
 ```
 
 Backups contain desired jobs and their revision history, encrypted secret records, volume-registration locality metadata, and durable namespace WireGuard port assignments. They do **not** contain allocations, container images, local volume bytes, TLS private keys, or the secret encryption key. Restoring the locality metadata deliberately prevents Trellis from silently treating a previously bound volume as new; recovering a volume-backed workload therefore also requires the owning node identity and its data, or an intentional manifest change to a new volume name. Secure and separately back up the 32-byte secrets key referenced by `secrets_key` in the node config; encrypted records are unusable without it.

@@ -6,6 +6,8 @@ The `trellisctl` CLI is the first-party operator interface to the [Trellis user 
 
 A **context** stores the connection information needed to operate one cluster/namespace: API address, bearer token, namespace, CA certificate, and optional client certificate/key paths.
 
+Administrator private keys are deliberately not stored in named contexts. Root-only commands accept a PKCS#8 Ed25519 key through `--administrator-key PATH` or unpadded base64 PKCS#8 DER through `TRELLIS_ADMINISTRATOR_KEY`; `trellisctl` performs challenge acquisition, request signing, and leader-change retry automatically.
+
 Save the effective connection and select it:
 
 ```sh
@@ -239,7 +241,7 @@ For example:
 trellisctl nodes status worker-2
 trellisctl nodes drain worker-2
 trellisctl nodes undrain worker-2
-trellisctl nodes remove 9cf13a2b
+trellisctl --administrator-key ./trellis-administrator.pem nodes remove 9cf13a2b
 ```
 
 Ambiguous prefixes are rejected and the CLI shows the matching nodes rather than guessing.

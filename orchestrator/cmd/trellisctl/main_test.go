@@ -1,6 +1,11 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/pem"
 	"os"
 	"path/filepath"
 	"testing"
@@ -20,6 +25,7 @@ func TestLoadConfigPreservesTLSFlags(t *testing.T) {
 		"--ca-cert", "cluster-ca.pem",
 		"--cert", "client.pem",
 		"--key", "client-key.pem",
+		"--administrator-key", "administrator.pem",
 	}); err != nil {
 		t.Fatalf("parse flags: %v", err)
 	}
@@ -35,6 +41,38 @@ func TestLoadConfigPreservesTLSFlags(t *testing.T) {
 	}
 	if config.Key != "client-key.pem" {
 		t.Fatalf("client key flag was not preserved: got %q", config.Key)
+	}
+	if config.AdminKey != "administrator.pem" {
+		t.Fatalf("administrator key flag was not preserved: got %q", config.AdminKey)
+	}
+}
+
+func TestLoadAdministratorPrivateKey(t *testing.T) {
+	_, expected, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(expected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousConfig := config
+	t.Cleanup(func() { config = previousConfig })
+
+	config = CLIConfig{AdminKeyData: base64.RawStdEncoding.EncodeToString(der)}
+	got, err := loadAdministratorPrivateKey()
+	if err != nil || !expected.Equal(got) {
+		t.Fatalf("load base64 administrator key: equal=%t err=%v", expected.Equal(got), err)
+	}
+
+	path := filepath.Join(t.TempDir(), "administrator.pem")
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config = CLIConfig{AdminKey: path}
+	got, err = loadAdministratorPrivateKey()
+	if err != nil || !expected.Equal(got) {
+		t.Fatalf("load PEM administrator key: equal=%t err=%v", expected.Equal(got), err)
 	}
 }
 
@@ -151,5 +189,6 @@ func testRootCommand() *cobra.Command {
 	flags.StringVar(&config.CACert, "ca-cert", "", "")
 	flags.StringVar(&config.Cert, "cert", "", "")
 	flags.StringVar(&config.Key, "key", "", "")
+	flags.StringVar(&config.AdminKey, "administrator-key", "", "")
 	return root
 }

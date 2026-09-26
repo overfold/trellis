@@ -1,14 +1,18 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 
+	"github.com/clofour/trellis/internal/client"
 	"github.com/clofour/trellis/internal/localconfig"
 	"github.com/clofour/trellis/internal/version"
 	"github.com/spf13/cobra"
@@ -23,6 +27,8 @@ type CLIConfig struct {
 	CACertPEM    string
 	Cert         string
 	Key          string
+	AdminKey     string
+	AdminKeyData string
 	Output       string
 }
 
@@ -70,6 +76,7 @@ func newRootCmd() *cobra.Command {
 	persistentFlags.StringVar(&config.CACert, "ca-cert", "", "Path to cluster CA certificate (PEM)")
 	persistentFlags.StringVar(&config.Cert, "cert", "", "Path to client certificate (PEM)")
 	persistentFlags.StringVar(&config.Key, "key", "", "Path to client private key (PEM)")
+	persistentFlags.StringVar(&config.AdminKey, "administrator-key", "", "Path to the administrator Ed25519 private key (PKCS#8 PEM)")
 
 	root.AddCommand(NewContextCmd())
 	root.AddCommand(NewJobsCmd())
@@ -147,7 +154,7 @@ func buildCLITLSConfig() (*tls.Config, error) {
 
 func loadConfig(cmd *cobra.Command) error {
 	flagConfig := config
-	merged := CLIConfig{ServerAddr: "localhost:8128", CACert: flagConfig.CACert, Cert: flagConfig.Cert, Key: flagConfig.Key, Output: flagConfig.Output}
+	merged := CLIConfig{ServerAddr: "localhost:8128", CACert: flagConfig.CACert, Cert: flagConfig.Cert, Key: flagConfig.Key, AdminKey: flagConfig.AdminKey, Output: flagConfig.Output}
 
 	if lc, err := localconfig.Read(localconfig.DefaultPath); err == nil {
 		merged.ServerAddr = lc.ServerAddr
@@ -218,6 +225,9 @@ func loadConfig(cmd *cobra.Command) error {
 	if value, ok := os.LookupEnv("TRELLIS_KEY"); ok {
 		merged.Key = value
 	}
+	if value, ok := os.LookupEnv("TRELLIS_ADMINISTRATOR_KEY"); ok {
+		merged.AdminKeyData = value
+	}
 
 	flags := cmd.Root().PersistentFlags()
 	if flags.Changed("server-addr") {
@@ -238,6 +248,10 @@ func loadConfig(cmd *cobra.Command) error {
 	if flags.Changed("key") {
 		merged.Key = flagConfig.Key
 	}
+	if flags.Changed("administrator-key") {
+		merged.AdminKey = flagConfig.AdminKey
+		merged.AdminKeyData = ""
+	}
 
 	if merged.Output == "" {
 		merged.Output = "table"
@@ -247,6 +261,54 @@ func loadConfig(cmd *cobra.Command) error {
 	}
 	config = merged
 	return nil
+}
+
+func administratorServerClient() (*client.ServerClient, error) {
+	tlsCfg, err := buildCLITLSConfig()
+	if err != nil {
+		return nil, err
+	}
+	privateKey, err := loadAdministratorPrivateKey()
+	if err != nil {
+		return nil, err
+	}
+	serverClient := client.NewServerClient("", config.ServerAddr, tlsCfg)
+	if err := serverClient.UseAdministratorKey(privateKey); err != nil {
+		return nil, err
+	}
+	return serverClient, nil
+}
+
+func loadAdministratorPrivateKey() (ed25519.PrivateKey, error) {
+	var der []byte
+	if config.AdminKey != "" {
+		data, err := os.ReadFile(config.AdminKey)
+		if err != nil {
+			return nil, fmt.Errorf("read administrator private key: %w", err)
+		}
+		block, _ := pem.Decode(data)
+		if block == nil {
+			return nil, fmt.Errorf("administrator private key must be PKCS#8 PEM")
+		}
+		der = block.Bytes
+	} else if config.AdminKeyData != "" {
+		var err error
+		der, err = base64.RawStdEncoding.DecodeString(config.AdminKeyData)
+		if err != nil {
+			return nil, fmt.Errorf("TRELLIS_ADMINISTRATOR_KEY must be unpadded base64 PKCS#8 DER: %w", err)
+		}
+	} else {
+		return nil, fmt.Errorf("administrator operation requires --administrator-key or TRELLIS_ADMINISTRATOR_KEY")
+	}
+	parsed, err := x509.ParsePKCS8PrivateKey(der)
+	if err != nil {
+		return nil, fmt.Errorf("parse administrator private key: %w", err)
+	}
+	privateKey, ok := parsed.(ed25519.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("administrator private key must be Ed25519")
+	}
+	return privateKey, nil
 }
 
 func writeJSON(w io.Writer, value any) error {

@@ -2,10 +2,10 @@ package server
 
 import (
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
+	"crypto/ed25519"
 	"crypto/tls"
-	"encoding/hex"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -243,8 +243,8 @@ func (s *Server) AllocationLogsForNamespace(ctx context.Context, namespace, id s
 
 // Cluster contains persisted cluster identity and TLS state.
 type Cluster struct {
-	Hash         string
-	ControlEpoch uint64 `json:"control_epoch,omitempty"`
+	AdministratorPublicKey string `json:"administrator_public_key"`
+	ControlEpoch           uint64 `json:"control_epoch,omitempty"`
 }
 
 // NodeRegistration contains the identity and capacity of a node.
@@ -493,9 +493,9 @@ func (s *Server) SetWireGuardPortCount(count int) error {
 	return nil
 }
 
-// Init initializes cluster state from replicated administrator verification
-// material. Existing members do not need the administrator credential or hash.
-func (s *Server) Init(ctx context.Context, initialAdminHash string) error {
+// Init initializes cluster state from the replicated administrator public key.
+// Existing members do not need any administrator key material in node configuration.
+func (s *Server) Init(ctx context.Context, initialAdministratorPublicKey string) error {
 	cluster, err := s.state.GetCluster(ctx)
 	if err != nil {
 		return fmt.Errorf("get cluster: %w", err)
@@ -503,8 +503,8 @@ func (s *Server) Init(ctx context.Context, initialAdminHash string) error {
 
 	if cluster != nil {
 		s.log.Info("cluster already initialized")
-		if err := s.storage.Delete("token"); err != nil && !os.IsNotExist(unwrapPathError(err)) {
-			return fmt.Errorf("remove legacy local administrator token: %w", err)
+		if _, err := parseAdministratorPublicKey(cluster.AdministratorPublicKey); err != nil {
+			return fmt.Errorf("replicated administrator public key: %w", err)
 		}
 		s.cluster = cluster
 		s.client = client.NewAgentClient("", s.clientTLS)
@@ -512,11 +512,10 @@ func (s *Server) Init(ctx context.Context, initialAdminHash string) error {
 		return nil
 	}
 
-	decodedHash, err := hex.DecodeString(initialAdminHash)
-	if err != nil || len(decodedHash) != sha256.Size {
-		return fmt.Errorf("initial administrator token hash must be a SHA-256 hex digest")
+	if _, err := parseAdministratorPublicKey(initialAdministratorPublicKey); err != nil {
+		return fmt.Errorf("initial administrator public key: %w", err)
 	}
-	cluster = &Cluster{Hash: initialAdminHash}
+	cluster = &Cluster{AdministratorPublicKey: initialAdministratorPublicKey}
 
 	err = s.state.PutCluster(ctx, cluster)
 	if err != nil {
@@ -1326,21 +1325,37 @@ func (s *Server) AllocationMetrics(ctx context.Context, namespace, id string) (a
 	return s.client.AllocationMetrics(ctx, nodeID, address, id)
 }
 
-// ValidateAPIToken validates the cluster API token.
-func (s *Server) ValidateAPIToken(token string) bool {
+// AdministratorVerification returns the replicated administrator public key and current leadership epoch.
+func (s *Server) AdministratorVerification() (ed25519.PublicKey, uint64, bool) {
 	s.mu.RLock()
-	expectedHash := ""
+	encoded := ""
+	epoch := uint64(0)
 	if s.cluster != nil {
-		expectedHash = s.cluster.Hash
+		encoded = s.cluster.AdministratorPublicKey
+		epoch = s.cluster.ControlEpoch
 	}
 	s.mu.RUnlock()
-	if expectedHash == "" {
-		return false
+	publicKey, err := parseAdministratorPublicKey(encoded)
+	if err != nil {
+		return nil, 0, false
 	}
-	hash := sha256.Sum256([]byte(token))
-	hashHex := hex.EncodeToString(hash[:])
+	return publicKey, epoch, true
+}
 
-	return subtle.ConstantTimeCompare([]byte(hashHex), []byte(expectedHash)) == 1
+func parseAdministratorPublicKey(encoded string) (ed25519.PublicKey, error) {
+	der, err := base64.RawStdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("decode base64: %w", err)
+	}
+	parsed, err := x509.ParsePKIXPublicKey(der)
+	if err != nil {
+		return nil, fmt.Errorf("parse PKIX key: %w", err)
+	}
+	publicKey, ok := parsed.(ed25519.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("key must be Ed25519")
+	}
+	return publicKey, nil
 }
 
 func unwrapPathError(err error) error {

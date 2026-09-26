@@ -122,7 +122,7 @@ api_access:
 
 A job may never delegate more authority than the credential submitting it. Namespace-scoped callers cannot request cluster-scoped workload credentials, and read-only callers cannot request write credentials. Planning enforces the same ceiling as apply so a preview cannot advertise a deployment the caller is not authorized to create.
 
-The administrator credential is intentionally separate. Trellis never injects that root credential into workloads. Operations such as Raft administration, backup/restore, and minting ordinary operator credentials remain administrator operations rather than abilities granted by `cluster/write`. Node registration and heartbeats use certificate-bound node identity, while managed enrollment uses a separate enrollment credential.
+The administrator signing key is intentionally separate. Trellis never injects it into workloads. Operations such as Raft administration, backup/restore, and minting ordinary operator credentials remain administrator operations rather than abilities granted by `cluster/write`. Node registration and heartbeats use certificate-bound node identity, while managed enrollment uses a separate enrollment credential.
 
 Generated credentials carry an authoritative server-side kind (`operator` or `workload`) in addition to scope/access. `GET /v1/auth/whoami` reports the kind and effective authorization of the credential making the request; the administrator credential reports itself explicitly as `administrator`.
 

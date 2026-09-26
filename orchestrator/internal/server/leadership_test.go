@@ -21,7 +21,7 @@ func TestAcquireLeadershipAdvancesDurableEpoch(t *testing.T) {
 	defer func() { _ = store.Close() }()
 
 	stateCtl := NewStateController(store, "test-cluster")
-	if err := stateCtl.PutCluster(ctx, &Cluster{Hash: "hash", ControlEpoch: 3}); err != nil {
+	if err := stateCtl.PutCluster(ctx, &Cluster{AdministratorPublicKey: "key", ControlEpoch: 3}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -30,7 +30,7 @@ func TestAcquireLeadershipAdvancesDurableEpoch(t *testing.T) {
 	// acquired from the durable epoch, not this stale in-memory snapshot.
 	s := &Server{
 		state:   stateCtl,
-		cluster: &Cluster{Hash: "hash", ControlEpoch: 1},
+		cluster: &Cluster{AdministratorPublicKey: "key", ControlEpoch: 1},
 		now:     time.Now,
 	}
 	if err := s.AcquireLeadership(ctx); err != nil {
@@ -64,7 +64,7 @@ func TestAcquireLeadershipInvalidatesAndFencesCachedNetworkPlans(t *testing.T) {
 	defer func() { _ = store.Close() }()
 
 	stateCtl := NewStateController(store, "test-cluster")
-	if err := stateCtl.PutCluster(ctx, &Cluster{Hash: "hash", ControlEpoch: 3}); err != nil {
+	if err := stateCtl.PutCluster(ctx, &Cluster{AdministratorPublicKey: "key", ControlEpoch: 3}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -85,7 +85,7 @@ func TestAcquireLeadershipInvalidatesAndFencesCachedNetworkPlans(t *testing.T) {
 	}
 	s := &Server{
 		state:              stateCtl,
-		cluster:            &Cluster{Hash: "hash", ControlEpoch: 3},
+		cluster:            &Cluster{AdministratorPublicKey: "key", ControlEpoch: 3},
 		controlEpoch:       3,
 		now:                func() time.Time { return now },
 		networkPlans:       map[networkPlanKey]*networkPlanState{key: {target: stale, appliedHash: "old", appliedAt: now.Add(-networkPlanRepairInterval - time.Second)}},

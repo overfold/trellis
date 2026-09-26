@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/clofour/trellis/internal/api"
-	"github.com/clofour/trellis/internal/client"
 	"github.com/spf13/cobra"
 )
 
@@ -12,7 +11,7 @@ func NewCredentialsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "credentials",
 		Short: "Mint scoped operator API credentials",
-		Long:  "Mint scoped operator API credentials. This command requires the administrator credential; ordinary cluster/write operator credentials cannot mint additional credentials.",
+		Long:  "Mint scoped operator API credentials. This command requires the administrator signing key; ordinary cluster/write operator credentials cannot mint additional credentials.",
 	}
 	cmd.AddCommand(newCredentialsCreateCmd())
 	return cmd
@@ -23,7 +22,7 @@ func newCredentialsCreateCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "create",
 		Short: "Create a scoped operator API credential",
-		Long:  "Create an operator credential with namespace or cluster scope and read or write access. The caller must authenticate with the administrator credential.",
+		Long:  "Create an operator credential with namespace or cluster scope and read or write access. The caller must authenticate with the administrator signing key.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if scope != "cluster" && scope != "namespace" {
 				return fmt.Errorf("--scope must be cluster or namespace")
@@ -37,11 +36,11 @@ func newCredentialsCreateCmd() *cobra.Command {
 			if scope == "cluster" && namespace != "" {
 				return fmt.Errorf("--namespace-scope cannot be used with cluster scope")
 			}
-			tlsCfg, err := buildCLITLSConfig()
+			serverClient, err := administratorServerClient()
 			if err != nil {
 				return err
 			}
-			response, err := client.NewServerClient(config.ClusterToken, config.ServerAddr, tlsCfg).CreateCredential(cmd.Context(), &api.CredentialCreateRequest{
+			response, err := serverClient.CreateCredential(cmd.Context(), &api.CredentialCreateRequest{
 				Scope: scope, Access: access, Namespace: namespace,
 			})
 			if err != nil {

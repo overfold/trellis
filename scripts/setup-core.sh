@@ -72,6 +72,7 @@ with_gvisor=false
 with_dashboard=false
 dashboard_access="read"
 assume_yes=false
+administrator_private_key="${TRELLIS_ADMINISTRATOR_KEY:-}"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -228,7 +229,7 @@ read_secret() {
 }
 
 if [ ! -f "$CONFIG_FILE" ]; then
-    admin_hash_config=""
+    admin_public_key_config=""
     if [ -n "$join_addr" ]; then
         enrollment_token="$(read_secret "Existing cluster enrollment token" "$enrollment_token_file" "${TRELLIS_ENROLLMENT_TOKEN:-}")"
         [ -n "$ca_cert_file" ] || ui_die "--ca-cert-file is required when joining so enrollment uses the pinned cluster CA."
@@ -237,16 +238,18 @@ if [ ! -f "$CONFIG_FILE" ]; then
         printf '%s\n' "$secrets_value" >"$SECRETS_KEY_FILE"
         unset secrets_value
     else
-        admin_token="trls_admin_$(head -c 32 /dev/urandom | base64 | tr -d '=\n')"
-        admin_token_hash="$(printf '%s' "$admin_token" | sha256sum | awk '{print $1}')"
-        admin_hash_config="admin_token_hash: ${admin_token_hash}"
+        administrator_key_pem="$(openssl genpkey -algorithm ED25519)"
+        administrator_private_key="$(printf '%s\n' "$administrator_key_pem" | openssl pkey -outform DER | base64 | tr -d '=\n')"
+        administrator_public_key="$(printf '%s\n' "$administrator_key_pem" | openssl pkey -pubout -outform DER | base64 | tr -d '=\n')"
+        unset administrator_key_pem
+        admin_public_key_config="administrator_public_key: ${administrator_public_key}"
         enrollment_token="trls_enroll_$(head -c 32 /dev/urandom | base64 | tr -d '=\n')"
         openssl rand -base64 32 >"$SECRETS_KEY_FILE"
     fi
     chmod 600 "$SECRETS_KEY_FILE"
     cat >"$CONFIG_FILE" <<EOF_CONFIG
 cluster: default
-${admin_hash_config}
+${admin_public_key_config}
 enrollment_token: ${enrollment_token}
 node_signing_mode: managed
 data_dir: ${DATA_DIR}
@@ -262,6 +265,9 @@ EOF_CONFIG
     fi
     chmod 600 "$CONFIG_FILE"
     ui_step "Created node configuration"
+    if [ -n "${administrator_private_key:-}" ]; then
+        ui_warn "Save this base64 PKCS#8 administrator private key in an operator password manager; Trellis does not retain it: ${administrator_private_key}"
+    fi
 else
     [ -f "$SECRETS_KEY_FILE" ] || ui_die "${CONFIG_FILE} exists but ${SECRETS_KEY_FILE} is missing; restore the matching key and rerun setup."
     chmod 600 "$CONFIG_FILE" "$SECRETS_KEY_FILE"
@@ -296,12 +302,12 @@ operator_config="${operator_home}/.config/trellis/config.yaml"
 if [ -f "$operator_config" ] && grep -q '^  local:' "$operator_config" 2>/dev/null; then
     ui_step "Existing local trellisctl context kept for ${operator_user}"
 else
-    if [ -z "${admin_token:-}" ]; then
+    if [ -z "${administrator_private_key:-}" ]; then
         ui_detail "No administrator credential was copied to this joining node; configure trellisctl from an operator workstation."
     else
         operator_token=""
         for _ in $(seq 1 30); do
-            operator_token="$(TRELLIS_TOKEN="$admin_token" local_ctl "$WORK_TMP" credentials create --scope cluster --access write --output table 2>/dev/null || true)"
+            operator_token="$(TRELLIS_ADMINISTRATOR_KEY="$administrator_private_key" local_ctl "$WORK_TMP" credentials create --scope cluster --access write --output table 2>/dev/null || true)"
             [ -n "$operator_token" ] && break
             sleep 1
         done
@@ -315,14 +321,12 @@ else
         ui_step "Saved local cluster/write context for ${operator_user}"
     fi
 fi
-if [ -n "${admin_token:-}" ]; then
-    ui_warn "Save this administrator credential in an operator password manager; Trellis does not retain it: ${admin_token}"
-fi
-
 if [ "$with_dashboard" = true ]; then
-    [ -n "${admin_token:-}" ] || ui_die "Dashboard deployment requires an operator-side administrator credential and is not performed while joining a node."
+    [ -n "${administrator_private_key:-}" ] || ui_die "Dashboard deployment requires an operator-side administrator key and is not performed while joining a node."
     ui_section "Dashboard"
-    TRELLIS_TOKEN="$admin_token" deploy_dashboard "$WORK_TMP" "$RELEASE_TAG" default "$dashboard_access"
+    dashboard_operator_token="$(TRELLIS_ADMINISTRATOR_KEY="$administrator_private_key" local_ctl "$WORK_TMP" credentials create --scope cluster --access write)"
+    TRELLIS_TOKEN="$dashboard_operator_token" deploy_dashboard "$WORK_TMP" "$RELEASE_TAG" default "$dashboard_access"
+    unset dashboard_operator_token
     DASHBOARD_INSTALLED=true
     DASHBOARD_NAMESPACE=default
     DASHBOARD_ACCESS_STATE="$dashboard_access"
@@ -332,7 +336,7 @@ if [ "$with_dashboard" = true ]; then
         ui_warn "The dashboard has cluster/write access. Put port 3000 behind your own HTTPS and identity-aware proxy."
     fi
 fi
-unset admin_token admin_token_hash admin_hash_config enrollment_token
+unset administrator_private_key administrator_public_key admin_public_key_config enrollment_token
 
 STATE_COMPLETE=true
 STATE_VERSION="$RELEASE_TAG"

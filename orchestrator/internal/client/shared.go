@@ -3,13 +3,19 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"time"
+
+	"github.com/clofour/trellis/internal/api"
+	"github.com/clofour/trellis/internal/auth"
 )
 
 const maxResponseBody = 64 << 20
@@ -31,9 +37,10 @@ func newHTTPClientWithResponseHeaderTimeout(tlsConfig *tls.Config, responseHeade
 }
 
 type client struct {
-	token     string
-	namespace string
-	client    *http.Client
+	token            string
+	namespace        string
+	administratorKey ed25519.PrivateKey
+	client           *http.Client
 }
 
 // HTTPError contains a non-successful HTTP response.
@@ -47,53 +54,94 @@ func (e *HTTPError) Error() string {
 }
 
 func (c *client) request(ctx context.Context, method string, url string, requestData any, responseData any) error {
-	var requestBody io.Reader = http.NoBody
+	var requestBodyBytes []byte
 	if requestData != nil {
-		requestBodyBytes, err := json.Marshal(requestData)
+		var err error
+		requestBodyBytes, err = json.Marshal(requestData)
 		if err != nil {
 			return fmt.Errorf("marshal json: %w", err)
 		}
-		requestBody = bytes.NewReader(requestBodyBytes)
 	}
 
-	request, err := http.NewRequestWithContext(ctx, method, url, requestBody)
+	for attempt := 0; attempt < 2; attempt++ {
+		request, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(requestBodyBytes))
+		if err != nil {
+			return fmt.Errorf("constructing request %s: %w", url, err)
+		}
+		request.Header.Set("Content-Type", "application/json")
+		if c.token != "" {
+			request.Header.Set("Authorization", "Bearer "+c.token)
+		}
+		if c.namespace != "" {
+			request.Header.Set("X-Trellis-Namespace", c.namespace)
+		}
+		if c.administratorKey != nil {
+			challenge, err := c.administratorChallenge(ctx, url)
+			if err != nil {
+				return err
+			}
+			payload := auth.AdministratorSigningPayload(challenge, method, request.URL.RequestURI(), requestBodyBytes)
+			request.Header.Set(auth.AdministratorChallengeHeader, challenge)
+			request.Header.Set(auth.AdministratorSignatureHeader, base64.RawURLEncoding.EncodeToString(ed25519.Sign(c.administratorKey, payload)))
+		}
+
+		response, err := c.client.Do(request)
+		if err != nil {
+			return fmt.Errorf("executing request %s: %w", url, err)
+		}
+		responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, maxResponseBody+1))
+		_ = response.Body.Close()
+		if readErr != nil {
+			return fmt.Errorf("read response body: %w", readErr)
+		}
+		if len(responseBody) > maxResponseBody {
+			return fmt.Errorf("response body exceeds %d bytes", maxResponseBody)
+		}
+		if c.administratorKey != nil && attempt == 0 && response.Header.Get(auth.AdministratorChallengeStatusHeader) == auth.AdministratorChallengeInvalid {
+			continue
+		}
+		if checkStatusCode(response.StatusCode) {
+			return &HTTPError{Status: response.StatusCode, Body: responseBody}
+		}
+		if responseData != nil {
+			if err := json.Unmarshal(responseBody, responseData); err != nil {
+				return fmt.Errorf("unmarshal json: %w", err)
+			}
+		}
+		return nil
+	}
+	return fmt.Errorf("administrator challenge was rejected after retry")
+}
+
+func (c *client) administratorChallenge(ctx context.Context, target string) (string, error) {
+	targetURL, err := url.Parse(target)
 	if err != nil {
-		return fmt.Errorf("constructing request %s: %w", url, err)
+		return "", fmt.Errorf("parse administrator request URL: %w", err)
 	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Authorization", "Bearer "+c.token)
-	if c.namespace != "" {
-		request.Header.Set("X-Trellis-Namespace", c.namespace)
+	targetURL.Path = "/v1/auth/administrator/challenge"
+	targetURL.RawPath = ""
+	targetURL.RawQuery = ""
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL.String(), http.NoBody)
+	if err != nil {
+		return "", fmt.Errorf("construct administrator challenge request: %w", err)
 	}
-
 	response, err := c.client.Do(request)
 	if err != nil {
-		return fmt.Errorf("executing request %s: %w", url, err)
+		return "", fmt.Errorf("request administrator challenge: %w", err)
 	}
-	defer func() {
-		_ = response.Body.Close()
-	}()
-
-	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBody+1))
+	defer func() { _ = response.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(response.Body, 16<<10))
 	if err != nil {
-		return fmt.Errorf("read response body: %w", err)
+		return "", fmt.Errorf("read administrator challenge: %w", err)
 	}
-	if len(responseBody) > maxResponseBody {
-		return fmt.Errorf("response body exceeds %d bytes", maxResponseBody)
-	}
-
 	if checkStatusCode(response.StatusCode) {
-		return &HTTPError{Status: response.StatusCode, Body: responseBody}
+		return "", &HTTPError{Status: response.StatusCode, Body: body}
 	}
-
-	if responseData != nil {
-		err = json.Unmarshal(responseBody, responseData)
-		if err != nil {
-			return fmt.Errorf("unmarshal json: %w", err)
-		}
+	var challenge api.AdministratorChallengeResponse
+	if err := json.Unmarshal(body, &challenge); err != nil || challenge.Challenge == "" {
+		return "", fmt.Errorf("invalid administrator challenge response")
 	}
-
-	return nil
+	return challenge.Challenge, nil
 }
 
 func (c *client) stream(ctx context.Context, url string) (io.ReadCloser, error) {

@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 
 	"github.com/clofour/trellis/internal/api"
-	"github.com/clofour/trellis/internal/client"
 	"github.com/spf13/cobra"
 )
 
@@ -27,11 +26,11 @@ func newBackupCreateCmd() *cobra.Command {
 		Short: "Take a live backup of jobs and encrypted secrets",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			tlsCfg, err := buildCLITLSConfig()
+			serverClient, err := administratorServerClient()
 			if err != nil {
 				return err
 			}
-			snapshot, err := client.NewServerClient(config.ClusterToken, config.ServerAddr, tlsCfg).CreateBackup(cmd.Context())
+			snapshot, err := serverClient.CreateBackup(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -103,11 +102,11 @@ func newBackupRestoreCmd() *cobra.Command {
 			if err := ensureJSONEOF(decoder); err != nil {
 				return err
 			}
-			tlsCfg, err := buildCLITLSConfig()
+			serverClient, err := administratorServerClient()
 			if err != nil {
 				return err
 			}
-			if err := client.NewServerClient(config.ClusterToken, config.ServerAddr, tlsCfg).RestoreBackup(cmd.Context(), &snapshot); err != nil {
+			if err := serverClient.RestoreBackup(cmd.Context(), &snapshot); err != nil {
 				return err
 			}
 			_, err = fmt.Fprintln(cmd.OutOrStdout(), "Backup restored successfully; jobs will be scheduled fresh.")

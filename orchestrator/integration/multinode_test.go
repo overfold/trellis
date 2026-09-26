@@ -5,9 +5,11 @@ package integration
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/tls"
-	"encoding/hex"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,6 +21,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/clofour/trellis/internal/api"
+	"github.com/clofour/trellis/internal/client"
 )
 
 // TestMultiNodeFailureRecovery intentionally uses OS processes, loopback TCP,
@@ -93,10 +98,12 @@ type node struct {
 	logStart int64
 }
 type harness struct {
-	t          *testing.T
-	bin, token string
-	nodes      []*node
-	client     *http.Client
+	t        *testing.T
+	bin      string
+	token    string
+	adminKey ed25519.PrivateKey
+	nodes    []*node
+	client   *http.Client
 }
 
 func newHarness(t *testing.T, count int) *harness {
@@ -111,8 +118,15 @@ func newHarness(t *testing.T, count int) *harness {
 	if out, err := c.CombinedOutput(); err != nil {
 		t.Fatalf("build node: %v\n%s", err, out)
 	}
-	h := &harness{t: t, bin: bin, token: "integration-token", client: &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}}
-	adminHash := sha256.Sum256([]byte(h.token))
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicDER, err := x509.MarshalPKIXPublicKey(publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &harness{t: t, bin: bin, adminKey: privateKey, client: &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}}
 	base := t.TempDir()
 	for i := 0; i < count; i++ {
 		n := &node{dir: filepath.Join(base, fmt.Sprintf("node-%d", i))}
@@ -123,7 +137,7 @@ func newHarness(t *testing.T, count int) *harness {
 		}
 		n.args = []string{"--enrollment-token", "integration-enrollment", "--cluster", "integration", "--data-dir", n.dir, "--runtime", "injected", "--runtime-faults", filepath.Join(n.dir, "fault.json"), "--agent-listen", addr(n.ports[0]), "--agent-advertise", addr(n.ports[0]), "--server-listen", addr(n.ports[1]), "--server-advertise", addr(n.ports[1]), "--raft-listen", addr(n.ports[2]), "--raft-advertise", addr(n.ports[2]), "--dns-listen", addr(n.ports[3]), "--wireguard-port", fmt.Sprint(n.ports[4]), "--wireguard-port-count", "1"}
 		if i == 0 {
-			n.args = append(n.args, "--admin-token-hash", hex.EncodeToString(adminHash[:]))
+			n.args = append(n.args, "--administrator-public-key", base64.RawStdEncoding.EncodeToString(publicDER))
 		}
 		if i > 0 {
 			n.args = append(n.args, "--join", addr(h.nodes[0].ports[1]), "--ca-cert", filepath.Join(h.nodes[0].dir, "node-ca.crt"))
@@ -134,6 +148,17 @@ func newHarness(t *testing.T, count int) *harness {
 		h.nodes = append(h.nodes, n)
 		h.start(i)
 		h.waitHTTP(i)
+		if i == 0 {
+			administrator := client.NewServerClient("", addr(n.ports[1]), &tls.Config{InsecureSkipVerify: true})
+			if err := administrator.UseAdministratorKey(h.adminKey); err != nil {
+				t.Fatal(err)
+			}
+			credential, err := administrator.CreateCredential(t.Context(), &api.CredentialCreateRequest{Scope: "cluster", Access: "write"})
+			if err != nil {
+				t.Fatalf("mint integration operator credential: %v", err)
+			}
+			h.token = credential.Token
+		}
 	}
 	return h
 }
@@ -194,6 +219,14 @@ func (h *harness) close() {
 }
 func (h *harness) waitHTTP(i int) {
 	h.eventually(35*time.Second, func() bool {
+		if h.token == "" {
+			administrator := client.NewServerClient("", addr(h.nodes[i].ports[1]), &tls.Config{InsecureSkipVerify: true})
+			if err := administrator.UseAdministratorKey(h.adminKey); err != nil {
+				return false
+			}
+			_, err := administrator.ListNodes(context.Background())
+			return err == nil
+		}
 		r, e := h.request(i, "GET", "/v1/nodes", nil)
 		if r != nil {
 			r.Body.Close()

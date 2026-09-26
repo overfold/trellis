@@ -4,6 +4,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
@@ -58,7 +59,7 @@ type config struct {
 	ConfigFile                                                                     string
 	AgentListen, AgentAdvertise, ServerListen, ServerAdvertise                     string
 	RaftListen, RaftAdvertise, Join                                                string
-	DataDir, Cluster, AdminTokenHash, EnrollmentToken, SigningMode, ContainerdSock string
+	DataDir, Cluster, AdminPublicKey, EnrollmentToken, SigningMode, ContainerdSock string
 	Runtime, RuntimeFaults                                                         string
 	WireGuardPool, WireGuardEndpoint                                               string
 	WireGuardPort, WireGuardPortCount                                              int
@@ -106,7 +107,7 @@ func main() {
 	f.StringVar(&cfg.Join, "join", "", "Address of an existing cluster member to join (server API address)")
 	f.StringVar(&cfg.DataDir, "data-dir", "/var/lib/trellis/data", "Directory for local state and volumes")
 	f.StringVar(&cfg.Cluster, "cluster", "default", "Cluster name")
-	f.StringVar(&cfg.AdminTokenHash, "admin-token-hash", "", "SHA-256 hash used to initialize administrator API verification")
+	f.StringVar(&cfg.AdminPublicKey, "administrator-public-key", "", "Base64 PKIX Ed25519 public key used to initialize administrator request verification")
 	f.StringVar(&cfg.EnrollmentToken, "enrollment-token", "", "Managed-mode node enrollment credential")
 	f.StringVar(&cfg.SigningMode, "node-signing-mode", "managed", "Node certificate signing mode: managed or external")
 	f.StringVar(&cfg.ContainerdSock, "containerd-sock", "/run/containerd/containerd.sock", "Containerd socket path")
@@ -142,8 +143,8 @@ func main() {
 func run(parent context.Context, cfg *config) error {
 	ctx, stop := signal.NotifyContext(parent, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	if cfg.Join == "" && cfg.AdminTokenHash == "" {
-		return fmt.Errorf("admin_token_hash or --admin-token-hash is required when creating a cluster")
+	if cfg.Join == "" && cfg.AdminPublicKey == "" {
+		return fmt.Errorf("administrator_public_key or --administrator-public-key is required when creating a cluster")
 	}
 	if cfg.SigningMode != "managed" && cfg.SigningMode != "external" {
 		return fmt.Errorf("node_signing_mode must be managed or external")
@@ -301,7 +302,7 @@ func run(parent context.Context, cfg *config) error {
 	server.RegisterMetrics(control, prometheus.DefaultRegisterer)
 
 	for i := 0; ; i++ {
-		if err := control.Init(ctx, cfg.AdminTokenHash); err == nil {
+		if err := control.Init(ctx, cfg.AdminPublicKey); err == nil {
 			break
 		} else if i >= 30 {
 			return fmt.Errorf("initialize control plane: %w", err)
@@ -439,7 +440,7 @@ func run(parent context.Context, cfg *config) error {
 	}()
 
 	leaderHTTP := echo.New()
-	leaderHTTP.Use(middleware.Recover(), leaderAuthMiddleware(control.ValidateAPIToken, cfg.EnrollmentToken, control.TokenManager()))
+	leaderHTTP.Use(middleware.Recover(), leaderAuthMiddleware(auth.NewAdministratorAuthenticator(), control.AdministratorVerification, cfg.EnrollmentToken, control.TokenManager()))
 	leaderHTTP.GET("/v1/auth/whoami", server.HandleWhoAmI)
 	server.NewHandler(control).Register(leaderHTTP)
 	apiProxy := newControlPlaneProxy(elector, cfg.ServerAdvertise, leaderHTTP, newHTTPTransport(clientTLS), log)
@@ -954,11 +955,26 @@ func nodeControlPlaneRoute(r *http.Request) bool {
 		(r.Method == http.MethodPost && path == "/v1/raft/join")
 }
 
-func leaderAuthMiddleware(validateAdmin func(string) bool, enrollmentToken string, tokenManager *auth.TokenManager) echo.MiddlewareFunc {
+func leaderAuthMiddleware(administrator *auth.AdministratorAuthenticator, administratorVerification func() (ed25519.PublicKey, uint64, bool), enrollmentToken string, tokenManager *auth.TokenManager) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c *echo.Context) error {
 			if c.Request().URL.Path == "/metrics" {
 				return next(c)
+			}
+			if c.Request().URL.Path == "/v1/auth/administrator/challenge" {
+				if c.Request().Method != http.MethodPost {
+					return echo.NewHTTPError(http.StatusMethodNotAllowed, "administrator challenges require POST")
+				}
+				_, epoch, ok := administratorVerification()
+				if !ok {
+					return echo.NewHTTPError(http.StatusServiceUnavailable, "administrator verification is unavailable")
+				}
+				challenge, expiresAt, err := administrator.Issue(epoch)
+				if err != nil {
+					return echo.NewHTTPError(http.StatusServiceUnavailable, "unable to issue administrator challenge")
+				}
+				c.Response().Header().Set("Cache-Control", "no-store")
+				return c.JSON(http.StatusCreated, api.AdministratorChallengeResponse{Challenge: challenge, ExpiresAt: expiresAt})
 			}
 			key := strings.TrimPrefix(c.Request().Header.Get("Authorization"), "Bearer ")
 			if enrollmentToken != "" && c.Request().URL.Path == "/v1/nodes/enroll" && subtle.ConstantTimeCompare([]byte(key), []byte(enrollmentToken)) == 1 {
@@ -966,12 +982,28 @@ func leaderAuthMiddleware(validateAdmin func(string) bool, enrollmentToken strin
 				c.SetRequest(c.Request().WithContext(ctx))
 				return next(c)
 			}
-			if key != "" && validateAdmin != nil && validateAdmin(key) {
-				principal := auth.AdministratorPrincipal()
-				ctx := context.WithValue(c.Request().Context(), server.AdminContextKey, true)
-				ctx = context.WithValue(ctx, server.PrincipalContextKey, principal)
-				c.SetRequest(c.Request().WithContext(ctx))
-				return next(c)
+			challenge := c.Request().Header.Get(auth.AdministratorChallengeHeader)
+			signature := c.Request().Header.Get(auth.AdministratorSignatureHeader)
+			if challenge != "" || signature != "" {
+				body, err := io.ReadAll(io.LimitReader(c.Request().Body, (64<<20)+1))
+				if err != nil {
+					return echo.NewHTTPError(http.StatusBadRequest, "unable to read signed request body")
+				}
+				if len(body) > 64<<20 {
+					return echo.NewHTTPError(http.StatusRequestEntityTooLarge, "signed request body exceeds 64 MiB")
+				}
+				c.Request().Body = io.NopCloser(bytes.NewReader(body))
+				publicKey, epoch, ok := administratorVerification()
+				payload := auth.AdministratorSigningPayload(challenge, c.Request().Method, c.Request().URL.RequestURI(), body)
+				if ok && challenge != "" && signature != "" && administrator.Verify(publicKey, epoch, challenge, signature, payload) {
+					principal := auth.AdministratorPrincipal()
+					ctx := context.WithValue(c.Request().Context(), server.AdminContextKey, true)
+					ctx = context.WithValue(ctx, server.PrincipalContextKey, principal)
+					c.SetRequest(c.Request().WithContext(ctx))
+					return next(c)
+				}
+				c.Response().Header().Set(auth.AdministratorChallengeStatusHeader, auth.AdministratorChallengeInvalid)
+				return echo.NewHTTPError(http.StatusUnauthorized, "invalid administrator challenge or signature")
 			}
 			if key != "" && tokenManager != nil {
 				principal, err := tokenManager.ValidateToken(c.Request().Context(), key)

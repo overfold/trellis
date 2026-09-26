@@ -6,9 +6,17 @@
 set -euo pipefail
 
 SHARE_DIR="/vagrant/bin"
-TOKEN_FILE="${SHARE_DIR}/token"
-TRELLIS_TOKEN="$(cat "${TOKEN_FILE}")"
+ADMIN_KEY_FILE="${SHARE_DIR}/administrator-key.pem"
 TRELLIS_ADDR="localhost:8128"
+
+echo "Waiting for cluster leader..."
+TRELLIS_TOKEN=""
+for _ in $(seq 1 30); do
+    TRELLIS_TOKEN="$(trellisctl --server-addr "${TRELLIS_ADDR}" --administrator-key "${ADMIN_KEY_FILE}" credentials create --scope cluster --access write 2>/dev/null || true)"
+    [ -n "${TRELLIS_TOKEN}" ] && break
+    sleep 3
+done
+[ -n "${TRELLIS_TOKEN}" ] || { echo "cluster administrator API unavailable" >&2; exit 1; }
 CLI="trellisctl --server-addr ${TRELLIS_ADDR} --token ${TRELLIS_TOKEN}"
 
 wait_healthy() {
@@ -30,7 +38,6 @@ wait_healthy() {
 
 # ── Wait for the cluster to elect a leader ───────────────────────────
 
-echo "Waiting for cluster leader..."
 for i in $(seq 1 30); do
     if ${CLI} nodes list >/dev/null 2>&1; then
         echo "Cluster is ready."

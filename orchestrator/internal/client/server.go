@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
@@ -178,6 +179,16 @@ func NewNamespaceServerClient(token string, addr string, namespace string, tlsCo
 		baseURL: baseURL,
 		client:  c,
 	}
+}
+
+// UseAdministratorKey authenticates subsequent requests with Ed25519 request signatures.
+func (s *ServerClient) UseAdministratorKey(privateKey ed25519.PrivateKey) error {
+	if len(privateKey) != ed25519.PrivateKeySize {
+		return fmt.Errorf("administrator private key must be %d bytes", ed25519.PrivateKeySize)
+	}
+	s.client.token = ""
+	s.client.administratorKey = append(ed25519.PrivateKey(nil), privateKey...)
+	return nil
 }
 
 // ListNodes returns all registered nodes.

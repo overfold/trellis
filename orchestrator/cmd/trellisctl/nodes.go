@@ -31,11 +31,11 @@ func NewNodesCmd() *cobra.Command {
 
 func NewNodesLeadershipTransferCmd() *cobra.Command {
 	return &cobra.Command{Use: "transfer-leadership", Args: cobra.NoArgs, Hidden: true, Short: "Transfer control-plane leadership to another voter", RunE: func(cmd *cobra.Command, _ []string) error {
-		tlsCfg, err := buildCLITLSConfig()
+		serverClient, err := administratorServerClient()
 		if err != nil {
 			return err
 		}
-		if err := client.NewServerClient(config.ClusterToken, config.ServerAddr, tlsCfg).TransferLeadership(cmd.Context()); err != nil {
+		if err := serverClient.TransferLeadership(cmd.Context()); err != nil {
 			return err
 		}
 		_, err = fmt.Fprintln(cmd.OutOrStdout(), "Control-plane leadership transfer started.")
@@ -68,7 +68,11 @@ func NewNodesRemoveCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		Short: "Permanently remove a node from the cluster",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			serverClient, node, err := resolveNodeClient(cmd, args[0])
+			serverClient, err := administratorServerClient()
+			if err != nil {
+				return err
+			}
+			node, err := resolveNodeWithClient(cmd, serverClient, args[0])
 			if err != nil {
 				return err
 			}
@@ -251,15 +255,19 @@ func resolveNodeClient(cmd *cobra.Command, ref string) (*client.ServerClient, ap
 		return nil, api.NodeResponse{}, err
 	}
 	serverClient := client.NewServerClient(config.ClusterToken, config.ServerAddr, tlsCfg)
-	nodes, err := serverClient.ListNodes(cmd.Context())
-	if err != nil {
-		return nil, api.NodeResponse{}, err
-	}
-	node, err := resolveNodeReference(*nodes, ref)
+	node, err := resolveNodeWithClient(cmd, serverClient, ref)
 	if err != nil {
 		return nil, api.NodeResponse{}, err
 	}
 	return serverClient, node, nil
+}
+
+func resolveNodeWithClient(cmd *cobra.Command, serverClient *client.ServerClient, ref string) (api.NodeResponse, error) {
+	nodes, err := serverClient.ListNodes(cmd.Context())
+	if err != nil {
+		return api.NodeResponse{}, err
+	}
+	return resolveNodeReference(*nodes, ref)
 }
 
 func resolveNodeReference(nodes api.NodeListResponse, ref string) (api.NodeResponse, error) {

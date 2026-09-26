@@ -36,7 +36,7 @@ Trellis credentials have independent **scope** and **access**:
 - `cluster/read` — observe cluster-wide state and select namespaces;
 - `cluster/write` — perform ordinary cluster/operator mutations.
 
-The administrator credential is more privileged than `cluster/write`: it is reserved for Raft administration, backup/restore, and minting scoped credentials. The dashboard should never receive it. The separate managed-enrollment credential is likewise never a dashboard credential.
+The administrator signing key is more privileged than `cluster/write`: it is reserved for Raft administration, backup/restore, and minting scoped credentials. The dashboard should never receive it. The separate managed-enrollment credential is likewise never a dashboard credential.
 
 The setup script deploys a read-only dashboard with:
 

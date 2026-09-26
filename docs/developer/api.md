@@ -1,14 +1,14 @@
 # HTTP API
 
-The control-plane API defaults to port 8128. Send `Authorization: Bearer TOKEN`; cluster-scoped callers may additionally select a namespaced view with `X-Trellis-Namespace: NAME`. JSON request bodies use `Content-Type: application/json`. Use TLS outside a local sandbox.
+The control-plane API defaults to port 8128. Ordinary operator and workload callers send `Authorization: Bearer TOKEN`; cluster-scoped callers may additionally select a namespaced view with `X-Trellis-Namespace: NAME`. Administrator requests use the signing protocol below. JSON request bodies use `Content-Type: application/json`. Use TLS outside a local sandbox.
 
 Trellis distinguishes three credential kinds:
 
-- `administrator` — the root operator credential used for Raft administration, backup/restore, and minting operator credentials;
+- `administrator` — the root request context granted after verification of an operator-held Ed25519 key;
 - `operator` — an explicitly minted API credential with `namespace` or `cluster` scope and `read` or `write` access;
 - `workload` — a scoped credential injected through task-group `api_access`.
 
-Credential prefixes (`trls_admin_`, `trls_op_`, `trls_wl_`) are descriptive only. The server authenticates the complete bearer value and uses its authoritative stored principal metadata for generated credentials. The separate managed-enrollment credential conventionally uses `trls_enroll_`.
+Credential prefixes (`trls_op_`, `trls_wl_`) are descriptive only. The server authenticates the complete bearer value and uses its authoritative stored principal metadata for generated credentials. The separate managed-enrollment credential conventionally uses `trls_enroll_`.
 
 A task group requests workload access with an object such as `{"scope":"namespace","access":"read"}`. Namespace scope is restricted to the namespace containing the job. Cluster scope grants only the ordinary read/write API authority represented by the credential; it never turns into the administrator credential. Both scopes set `TRELLIS_NAMESPACE` to the job namespace as a default request scope.
 
@@ -19,6 +19,7 @@ The API uses the same resource vocabulary as the [Trellis user model](../public/
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/metrics` | Prometheus metrics. |
+| `POST` | `/v1/auth/administrator/challenge` | Issue a short-lived one-time administrator signing challenge. |
 | `GET` | `/v1/auth/whoami` | Return the current credential kind, scope, access, namespace, and available provenance metadata. |
 | `GET` | `/v1/nodes` | List node capacity, discovered capabilities, and status; requires cluster scope. |
 | `POST` / `DELETE` | `/v1/nodes/{id}/drain` | Drain or undrain; requires `cluster/write`. |
@@ -66,7 +67,11 @@ A namespace credential is authorized only for its stored namespace regardless of
 
 ## Administrator, enrollment, and cluster-internal endpoints
 
-`POST /v1/credentials`, `GET /v1/backup`, `POST /v1/backup/restore`, `DELETE /v1/raft/members/{id}`, and `POST /v1/raft/leadership-transfer` require the operator-held administrator credential, which nodes verify against replicated hash material without storing the raw credential. `POST /v1/nodes`, `POST /v1/nodes/{id}/heartbeat`, `POST /v1/raft/join`, and agent port 8127 require a trusted node certificate whose URI SAN identifies the immutable node UUID. Registration and heartbeat IDs must match it; Raft join derives the voter ID from it and requires advertised hosts to match certificate SANs. Managed-only `POST /v1/nodes/enroll` requires the separate enrollment credential over a connection authenticated with the pinned node CA. Node registration includes the node WireGuard public key, externally reachable base endpoint, local port-range base, and port-range size when namespace networking is available; heartbeats include discovered capabilities and return no desired state. The control plane combines the namespace's durable port slot with each node's advertised bases when building WireGuard peer plans. Leader-to-agent requests verify both that the agent certificate identifies the scheduled target node and that the caller certificate identifies the current locally known Raft leader. Start, stop, and network-plan mutations retain control-epoch fencing; starts retain generation, revision, and execution-hash checks, while stops retain generation checks. These cluster-internal APIs are not a substitute for ordinary scoped operator access.
+`POST /v1/credentials`, `GET /v1/backup`, `POST /v1/backup/restore`, `DELETE /v1/raft/members/{id}`, and `POST /v1/raft/leadership-transfer` require an administrator-signed request. The operator keeps the Ed25519 private key; replicated cluster state contains only its PKIX public key.
+
+To sign a request, first `POST /v1/auth/administrator/challenge`. The leader returns a short-lived one-time `challenge`. Sign these newline-separated fields as UTF-8 bytes: `trellis-admin-request-v1`, challenge, uppercase HTTP method, exact path and query (`RequestURI`), and lowercase hexadecimal SHA-256 of the transmitted body. Send the challenge in `X-Trellis-Admin-Challenge` and the unpadded base64url Ed25519 signature in `X-Trellis-Admin-Signature`. The leader consumes a challenge on its first verification attempt. Challenges are leader-local and bound to the control epoch; clients receiving `X-Trellis-Admin-Challenge-Status: invalid` must obtain a fresh challenge and retry. `trellisctl` does this automatically.
+
+`POST /v1/nodes`, `POST /v1/nodes/{id}/heartbeat`, `POST /v1/raft/join`, and agent port 8127 require a trusted node certificate whose URI SAN identifies the immutable node UUID. Registration and heartbeat IDs must match it; Raft join derives the voter ID from it and requires advertised hosts to match certificate SANs. Managed-only `POST /v1/nodes/enroll` requires the separate enrollment credential over a connection authenticated with the pinned node CA. Node registration includes the node WireGuard public key, externally reachable base endpoint, local port-range base, and port-range size when namespace networking is available; heartbeats include discovered capabilities and return no desired state. The control plane combines the namespace's durable port slot with each node's advertised bases when building WireGuard peer plans. Leader-to-agent requests verify both that the agent certificate identifies the scheduled target node and that the caller certificate identifies the current locally known Raft leader. Start, stop, and network-plan mutations retain control-epoch fencing; starts retain generation, revision, and execution-hash checks, while stops retain generation checks. These cluster-internal APIs are not a substitute for ordinary scoped operator access.
 
 ## Example
 

@@ -4,16 +4,17 @@ set -euo pipefail
 SHARE_DIR="/vagrant/bin"
 DATA_DIR="/var/lib/trellis/data"
 CONFIG_FILE="/etc/trellis/trellis.yaml"
-TOKEN_FILE="${SHARE_DIR}/token"
+ADMIN_KEY_FILE="${SHARE_DIR}/administrator-key.pem"
+ADMIN_PUBLIC_KEY_FILE="${SHARE_DIR}/administrator-public-key"
 ENROLLMENT_TOKEN_FILE="${SHARE_DIR}/enrollment-token"
 CA_CERT_FILE="${SHARE_DIR}/node-ca.crt"
 
-# Generate separate shared administrator and enrollment credentials.
+# Generate separate administrator signing and enrollment credentials.
 mkdir -p "${SHARE_DIR}"
-if [ ! -s "${TOKEN_FILE}" ]; then
+if [ ! -s "${ADMIN_KEY_FILE}" ] || [ ! -s "${ADMIN_PUBLIC_KEY_FILE}" ]; then
     umask 077
-    printf 'trls_admin_' > "${TOKEN_FILE}"
-    head -c 32 /dev/urandom | base64 | tr -d '=\n' >> "${TOKEN_FILE}"
+    openssl genpkey -algorithm ED25519 -out "${ADMIN_KEY_FILE}"
+    openssl pkey -in "${ADMIN_KEY_FILE}" -pubout -outform DER | base64 | tr -d '=\n' >"${ADMIN_PUBLIC_KEY_FILE}"
 fi
 if [ ! -s "${ENROLLMENT_TOKEN_FILE}" ]; then
     umask 077
@@ -41,7 +42,7 @@ server_advertise: ${ADVERTISE_HOST}:8128
 raft_advertise: ${ADVERTISE_HOST}:8129
 EOF
 if [ "${HOSTNAME}" = "control" ]; then
-    printf 'admin_token_hash: %s\n' "$(sha256sum "${TOKEN_FILE}" | awk '{print $1}')" >> "$CONFIG_FILE"
+    printf 'administrator_public_key: %s\n' "$(cat "${ADMIN_PUBLIC_KEY_FILE}")" >> "$CONFIG_FILE"
 else
     for _ in $(seq 1 60); do [ -s "${CA_CERT_FILE}" ] && break; sleep 1; done
     [ -s "${CA_CERT_FILE}" ] || { echo "cluster CA certificate unavailable" >&2; exit 1; }
