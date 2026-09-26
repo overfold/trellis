@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"time"
+
+	"github.com/google/uuid"
 )
 
 // TaskLogs streams one task's logs for a scheduler allocation from an agent.
-func (s *AgentClient) TaskLogs(ctx context.Context, address, allocationID, task string, follow bool, tail int) (io.ReadCloser, error) {
+func (s *AgentClient) TaskLogs(ctx context.Context, nodeID uuid.UUID, address, allocationID, task string, follow bool, tail int) (io.ReadCloser, error) {
 	query := url.Values{
 		"follow": {fmt.Sprint(follow)},
 		"tail":   {fmt.Sprint(tail)},
@@ -16,7 +19,7 @@ func (s *AgentClient) TaskLogs(ctx context.Context, address, allocationID, task 
 	if task != "" {
 		query.Set("task", task)
 	}
-	return s.client.stream(ctx, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(allocationID)+"/logs?"+query.Encode())
+	return s.clientFor(nodeID, 30*time.Second).stream(ctx, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(allocationID)+"/logs?"+query.Encode())
 }
 
 // AllocationTaskLogs streams one task's logs for a scheduler allocation from the control plane.

@@ -12,7 +12,7 @@ func NewCredentialsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "credentials",
 		Short: "Mint scoped operator API credentials",
-		Long:  "Mint scoped operator API credentials. This administrative command requires the bootstrap credential; ordinary cluster/write operator credentials cannot mint additional credentials.",
+		Long:  "Mint scoped operator API credentials. This command requires the administrator credential; ordinary cluster/write operator credentials cannot mint additional credentials.",
 	}
 	cmd.AddCommand(newCredentialsCreateCmd())
 	return cmd
@@ -23,7 +23,7 @@ func newCredentialsCreateCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "create",
 		Short: "Create a scoped operator API credential",
-		Long:  "Create an operator credential with namespace or cluster scope and read or write access. The caller must authenticate with the bootstrap credential.",
+		Long:  "Create an operator credential with namespace or cluster scope and read or write access. The caller must authenticate with the administrator credential.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if scope != "cluster" && scope != "namespace" {
 				return fmt.Errorf("--scope must be cluster or namespace")

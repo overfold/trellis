@@ -17,7 +17,8 @@ Usage: setup.sh [options]
 Options:
   --advertise HOST              Address peers and workloads can use to reach this node
   --join HOST:8128              Join an existing cluster
-  --bootstrap-token-file FILE   Read the existing bootstrap credential from FILE
+  --enrollment-token-file FILE  Read the managed-mode enrollment credential from FILE
+  --ca-cert-file FILE           Pin the existing cluster node CA certificate
   --secrets-key-file FILE       Read the existing cluster secrets key from FILE
   --secrets-key-id ID           Existing cluster key ID, when explicitly configured
   --with-networking             Install namespace networking (default)
@@ -34,7 +35,7 @@ choose Customize to change cluster mode, address, networking, gVisor, or dashboa
 Flags provide the same choices for automation.
 
 Environment alternatives for joins:
-  TRELLIS_BOOTSTRAP_TOKEN       Existing cluster bootstrap credential
+  TRELLIS_ENROLLMENT_TOKEN      Existing managed-mode enrollment credential
   TRELLIS_SECRETS_KEY           Existing cluster 32-byte/base64 secrets key
   TRELLIS_SECRETS_KEY_ID        Existing cluster key ID, when explicitly configured
 HELP
@@ -77,13 +78,14 @@ resolve_engine
 source "$TMP/common-real.sh"
 require_root_linux_amd64
 
-advertise=""; join=""; token_file=""; key_file=""; key_id=""
+advertise=""; join=""; enrollment_file=""; ca_file=""; key_file=""; key_id=""
 networking=true; gvisor=true; dashboard=off; assume_yes=false
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --advertise) [ "$#" -ge 2 ] || ui_die "--advertise requires a value"; advertise="$2"; shift 2 ;;
         --join) [ "$#" -ge 2 ] || ui_die "--join requires HOST:8128"; join="$2"; shift 2 ;;
-        --bootstrap-token-file) [ "$#" -ge 2 ] || ui_die "--bootstrap-token-file requires a path"; token_file="$2"; shift 2 ;;
+        --enrollment-token-file) [ "$#" -ge 2 ] || ui_die "--enrollment-token-file requires a path"; enrollment_file="$2"; shift 2 ;;
+        --ca-cert-file) [ "$#" -ge 2 ] || ui_die "--ca-cert-file requires a path"; ca_file="$2"; shift 2 ;;
         --secrets-key-file) [ "$#" -ge 2 ] || ui_die "--secrets-key-file requires a path"; key_file="$2"; shift 2 ;;
         --secrets-key-id) [ "$#" -ge 2 ] || ui_die "--secrets-key-id requires a value"; key_id="$2"; shift 2 ;;
         --with-networking) networking=true; shift ;;
@@ -189,7 +191,8 @@ fi
 
 args=(--yes --advertise "$advertise")
 [ -z "$join" ] || args+=(--join "$join")
-[ -z "$token_file" ] || args+=(--bootstrap-token-file "$token_file")
+[ -z "$enrollment_file" ] || args+=(--enrollment-token-file "$enrollment_file")
+[ -z "$ca_file" ] || args+=(--ca-cert-file "$ca_file")
 [ -z "$key_file" ] || args+=(--secrets-key-file "$key_file")
 [ -z "$key_id" ] || args+=(--secrets-key-id "$key_id")
 [ "$networking" = true ] && args+=(--with-networking)

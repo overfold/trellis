@@ -99,6 +99,7 @@ type DesiredAllocation struct {
 // HeartbeatResponse returns the desired allocations for a node.
 type HeartbeatResponse struct {
 	Epoch              uint64              `json:"epoch"`
+	LeaderID           uuid.UUID           `json:"leader_id"`
 	Desired            []DesiredAllocation `json:"desired"`
 	OrphanConfirmation bool                `json:"orphan_confirmation"`
 }
@@ -201,14 +202,24 @@ type ServiceListResponse = []ServiceEntry
 
 // RaftJoinRequest identifies a server joining the Raft cluster.
 type RaftJoinRequest struct {
-	ID          string `json:"id"`
-	RaftAddress string `json:"raft_address"`
+	RaftAddress   string `json:"raft_address"`
+	ServerAddress string `json:"server_address"`
 }
 
-// RaftJoinResponse returns cluster TLS materials to a joining server.
-type RaftJoinResponse struct {
+// NodeEnrollmentRequest asks a managed cluster to issue one node identity.
+type NodeEnrollmentRequest struct {
+	NodeID          uuid.UUID `json:"node_id"`
+	ServerAdvertise string    `json:"server_advertise"`
+	AgentAdvertise  string    `json:"agent_advertise"`
+	RaftAdvertise   string    `json:"raft_advertise"`
+}
+
+// NodeEnrollmentResponse returns managed node signing materials.
+type NodeEnrollmentResponse struct {
 	CACert string `json:"ca_cert"`
 	CAKey  string `json:"ca_key"`
+	Cert   string `json:"cert"`
+	Key    string `json:"key"`
 }
 
 // JobRevisionResponse describes one persisted revision of a job.

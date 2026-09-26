@@ -8,7 +8,7 @@ import (
 )
 
 // CreateCredential mints a scoped operator credential. The HTTP layer restricts
-// this operation to the bootstrap credential.
+// this operation to the administrator credential.
 func (s *Server) CreateCredential(ctx context.Context, scope auth.AccessScope, access auth.AccessLevel, namespace string) (string, error) {
 	if s.tokenManager == nil {
 		return "", fmt.Errorf("credential management is unavailable")

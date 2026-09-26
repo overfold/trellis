@@ -69,6 +69,29 @@ func (s *StateController) PutNode(ctx context.Context, id string, node *NodeSumm
 	return nil
 }
 
+// PutNodeServerAddress records the control-plane address for a Raft node ID.
+func (s *StateController) PutNodeServerAddress(ctx context.Context, id, address string) error {
+	key := fmt.Sprintf("%s/%s/node-server-addresses/%s", trellisNamespace, s.cluster, id)
+	if err := s.put(ctx, key, address); err != nil {
+		return fmt.Errorf("put node server address: %w", err)
+	}
+	return nil
+}
+
+// GetNodeServerAddress resolves a Raft node ID to its control-plane address.
+func (s *StateController) GetNodeServerAddress(ctx context.Context, id string) (string, error) {
+	key := fmt.Sprintf("%s/%s/node-server-addresses/%s", trellisNamespace, s.cluster, id)
+	var address string
+	found, err := s.get(ctx, key, &address)
+	if err != nil {
+		return "", fmt.Errorf("get node server address: %w", err)
+	}
+	if !found || address == "" {
+		return "", fmt.Errorf("control-plane address for node %s not found", id)
+	}
+	return address, nil
+}
+
 // ListJobs loads all persisted jobs.
 func (s *StateController) ListJobs(ctx context.Context) (map[string]*Job, error) {
 	prefix := fmt.Sprintf("%s/%s/jobs/", trellisNamespace, s.cluster)

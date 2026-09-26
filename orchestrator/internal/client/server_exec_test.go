@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/clofour/trellis/internal/api"
+	"github.com/google/uuid"
 )
 
 func TestServerClientExecSessionLifecycle(t *testing.T) {
@@ -133,16 +134,17 @@ func TestServerClientExecSessionLifecycle(t *testing.T) {
 	}
 }
 
-
 func TestAgentClientNetworkPlanTransportUsesContextDeadline(t *testing.T) {
 	client := NewAgentClient("token", nil)
-	regular, ok := client.client.client.Transport.(*http.Transport)
+	regularClient := client.clientFor(uuid.New(), 30*time.Second)
+	regular, ok := regularClient.client.Transport.(*http.Transport)
 	if !ok {
-		t.Fatalf("regular transport type = %T", client.client.client.Transport)
+		t.Fatalf("regular transport type = %T", regularClient.client.Transport)
 	}
-	networkPlans, ok := client.networkPlanClient.client.Transport.(*http.Transport)
+	networkPlanClient := client.clientFor(uuid.New(), 0)
+	networkPlans, ok := networkPlanClient.client.Transport.(*http.Transport)
 	if !ok {
-		t.Fatalf("network-plan transport type = %T", client.networkPlanClient.client.Transport)
+		t.Fatalf("network-plan transport type = %T", networkPlanClient.client.Transport)
 	}
 	if regular.ResponseHeaderTimeout != 30*time.Second {
 		t.Fatalf("regular response header timeout = %s, want 30s", regular.ResponseHeaderTimeout)

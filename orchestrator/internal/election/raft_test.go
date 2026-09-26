@@ -37,7 +37,7 @@ type noopSnap struct{}
 func (noopSnap) Persist(sink raft.SnapshotSink) error { return sink.Close() }
 func (noopSnap) Release()                             {}
 
-func newTestRaft(t *testing.T) (*raft.Raft, string) {
+func newTestRaft(t *testing.T) (*raft.Raft, string, uuid.UUID) {
 	t.Helper()
 	dir := t.TempDir()
 	port := freePort(t)
@@ -53,8 +53,9 @@ func newTestRaft(t *testing.T) (*raft.Raft, string) {
 	}
 	snaps, _ := raft.NewFileSnapshotStore(dir, 1, os.Stderr)
 
+	nodeID := uuid.New()
 	cfg := raft.DefaultConfig()
-	cfg.LocalID = raft.ServerID(bind)
+	cfg.LocalID = raft.ServerID(nodeID.String())
 	cfg.HeartbeatTimeout = 200 * time.Millisecond
 	cfg.ElectionTimeout = 200 * time.Millisecond
 	cfg.LeaderLeaseTimeout = 100 * time.Millisecond
@@ -69,16 +70,16 @@ func newTestRaft(t *testing.T) (*raft.Raft, string) {
 	})
 
 	r.BootstrapCluster(raft.Configuration{
-		Servers: []raft.Server{{ID: raft.ServerID(bind), Address: transport.LocalAddr()}},
+		Servers: []raft.Server{{ID: raft.ServerID(nodeID.String()), Address: transport.LocalAddr()}},
 	})
 
-	return r, bind
+	return r, bind, nodeID
 }
 
 func TestRaftElector_ElectedEvent(t *testing.T) {
-	r, bind := newTestRaft(t)
+	r, bind, _ := newTestRaft(t)
 	nodeID := uuid.New()
-	elector := NewRaftElector(r, Leader{NodeID: nodeID, Address: bind})
+	elector := NewRaftElector(r, Leader{NodeID: nodeID, Address: bind}, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -103,8 +104,8 @@ func TestRaftElector_ElectedEvent(t *testing.T) {
 }
 
 func TestRaftElector_Current(t *testing.T) {
-	r, bind := newTestRaft(t)
-	elector := NewRaftElector(r, Leader{Address: bind})
+	r, bind, nodeID := newTestRaft(t)
+	elector := NewRaftElector(r, Leader{NodeID: nodeID, Address: bind}, nil)
 
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {

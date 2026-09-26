@@ -257,11 +257,11 @@ Prefer this mode for proxies, discovery controllers, and automation that does no
 
 ## Give a trusted operator workload cluster API access
 
-**Outcome:** let a workload perform administrative or cross-namespace operations that a namespace controller cannot perform.
+**Outcome:** let a workload perform ordinary cluster-wide or cross-namespace operations that a namespace controller cannot perform.
 
-Set `api_access: cluster` only on a fully trusted task group. Trellis injects the cluster administrator token in `TRELLIS_TOKEN`. It also sets `TRELLIS_NAMESPACE` to the job's namespace as a conservative default for clients that automatically send a namespace header, but that value is **not** an authorization boundary for a cluster token.
+Set `api_access: cluster` only on a fully trusted task group. Trellis injects a scoped cluster API token in `TRELLIS_TOKEN`, never the administrator or enrollment credential. It also sets `TRELLIS_NAMESPACE` to the job's namespace as a conservative default for clients that automatically send a namespace header, but that value is **not** an authorization boundary for a cluster-scoped token.
 
-Cluster mode is appropriate for an operator surface that genuinely needs node maintenance, backups, secret administration, cross-namespace operations, Raft controls, or equivalent administrator APIs. It is not a shortcut for giving an ordinary application access to another namespace.
+Cluster mode is appropriate for an operator workload that genuinely needs ordinary cross-namespace reads or writes. It does not grant credential minting, backup/restore, node enrollment, or Raft administration; those remain administrator, enrollment, or node-identity operations. It is not a shortcut for giving an ordinary application access to another namespace.
 
 Treat compromise of any task in the group as compromise of the cluster credential. Pin and review images, avoid unrelated sidecars, keep the token out of logs/metrics/browser code, and prefer `namespace` whenever it can express the controller's job.
 

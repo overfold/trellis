@@ -43,7 +43,8 @@ Usage:
 Options:
   --advertise HOST              Address peers and workloads can use to reach this node
   --join HOST:8128              Join an existing cluster instead of creating one
-  --bootstrap-token-file FILE   Read the existing cluster bootstrap token from FILE
+  --enrollment-token-file FILE  Read the managed-mode node enrollment token from FILE
+  --ca-cert-file FILE           Pin the existing cluster node CA certificate
   --secrets-key-file FILE       Read the existing cluster secrets key from FILE
   --secrets-key-id ID           Existing cluster key ID when it was explicitly configured
   --with-networking             Install WireGuard dependencies for namespace networking
@@ -54,7 +55,7 @@ Options:
   -h, --help                    Show this help
 
 Environment alternatives for joins:
-  TRELLIS_BOOTSTRAP_TOKEN       Existing cluster bootstrap token
+  TRELLIS_ENROLLMENT_TOKEN      Existing managed-mode enrollment token
   TRELLIS_SECRETS_KEY           Existing cluster 32-byte/base64 secrets key
   TRELLIS_SECRETS_KEY_ID        Existing cluster key ID when explicitly configured
 EOF_USAGE
@@ -62,7 +63,8 @@ EOF_USAGE
 
 advertise_host=""
 join_addr=""
-bootstrap_token_file=""
+enrollment_token_file=""
+ca_cert_file=""
 join_secrets_file=""
 join_secrets_key_id="${TRELLIS_SECRETS_KEY_ID:-}"
 with_networking=false
@@ -75,7 +77,8 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --advertise) [ "$#" -ge 2 ] || ui_die "--advertise requires a value"; advertise_host="$2"; shift 2 ;;
         --join) [ "$#" -ge 2 ] || ui_die "--join requires a host:port"; join_addr="$2"; shift 2 ;;
-        --bootstrap-token-file) [ "$#" -ge 2 ] || ui_die "--bootstrap-token-file requires a path"; bootstrap_token_file="$2"; shift 2 ;;
+        --enrollment-token-file) [ "$#" -ge 2 ] || ui_die "--enrollment-token-file requires a path"; enrollment_token_file="$2"; shift 2 ;;
+        --ca-cert-file) [ "$#" -ge 2 ] || ui_die "--ca-cert-file requires a path"; ca_cert_file="$2"; shift 2 ;;
         --secrets-key-file) [ "$#" -ge 2 ] || ui_die "--secrets-key-file requires a path"; join_secrets_file="$2"; shift 2 ;;
         --secrets-key-id) [ "$#" -ge 2 ] || ui_die "--secrets-key-id requires a value"; join_secrets_key_id="$2"; shift 2 ;;
         --with-networking) with_networking=true; shift ;;
@@ -141,7 +144,8 @@ fi
 if [ -n "$join_addr" ] && [[ "$join_addr" != *:* ]]; then
     ui_die "--join must be an existing node address such as node-a:8128"
 fi
-if [ -n "$bootstrap_token_file" ] && [ ! -r "$bootstrap_token_file" ]; then ui_die "Cannot read $bootstrap_token_file"; fi
+if [ -n "$enrollment_token_file" ] && [ ! -r "$enrollment_token_file" ]; then ui_die "Cannot read $enrollment_token_file"; fi
+if [ -n "$ca_cert_file" ] && [ ! -r "$ca_cert_file" ]; then ui_die "Cannot read $ca_cert_file"; fi
 if [ -n "$join_secrets_file" ] && [ ! -r "$join_secrets_file" ]; then ui_die "Cannot read $join_secrets_file"; fi
 
 fetch_latest_release
@@ -224,19 +228,27 @@ read_secret() {
 }
 
 if [ ! -f "$CONFIG_FILE" ]; then
+    admin_hash_config=""
     if [ -n "$join_addr" ]; then
-        cluster_token="$(read_secret "Existing cluster bootstrap token" "$bootstrap_token_file" "${TRELLIS_BOOTSTRAP_TOKEN:-}")"
+        enrollment_token="$(read_secret "Existing cluster enrollment token" "$enrollment_token_file" "${TRELLIS_ENROLLMENT_TOKEN:-}")"
+        [ -n "$ca_cert_file" ] || ui_die "--ca-cert-file is required when joining so enrollment uses the pinned cluster CA."
+        install -m 0644 "$ca_cert_file" "${CONFIG_DIR}/node-ca.crt"
         secrets_value="$(read_secret "Existing cluster secrets key" "$join_secrets_file" "${TRELLIS_SECRETS_KEY:-}")"
         printf '%s\n' "$secrets_value" >"$SECRETS_KEY_FILE"
         unset secrets_value
     else
-        cluster_token="trls_boot_$(head -c 32 /dev/urandom | base64 | tr -d '=\n')"
+        admin_token="trls_admin_$(head -c 32 /dev/urandom | base64 | tr -d '=\n')"
+        admin_token_hash="$(printf '%s' "$admin_token" | sha256sum | awk '{print $1}')"
+        admin_hash_config="admin_token_hash: ${admin_token_hash}"
+        enrollment_token="trls_enroll_$(head -c 32 /dev/urandom | base64 | tr -d '=\n')"
         openssl rand -base64 32 >"$SECRETS_KEY_FILE"
     fi
     chmod 600 "$SECRETS_KEY_FILE"
     cat >"$CONFIG_FILE" <<EOF_CONFIG
 cluster: default
-bootstrap_token: ${cluster_token}
+${admin_hash_config}
+enrollment_token: ${enrollment_token}
+node_signing_mode: managed
 data_dir: ${DATA_DIR}
 agent_advertise: ${advertise_host}:8127
 server_advertise: ${advertise_host}:8128
@@ -245,10 +257,10 @@ secrets_key: ${SECRETS_KEY_FILE}
 EOF_CONFIG
     if [ -n "$join_addr" ]; then
         printf 'join: %s\n' "$join_addr" >>"$CONFIG_FILE"
+        printf 'ca_cert: %s\n' "${CONFIG_DIR}/node-ca.crt" >>"$CONFIG_FILE"
         [ -z "$join_secrets_key_id" ] || printf 'secrets_key_id: %s\n' "$join_secrets_key_id" >>"$CONFIG_FILE"
     fi
     chmod 600 "$CONFIG_FILE"
-    unset cluster_token
     ui_step "Created node configuration"
 else
     [ -f "$SECRETS_KEY_FILE" ] || ui_die "${CONFIG_FILE} exists but ${SECRETS_KEY_FILE} is missing; restore the matching key and rerun setup."
@@ -284,25 +296,33 @@ operator_config="${operator_home}/.config/trellis/config.yaml"
 if [ -f "$operator_config" ] && grep -q '^  local:' "$operator_config" 2>/dev/null; then
     ui_step "Existing local trellisctl context kept for ${operator_user}"
 else
-    operator_token=""
-    for _ in $(seq 1 30); do
-        operator_token="$(local_ctl "$WORK_TMP" credentials create --scope cluster --access write --output table 2>/dev/null || true)"
-        [ -n "$operator_token" ] && break
-        sleep 1
-    done
-    [ -n "$operator_token" ] || ui_die "Trellis is running, but an operator credential could not be created."
-    operator_config_home="${operator_home}/.config"
-    install -d -m 0700 -o "$operator_user" -g "$operator_group" "$operator_config_home"
-    HOME="$operator_home" XDG_CONFIG_HOME="$operator_config_home" \
-        "${INSTALL_DIR}/trellisctl" --token "$operator_token" --namespace default context save local --use >/dev/null
-    if [ "$operator_user" != "root" ]; then chown -R "${operator_user}:${operator_group}" "${operator_config_home}/trellis"; fi
-    unset operator_token
-    ui_step "Saved local cluster/write context for ${operator_user}"
+    if [ -z "${admin_token:-}" ]; then
+        ui_detail "No administrator credential was copied to this joining node; configure trellisctl from an operator workstation."
+    else
+        operator_token=""
+        for _ in $(seq 1 30); do
+            operator_token="$(TRELLIS_TOKEN="$admin_token" local_ctl "$WORK_TMP" credentials create --scope cluster --access write --output table 2>/dev/null || true)"
+            [ -n "$operator_token" ] && break
+            sleep 1
+        done
+        [ -n "$operator_token" ] || ui_die "Trellis is running, but an operator credential could not be created."
+        operator_config_home="${operator_home}/.config"
+        install -d -m 0700 -o "$operator_user" -g "$operator_group" "$operator_config_home"
+        HOME="$operator_home" XDG_CONFIG_HOME="$operator_config_home" \
+            "${INSTALL_DIR}/trellisctl" --token "$operator_token" --namespace default context save local --use >/dev/null
+        if [ "$operator_user" != "root" ]; then chown -R "${operator_user}:${operator_group}" "${operator_config_home}/trellis"; fi
+        unset operator_token
+        ui_step "Saved local cluster/write context for ${operator_user}"
+    fi
+fi
+if [ -n "${admin_token:-}" ]; then
+    ui_warn "Save this administrator credential in an operator password manager; Trellis does not retain it: ${admin_token}"
 fi
 
 if [ "$with_dashboard" = true ]; then
+    [ -n "${admin_token:-}" ] || ui_die "Dashboard deployment requires an operator-side administrator credential and is not performed while joining a node."
     ui_section "Dashboard"
-    deploy_dashboard "$WORK_TMP" "$RELEASE_TAG" default "$dashboard_access"
+    TRELLIS_TOKEN="$admin_token" deploy_dashboard "$WORK_TMP" "$RELEASE_TAG" default "$dashboard_access"
     DASHBOARD_INSTALLED=true
     DASHBOARD_NAMESPACE=default
     DASHBOARD_ACCESS_STATE="$dashboard_access"
@@ -312,6 +332,7 @@ if [ "$with_dashboard" = true ]; then
         ui_warn "The dashboard has cluster/write access. Put port 3000 behind your own HTTPS and identity-aware proxy."
     fi
 fi
+unset admin_token admin_token_hash admin_hash_config enrollment_token
 
 STATE_COMPLETE=true
 STATE_VERSION="$RELEASE_TAG"

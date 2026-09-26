@@ -7,10 +7,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/clofour/trellis/internal/election"
+	"github.com/clofour/trellis/internal/storage"
+	"github.com/clofour/trellis/internal/tlsutil"
+	"github.com/google/uuid"
+	"github.com/labstack/echo/v5"
 )
 
 type fixedElector struct{ leader *election.Leader }
@@ -37,6 +42,83 @@ func TestAcquireNodeIDIsStable(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("node ID mode is %o", info.Mode().Perm())
+	}
+}
+
+func TestManagedSigningBootstrapsNodeIdentityAndCAKey(t *testing.T) {
+	dir := t.TempDir()
+	local := storage.NewLocalStorage(dir)
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	id := uuid.New()
+	cfg := &config{SigningMode: "managed", ServerAdvertise: "node-a:8128", AgentAdvertise: "node-a:8127"}
+	m, err := loadOrBootstrapTLS(context.Background(), slog.Default(), cfg, local, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.CAKey) == 0 {
+		t.Fatal("managed mode did not retain the CA private key")
+	}
+	if err := tlsutil.ValidateMaterials(m, id); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExternalSigningDoesNotPersistCAKey(t *testing.T) {
+	dir := t.TempDir()
+	id := uuid.New()
+	caCert, caKey, err := tlsutil.GenerateCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, key, err := tlsutil.GenerateNodeCert(caCert, caKey, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := func(name string, data []byte) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	local := storage.NewLocalStorage(filepath.Join(dir, "data"))
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config{SigningMode: "external", CACert: write("ca.crt", caCert), Cert: write("node.crt", cert), Key: write("node.key", key)}
+	m, err := loadOrBootstrapTLS(context.Background(), slog.Default(), cfg, local, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.CAKey) != 0 {
+		t.Fatal("external mode loaded a CA private key")
+	}
+	var persisted string
+	if err := local.Get("tls/ca-key", &persisted); err == nil {
+		t.Fatal("external mode persisted a CA private key")
+	}
+}
+
+func TestExternalSigningRejectsCertificateFromUntrustedCA(t *testing.T) {
+	dir := t.TempDir()
+	id := uuid.New()
+	trustedCert, _, _ := tlsutil.GenerateCA()
+	untrustedCert, untrustedKey, _ := tlsutil.GenerateCA()
+	cert, key, _ := tlsutil.GenerateNodeCert(untrustedCert, untrustedKey, id)
+	write := func(name string, data []byte) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	local := storage.NewLocalStorage(filepath.Join(dir, "data"))
+	_ = local.Init()
+	cfg := &config{SigningMode: "external", CACert: write("ca.crt", trustedCert), Cert: write("node.crt", cert), Key: write("node.key", key)}
+	if _, err := loadOrBootstrapTLS(context.Background(), slog.Default(), cfg, local, id); err == nil {
+		t.Fatal("accepted node certificate signed by an untrusted CA")
 	}
 }
 
@@ -104,5 +186,27 @@ func TestControlPlaneExecutesLocallyOnlyWhenLeaderIsActive(t *testing.T) {
 	}
 	if localCalls != 1 {
 		t.Fatalf("local handler calls = %d", localCalls)
+	}
+}
+
+func TestEnrollmentCredentialIsNotAdministratorCredential(t *testing.T) {
+	e := echo.New()
+	e.Use(leaderAuthMiddleware(func(token string) bool { return token == "admin-secret" }, "enroll-secret", nil))
+	e.POST("/v1/jobs", func(c *echo.Context) error { return c.NoContent(http.StatusNoContent) })
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/jobs", nil)
+	req.Header.Set("Authorization", "Bearer enroll-secret")
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("enrollment credential status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/jobs", nil)
+	req.Header.Set("Authorization", "Bearer admin-secret")
+	rec = httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("administrator credential status = %d, want %d", rec.Code, http.StatusNoContent)
 	}
 }

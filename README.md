@@ -30,7 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/clofour/trellis/main/scripts/setup.
   sudo bash -s -- --without-networking --without-gvisor
 ```
 
-Use `--join HOST:8128` to add a machine to an existing cluster. A joining server must receive both that cluster's bootstrap token and its existing secrets-encryption key; see [Operations](docs/public/operations.md#add-a-node) for the secure file-based workflow.
+Use `--join HOST:8128` to add a machine to an existing cluster. Managed enrollment uses a pinned copy of the cluster node CA plus a dedicated enrollment credential; administrator access and the shared secrets-encryption key remain separate. See [Operations](docs/public/operations.md#add-a-node) for managed and external-signing workflows.
 
 Upgrade and removal use the same lifecycle tooling without requiring a repository clone:
 

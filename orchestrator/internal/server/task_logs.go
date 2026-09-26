@@ -26,6 +26,7 @@ func (s *Server) AllocationTaskLogsForNamespace(ctx context.Context, namespace, 
 		s.mu.RUnlock()
 		return nil, fmt.Errorf("allocation not found")
 	}
+	nodeID := found.Node.ID
 	address := fmt.Sprintf("%s:%d", found.Node.Host, found.Node.Port)
 	tasks := append([]spec.TaskSpec(nil), found.Tasks...)
 	s.mu.RUnlock()
@@ -53,5 +54,5 @@ func (s *Server) AllocationTaskLogsForNamespace(ctx context.Context, namespace, 
 		}
 	}
 
-	return s.client.TaskLogs(ctx, address, id, task, follow, tail)
+	return s.client.TaskLogs(ctx, nodeID, address, id, task, follow, tail)
 }

@@ -176,7 +176,7 @@ Trellis gives every task in the group a bearer credential restricted to the job'
 
 Use `namespace/write` only for a namespace-local controller that actually mutates desired state. Use `cluster/read` for a trusted cluster-wide observer. Use `cluster/write` only for an operator workload that needs ordinary cluster mutations.
 
-The bootstrap credential is separate and more privileged. It is used for node registration, Raft membership, backup/restore, and minting scoped credentials, and Trellis never injects it into workloads.
+The administrator credential is separate and more privileged. It is used for backup/restore, Raft administration, and minting scoped credentials, and Trellis never injects it into workloads. Node registration and heartbeats instead use certificate-bound node identity; managed enrollment has its own credential.
 
 Every task in an API-enabled group can read the injected token, so do not add untrusted sidecars. The [`api-access`](../../examples/api-access/) example intentionally uses `namespace/read` and explains TLS verification, authenticated requests, last-known-good behavior, and token hygiene.
 

@@ -4,13 +4,13 @@ The control-plane API defaults to port 8128. Send `Authorization: Bearer TOKEN`;
 
 Trellis distinguishes three credential kinds:
 
-- `bootstrap` — the root node/cluster credential used for node registration, Raft membership, backup/restore, and minting operator credentials;
+- `administrator` — the root operator credential used for Raft administration, backup/restore, and minting operator credentials;
 - `operator` — an explicitly minted API credential with `namespace` or `cluster` scope and `read` or `write` access;
 - `workload` — a scoped credential injected through task-group `api_access`.
 
-Credential prefixes (`trls_boot_`, `trls_op_`, `trls_wl_`) are descriptive only. The server authenticates the complete bearer value and uses its authoritative stored principal metadata for generated credentials.
+Credential prefixes (`trls_admin_`, `trls_op_`, `trls_wl_`) are descriptive only. The server authenticates the complete bearer value and uses its authoritative stored principal metadata for generated credentials. The separate managed-enrollment credential conventionally uses `trls_enroll_`.
 
-A task group requests workload access with an object such as `{"scope":"namespace","access":"read"}`. Namespace scope is restricted to the namespace containing the job. Cluster scope grants only the ordinary read/write API authority represented by the credential; it never turns into the bootstrap credential. Both scopes set `TRELLIS_NAMESPACE` to the job namespace as a default request scope.
+A task group requests workload access with an object such as `{"scope":"namespace","access":"read"}`. Namespace scope is restricted to the namespace containing the job. Cluster scope grants only the ordinary read/write API authority represented by the credential; it never turns into the administrator credential. Both scopes set `TRELLIS_NAMESPACE` to the job namespace as a default request scope.
 
 The API uses the same resource vocabulary as the [Trellis user model](../public/user-model.md), but JSON is the transport representation. Humans author jobs as YAML manifests; job submission carries the equivalent JSON `JobSpec` inside the API request. Human-readable YAML memory sizes are normalized to byte counts in JSON.
 
@@ -49,9 +49,9 @@ The API uses the same resource vocabulary as the [Trellis user model](../public/
 }
 ```
 
-A bootstrap credential reports `kind: "bootstrap"`, `scope: "cluster"`, and `access: "write"`, but callers must still treat `bootstrap` as more privileged than ordinary `cluster/write`: root-only endpoint checks use the credential kind/context, not merely those two effective fields.
+An administrator credential reports `kind: "administrator"`, `scope: "cluster"`, and `access: "write"`, but callers must still treat `administrator` as more privileged than ordinary `cluster/write`: root-only endpoint checks use the credential kind/context, not merely those two effective fields.
 
-`GET /v1/namespaces` is discovery, not namespace lifecycle management. For cluster-scoped or bootstrap callers it returns the sorted unique namespace names currently referenced by desired jobs. A namespace-scoped caller receives only its own namespace. Applying a valid job to a previously unseen namespace does not require a separate namespace-creation call; after that desired job exists, the name becomes discoverable.
+`GET /v1/namespaces` is discovery, not namespace lifecycle management. For cluster-scoped or administrator callers it returns the sorted unique namespace names currently referenced by desired jobs. A namespace-scoped caller receives only its own namespace. Applying a valid job to a previously unseen namespace does not require a separate namespace-creation call; after that desired job exists, the name becomes discoverable.
 
 For allocation logs, `task` selects the task name from the allocation's task group. It may be omitted when the allocation has exactly one task; a multi-task allocation returns `400` until the caller selects one. The allocation ID is the Trellis allocation identity, not an agent/container runtime ID.
 
@@ -64,9 +64,9 @@ Secret write body: `{"value_base64":"...","expected_version":1}`; omit `expected
 
 A namespace credential is authorized only for its stored namespace regardless of the namespace header supplied by the caller. A cluster credential may deliberately select different namespaces but receives only the read/write authority encoded in its principal.
 
-## Bootstrap and cluster-internal endpoints
+## Administrator, enrollment, and cluster-internal endpoints
 
-`POST /v1/credentials`, `GET /v1/backup`, `POST /v1/backup/restore`, `POST /v1/nodes`, `POST /v1/nodes/{id}/heartbeat`, `POST /v1/raft/join`, `DELETE /v1/raft/members/{id}`, and `POST /v1/raft/leadership-transfer` require the bootstrap credential. Node registration includes the node WireGuard public key, externally reachable base endpoint, local port-range base, and port-range size when namespace networking is available; heartbeats include discovered capabilities. The control plane combines the namespace's durable port slot with each node's advertised bases when building WireGuard peer plans. The scheduler derives requirements from workload runtime and networking fields; a pending allocation whose eligible nodes lack a required feature reports `missing_capability` and names the feature in its diagnostic message. Agent port 8127 exposes internal allocation operations authenticated with the node bootstrap credential, including `POST /v1/network-plans` to refresh the local WireGuard listener, peers, and routes for an active namespace network. These cluster-internal APIs are not a substitute for ordinary scoped operator access.
+`POST /v1/credentials`, `GET /v1/backup`, `POST /v1/backup/restore`, `DELETE /v1/raft/members/{id}`, and `POST /v1/raft/leadership-transfer` require the operator-held administrator credential, which nodes verify against replicated hash material without storing the raw credential. `POST /v1/nodes`, `POST /v1/nodes/{id}/heartbeat`, `POST /v1/raft/join`, and agent port 8127 require a trusted node certificate whose URI SAN identifies the immutable node UUID. Registration and heartbeat IDs must match it; Raft join derives the voter ID from it and requires advertised hosts to match certificate SANs. Managed-only `POST /v1/nodes/enroll` requires the separate enrollment credential over a connection authenticated with the pinned node CA. Node registration includes the node WireGuard public key, externally reachable base endpoint, local port-range base, and port-range size when namespace networking is available; heartbeats include discovered capabilities. The control plane combines the namespace's durable port slot with each node's advertised bases when building WireGuard peer plans. Leader-to-agent requests additionally verify that the peer certificate identifies the scheduled target node. Leader mutations retain control-epoch, allocation-generation, revision, and execution-hash fencing. These cluster-internal APIs are not a substitute for ordinary scoped operator access.
 
 ## Example
 

@@ -40,13 +40,13 @@ type Action struct {
 }
 
 const (
-	allocationLossTimeout          = 45 * time.Second
-	leaderRecoveryGrace            = 30 * time.Second
-	maxExecutionAttempts           = 8
-	networkPlanBaseTimeout         = 15 * time.Second
-	networkPlanPeerTimeoutBudget   = 25 * time.Millisecond
-	networkPlanRouteTimeoutBudget  = 100 * time.Millisecond
-	networkPlanRepairInterval      = 5 * time.Minute
+	allocationLossTimeout         = 45 * time.Second
+	leaderRecoveryGrace           = 30 * time.Second
+	maxExecutionAttempts          = 8
+	networkPlanBaseTimeout        = 15 * time.Second
+	networkPlanPeerTimeoutBudget  = 25 * time.Millisecond
+	networkPlanRouteTimeoutBudget = 100 * time.Millisecond
+	networkPlanRepairInterval     = 5 * time.Minute
 )
 
 func networkPlanOperationTimeout(plan *network.Plan, attempt int) time.Duration {
@@ -666,7 +666,7 @@ func (s *Server) runNetworkPlanLoop(ctx context.Context) {
 	}
 }
 
-func (s *Server) dispatchPendingNetworkPlans(ctx context.Context, update func(context.Context, string, *api.NetworkPlanRequest) error) {
+func (s *Server) dispatchPendingNetworkPlans(ctx context.Context, update func(context.Context, uuid.UUID, string, *api.NetworkPlanRequest) error) {
 	if ctx.Err() != nil {
 		return
 	}
@@ -677,14 +677,14 @@ func (s *Server) dispatchPendingNetworkPlans(ctx context.Context, update func(co
 	}
 }
 
-func (s *Server) sendNetworkPlanTarget(ctx context.Context, target networkPlanTarget, update func(context.Context, string, *api.NetworkPlanRequest) error) {
+func (s *Server) sendNetworkPlanTarget(ctx context.Context, target networkPlanTarget, update func(context.Context, uuid.UUID, string, *api.NetworkPlanRequest) error) {
 	defer s.releaseNetworkPlanWorker(target.nodeID, target.epoch)
 	if ctx.Err() != nil || target.epoch != s.currentControlEpoch() {
 		return
 	}
 	planCtx, cancel := context.WithTimeout(ctx, networkPlanOperationTimeout(target.plan, target.attempt))
 	request := &api.NetworkPlanRequest{Epoch: target.epoch, Namespace: target.namespace, Plan: *target.plan}
-	err := update(planCtx, target.address, request)
+	err := update(planCtx, target.nodeID, target.address, request)
 	cancel()
 	s.finishNetworkPlanAttempt(target, err)
 	if err != nil {
@@ -866,7 +866,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 		if err := s.state.PutAllocation(ctx, alloc); err != nil {
 			return fmt.Errorf("persist allocation: %w", err)
 		}
-		if err := s.client.RunAllocation(ctx, address, request); err != nil {
+		if err := s.client.RunAllocation(ctx, alloc.Node.ID, address, request); err != nil {
 			if code := agentOperationCode(err); code == api.OperationStaleEpoch {
 				return err
 			} else if code == api.OperationStaleGeneration || code == api.OperationConflict {
@@ -906,7 +906,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 		if nodeStatus != NodeStatusHealthy && nodeStatus != NodeStatusDraining {
 			return fmt.Errorf("node %s is unavailable for allocation stop", alloc.Node.ID)
 		}
-		if err := s.client.StopAllocation(ctx, address, &api.StopAllocationRequest{AllocationID: alloc.ID, Generation: alloc.Generation, Epoch: epoch}); err != nil {
+		if err := s.client.StopAllocation(ctx, alloc.Node.ID, address, &api.StopAllocationRequest{AllocationID: alloc.ID, Generation: alloc.Generation, Epoch: epoch}); err != nil {
 			if code := agentOperationCode(err); code == api.OperationStaleEpoch || code == api.OperationStaleGeneration {
 				return err
 			}
