@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -105,6 +106,67 @@ func TestWriteConfigPreservesExtendedAttributes(t *testing.T) {
 		if !bytes.Equal(got, want) {
 			t.Errorf("%s = %v; want %v", name, got, want)
 		}
+	}
+}
+
+func TestWriteConfigRemovesInheritedACL(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "proxy.conf")
+	if err := os.WriteFile(path, []byte("old"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	// A default ACL on the parent is inherited by newly created temporary files.
+	acl := []byte{
+		2, 0, 0, 0,
+		1, 0, 7, 0, 255, 255, 255, 255,
+		2, 0, 4, 0, 0, 0, 0, 0,
+		4, 0, 4, 0, 255, 255, 255, 255,
+		16, 0, 4, 0, 255, 255, 255, 255,
+		32, 0, 0, 0, 255, 255, 255, 255,
+	}
+	binary.LittleEndian.PutUint32(acl[16:20], uint32(os.Geteuid()))
+	if err := unix.Setxattr(dir, "system.posix_acl_default", acl, 0); err != nil {
+		if errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.EPERM) {
+			t.Skipf("filesystem does not permit POSIX ACLs: %v", err)
+		}
+		t.Fatal(err)
+	}
+	probe, err := os.CreateTemp(dir, "probe-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(probe.Name())
+	defer probe.Close()
+	if _, err := unix.Fgetxattr(int(probe.Fd()), "system.posix_acl_access", nil); err != nil {
+		t.Fatalf("temporary file did not inherit ACL: %v", err)
+	}
+	if err := writeConfig(path, []byte("new")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := unix.Getxattr(path, "system.posix_acl_access", nil); !errors.Is(err, unix.ENODATA) {
+		t.Fatalf("replacement ACL error = %v; want no ACL", err)
+	}
+}
+
+func TestListXattrNamesUnsupported(t *testing.T) {
+	for _, failCall := range []int{1, 2} {
+		t.Run(fmt.Sprint(failCall), func(t *testing.T) {
+			calls := 0
+			names, err := listXattrNames(func(buf []byte) (int, error) {
+				calls++
+				if calls == failCall {
+					return 0, unix.EOPNOTSUPP
+				}
+				if buf == nil {
+					return 5, nil
+				}
+				copy(buf, "test\x00")
+				return 5, nil
+			})
+			if err != nil || len(names) != 0 {
+				t.Fatalf("names = %v, error = %v; want empty set", names, err)
+			}
+		})
 	}
 }
 

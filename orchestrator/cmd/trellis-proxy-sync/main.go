@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -213,19 +214,22 @@ func writeConfig(path string, data []byte) error {
 }
 
 func copyXattrs(path string, dst *os.File) error {
-	size, err := unix.Listxattr(path, nil)
+	source, err := listXattrNames(func(names []byte) (int, error) { return unix.Listxattr(path, names) })
 	if err != nil {
 		return err
 	}
-	names := make([]byte, size)
-	n, err := unix.Listxattr(path, names)
+	destination, err := listXattrNames(func(names []byte) (int, error) { return unix.Flistxattr(int(dst.Fd()), names) })
 	if err != nil {
 		return err
 	}
-	for _, name := range strings.Split(string(names[:n]), "\x00") {
-		if name == "" {
-			continue
+	for name := range destination {
+		if _, ok := source[name]; !ok {
+			if err := unix.Fremovexattr(int(dst.Fd()), name); err != nil {
+				return fmt.Errorf("remove %s: %w", name, err)
+			}
 		}
+	}
+	for name := range source {
 		size, err := unix.Getxattr(path, name, nil)
 		if err != nil {
 			return fmt.Errorf("read %s: %w", name, err)
@@ -240,6 +244,31 @@ func copyXattrs(path string, dst *os.File) error {
 		}
 	}
 	return nil
+}
+
+func listXattrNames(list func([]byte) (int, error)) (map[string]struct{}, error) {
+	size, err := list(nil)
+	if errors.Is(err, unix.EOPNOTSUPP) {
+		return map[string]struct{}{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	names := make([]byte, size)
+	n, err := list(names)
+	if errors.Is(err, unix.EOPNOTSUPP) {
+		return map[string]struct{}{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]struct{})
+	for _, name := range strings.Split(string(names[:n]), "\x00") {
+		if name != "" {
+			result[name] = struct{}{}
+		}
+	}
+	return result, nil
 }
 
 func selectUpstreams(allocs []api.AllocationResponse, containerPort int) []upstream {
