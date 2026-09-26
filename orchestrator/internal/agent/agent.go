@@ -26,6 +26,7 @@ import (
 	"github.com/clofour/trellis/internal/runtime"
 	"github.com/clofour/trellis/internal/spec"
 	"github.com/clofour/trellis/internal/storage"
+	"github.com/containerd/errdefs"
 	"github.com/google/uuid"
 )
 
@@ -1224,19 +1225,23 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string) error {
 	}
 
 	containerID := alloc.ContainerID
+	containerMissing := false
 	if alloc.ContainerOwnershipUnverified {
 		observed, err := a.runtime.Inspect(ctx, containerID)
-		if err != nil {
+		if errdefs.IsNotFound(err) {
+			containerMissing = true
+		} else if err != nil {
 			return fmt.Errorf("verify container %s before cleanup: %w", containerID, err)
-		}
-		if !a.containerMatchesAllocation(*observed, &alloc) {
+		} else if !a.containerMatchesAllocation(*observed, &alloc) {
 			return fmt.Errorf("%w: container %s has different execution metadata", ErrExecutionConflict, containerID)
 		}
 	}
 	a.reconciler.BeginStop(allocID)
 	persistStopErr := a.markAllocationStopping(allocID)
-	if err := a.runtime.Stop(ctx, containerID); err != nil {
-		return errors.Join(persistStopErr, fmt.Errorf("stop container %s: %w", containerID, err))
+	if !containerMissing {
+		if err := a.runtime.Stop(ctx, containerID); err != nil {
+			return errors.Join(persistStopErr, fmt.Errorf("stop container %s: %w", containerID, err))
+		}
 	}
 
 	var errs []error
@@ -1249,8 +1254,10 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string) error {
 	if err := a.network.Detach(ctx, alloc.Network); err != nil {
 		errs = append(errs, fmt.Errorf("detach allocation network: %w", err))
 	}
-	if err := a.runtime.Remove(ctx, containerID); err != nil {
-		errs = append(errs, fmt.Errorf("remove container %s: %w", containerID, err))
+	if !containerMissing {
+		if err := a.runtime.Remove(ctx, containerID); err != nil {
+			errs = append(errs, fmt.Errorf("remove container %s: %w", containerID, err))
+		}
 	}
 	if alloc.SecretDir != "" {
 		if err := os.RemoveAll(alloc.SecretDir); err != nil {

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"github.com/clofour/trellis/internal/runtime"
 	"github.com/clofour/trellis/internal/spec"
 	"github.com/clofour/trellis/internal/storage"
+	"github.com/containerd/errdefs"
 	"github.com/google/uuid"
 )
 
@@ -208,10 +210,15 @@ type ambiguousCreateRuntime struct {
 	removeCount      int
 	startCount       int
 	inspectAvailable bool
+	createMissing    bool
+	inspectMissing   bool
 	labels           map[string]string
 }
 
 func (r *ambiguousCreateRuntime) Create(_ context.Context, options runtime.CreateOptions) (string, error) {
+	if r.createMissing && r.createErr != nil {
+		return options.ID, r.createErr
+	}
 	r.status = runtime.StatusCreated
 	r.labels = options.Labels
 	return options.ID, r.createErr
@@ -220,6 +227,9 @@ func (r *ambiguousCreateRuntime) Create(_ context.Context, options runtime.Creat
 func (r *ambiguousCreateRuntime) Inspect(_ context.Context, id string) (*runtime.ContainerInfo, error) {
 	if !r.inspectAvailable {
 		return nil, errors.New("inspect unavailable")
+	}
+	if r.inspectMissing {
+		return nil, fmt.Errorf("inspect %s: %w", id, errdefs.ErrNotFound)
 	}
 	return &runtime.ContainerInfo{ID: id, Labels: r.labels, Status: r.status}, nil
 }
@@ -721,6 +731,62 @@ func TestAmbiguousCreateRetainsRecordUntilOwnershipVerified(t *testing.T) {
 	}
 	if err := local.Get(allocationRecordKey(id), &recorded); err == nil {
 		t.Fatal("allocation record retained after successful removal")
+	}
+}
+
+func TestFailedCreateMissingContainerCanBeCleanedUpOnRetry(t *testing.T) {
+	for _, retry := range []string{"RunGroup", "StopGroup"} {
+		t.Run(retry, func(t *testing.T) {
+			createErr := errors.New("create failed before container creation")
+			rt := &ambiguousCreateRuntime{
+				reconcilerRuntime: &reconcilerRuntime{},
+				createErr:         createErr,
+				createMissing:     true,
+			}
+			agent := newOperationTestAgent(t, rt)
+			local := storage.NewLocalStorage(t.TempDir())
+			if err := local.Init(); err != nil {
+				t.Fatal(err)
+			}
+			agent.ConfigureDurability(local, "test")
+			request := operationTestRequest()
+			request.Tasks = request.Tasks[:1]
+			id := "allocation-g2-first"
+
+			if err := agent.RunGroup(context.Background(), request); !errors.Is(err, createErr) {
+				t.Fatalf("initial run error = %v, want create error", err)
+			}
+			var recorded Allocation
+			if err := local.Get(allocationRecordKey(id), &recorded); err != nil || !recorded.ContainerOwnershipUnverified {
+				t.Fatalf("retained record = %+v, error = %v, want unverified ownership", recorded, err)
+			}
+
+			rt.inspectAvailable = true
+			rt.inspectMissing = true
+			switch retry {
+			case "RunGroup":
+				rt.createErr = nil
+				if err := agent.RunGroup(context.Background(), request); err != nil {
+					t.Fatalf("retry run: %v", err)
+				}
+				if current := agent.allocations[id]; current == nil || current.Status != "running" || current.ContainerOwnershipUnverified {
+					t.Fatalf("allocation after retry = %+v, want verified running allocation", current)
+				}
+			case "StopGroup":
+				if err := agent.StopGroup(context.Background(), &api.StopAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation}); err != nil {
+					t.Fatalf("retry stop: %v", err)
+				}
+				if agent.allocations[id] != nil {
+					t.Fatal("allocation retained after stop")
+				}
+				if err := local.Get(allocationRecordKey(id), &recorded); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("record after stop: %v, want not found", err)
+				}
+			}
+			if rt.removeCount != 0 {
+				t.Fatalf("remove attempts = %d, want none for missing container", rt.removeCount)
+			}
+		})
 	}
 }
 
