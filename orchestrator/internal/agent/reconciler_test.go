@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/clofour/trellis/internal/api"
 	"github.com/clofour/trellis/internal/runtime"
 	"github.com/clofour/trellis/internal/spec"
 )
@@ -69,6 +70,31 @@ func TestAllocationReconcilerRestartsStoppedAllocation(t *testing.T) {
 	}
 	if got := subscriber.statuses[len(subscriber.statuses)-1]; got != "healthy" {
 		t.Fatalf("status = %q, want healthy", got)
+	}
+}
+
+func TestDrainGroupSuppressesAutomaticRestart(t *testing.T) {
+	rt := &reconcilerRuntime{status: runtime.StatusStopped}
+	r := NewAllocationReconciler(rt, nil)
+	r.Track("task", false, nil)
+	agent := &Agent{
+		allocations: map[string]*Allocation{
+			"task": {ID: "task", AllocationID: "alloc", Generation: 2},
+		},
+		reconciler: r,
+		operations: make(map[string]*allocationOperation),
+	}
+	if err := agent.DrainGroup(&api.DrainAllocationRequest{AllocationID: "alloc", Generation: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Reconcile(context.Background(), "task"); err != nil {
+		t.Fatal(err)
+	}
+	if rt.restartCount != 0 {
+		t.Fatalf("restart count = %d, want 0 for draining allocation", rt.restartCount)
+	}
+	if !agent.allocations["task"].Draining {
+		t.Fatal("agent did not persist the draining state transition")
 	}
 }
 

@@ -31,6 +31,13 @@ type StopAllocationRequest struct {
 	Epoch        uint64 `json:"epoch"`
 }
 
+// DrainAllocationRequest identifies an allocation generation whose automatic
+// restarts must be suppressed while the control plane prepares to stop it.
+type DrainAllocationRequest struct {
+	AllocationID string `json:"allocation_id"`
+	Generation   uint64 `json:"generation"`
+}
+
 // NetworkPlanRequest updates the peers for an active namespace network.
 type NetworkPlanRequest struct {
 	Epoch     uint64       `json:"epoch"`

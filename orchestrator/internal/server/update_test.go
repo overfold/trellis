@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -208,6 +209,15 @@ func TestReconcileRollingDrainsOldAllocations(t *testing.T) {
 	}
 	if newCount != 1 {
 		t.Errorf("expected 1 new allocation (max_parallel=1), got %d", newCount)
+	}
+	drainCalls := 0
+	for _, call := range agent.recordedCalls() {
+		if strings.HasSuffix(call.path, "/drain") {
+			drainCalls++
+		}
+	}
+	if drainCalls != 2 {
+		t.Errorf("drain-control calls = %d, want 2", drainCalls)
 	}
 }
 

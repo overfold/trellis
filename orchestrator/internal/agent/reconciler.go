@@ -122,8 +122,8 @@ func (r *AllocationReconciler) Untrack(allocID string) error {
 	return nil
 }
 
-// BeginStop waits for an active reconciliation pass and prevents further restarts.
-func (r *AllocationReconciler) BeginStop(allocID string) {
+// SuppressRestarts waits for an active reconciliation pass and prevents further restarts.
+func (r *AllocationReconciler) SuppressRestarts(allocID string) {
 	r.mu.Lock()
 	state := r.states[allocID]
 	r.mu.Unlock()
@@ -135,6 +135,11 @@ func (r *AllocationReconciler) BeginStop(allocID string) {
 	state.stopping = true
 	r.mu.Unlock()
 	state.operation.Unlock()
+}
+
+// BeginStop suppresses restarts before runtime cleanup starts.
+func (r *AllocationReconciler) BeginStop(allocID string) {
+	r.SuppressRestarts(allocID)
 }
 
 // ObserveHealth records a health observation. The health manager owns how an

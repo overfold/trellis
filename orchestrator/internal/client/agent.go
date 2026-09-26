@@ -128,6 +128,16 @@ func (s *AgentClient) RunAllocation(ctx context.Context, nodeID uuid.UUID, addre
 	return nil
 }
 
+// DrainAllocation suppresses automatic restarts until the allocation is stopped.
+func (s *AgentClient) DrainAllocation(ctx context.Context, nodeID uuid.UUID, address string, request *api.DrainAllocationRequest) error {
+	var response api.OperationResponse
+	err := s.clientFor(nodeID, 30*time.Second).request(ctx, http.MethodPost, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(request.AllocationID)+"/drain", request, &response)
+	if err != nil {
+		return fmt.Errorf("drain allocation: %w", decodeOperationError(err))
+	}
+	return nil
+}
+
 // StopAllocation asks an agent to stop an allocation.
 func (s *AgentClient) StopAllocation(ctx context.Context, nodeID uuid.UUID, address string, request *api.StopAllocationRequest) error {
 	var response api.OperationResponse

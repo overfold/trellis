@@ -432,7 +432,7 @@ func (h *Handler) handleHeartbeat(c *echo.Context) error {
 	if err := h.server.Heartbeat(c.Request().Context(), id, request.Allocations, request.Version, request.Volumes, request.Capabilities); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "unable to process heartbeat")
 	}
-	return c.JSON(http.StatusOK, h.server.HeartbeatResponse(id))
+	return c.NoContent(http.StatusNoContent)
 }
 
 func (h *Handler) handleListJobs(c *echo.Context) error {

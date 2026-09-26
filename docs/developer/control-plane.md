@@ -2,7 +2,7 @@
 
 ## Registration and heartbeats
 
-Nodes register UUID, agent address, capacity, OS/architecture, labels, volume inventory, and optional WireGuard identity. Periodic heartbeats refresh node status and report allocation generation, task, phase, health, each task's observed namespace-network address when present, ports, and version. The control plane retains endpoint observations per task rather than collapsing a multi-task allocation onto whichever task was reported first. The response is a desired-allocation set plus control epoch and orphan-confirmation signal. After three missed heartbeat intervals a healthy node is marked unhealthy.
+Nodes register UUID, agent address, capacity, OS/architecture, labels, volume inventory, and optional WireGuard identity. Periodic heartbeats refresh node status and report allocation generation, task, phase, health, each task's observed namespace-network address when present, ports, capabilities, and version. The control plane retains endpoint observations per task rather than collapsing a multi-task allocation onto whichever task was reported first. A successful heartbeat is acknowledged without returning desired state. After three missed heartbeat intervals a healthy node is marked unhealthy.
 
 ## Scheduling algorithm
 
@@ -18,9 +18,9 @@ The result may contain fewer placements than requested. Reconciliation will try 
 
 ## Reconciliation
 
-The leader serializes reconciliation runs. It normalizes allocations, expires unhealthy nodes, ignores terminal records, respects retry timestamps, stops allocations whose job disappeared, and detects outdated job revisions. It then scales each group down/up and executes start/stop actions outside the state scan.
+The leader serializes reconciliation runs. It normalizes allocations, expires unhealthy nodes, ignores terminal records, respects retry timestamps, stops allocations whose job disappeared, and detects outdated job revisions. It also compares heartbeat observations with desired allocations and stops orphaned or stale generations through the same reconciler action path after the leader-recovery grace period. It then scales each group down/up and executes agent actions outside the state scan.
 
-`recreate` immediately stops outdated allocations. `rolling` marks them draining, creates at most `max_parallel` non-healthy replacements at a time, and stops old allocations only as healthy new capacity makes them surplus. A zero/omitted strategy becomes recreate; omitted/nonpositive rolling parallelism is effectively one.
+`recreate` immediately stops outdated allocations. `rolling` marks them draining, explicitly tells the agent reconciler to suppress automatic restarts, creates at most `max_parallel` non-healthy replacements at a time, and sends the normal stop operation only as healthy new capacity makes them surplus. A zero/omitted strategy becomes recreate; omitted/nonpositive rolling parallelism is effectively one.
 
 Agent failures receive deterministic exponential backoff with jitter, capped by the reconciliation attempt rules. Old leadership epochs, generations, and mismatched execution hashes produce protocol-level conflict codes rather than silently changing a newer allocation.
 

@@ -427,8 +427,9 @@ func run(parent context.Context, cfg *config) error {
 		}
 	}()
 
+	elector := election.NewRaftElector(raftStore.Raft(), election.Leader{NodeID: id, Address: cfg.ServerAdvertise}, control.NodeServerAddress)
 	agentHTTP := echo.New()
-	agentHTTP.Use(middleware.Recover(), nodeAuthMiddleware(ag.AuthorizeLeader))
+	agentHTTP.Use(middleware.Recover(), nodeAuthMiddleware(currentLeaderAuthorizer(elector)))
 	agent.NewHandler(ag).Register(agentHTTP)
 	go func() {
 		if err := (echo.StartConfig{Address: cfg.AgentListen, TLSConfig: agentServerTLS, GracefulTimeout: shutdownTime}).Start(ctx, agentHTTP); err != nil && ctx.Err() == nil {
@@ -437,7 +438,6 @@ func run(parent context.Context, cfg *config) error {
 		}
 	}()
 
-	elector := election.NewRaftElector(raftStore.Raft(), election.Leader{NodeID: id, Address: cfg.ServerAdvertise}, control.NodeServerAddress)
 	leaderHTTP := echo.New()
 	leaderHTTP.Use(middleware.Recover(), leaderAuthMiddleware(control.ValidateAPIToken, cfg.EnrollmentToken, control.TokenManager()))
 	leaderHTTP.GET("/v1/auth/whoami", server.HandleWhoAmI)
@@ -936,6 +936,13 @@ func nodeAuthMiddleware(authorize func(uuid.UUID) bool) echo.MiddlewareFunc {
 			c.SetRequest(c.Request().WithContext(ctx))
 			return next(c)
 		}
+	}
+}
+
+func currentLeaderAuthorizer(elector election.Elector) func(uuid.UUID) bool {
+	return func(id uuid.UUID) bool {
+		leaderID, err := elector.CurrentID()
+		return err == nil && id != uuid.Nil && id == leaderID
 	}
 }
 

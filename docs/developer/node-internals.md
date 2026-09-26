@@ -2,7 +2,7 @@
 
 ## Agent convergence
 
-The server submits one allocation containing all tasks in a group. The agent validates epoch/generation, serializes local reconciliation, prepares network/volumes/secrets/ports, and asks the selected runtime to create/start containers. Runtime labels retain allocation identity and generation so an agent can recover ownership after restart. Delete operations are likewise generation-aware. The agent API is an internal control surface, not a user API.
+The server submits one allocation containing all tasks in a group. The agent validates epoch/generation, serializes local reconciliation, prepares network/volumes/secrets/ports, and asks the selected runtime to create/start containers. Runtime labels retain allocation identity and generation so an agent can recover ownership after restart. Delete operations are likewise generation-aware. Before a rolling replacement or node evacuation, an explicit drain operation suppresses local automatic restarts until the normal stop arrives. Heartbeats report observations only; desired-vs-observed cleanup belongs to the server reconciler. The agent API is an internal control surface, not a user API.
 
 ## Runtime abstraction
 

@@ -29,14 +29,22 @@ type ActionType string
 const (
 	// ActionStart starts or updates an allocation.
 	ActionStart ActionType = "start"
+	// ActionDrain suppresses local restarts before a later stop.
+	ActionDrain ActionType = "drain"
 	// ActionStop stops an allocation.
 	ActionStop ActionType = "stop"
+	// ActionStopObserved removes a node-observed allocation generation that is
+	// absent from control-plane desired state.
+	ActionStopObserved ActionType = "stop_observed"
 )
 
 // Action describes one allocation reconciliation operation.
 type Action struct {
 	Type       ActionType
 	Allocation *Allocation
+	Node       *Node
+	ID         string
+	Generation uint64
 }
 
 const (
@@ -205,6 +213,31 @@ func (s *Server) Reconcile(ctx context.Context) {
 		admittedJobs[key] = true
 	}
 	var actions []Action
+	if !s.leaderSince.IsZero() && now.Sub(s.leaderSince) >= leaderRecoveryGrace {
+		type observationKey struct {
+			nodeID     uuid.UUID
+			allocation string
+			generation uint64
+		}
+		desired := make(map[observationKey]bool)
+		for _, allocation := range s.allocations {
+			allocation.mu.Lock()
+			if allocation.Node != nil && allocation.Phase != lifecycle.PhaseStopped && allocation.Phase != lifecycle.PhaseFailed && allocation.Phase != lifecycle.PhaseLost {
+				desired[observationKey{nodeID: allocation.Node.ID, allocation: allocation.ID, generation: allocation.Generation}] = true
+			}
+			allocation.mu.Unlock()
+		}
+		for _, node := range s.nodes {
+			if node.Status != NodeStatusHealthy && node.Status != NodeStatusDraining {
+				continue
+			}
+			for _, observed := range node.observedAllocations {
+				if !desired[observationKey{nodeID: node.ID, allocation: observed.ID, generation: observed.Generation}] {
+					actions = append(actions, Action{Type: ActionStopObserved, Node: node, ID: observed.ID, Generation: observed.Generation})
+				}
+			}
+		}
+	}
 	valid := make([]*Allocation, 0, len(s.allocations))
 	for _, allocation := range s.allocations {
 		allocation.mu.Lock()
@@ -240,6 +273,9 @@ func (s *Server) Reconcile(ctx context.Context) {
 			allocation.mu.Unlock()
 			continue
 		}
+		if allocation.Draining && allocation.Node != nil && (allocation.Node.Status == NodeStatusHealthy || allocation.Node.Status == NodeStatusDraining) {
+			actions = append(actions, Action{Type: ActionDrain, Allocation: allocation})
+		}
 		if allocation.Node != nil && allocation.Node.Status == NodeStatusDraining {
 			if now.Sub(s.leaderSince) >= leaderRecoveryGrace && !allocation.Node.LastHeartbeat.IsZero() && now.Sub(allocation.Node.LastHeartbeat) >= allocationLossTimeout {
 				_ = allocation.Transition(lifecycle.PhaseLost, now, "node_unavailable", "node did not re-register before the allocation loss timeout")
@@ -262,6 +298,7 @@ func (s *Server) Reconcile(ctx context.Context) {
 			if !allocation.Draining {
 				allocation.Draining = true
 				_ = s.state.PutAllocation(context.WithoutCancel(ctx), allocation)
+				actions = append(actions, Action{Type: ActionDrain, Allocation: allocation})
 			}
 			valid = append(valid, allocation)
 			allocation.mu.Unlock()
@@ -274,6 +311,9 @@ func (s *Server) Reconcile(ctx context.Context) {
 				if !allocation.Draining {
 					allocation.Draining = true
 					_ = s.state.PutAllocation(context.WithoutCancel(ctx), allocation)
+					if allocation.Node != nil && (allocation.Node.Status == NodeStatusHealthy || allocation.Node.Status == NodeStatusDraining) {
+						actions = append(actions, Action{Type: ActionDrain, Allocation: allocation})
+					}
 				}
 				if allocation.Node == nil || allocation.Node.Status != NodeStatusHealthy {
 					if now.Sub(s.leaderSince) >= leaderRecoveryGrace && allocation.Node != nil && !allocation.Node.LastHeartbeat.IsZero() && now.Sub(allocation.Node.LastHeartbeat) >= allocationLossTimeout {
@@ -429,7 +469,11 @@ func (s *Server) Reconcile(ctx context.Context) {
 
 	for i := range actions {
 		if err := s.Execute(ctx, &actions[i]); err != nil {
-			s.log.Error("reconcile action failed", "action", actions[i].Type, "allocation", actions[i].Allocation.ID, "error", err)
+			allocationID := actions[i].ID
+			if actions[i].Allocation != nil {
+				allocationID = actions[i].Allocation.ID
+			}
+			s.log.Error("reconcile action failed", "action", actions[i].Type, "allocation", allocationID, "error", err)
 		}
 	}
 	s.refreshNetworkPlans()
@@ -733,6 +777,18 @@ func (s *Server) nodePointers() []*Node {
 
 // Execute performs a reconciliation action.
 func (s *Server) Execute(ctx context.Context, action *Action) error {
+	if action.Type == ActionStopObserved {
+		s.mu.RLock()
+		epoch := s.controlEpoch
+		node := action.Node
+		nodeStatus := node.Status
+		address := fmt.Sprintf("%s:%d", node.Host, node.Port)
+		s.mu.RUnlock()
+		if nodeStatus != NodeStatusHealthy && nodeStatus != NodeStatusDraining {
+			return fmt.Errorf("node %s is unavailable for observed allocation stop", node.ID)
+		}
+		return s.client.StopAllocation(ctx, node.ID, address, &api.StopAllocationRequest{AllocationID: action.ID, Generation: action.Generation, Epoch: epoch})
+	}
 	alloc := action.Allocation
 
 	// Follow the server locking contract: when both locks are needed, acquire the
@@ -892,6 +948,12 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 		if err := s.state.PutAllocation(ctx, alloc); err != nil {
 			return fmt.Errorf("persist running allocation: %w", err)
 		}
+	case ActionDrain:
+		unlockServer()
+		if nodeStatus != NodeStatusHealthy && nodeStatus != NodeStatusDraining {
+			return fmt.Errorf("node %s is unavailable for allocation drain", alloc.Node.ID)
+		}
+		return s.client.DrainAllocation(ctx, alloc.Node.ID, address, &api.DrainAllocationRequest{AllocationID: alloc.ID, Generation: alloc.Generation})
 	case ActionStop:
 		unlockServer()
 

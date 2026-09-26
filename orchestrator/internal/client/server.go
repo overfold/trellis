@@ -152,12 +152,12 @@ type NodeInfo struct {
 
 // Heartbeat contains the state periodically reported by a node.
 type Heartbeat struct {
-	NodeID      uuid.UUID              `json:"id"`
-	Timestamp   time.Time              `json:"timestamp"`
-	Allocations []api.AllocationStatus `json:"allocations,omitempty"`
-	Volumes     []string               `json:"volumes,omitempty"`
-	Capabilities []spec.NodeCapability `json:"capabilities,omitempty"`
-	Version     string                 `json:"version,omitempty"`
+	NodeID       uuid.UUID              `json:"id"`
+	Timestamp    time.Time              `json:"timestamp"`
+	Allocations  []api.AllocationStatus `json:"allocations,omitempty"`
+	Volumes      []string               `json:"volumes,omitempty"`
+	Capabilities []spec.NodeCapability  `json:"capabilities,omitempty"`
+	Version      string                 `json:"version,omitempty"`
 }
 
 // NewServerClient creates a client for cluster-scoped server APIs.
@@ -358,25 +358,21 @@ func (s *ServerClient) ListAllocations(ctx context.Context, label string) (*api.
 	return &responseData, nil
 }
 
-// SendHeartbeat reports node state and returns desired allocations.
-func (s *ServerClient) SendHeartbeat(ctx context.Context, id uuid.UUID, heartbeat *Heartbeat) (*api.HeartbeatResponse, error) {
+// SendHeartbeat reports observed node state.
+func (s *ServerClient) SendHeartbeat(ctx context.Context, id uuid.UUID, heartbeat *Heartbeat) error {
 	requestData := &api.HeartbeatRequest{
-		NodeID:      heartbeat.NodeID,
-		Timestamp:   heartbeat.Timestamp,
-		Allocations: heartbeat.Allocations,
-		Volumes:     heartbeat.Volumes,
+		NodeID:       heartbeat.NodeID,
+		Timestamp:    heartbeat.Timestamp,
+		Allocations:  heartbeat.Allocations,
+		Volumes:      heartbeat.Volumes,
 		Capabilities: heartbeat.Capabilities,
-		Version:     heartbeat.Version,
+		Version:      heartbeat.Version,
 	}
 	url := fmt.Sprintf("%s/v1/nodes/%s/heartbeat", s.address(), id)
-
-	var response api.HeartbeatResponse
-	err := s.client.request(ctx, http.MethodPost, url, requestData, &response)
-	if err != nil {
-		return nil, fmt.Errorf("send heartbeat: %w", err)
+	if err := s.client.request(ctx, http.MethodPost, url, requestData, nil); err != nil {
+		return fmt.Errorf("send heartbeat: %w", err)
 	}
-
-	return &response, nil
+	return nil
 }
 
 func normalizeBaseURL(addr string) string {

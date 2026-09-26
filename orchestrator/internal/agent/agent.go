@@ -51,8 +51,6 @@ type Agent struct {
 	cluster     string
 	version     string
 	epoch       uint64
-	leaderID    uuid.UUID
-	orphans     map[string]int
 	mu          sync.RWMutex
 	operationMu sync.Mutex
 	operations  map[string]*allocationOperation
@@ -117,6 +115,7 @@ type Allocation struct {
 	Network     *network.Attachment
 	Status      string
 	Health      string
+	Draining    bool
 }
 
 const heartbeatInterval = 10 * time.Second
@@ -171,14 +170,6 @@ func (a *Agent) AcceptEpoch(epoch uint64) error {
 	return nil
 }
 
-// AuthorizeLeader reports whether id is the current Raft leader learned from
-// the latest authenticated heartbeat response.
-func (a *Agent) AuthorizeLeader(id uuid.UUID) bool {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return id != uuid.Nil && id == a.leaderID
-}
-
 func allocationRecordKey(id string) string {
 	return "agent/allocations/" + base64.RawURLEncoding.EncodeToString([]byte(id))
 }
@@ -219,7 +210,6 @@ func NewAgent(log *slog.Logger, runtime runtime.ContainerRuntime, health *health
 		allocations:  make(map[string]*Allocation),
 		execSessions: make(map[string]*execSession),
 		healthProbe:  filepath.Join(filepath.Dir(executable), "trellis-health-probe"),
-		orphans:      make(map[string]int),
 		operations:   make(map[string]*allocationOperation),
 
 		log: log,
@@ -334,6 +324,7 @@ func (a *Agent) recover(ctx context.Context) error {
 			continue
 		}
 		stopping := hadRecord && allocation.Status == "stopping"
+		restartSuppressed := stopping || allocation.Draining
 		recoveryPending := !stopping && (container.Status == runtime.StatusCreated || container.Status == runtime.StatusStopped)
 		if recoveryPending {
 			// Recovery reports observation; it does not invent desired state.
@@ -363,12 +354,12 @@ func (a *Agent) recover(ctx context.Context) error {
 					}
 					a.health.RegisterTask(allocation.ID, allocation.ContainerID, &check)
 				}
-				if stopping {
+				if restartSuppressed {
 					a.reconciler.TrackStopping(allocation.ID, allocation.Spec.HealthCheck != nil, allocation.Restart)
 				} else if !recoveryPending {
 					a.reconciler.TrackRecovered(allocation.ID, allocation.Spec.HealthCheck != nil, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow)
 				}
-			} else if stopping {
+			} else if restartSuppressed {
 				a.reconciler.TrackStopping(allocation.ID, false, nil)
 			} else if !recoveryPending {
 				a.reconciler.Track(allocation.ID, false, nil)
@@ -564,50 +555,37 @@ func (a *Agent) StopGroup(ctx context.Context, request *api.StopAllocationReques
 	return errors.Join(errs...)
 }
 
-func (a *Agent) reconcileDesired(ctx context.Context, response *api.HeartbeatResponse) {
-	if response == nil || response.LeaderID == uuid.Nil {
-		return
-	}
-	if err := a.AcceptEpoch(response.Epoch); err != nil {
-		return
-	}
+// DrainGroup suppresses automatic restarts for one allocation generation until
+// the control plane delivers the normal stop operation.
+func (a *Agent) DrainGroup(request *api.DrainAllocationRequest) error {
+	unlock := a.lockAllocationOperation(request.AllocationID)
+	defer unlock()
 	a.mu.Lock()
-	a.leaderID = response.LeaderID
-	a.mu.Unlock()
-	if !response.OrphanConfirmation {
-		return
-	}
-	type desiredState struct {
-		wanted   bool
-		draining bool
-	}
-	desired := make(map[string]desiredState, len(response.Desired))
-	for _, allocation := range response.Desired {
-		desired[fmt.Sprintf("%s/%d", allocation.ID, allocation.Generation)] = desiredState{wanted: true, draining: allocation.Draining}
-	}
-	a.mu.Lock()
-	var collect []string
-	for id, allocation := range a.allocations {
-		key := fmt.Sprintf("%s/%d", allocation.AllocationID, allocation.Generation)
-		state := desired[key]
-		if state.wanted {
-			delete(a.orphans, key)
-			if state.draining {
-				_ = a.reconciler.Untrack(allocation.ID)
-			}
+	var ids []string
+	var persistErr error
+	for _, allocation := range a.allocations {
+		if allocation.AllocationID != request.AllocationID {
 			continue
 		}
-		a.orphans[key]++
-		if a.orphans[key] >= 2 {
-			collect = append(collect, id)
+		if allocation.Generation > request.Generation {
+			a.mu.Unlock()
+			return fmt.Errorf("%w: current %d, requested %d", ErrStaleGeneration, allocation.Generation, request.Generation)
+		}
+		if allocation.Generation != request.Generation {
+			continue
+		}
+		allocation.Draining = true
+		ids = append(ids, allocation.ID)
+		if err := a.persistAllocation(allocation); err != nil {
+			persistErr = fmt.Errorf("persist draining allocation: %w", err)
+			break
 		}
 	}
 	a.mu.Unlock()
-	for _, id := range collect {
-		if err := a.StopAllocation(context.WithoutCancel(ctx), id); err != nil {
-			a.log.Error("collect confirmed orphan", "task", id, "error", err)
-		}
+	for _, id := range ids {
+		a.reconciler.SuppressRestarts(id)
 	}
+	return persistErr
 }
 
 // RunAllocation creates and starts one allocation task.
@@ -1294,7 +1272,7 @@ func (a *Agent) runHeartbeatLoop(ctx context.Context) {
 				actual = append(actual, api.AllocationStatus{ID: alloc.AllocationID, Generation: alloc.Generation, Task: alloc.TaskName, Address: allocationNetworkAddress(alloc), Phase: lifecycle.Phase(alloc.Status), Health: lifecycle.Health(alloc.Health), Ports: ports})
 			}
 			a.mu.RUnlock()
-			response, err := a.server.SendHeartbeat(ctx, a.nodeID, &client.Heartbeat{
+			err := a.server.SendHeartbeat(ctx, a.nodeID, &client.Heartbeat{
 				NodeID:       a.nodeID,
 				Timestamp:    time.Now(),
 				Allocations:  actual,
@@ -1305,8 +1283,6 @@ func (a *Agent) runHeartbeatLoop(ctx context.Context) {
 			if err != nil {
 				a.log.Error("send heartbeat failed", "error", err)
 				registered = false
-			} else {
-				a.reconcileDesired(ctx, response)
 			}
 		}
 	}

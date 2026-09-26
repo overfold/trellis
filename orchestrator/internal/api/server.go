@@ -89,21 +89,6 @@ type HeartbeatRequest struct {
 	Version      string                `json:"version,omitempty"`
 }
 
-// DesiredAllocation describes the generation an agent should run.
-type DesiredAllocation struct {
-	ID         string `json:"id"`
-	Generation uint64 `json:"generation"`
-	Draining   bool   `json:"draining,omitempty"`
-}
-
-// HeartbeatResponse returns the desired allocations for a node.
-type HeartbeatResponse struct {
-	Epoch              uint64              `json:"epoch"`
-	LeaderID           uuid.UUID           `json:"leader_id"`
-	Desired            []DesiredAllocation `json:"desired"`
-	OrphanConfirmation bool                `json:"orphan_confirmation"`
-}
-
 // AllocationStatus reports the observed state of an allocation.
 type AllocationStatus struct {
 	ID         string           `json:"id"`

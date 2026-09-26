@@ -37,25 +37,33 @@ func (e *RaftElector) Run(ctx context.Context, events chan<- Event) error {
 
 // Current returns the current Raft leader, if known.
 func (e *RaftElector) Current(ctx context.Context) (*Leader, error) {
-	_, id := e.raft.LeaderWithID()
-	if id == "" {
-		return nil, nil
+	nodeID, err := e.CurrentID()
+	if err != nil || nodeID == uuid.Nil {
+		return nil, err
 	}
-	leaderID := string(id)
-	if leaderID == e.self.NodeID.String() {
+	if nodeID == e.self.NodeID {
 		leader := e.self
 		return &leader, nil
-	}
-	nodeID, err := uuid.Parse(leaderID)
-	if err != nil {
-		return nil, fmt.Errorf("invalid Raft leader node ID %q: %w", leaderID, err)
 	}
 	if e.resolve == nil {
 		return nil, fmt.Errorf("no control-plane address resolver configured")
 	}
-	address, err := e.resolve(ctx, leaderID)
+	address, err := e.resolve(ctx, nodeID.String())
 	if err != nil {
 		return nil, err
 	}
 	return &Leader{NodeID: nodeID, Address: address}, nil
+}
+
+// CurrentID returns the leader identity directly from local Raft state.
+func (e *RaftElector) CurrentID() (uuid.UUID, error) {
+	_, id := e.raft.LeaderWithID()
+	if id == "" {
+		return uuid.Nil, nil
+	}
+	nodeID, err := uuid.Parse(string(id))
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("invalid Raft leader node ID %q: %w", id, err)
+	}
+	return nodeID, nil
 }

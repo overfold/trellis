@@ -22,6 +22,23 @@ type fixedElector struct{ leader *election.Leader }
 
 func (e fixedElector) Run(context.Context, chan<- election.Event) error  { return nil }
 func (e fixedElector) Current(context.Context) (*election.Leader, error) { return e.leader, nil }
+func (e fixedElector) CurrentID() (uuid.UUID, error) {
+	if e.leader == nil {
+		return uuid.Nil, nil
+	}
+	return e.leader.NodeID, nil
+}
+
+type mutableElector struct{ leaderID uuid.UUID }
+
+func (e *mutableElector) Run(context.Context, chan<- election.Event) error { return nil }
+func (e *mutableElector) Current(context.Context) (*election.Leader, error) {
+	if e.leaderID == uuid.Nil {
+		return nil, nil
+	}
+	return &election.Leader{NodeID: e.leaderID}, nil
+}
+func (e *mutableElector) CurrentID() (uuid.UUID, error) { return e.leaderID, nil }
 
 func TestAcquireNodeIDIsStable(t *testing.T) {
 	dir := t.TempDir()
@@ -129,6 +146,19 @@ func TestSplitAddress(t *testing.T) {
 	}
 	if host != "node.example" || port != 8127 {
 		t.Fatalf("got %s:%d", host, port)
+	}
+}
+
+func TestAgentAuthorizationFollowsLocallyKnownLeader(t *testing.T) {
+	oldLeader, newLeader := uuid.New(), uuid.New()
+	elector := &mutableElector{leaderID: oldLeader}
+	authorize := currentLeaderAuthorizer(elector)
+	if !authorize(oldLeader) || authorize(newLeader) {
+		t.Fatal("initial Raft leader identity was not enforced")
+	}
+	elector.leaderID = newLeader
+	if authorize(oldLeader) || !authorize(newLeader) {
+		t.Fatal("agent authorization did not follow the Raft leadership change")
 	}
 }
 

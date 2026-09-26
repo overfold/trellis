@@ -23,6 +23,7 @@ type Event struct {
 type Elector interface {
 	Run(ctx context.Context, events chan<- Event) error
 	Current(ctx context.Context) (*Leader, error)
+	CurrentID() (uuid.UUID, error)
 }
 
 // SingleNodeElector always elects its sole node.
@@ -49,4 +50,9 @@ func (e *SingleNodeElector) Run(ctx context.Context, events chan<- Event) error 
 // Current returns the single node as leader.
 func (e *SingleNodeElector) Current(_ context.Context) (*Leader, error) {
 	return &e.leader, nil
+}
+
+// CurrentID returns the locally known leader identity.
+func (e *SingleNodeElector) CurrentID() (uuid.UUID, error) {
+	return e.leader.NodeID, nil
 }

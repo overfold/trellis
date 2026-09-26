@@ -267,23 +267,29 @@ type NodeRegistration struct {
 
 // Node contains the in-memory state of a registered node.
 type Node struct {
-	ID                 uuid.UUID
-	Host               string
-	Port               int
-	Status             NodeStatus
-	LastHeartbeat      time.Time
-	CPU                int
-	Memory             int64
-	OS                 string
-	Arch               string
-	Labels             map[string]string
-	Volumes            []string
-	Capabilities       []spec.NodeCapability
-	WireGuardPublicKey string
-	WireGuardEndpoint  string
-	WireGuardPortBase  int
-	WireGuardPortCount int
-	Version            string
+	ID                  uuid.UUID
+	Host                string
+	Port                int
+	Status              NodeStatus
+	LastHeartbeat       time.Time
+	CPU                 int
+	Memory              int64
+	OS                  string
+	Arch                string
+	Labels              map[string]string
+	Volumes             []string
+	Capabilities        []spec.NodeCapability
+	WireGuardPublicKey  string
+	WireGuardEndpoint   string
+	WireGuardPortBase   int
+	WireGuardPortCount  int
+	Version             string
+	observedAllocations []observedAllocation
+}
+
+type observedAllocation struct {
+	ID         string
+	Generation uint64
 }
 
 // NodeStatus describes whether a node can receive allocations.
@@ -684,6 +690,7 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 		return fmt.Errorf("persist node heartbeat: %w", err)
 	}
 	type statusInfo struct {
+		ID            string
 		Generation    uint64
 		Phase         lifecycle.Phase
 		Health        lifecycle.Health
@@ -700,7 +707,7 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 		key := fmt.Sprintf("%s/%d", a.ID, a.Generation)
 		info := statuses[key]
 		if len(info.ObservedTasks) == 0 {
-			info.Generation, info.Phase, info.Health = a.Generation, phase, health
+			info.ID, info.Generation, info.Phase, info.Health = a.ID, a.Generation, phase, health
 		} else {
 			if phase != lifecycle.PhaseRunning {
 				info.Phase = phase
@@ -725,6 +732,21 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 		}
 		statuses[key] = info
 	}
+	observed := make([]observedAllocation, 0, len(statuses))
+	for _, info := range statuses {
+		observed = append(observed, observedAllocation{ID: info.ID, Generation: info.Generation})
+	}
+	sort.Slice(observed, func(i, j int) bool {
+		if observed[i].ID == observed[j].ID {
+			return observed[i].Generation < observed[j].Generation
+		}
+		return observed[i].ID < observed[j].ID
+	})
+	s.mu.Lock()
+	if current := s.nodes[nodeID]; current != nil {
+		current.observedAllocations = observed
+	}
+	s.mu.Unlock()
 	var changed []*Allocation
 	for _, a := range owned {
 		a.mu.Lock()
@@ -769,23 +791,6 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 
 	s.refreshCatalog()
 	return nil
-}
-
-// HeartbeatResponse returns desired allocation state for a node.
-func (s *Server) HeartbeatResponse(nodeID uuid.UUID) api.HeartbeatResponse {
-	s.mu.RLock()
-	epoch, leaderSince := s.controlEpoch, s.leaderSince
-	allocations := append([]*Allocation(nil), s.allocations...)
-	s.mu.RUnlock()
-	response := api.HeartbeatResponse{Epoch: epoch, LeaderID: s.nodeID, OrphanConfirmation: !leaderSince.IsZero() && s.now().Sub(leaderSince) >= leaderRecoveryGrace}
-	for _, allocation := range allocations {
-		allocation.mu.Lock()
-		if allocation.Node != nil && allocation.Node.ID == nodeID && allocation.Phase != lifecycle.PhaseStopped && allocation.Phase != lifecycle.PhaseFailed && allocation.Phase != lifecycle.PhaseLost {
-			response.Desired = append(response.Desired, api.DesiredAllocation{ID: allocation.ID, Generation: allocation.Generation, Draining: allocation.Draining})
-		}
-		allocation.mu.Unlock()
-	}
-	return response
 }
 
 func jobKey(namespace, name string) string {
