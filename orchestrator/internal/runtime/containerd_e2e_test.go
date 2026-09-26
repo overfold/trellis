@@ -43,7 +43,19 @@ func TestContainerdAllocationAdoption(t *testing.T) {
 	}
 	id := "trellis-e2e-adoption"
 	_ = r.Stop(ctx, id)
-	_ = r.Remove(ctx, id)
+	if err := r.Remove(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a process exit after writing mount sources but before container creation.
+	if err := os.MkdirAll("/var/lib/trellis/runtime", 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"-resolv.conf", "-hosts"} {
+		path := filepath.Join("/var/lib/trellis/runtime", id+suffix)
+		if err := os.WriteFile(path, []byte("stale"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	options := runtime.CreateOptions{
 		ID:         id,
 		Image:      image,

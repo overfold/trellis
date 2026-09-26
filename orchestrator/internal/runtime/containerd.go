@@ -91,6 +91,15 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 	if err != nil {
 		return "", fmt.Errorf("getting image %s: %w", options.Image, err)
 	}
+	if err := reclaimStaleMountFiles(ctx, []string{
+		filepath.Join(c.logDir, options.ID+"-resolv.conf"),
+		filepath.Join(c.logDir, options.ID+"-hosts"),
+	}, func(lookupCtx context.Context) error {
+		_, loadErr := c.client.LoadContainer(lookupCtx, options.ID)
+		return loadErr
+	}); err != nil {
+		return "", fmt.Errorf("reclaim mount files for %s: %w", options.ID, err)
+	}
 
 	allMounts := convertMounts(options.Mounts)
 	var createdFiles []string
@@ -434,6 +443,26 @@ func removeCreateFilesAfterFailedCreate(ctx context.Context, paths []string, loa
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	return removeCreateFilesIfAbsent(paths, load(cleanupCtx))
+}
+
+func reclaimStaleMountFiles(ctx context.Context, paths []string, load func(context.Context) error) error {
+	for _, path := range paths {
+		if _, err := os.Lstat(path); err == nil {
+			lookupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			loadErr := load(lookupCtx)
+			cancel()
+			if loadErr == nil {
+				return nil
+			}
+			if !errdefs.IsNotFound(loadErr) {
+				return fmt.Errorf("check container before reclaiming mount files: %w", loadErr)
+			}
+			return removeRuntimeFiles(paths...)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("inspect mount file %s: %w", path, err)
+		}
+	}
+	return nil
 }
 
 // Exec runs a command in a container and returns its exit code.

@@ -318,6 +318,60 @@ func TestWriteConfigPreservesExistingMountSources(t *testing.T) {
 	}
 }
 
+func TestReclaimStaleMountFilesAfterRestart(t *testing.T) {
+	for _, staleSuffix := range []string{"-resolv.conf", "-hosts"} {
+		t.Run(staleSuffix, func(t *testing.T) {
+			dir := t.TempDir()
+			dns := filepath.Join(dir, "allocation-resolv.conf")
+			hosts := filepath.Join(dir, "allocation-hosts")
+			stale := filepath.Join(dir, "allocation"+staleSuffix)
+			if err := os.WriteFile(stale, []byte("left by previous process"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			paths := []string{dns, hosts}
+			if err := reclaimStaleMountFiles(context.Background(), paths, func(context.Context) error {
+				return errdefs.ErrNotFound
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeDNSConfig(dns, []string{"198.18.0.53"}); err != nil {
+				t.Fatalf("retry DNS config for same allocation: %v", err)
+			}
+			if err := writeHostsConfig(hosts, map[string]string{"trellis": "127.0.0.1"}); err != nil {
+				t.Fatalf("retry hosts config for same allocation: %v", err)
+			}
+		})
+	}
+}
+
+func TestReclaimStaleMountFilesPreservesSourcesWithoutConfirmedAbsence(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		loadErr error
+		wantErr bool
+	}{
+		{name: "container exists"},
+		{name: "lookup failed", loadErr: errors.New("container state unknown"), wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "allocation-resolv.conf")
+			if err := os.WriteFile(path, []byte("existing"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			err := reclaimStaleMountFiles(context.Background(), []string{path}, func(context.Context) error {
+				return tc.loadErr
+			})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("reclaim error = %v, want error = %v", err, tc.wantErr)
+			}
+			if got, err := os.ReadFile(path); err != nil || string(got) != "existing" {
+				t.Fatalf("mount source after lookup %v = %q, %v", tc.loadErr, got, err)
+			}
+		})
+	}
+}
+
 func TestFailedCreateRemovesFilesWhenContainerIsAbsentForRetry(t *testing.T) {
 	dir := t.TempDir()
 	dns := filepath.Join(dir, "allocation-resolv.conf")
