@@ -21,6 +21,7 @@ import (
 
 	"github.com/clofour/trellis/internal/api"
 	"github.com/clofour/trellis/internal/client"
+	"golang.org/x/sys/unix"
 )
 
 type upstream struct {
@@ -195,6 +196,12 @@ func writeConfig(path string, data []byte) error {
 		tmp.Close()
 		return err
 	}
+	if owner != nil {
+		if err := copyXattrs(path, tmp); err != nil {
+			tmp.Close()
+			return fmt.Errorf("preserve extended attributes of %s: %w", path, err)
+		}
+	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
 		return err
@@ -203,6 +210,36 @@ func writeConfig(path string, data []byte) error {
 		return err
 	}
 	return os.Rename(tmp.Name(), path)
+}
+
+func copyXattrs(path string, dst *os.File) error {
+	size, err := unix.Listxattr(path, nil)
+	if err != nil {
+		return err
+	}
+	names := make([]byte, size)
+	n, err := unix.Listxattr(path, names)
+	if err != nil {
+		return err
+	}
+	for _, name := range strings.Split(string(names[:n]), "\x00") {
+		if name == "" {
+			continue
+		}
+		size, err := unix.Getxattr(path, name, nil)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", name, err)
+		}
+		value := make([]byte, size)
+		n, err := unix.Getxattr(path, name, value)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", name, err)
+		}
+		if err := unix.Fsetxattr(int(dst.Fd()), name, value[:n], 0); err != nil {
+			return fmt.Errorf("set %s: %w", name, err)
+		}
+	}
+	return nil
 }
 
 func selectUpstreams(allocs []api.AllocationResponse, containerPort int) []upstream {

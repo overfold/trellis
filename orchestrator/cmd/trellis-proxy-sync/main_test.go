@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"encoding/binary"
+	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -8,6 +11,7 @@ import (
 
 	"github.com/clofour/trellis/internal/api"
 	"github.com/clofour/trellis/internal/lifecycle"
+	"golang.org/x/sys/unix"
 )
 
 func TestWriteConfig(t *testing.T) {
@@ -56,6 +60,51 @@ func TestWriteConfigPreservesMode(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != 0600 {
 		t.Fatalf("config mode = %04o; want 0600", got)
+	}
+}
+
+func TestWriteConfigPreservesExtendedAttributes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "proxy.conf")
+	if err := os.WriteFile(path, []byte("old"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	// Linux POSIX ACL xattr: version 2, owner, named user, group, mask, other.
+	acl := []byte{
+		2, 0, 0, 0,
+		1, 0, 6, 0, 255, 255, 255, 255,
+		2, 0, 4, 0, 0, 0, 0, 0,
+		4, 0, 4, 0, 255, 255, 255, 255,
+		16, 0, 4, 0, 255, 255, 255, 255,
+		32, 0, 0, 0, 255, 255, 255, 255,
+	}
+	binary.LittleEndian.PutUint32(acl[16:20], uint32(os.Geteuid()))
+	if err := unix.Setxattr(path, "system.posix_acl_access", acl, 0); err != nil {
+		if errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.EPERM) {
+			t.Skipf("filesystem does not permit POSIX ACLs: %v", err)
+		}
+		t.Fatal(err)
+	}
+	if err := unix.Setxattr(path, "user.trellis-test", []byte("metadata"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeConfig(path, []byte("new")); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string][]byte{
+		"system.posix_acl_access": acl,
+		"user.trellis-test":       []byte("metadata"),
+	} {
+		size, err := unix.Getxattr(path, name, nil)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		got := make([]byte, size)
+		if _, err := unix.Getxattr(path, name, got); err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("%s = %v; want %v", name, got, want)
+		}
 	}
 }
 
