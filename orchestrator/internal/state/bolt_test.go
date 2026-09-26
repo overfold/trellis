@@ -171,6 +171,40 @@ func TestRestoreDesiredRejectsInvalidSnapshotWithoutWriting(t *testing.T) {
 	}
 }
 
+func TestBoltStoreBackupRestoreVolumeRegistration(t *testing.T) {
+	source, err := NewBoltStore(filepath.Join(t.TempDir(), "source.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = source.Close() }()
+	ctx := context.Background()
+	key := url.QueryEscape("acme/database")
+	value := []byte(`{"namespace":"acme","name":"database","node_id":"2a193e44-b975-4b8b-83f0-93189885e38d"}`)
+	if err := source.Put(ctx, "trellis/old/volume-registrations/"+key, value); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := source.DesiredSnapshot("old")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	target, err := NewBoltStore(filepath.Join(t.TempDir(), "target.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = target.Close() }()
+	if err := target.RestoreDesired("new", snapshot); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := target.Get(ctx, "trellis/new/volume-registrations/"+key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(restored) != string(value) {
+		t.Fatalf("restored volume registration = %q, want %q", restored, value)
+	}
+}
+
 func TestBoltBatchAndDesiredSnapshot(t *testing.T) {
 	store, err := NewBoltStore(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {

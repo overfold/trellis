@@ -318,7 +318,7 @@ func ValidateDesiredSnapshot(snapshot *DesiredSnapshot, additionalJobValidation 
 	}
 	for key, raw := range snapshot.VolumeRegistrations {
 		var record volumeRegistration
-		if key == "" || json.Unmarshal(raw, &record) != nil || record.Namespace == "" || record.Name == "" || record.NodeID == uuid.Nil || key != url.QueryEscape(record.Namespace+"\x00"+record.Name) {
+		if key == "" || json.Unmarshal(raw, &record) != nil || record.Namespace == "" || record.Name == "" || record.NodeID == uuid.Nil || key != url.QueryEscape(record.Namespace+"/"+record.Name) {
 			return fmt.Errorf("invalid volume registration %q", key)
 		}
 	}
