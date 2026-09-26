@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -37,8 +38,9 @@ func TestEnsureNetworkPortRegistrationsRejectsExhaustion(t *testing.T) {
 		state:              NewStateController(memoryStore{}, "test"),
 		wireGuardPortCount: 1,
 	}
-	if _, err := s.ensureNetworkPortRegistrations(context.Background(), []string{"acme", "globex"}); err == nil {
-		t.Fatal("expected namespace WireGuard port range exhaustion")
+	registrations, err := s.ensureNetworkPortRegistrations(context.Background(), []string{"acme", "globex"})
+	if !errors.Is(err, errNetworkPortExhausted) || len(registrations) != 1 {
+		t.Fatalf("registrations = %v, error = %v; want one registration and exhaustion", registrations, err)
 	}
 }
 

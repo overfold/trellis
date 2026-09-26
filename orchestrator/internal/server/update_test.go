@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"log/slog"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -45,6 +46,36 @@ func TestReconcileDoesNotCreateAllocationsForInvalidJob(t *testing.T) {
 	s.Reconcile(context.Background())
 	if len(s.allocations) != 0 {
 		t.Fatalf("invalid job created allocations: %#v", s.allocations)
+	}
+}
+
+func TestReconcileContinuesAfterWireGuardPortExhaustion(t *testing.T) {
+	s, agent := newTestServerWithAgent()
+	defer agent.server.Close()
+	s.wireGuardPortCount = 1
+	s.networkPool = netip.MustParsePrefix("10.64.0.0/10")
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now(), Capabilities: []spec.NodeCapability{spec.CapabilityNamespaceNetworking}, WireGuardPortBase: 51820, WireGuardPortCount: 1}
+	s.nodes[node.ID] = node
+	if err := s.state.PutNetworkPortRegistration(context.Background(), &NetworkPortRegistration{Namespace: "old", Slot: 0}); err != nil {
+		t.Fatal(err)
+	}
+	networkTask := spec.TaskSpec{Name: "app", Image: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard}}
+	old := &Allocation{ID: "old-allocation", Namespace: "old", JobName: "deleted", TaskGroupName: "app", Tasks: []spec.TaskSpec{networkTask}, Node: node, Generation: 1, Phase: lifecycle.PhaseRunning}
+	s.allocations = []*Allocation{old}
+	s.jobs[jobKey("new", "networked")] = &Job{Spec: &spec.JobSpec{Namespace: "new", Name: "networked", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: []spec.TaskSpec{networkTask}}}}, Revision: 1}
+	s.jobs[jobKey("plain", "worker")] = &Job{Spec: &spec.JobSpec{Namespace: "plain", Name: "worker", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}}, Revision: 1}
+
+	s.Reconcile(context.Background())
+	if old.Phase != lifecycle.PhaseStopped {
+		t.Fatalf("deleted allocation phase = %s, want stopped", old.Phase)
+	}
+	if len(s.allocations) != 2 || s.allocations[1].Namespace != "plain" || s.allocations[1].Phase != lifecycle.PhaseRunning {
+		t.Fatalf("allocations after exhaustion = %+v, want stopped old and running plain", s.allocations)
+	}
+
+	s.Reconcile(context.Background())
+	if len(s.allocations) != 3 || s.allocations[2].Namespace != "new" || s.allocations[2].Phase != lifecycle.PhaseRunning {
+		t.Fatalf("allocations after slot release = %+v, want new network allocation running", s.allocations)
 	}
 }
 
