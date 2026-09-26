@@ -1014,6 +1014,51 @@ func (s *Server) UndrainNode(ctx context.Context, id uuid.UUID) error {
 		s.mu.Unlock()
 		return err
 	}
+	s.mu.RLock()
+	allocations := append([]*Allocation(nil), s.allocations...)
+	s.mu.RUnlock()
+	for _, allocation := range allocations {
+		s.mu.RLock()
+		allocation.mu.Lock()
+		if allocation.Node == nil || allocation.Node.ID != id || !allocation.Draining ||
+			(allocation.Phase != lifecycle.PhaseRunning && allocation.Phase != lifecycle.PhaseStarting && allocation.Phase != lifecycle.PhasePlaced) {
+			allocation.mu.Unlock()
+			s.mu.RUnlock()
+			continue
+		}
+		job := s.jobs[jobKey(allocation.Namespace, allocation.JobName)]
+		if job == nil || allocation.JobRevision != job.Revision {
+			allocation.mu.Unlock()
+			s.mu.RUnlock()
+			continue
+		}
+		groupExists := false
+		for _, group := range job.Spec.TaskGroups {
+			if group.Name == allocation.TaskGroupName {
+				groupExists = true
+				break
+			}
+		}
+		if !groupExists {
+			allocation.mu.Unlock()
+			s.mu.RUnlock()
+			continue
+		}
+		address := fmt.Sprintf("%s:%d", node.Host, node.Port)
+		request := &api.DrainAllocationRequest{AllocationID: allocation.ID, Generation: allocation.Generation, Epoch: s.controlEpoch}
+		s.mu.RUnlock()
+		if err := s.client.ResumeAllocation(ctx, id, address, request); err != nil {
+			allocation.mu.Unlock()
+			return fmt.Errorf("resume allocation %s: %w", allocation.ID, err)
+		}
+		allocation.Draining = false
+		if err := s.state.PutAllocation(ctx, allocation); err != nil {
+			allocation.Draining = true
+			allocation.mu.Unlock()
+			return fmt.Errorf("persist resumed allocation %s: %w", allocation.ID, err)
+		}
+		allocation.mu.Unlock()
+	}
 	s.Reconcile(ctx)
 	return nil
 }

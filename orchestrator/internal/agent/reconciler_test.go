@@ -98,6 +98,32 @@ func TestDrainGroupSuppressesAutomaticRestart(t *testing.T) {
 	}
 }
 
+func TestResumeGroupRestoresAutomaticRestart(t *testing.T) {
+	rt := &reconcilerRuntime{status: runtime.StatusStopped}
+	r := NewAllocationReconciler(rt, nil)
+	r.Track("task", false, nil)
+	agent := &Agent{
+		allocations: map[string]*Allocation{"task": {ID: "task", AllocationID: "alloc", Generation: 2, Status: "running", Spec: &spec.TaskSpec{}}},
+		reconciler: r,
+		operations: make(map[string]*allocationOperation),
+	}
+	if err := agent.DrainGroup(&api.DrainAllocationRequest{AllocationID: "alloc", Generation: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.ResumeGroup(&api.DrainAllocationRequest{AllocationID: "alloc", Generation: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if agent.allocations["task"].Draining {
+		t.Fatal("allocation remains draining")
+	}
+	if err := r.Reconcile(context.Background(), "task"); err != nil {
+		t.Fatal(err)
+	}
+	if rt.restartCount != 1 {
+		t.Fatalf("restart count = %d, want 1", rt.restartCount)
+	}
+}
+
 func TestAllocationReconcilerWaitsForHealthAfterRestart(t *testing.T) {
 	rt := &reconcilerRuntime{status: runtime.StatusStopped}
 	subscriber := &statusRecorder{}

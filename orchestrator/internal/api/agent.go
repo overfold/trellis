@@ -36,6 +36,7 @@ type StopAllocationRequest struct {
 type DrainAllocationRequest struct {
 	AllocationID string `json:"allocation_id"`
 	Generation   uint64 `json:"generation"`
+	Epoch        uint64 `json:"epoch,omitempty"`
 }
 
 // NetworkPlanRequest updates the peers for an active namespace network.

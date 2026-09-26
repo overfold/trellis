@@ -560,6 +560,9 @@ func (a *Agent) StopGroup(ctx context.Context, request *api.StopAllocationReques
 func (a *Agent) DrainGroup(request *api.DrainAllocationRequest) error {
 	unlock := a.lockAllocationOperation(request.AllocationID)
 	defer unlock()
+	if err := a.AcceptEpoch(request.Epoch); err != nil {
+		return err
+	}
 	a.mu.Lock()
 	var ids []string
 	var persistErr error
@@ -586,6 +589,41 @@ func (a *Agent) DrainGroup(request *api.DrainAllocationRequest) error {
 		a.reconciler.SuppressRestarts(id)
 	}
 	return persistErr
+}
+
+// ResumeGroup restores automatic restarts for a retained allocation generation.
+func (a *Agent) ResumeGroup(request *api.DrainAllocationRequest) error {
+	unlock := a.lockAllocationOperation(request.AllocationID)
+	defer unlock()
+	if err := a.AcceptEpoch(request.Epoch); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	var resumed []*Allocation
+	for _, allocation := range a.allocations {
+		if allocation.AllocationID != request.AllocationID {
+			continue
+		}
+		if allocation.Generation > request.Generation {
+			a.mu.Unlock()
+			return fmt.Errorf("%w: current %d, requested %d", ErrStaleGeneration, allocation.Generation, request.Generation)
+		}
+		if allocation.Generation != request.Generation || allocation.Status != "running" {
+			continue
+		}
+		allocation.Draining = false
+		if err := a.persistAllocation(allocation); err != nil {
+			allocation.Draining = true
+			a.mu.Unlock()
+			return fmt.Errorf("persist resumed allocation: %w", err)
+		}
+		resumed = append(resumed, allocation)
+	}
+	a.mu.Unlock()
+	for _, allocation := range resumed {
+		a.reconciler.ResumeRestarts(allocation.ID, allocation.Spec.HealthCheck != nil, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow)
+	}
+	return nil
 }
 
 // RunAllocation creates and starts one allocation task.

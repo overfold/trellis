@@ -107,6 +107,39 @@ func TestDrainNodeStopsAllocationAfterReplacementHealthy(t *testing.T) {
 	}
 }
 
+func TestUndrainNodeRetainsCurrentAllocation(t *testing.T) {
+	s, agent := newTestServerWithAgent()
+	defer agent.server.Close()
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
+	s.nodes[node.ID] = node
+	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: jobSpec, Revision: 2}
+	allocation := &Allocation{ID: "original", Namespace: "default", JobName: "web", TaskGroupName: "api", Tasks: jobSpec.TaskGroups[0].Tasks, Node: node, Generation: 1, JobRevision: 2, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy, Diagnostic: lifecycle.Diagnostic{CreatedAt: s.now(), TransitionedAt: s.now()}}
+	s.allocations = []*Allocation{allocation}
+
+	if err := s.DrainNode(context.Background(), node.ID); err != nil {
+		t.Fatal(err)
+	}
+	if !allocation.Draining {
+		t.Fatal("allocation was not marked draining")
+	}
+	if err := s.UndrainNode(context.Background(), node.ID); err != nil {
+		t.Fatal(err)
+	}
+	if allocation.Draining || allocation.Phase != lifecycle.PhaseRunning || len(s.allocations) != 1 {
+		t.Fatalf("allocation after undrain: draining=%t phase=%s count=%d", allocation.Draining, allocation.Phase, len(s.allocations))
+	}
+	resumed := false
+	for _, call := range agent.recordedCalls() {
+		if call.method == "DELETE" && call.path == "/v1/allocations/original/drain" {
+			resumed = true
+		}
+	}
+	if !resumed {
+		t.Fatal("agent did not receive allocation resume")
+	}
+}
+
 func TestReconcileStopsRemovedGroupOnDrainingNode(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()

@@ -953,7 +953,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 		if nodeStatus != NodeStatusHealthy && nodeStatus != NodeStatusDraining {
 			return fmt.Errorf("node %s is unavailable for allocation drain", alloc.Node.ID)
 		}
-		return s.client.DrainAllocation(ctx, alloc.Node.ID, address, &api.DrainAllocationRequest{AllocationID: alloc.ID, Generation: alloc.Generation})
+		return s.client.DrainAllocation(ctx, alloc.Node.ID, address, &api.DrainAllocationRequest{AllocationID: alloc.ID, Generation: alloc.Generation, Epoch: epoch})
 	case ActionStop:
 		unlockServer()
 
