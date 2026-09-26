@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"text/template"
@@ -114,7 +115,7 @@ func main() {
 			return
 		}
 
-		if err := os.WriteFile(outputFile, []byte(rendered), 0644); err != nil {
+		if err := writeConfig(outputFile, []byte(rendered)); err != nil {
 			log.Error("write config", "error", err)
 			return
 		}
@@ -139,6 +140,30 @@ func main() {
 			sync()
 		}
 	}
+}
+
+func writeConfig(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".trellis-proxy-sync-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if err := tmp.Chmod(0644); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }
 
 func selectUpstreams(allocs []api.AllocationResponse, containerPort int) []upstream {
