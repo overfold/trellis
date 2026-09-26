@@ -41,38 +41,33 @@ func TestOpenLogFileUsesLegacyPathOnlyWhenCurrentLogIsMissing(t *testing.T) {
 	}
 }
 
-func TestRemoveRuntimeFilesCleansCurrentAndLegacyFiles(t *testing.T) {
+func TestRemoveRuntimeFilesCleansCurrentFiles(t *testing.T) {
 	dir := t.TempDir()
 	current := filepath.Join(dir, "current")
-	legacy := filepath.Join(dir, "legacy")
-	for _, path := range []string{current, legacy} {
-		if err := os.Mkdir(path, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		for _, suffix := range []string{".log", "-resolv.conf", "-hosts"} {
-			if err := os.WriteFile(filepath.Join(path, "allocation"+suffix), []byte("data"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}
-		if err := os.WriteFile(filepath.Join(path, "other.log"), []byte("keep"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := removeRuntimeFiles("allocation", current, legacy); err != nil {
+	if err := os.Mkdir(current, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := removeRuntimeFiles("allocation", current, legacy); err != nil {
+	for _, suffix := range []string{".log", "-resolv.conf", "-hosts"} {
+		if err := os.WriteFile(filepath.Join(current, "allocation"+suffix), []byte("data"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(current, "other.log"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeRuntimeFiles("allocation", current); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeRuntimeFiles("allocation", current); err != nil {
 		t.Fatalf("retry cleanup: %v", err)
 	}
-	for _, path := range []string{current, legacy} {
-		for _, suffix := range []string{".log", "-resolv.conf", "-hosts"} {
-			if _, err := os.Lstat(filepath.Join(path, "allocation"+suffix)); !os.IsNotExist(err) {
-				t.Fatalf("runtime file %s remains: %v", filepath.Join(path, "allocation"+suffix), err)
-			}
+	for _, suffix := range []string{".log", "-resolv.conf", "-hosts"} {
+		if _, err := os.Lstat(filepath.Join(current, "allocation"+suffix)); !os.IsNotExist(err) {
+			t.Fatalf("runtime file %s remains: %v", filepath.Join(current, "allocation"+suffix), err)
 		}
-		if _, err := os.Stat(filepath.Join(path, "other.log")); err != nil {
-			t.Fatalf("unrelated log removed from %s: %v", path, err)
-		}
+	}
+	if _, err := os.Stat(filepath.Join(current, "other.log")); err != nil {
+		t.Fatalf("unrelated log removed from %s: %v", current, err)
 	}
 }
 

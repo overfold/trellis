@@ -315,18 +315,16 @@ func (c *ContainerdRuntime) Remove(ctx context.Context, containerID string) erro
 }
 
 func (c *ContainerdRuntime) removeRuntimeFiles(containerID string) error {
-	return removeRuntimeFiles(containerID, c.logDir, legacyRuntimeDir)
+	return removeRuntimeFiles(containerID, c.logDir)
 }
 
-func removeRuntimeFiles(containerID string, dirs ...string) error {
+func removeRuntimeFiles(containerID, dir string) error {
 	name := filepath.Base(containerID)
 	var errs []error
-	for _, dir := range dirs {
-		for _, suffix := range []string{".log", "-resolv.conf", "-hosts"} {
-			path := filepath.Join(dir, name+suffix)
-			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-				errs = append(errs, fmt.Errorf("remove runtime file %s: %w", path, err))
-			}
+	for _, suffix := range []string{".log", "-resolv.conf", "-hosts"} {
+		path := filepath.Join(dir, name+suffix)
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("remove runtime file %s: %w", path, err))
 		}
 	}
 	return errors.Join(errs...)
