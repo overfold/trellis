@@ -337,6 +337,9 @@ func (a *Agent) recover(ctx context.Context) error {
 			allocation.Health = "unknown"
 		} else if !stopping && container.Status == runtime.StatusRunning {
 			allocation.Status = "running"
+			if allocation.Spec != nil && allocation.Spec.HealthCheck != nil {
+				allocation.Health = "unknown"
+			}
 		}
 		if container.Status == runtime.StatusRunning || container.Status == runtime.StatusCreated || container.Status == runtime.StatusStopped {
 			for _, port := range allocation.Ports {
@@ -344,18 +347,15 @@ func (a *Agent) recover(ctx context.Context) error {
 					a.log.Error("recover port claim", "allocation", allocation.AllocationID, "error", err)
 				}
 			}
+			// Persist the initial observation before a probe can publish a result.
+			a.mu.Lock()
 			a.allocations[allocation.ID] = allocation
+			persistErr := a.persistAllocation(allocation)
+			a.mu.Unlock()
+			if persistErr != nil {
+				a.log.Error("refresh recovered allocation record", "allocation", allocation.AllocationID, "error", persistErr)
+			}
 			if allocation.Spec != nil {
-				if !stopping && !recoveryPending && allocation.Spec.HealthCheck != nil {
-					check := *allocation.Spec.HealthCheck
-					for _, port := range allocation.Ports {
-						if port.ContainerPort == check.Port {
-							check.Port = port.HostPort
-							break
-						}
-					}
-					a.health.RegisterTask(allocation.ID, allocation.ContainerID, &check)
-				}
 				if restartSuppressed {
 					a.reconciler.TrackStopping(allocation.ID, allocation.Spec.HealthCheck != nil, allocation.Restart)
 				} else if !recoveryPending {
@@ -366,8 +366,8 @@ func (a *Agent) recover(ctx context.Context) error {
 			} else if !recoveryPending {
 				a.reconciler.Track(allocation.ID, false, nil)
 			}
-			if err := a.persistAllocation(allocation); err != nil {
-				a.log.Error("refresh recovered allocation record", "allocation", allocation.AllocationID, "error", err)
+			if allocation.Spec != nil && !stopping && !recoveryPending && allocation.Spec.HealthCheck != nil {
+				a.health.RegisterTask(allocation.ID, allocation.ContainerID, allocation.Spec.HealthCheck)
 			}
 		}
 	}
@@ -896,12 +896,6 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 			return fmt.Errorf("start container %s: %w", containerID, err)
 		}
 	}
-	if ts.HealthCheck != nil {
-		check := *ts.HealthCheck
-		a.health.RegisterTask(allocID, containerID, &check)
-		healthRegistered = true
-	}
-
 	a.reconciler.Track(allocID, ts.HealthCheck != nil, restartPolicy)
 	tracked = true
 
@@ -936,6 +930,11 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	a.mu.Lock()
 	a.allocations[allocID] = ready
 	a.mu.Unlock()
+	if ts.HealthCheck != nil {
+		check := *ts.HealthCheck
+		a.health.RegisterTask(allocID, containerID, &check)
+		healthRegistered = true
+	}
 	if ts.HealthCheck == nil {
 		if err := a.reconciler.ObserveHealth(allocID, true); err != nil {
 			return fmt.Errorf("mark allocation healthy: %w", err)
@@ -1248,9 +1247,13 @@ func prepareSecrets(allocID, taskName string, delivered []api.DeliveredSecret) (
 // OnHealthy and OnUnhealthy are observation callbacks from the health manager.
 // They intentionally do not mutate allocation status directly; lifecycle state
 // transitions are centralized in the allocation reconciler.
-func (a *Agent) OnHealthy(_ context.Context, allocID string) error {
+func (a *Agent) OnHealthy(ctx context.Context, allocID string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	// A replaced worker can finish a probe after RegisterTask cancels it.
+	if ctx.Err() != nil {
+		return nil
+	}
 	if allocation := a.allocations[allocID]; allocation != nil {
 		allocation.Health = "healthy"
 		return a.persistAllocation(allocation)
@@ -1259,9 +1262,12 @@ func (a *Agent) OnHealthy(_ context.Context, allocID string) error {
 }
 
 // OnUnhealthy handles an unhealthy allocation.
-func (a *Agent) OnUnhealthy(_ context.Context, allocID string) error {
+func (a *Agent) OnUnhealthy(ctx context.Context, allocID string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if ctx.Err() != nil {
+		return nil
+	}
 	if allocation := a.allocations[allocID]; allocation != nil {
 		allocation.Health = "unhealthy"
 		return a.persistAllocation(allocation)
@@ -1277,6 +1283,10 @@ func (a *Agent) OnReconciledStatus(allocID, status string) {
 			alloc.Health = status
 		} else {
 			alloc.Status = status
+			if status == "running" && alloc.Spec != nil && alloc.Spec.HealthCheck != nil {
+				alloc.Health = "unknown"
+				a.health.RegisterTask(allocID, alloc.ContainerID, alloc.Spec.HealthCheck)
+			}
 		}
 		if err := a.persistAllocation(alloc); err != nil {
 			a.log.Error("persist reconciled allocation", "allocation", alloc.AllocationID, "error", err)

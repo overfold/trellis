@@ -51,6 +51,50 @@ type createdRecoveryRuntime struct {
 	removeCount int
 }
 
+type recoveryProbeRuntime struct {
+	*createdRecoveryRuntime
+	commands chan []string
+}
+
+type firstHealthProbeRuntime struct {
+	*reconcilerRuntime
+	started chan struct{}
+	probed  chan struct{}
+}
+
+func (r *firstHealthProbeRuntime) Start(context.Context, string) error {
+	close(r.started)
+	return nil
+}
+
+func (r *firstHealthProbeRuntime) Exec(context.Context, string, []string) (int, error) {
+	select {
+	case r.probed <- struct{}{}:
+	default:
+	}
+	return 0, nil
+}
+
+type blockingRecoveryDetach struct {
+	network.DisabledManager
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (m *blockingRecoveryDetach) Detach(context.Context, *network.Attachment) error {
+	close(m.entered)
+	<-m.release
+	return nil
+}
+
+func (r *recoveryProbeRuntime) Exec(_ context.Context, _ string, command []string) (int, error) {
+	select {
+	case r.commands <- command:
+	default:
+	}
+	return 0, nil
+}
+
 func (r *createdRecoveryRuntime) ListManaged(context.Context, string) ([]runtime.ContainerInfo, error) {
 	return []runtime.ContainerInfo{{ID: r.managedID, Status: r.status, Labels: r.labels}}, nil
 }
@@ -240,6 +284,66 @@ func TestRunAllocationMountsHealthProbeForEveryNetworkAndRuntime(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestRunAllocationRegistersHealthAfterStoringRunningAllocation(t *testing.T) {
+	rt := &firstHealthProbeRuntime{
+		reconcilerRuntime: &reconcilerRuntime{},
+		started:           make(chan struct{}),
+		probed:            make(chan struct{}, 1),
+	}
+	agent := newOperationTestAgent(t, rt)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	agent.health.SetContext(ctx)
+	callbackDone := make(chan struct{})
+	agent.health.Subscriber = &healthCallbackRecorder{agent: agent, done: callbackDone}
+	task := &spec.TaskSpec{Name: "web", Image: "image", HealthCheck: &spec.HealthCheckSpec{
+		Type: "script", Command: []string{"true"}, Interval: time.Millisecond, Threshold: 1,
+	}}
+
+	// Hold tracking so the old registration order gives a fast probe time to
+	// update the starting allocation before RunAllocation replaces it.
+	agent.reconciler.mu.Lock()
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- agent.RunAllocation(ctx, "alloc", "scheduler", 1, 1, "hash", "default", "job", "group", "web", task, "", nil, nil, nil, nil)
+	}()
+	select {
+	case <-rt.started:
+	case <-time.After(time.Second):
+		agent.reconciler.mu.Unlock()
+		t.Fatal("allocation did not start")
+	}
+	var probedBeforeReady bool
+	select {
+	case <-rt.probed:
+		probedBeforeReady = true
+	case <-time.After(50 * time.Millisecond):
+	}
+	agent.reconciler.mu.Unlock()
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("allocation did not finish starting")
+	}
+	if probedBeforeReady {
+		t.Fatal("health probe ran before the running allocation was stored")
+	}
+	select {
+	case <-callbackDone:
+	case <-time.After(time.Second):
+		t.Fatal("first health probe did not publish its result")
+	}
+	agent.mu.RLock()
+	got := agent.allocations["alloc"].Health
+	agent.mu.RUnlock()
+	if got != "healthy" {
+		t.Fatalf("health after first probe = %q, want healthy", got)
 	}
 }
 
@@ -706,6 +810,170 @@ func TestRecoverNonRunningAllocationDefersRestartToServer(t *testing.T) {
 			}
 			if _, ok := second.reconciler.states["task"]; ok {
 				t.Fatal("undrain started local restart reconciliation before start retry")
+			}
+		})
+	}
+}
+
+func TestRecoverRunningAllocationResetsHealthUntilProbe(t *testing.T) {
+	rt := &createdRecoveryRuntime{
+		reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning},
+		managedID:         "task",
+	}
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	check := &spec.HealthCheckSpec{Type: "script", Interval: time.Hour}
+	first := newOperationTestAgent(t, rt)
+	first.ConfigureDurability(local, "test")
+	if err := first.persistAllocation(&Allocation{
+		ID: "task", AllocationID: "allocation", ContainerID: "task",
+		Spec: &spec.TaskSpec{Name: "task", HealthCheck: check},
+		Status: "running", Health: "healthy",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	second := newOperationTestAgent(t, rt)
+	second.ConfigureDurability(local, "test")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	second.health.SetContext(ctx)
+	if err := second.recover(ctx); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if got := second.allocations["task"].Health; got != "unknown" {
+		t.Fatalf("recovered health = %q, want unknown", got)
+	}
+	var persisted Allocation
+	if err := local.Get(allocationRecordKey("task"), &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Health != "unknown" {
+		t.Fatalf("persisted health = %q, want unknown", persisted.Health)
+	}
+}
+
+func TestRecoverPersistsProbeResultBeforeReturning(t *testing.T) {
+	rt := &createdRecoveryRuntime{
+		reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning},
+		managedID:         "task",
+	}
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	first := newOperationTestAgent(t, rt)
+	first.ConfigureDurability(local, "test")
+	if err := first.persistAllocation(&Allocation{
+		ID: "task", AllocationID: "allocation", ContainerID: "task",
+		Spec: &spec.TaskSpec{Name: "task", HealthCheck: &spec.HealthCheckSpec{
+			Type: "script", Command: []string{"true"}, Interval: time.Millisecond, Threshold: 1,
+		}},
+		Status: "running", Health: "healthy",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.persistAllocation(&Allocation{
+		ID: "stale", AllocationID: "stale", ContainerID: "stale",
+		Network: &network.Attachment{AllocationID: "stale"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	second := newOperationTestAgent(t, rt)
+	second.ConfigureDurability(local, "test")
+	second.health.Subscriber = second
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	second.health.SetContext(ctx)
+	detach := &blockingRecoveryDetach{entered: make(chan struct{}), release: make(chan struct{})}
+	second.SetNetworkManager(detach)
+	done := make(chan error, 1)
+	go func() { done <- second.recover(ctx) }()
+	defer func() {
+		select {
+		case <-detach.release:
+		default:
+			close(detach.release)
+		}
+	}()
+
+	select {
+	case <-detach.entered:
+	case err := <-done:
+		t.Fatalf("recovery finished before stale cleanup: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("recovery did not reach stale cleanup")
+	}
+
+	deadline := time.After(time.Second)
+	for {
+		var persisted Allocation
+		if err := local.Get(allocationRecordKey("task"), &persisted); err != nil {
+			t.Fatal(err)
+		}
+		if persisted.Health == "healthy" {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("probe did not persist healthy during recovery")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	second.mu.RLock()
+	got := second.allocations["task"].Health
+	second.mu.RUnlock()
+	if got != "healthy" {
+		t.Fatalf("recovered health = %q, want healthy", got)
+	}
+	close(detach.release)
+	if err := <-done; err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+}
+
+func TestRecoverRunningAllocationProbesContainerPort(t *testing.T) {
+	for _, checkType := range []spec.HealthCheckType{"http", "tcp"} {
+		t.Run(string(checkType), func(t *testing.T) {
+			rt := &recoveryProbeRuntime{
+				createdRecoveryRuntime: &createdRecoveryRuntime{
+					reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning},
+					managedID:         "task",
+				},
+				commands: make(chan []string, 1),
+			}
+			local := storage.NewLocalStorage(t.TempDir())
+			if err := local.Init(); err != nil {
+				t.Fatal(err)
+			}
+			check := &spec.HealthCheckSpec{Type: checkType, Port: 8080, Path: "/health", Interval: 10 * time.Millisecond, Threshold: 1000}
+			first := newOperationTestAgent(t, rt)
+			first.ConfigureDurability(local, "test")
+			if err := first.persistAllocation(&Allocation{
+				ID: "task", AllocationID: "allocation", ContainerID: "task",
+				Spec:   &spec.TaskSpec{Name: "task", HealthCheck: check},
+				Ports:  []*runtime.Port{{HostPort: 32080, ContainerPort: 8080}},
+				Status: "running", Health: "healthy",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			second := newOperationTestAgent(t, rt)
+			second.ConfigureDurability(local, "test")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			second.health.SetContext(ctx)
+			if err := second.recover(ctx); err != nil {
+				t.Fatalf("recover: %v", err)
+			}
+			select {
+			case command := <-rt.commands:
+				if len(command) < 3 || command[0] != health.ProbeContainerPath || command[1] != string(checkType) || command[2] != "8080" {
+					t.Fatalf("recovered probe command = %v, want %s on container port 8080", command, checkType)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("recovered health probe did not run")
 			}
 		})
 	}
