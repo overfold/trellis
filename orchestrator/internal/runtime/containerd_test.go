@@ -2,12 +2,14 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
 
+	"github.com/containerd/errdefs"
 	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
@@ -311,6 +313,41 @@ func TestWriteConfigPreservesExistingMountSources(t *testing.T) {
 		got, err := os.ReadFile(path)
 		if err != nil || string(got) != "existing" {
 			t.Fatalf("mount source %s = %q, %v", path, got, err)
+		}
+	}
+}
+
+func TestFailedCreateRemovesFilesWhenContainerIsAbsentForRetry(t *testing.T) {
+	dir := t.TempDir()
+	dns := filepath.Join(dir, "allocation-resolv.conf")
+	hosts := filepath.Join(dir, "allocation-hosts")
+	writeFiles := func() {
+		t.Helper()
+		if err := writeDNSConfig(dns, []string{"198.18.0.53"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeHostsConfig(hosts, map[string]string{"trellis": "127.0.0.1"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFiles()
+	if err := removeCreateFilesIfAbsent([]string{dns, hosts}, errdefs.ErrNotFound); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{dns, hosts} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("file %s remains after failed create: %v", path, err)
+		}
+	}
+	writeFiles() // The same allocation ID can create both mount sources again.
+	for _, loadErr := range []error{nil, errors.New("container state unknown")} {
+		if err := removeCreateFilesIfAbsent([]string{dns, hosts}, loadErr); err != nil {
+			t.Fatal(err)
+		}
+		for _, path := range []string{dns, hosts} {
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("file %s was removed without confirmed absence: %v", path, err)
+			}
 		}
 	}
 }

@@ -96,9 +96,17 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 	var createdFiles []string
 	creationAttempted := false
 	defer func() {
-		if err != nil && !creationAttempted {
-			err = errors.Join(err, removeRuntimeFiles(createdFiles...))
+		if err == nil || len(createdFiles) == 0 {
+			return
 		}
+		if creationAttempted {
+			// A failed response may still have created the container. Only
+			// remove its mount sources when containerd confirms it is absent.
+			_, loadErr := c.client.LoadContainer(ctx, options.ID)
+			err = errors.Join(err, removeCreateFilesIfAbsent(createdFiles, loadErr))
+			return
+		}
+		err = errors.Join(err, removeRuntimeFiles(createdFiles...))
 	}()
 	if len(options.DNSServers) > 0 {
 		resolvPath := filepath.Join(c.logDir, options.ID+"-resolv.conf")
@@ -165,8 +173,6 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 			return "", fmt.Errorf("unsupported runtime %q", options.Runtime)
 		}
 	}
-	// A failed response can still mean containerd created the container. Keep
-	// its bind-mount sources for the agent to inspect and start on retry.
 	creationAttempted = true
 	container, err := c.client.NewContainer(ctx, options.ID, containerOpts...)
 	if err != nil {
@@ -413,6 +419,13 @@ func removeRuntimeFiles(paths ...string) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func removeCreateFilesIfAbsent(paths []string, loadErr error) error {
+	if !errdefs.IsNotFound(loadErr) {
+		return nil
+	}
+	return removeRuntimeFiles(paths...)
 }
 
 // Exec runs a command in a container and returns its exit code.
