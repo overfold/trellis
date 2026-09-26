@@ -108,14 +108,15 @@ type Allocation struct {
 	TaskName  string
 	Spec      *spec.TaskSpec
 
-	ContainerID string
-	Ports       []*runtime.Port
-	Mounts      []*runtime.Mount
-	SecretDir   string
-	Network     *network.Attachment
-	Status      string
-	Health      string
-	Draining    bool
+	ContainerID                  string
+	ContainerOwnershipUnverified bool
+	Ports                        []*runtime.Port
+	Mounts                       []*runtime.Mount
+	SecretDir                    string
+	Network                      *network.Attachment
+	Status                       string
+	Health                       string
+	Draining                     bool
 
 	DrainSequence uint64
 }
@@ -318,6 +319,13 @@ func (a *Agent) recover(ctx context.Context) error {
 		seen[container.ID] = true
 		allocation := stored[container.ID]
 		hadRecord := allocation != nil
+		if hadRecord && allocation.ContainerOwnershipUnverified && !a.containerMatchesAllocation(container, allocation) {
+			allocation.Status = "stopping"
+			a.mu.Lock()
+			a.allocations[allocation.ID] = allocation
+			a.mu.Unlock()
+			continue
+		}
 		if allocation == nil {
 			allocation = allocationFromRuntime(container)
 		}
@@ -379,8 +387,29 @@ func (a *Agent) recover(ctx context.Context) error {
 			_ = a.ports.Adopt(port)
 			_ = a.ports.Release(port)
 		}
-		_ = a.network.Detach(context.WithoutCancel(ctx), allocation.Network)
-		_ = a.deleteAllocationRecord(allocation.ID)
+		var cleanupErr error
+		if err := a.network.Detach(context.WithoutCancel(ctx), allocation.Network); err != nil {
+			cleanupErr = fmt.Errorf("detach network for missing allocation container: %w", err)
+		} else if allocation.SecretDir != "" {
+			if err := os.RemoveAll(allocation.SecretDir); err != nil {
+				cleanupErr = fmt.Errorf("remove secret files for missing allocation container: %w", err)
+			}
+		}
+		if allocation.Spec != nil {
+			cleanupErr = errors.Join(cleanupErr, a.volumes.ReleaseStaging(allocation.ID, allocation.Spec.Volumes))
+		}
+		if cleanupErr == nil {
+			if err := a.deleteAllocationRecord(allocation.ID); err != nil {
+				cleanupErr = fmt.Errorf("delete missing allocation record: %w", err)
+			}
+		}
+		if cleanupErr != nil {
+			a.log.Error("recover missing allocation container", "allocation", allocation.AllocationID, "error", cleanupErr)
+			allocation.Status = "stopping"
+			a.mu.Lock()
+			a.allocations[allocation.ID] = allocation
+			a.mu.Unlock()
+		}
 	}
 	return nil
 }
@@ -406,6 +435,20 @@ func allocationFromRuntime(container runtime.ContainerInfo) *Allocation {
 		GroupName: container.Labels["trellis.task-group"], TaskName: container.Labels["trellis.task"],
 		Status: "running", Health: "unknown",
 	}
+}
+
+func (a *Agent) containerMatchesAllocation(container runtime.ContainerInfo, allocation *Allocation) bool {
+	labels := container.Labels
+	return container.ID == allocation.ContainerID &&
+		labels["trellis.cluster"] == a.cluster &&
+		labels["trellis.allocation-id"] == allocation.AllocationID &&
+		labels["trellis.allocation-generation"] == strconv.FormatUint(allocation.Generation, 10) &&
+		labels["trellis.job-revision"] == strconv.Itoa(allocation.JobRevision) &&
+		labels["trellis.execution-hash"] == allocation.ExecutionHash &&
+		labels["trellis.namespace"] == allocation.Namespace &&
+		labels["trellis.job"] == allocation.JobName &&
+		labels["trellis.task-group"] == allocation.GroupName &&
+		labels["trellis.task"] == allocation.TaskName
 }
 
 // GetAllocations returns copies of agent allocation state.
@@ -697,11 +740,6 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	var ports []*runtime.Port
 	var secretDir string
 	defer func() {
-		if err := a.volumes.ReleaseStaging(allocID, ts.Volumes); err != nil {
-			a.log.Error("release volume staging", "allocation", allocID, "error", err)
-		}
-	}()
-	defer func() {
 		if committed {
 			return
 		}
@@ -715,8 +753,10 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 				a.reconciler.TrackStopping(allocID, false, restartPolicy)
 				tracked = true
 			}
-			persistStopErr := a.markAllocationStopping(allocID)
-			runErr = errors.Join(runErr, persistStopErr)
+		}
+		persistStopErr := a.markAllocationStopping(allocID)
+		runErr = errors.Join(runErr, persistStopErr)
+		if startAttempted {
 			if err := a.runtime.Stop(context.WithoutCancel(ctx), allocID); err != nil {
 				runErr = errors.Join(runErr, fmt.Errorf("stop container %s during failed start: %w", allocID, err))
 				return
@@ -725,23 +765,47 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		if healthRegistered {
 			a.health.DeregisterTask(allocID)
 		}
+		var cleanupErrs []error
 		if tracked {
-			_ = a.reconciler.Untrack(allocID)
+			if err := a.reconciler.Untrack(allocID); err != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("untrack allocation %s: %w", allocID, err))
+			}
 		}
 		if containerCreated {
-			_ = a.runtime.Remove(context.WithoutCancel(ctx), allocID)
+			if err := a.runtime.Remove(context.WithoutCancel(ctx), allocID); err != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove container %s: %w", allocID, err))
+			}
 		}
-		_ = a.network.Detach(context.WithoutCancel(ctx), netAttachment)
+		if err := a.network.Detach(context.WithoutCancel(ctx), netAttachment); err != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("detach allocation network: %w", err))
+		}
 		for _, p := range ports {
-			_ = a.ports.Release(p)
+			if err := a.ports.Release(p); err != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("release port %d: %w", p.HostPort, err))
+			}
 		}
 		if secretDir != "" {
-			_ = os.RemoveAll(secretDir)
+			if err := os.RemoveAll(secretDir); err != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove secret files: %w", err))
+			}
+		}
+		if err := a.volumes.ReleaseStaging(allocID, ts.Volumes); err != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("release volume staging: %w", err))
+		}
+		if alloc.ContainerOwnershipUnverified {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("container ownership for %s remains unverified", allocID))
+		}
+		if err := errors.Join(cleanupErrs...); err != nil {
+			runErr = errors.Join(runErr, err)
+			return
+		}
+		if err := a.deleteAllocationRecord(allocID); err != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("delete allocation record: %w", err))
+			return
 		}
 		a.mu.Lock()
 		delete(a.allocations, allocID)
 		a.mu.Unlock()
-		_ = a.deleteAllocationRecord(allocID)
 	}()
 
 	var taskPorts []spec.PortSpec
@@ -849,6 +913,11 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		ContainerPath: health.ProbeContainerPath,
 		ReadOnly:      true,
 	})
+	alloc.ContainerOwnershipUnverified = true
+	if err := a.persistAllocation(alloc); err != nil {
+		alloc.ContainerOwnershipUnverified = false
+		return fmt.Errorf("persist pending container creation: %w", err)
+	}
 	_, err = a.runtime.Create(ctx, runtime.CreateOptions{
 		ID:     containerID,
 		Image:  ts.Image,
@@ -882,11 +951,18 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	})
 	if err != nil {
 		observed, inspectErr := a.runtime.Inspect(context.WithoutCancel(ctx), containerID)
-		if inspectErr != nil || observed.Labels["trellis.allocation-id"] != schedulerID || observed.Labels["trellis.allocation-generation"] != labels["trellis.allocation-generation"] {
+		if inspectErr != nil {
+			return errors.Join(fmt.Errorf("create container %s: %w", containerID, err), fmt.Errorf("inspect container ownership: %w", inspectErr))
+		}
+		if !a.containerMatchesAllocation(*observed, alloc) {
 			return fmt.Errorf("create container %s: %w", containerID, err)
 		}
 	}
 	containerCreated = true
+	alloc.ContainerOwnershipUnverified = false
+	if err := a.persistAllocation(alloc); err != nil {
+		return fmt.Errorf("persist verified container creation: %w", err)
+	}
 
 	startAttempted = true
 	err = a.runtime.Start(ctx, containerID)
@@ -939,6 +1015,9 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		if err := a.reconciler.ObserveHealth(allocID, true); err != nil {
 			return fmt.Errorf("mark allocation healthy: %w", err)
 		}
+	}
+	if err := a.volumes.ReleaseStaging(allocID, ts.Volumes); err != nil {
+		return fmt.Errorf("release volume staging: %w", err)
 	}
 	committed = true
 
@@ -1145,6 +1224,15 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string) error {
 	}
 
 	containerID := alloc.ContainerID
+	if alloc.ContainerOwnershipUnverified {
+		observed, err := a.runtime.Inspect(ctx, containerID)
+		if err != nil {
+			return fmt.Errorf("verify container %s before cleanup: %w", containerID, err)
+		}
+		if !a.containerMatchesAllocation(*observed, &alloc) {
+			return fmt.Errorf("%w: container %s has different execution metadata", ErrExecutionConflict, containerID)
+		}
+	}
 	a.reconciler.BeginStop(allocID)
 	persistStopErr := a.markAllocationStopping(allocID)
 	if err := a.runtime.Stop(ctx, containerID); err != nil {
@@ -1174,6 +1262,11 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string) error {
 		err := a.ports.Release(p)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("release port %d: %w", p.HostPort, err))
+		}
+	}
+	if alloc.Spec != nil {
+		if err := a.volumes.ReleaseStaging(allocID, alloc.Spec.Volumes); err != nil {
+			errs = append(errs, fmt.Errorf("release volume staging: %w", err))
 		}
 	}
 	if err := errors.Join(errs...); err != nil {
