@@ -45,13 +45,14 @@ type stoppedWithErrorRuntime struct {
 type createdRecoveryRuntime struct {
 	*reconcilerRuntime
 	managedID   string
+	labels      map[string]string
 	stopCount   int
 	startCount  int
 	removeCount int
 }
 
 func (r *createdRecoveryRuntime) ListManaged(context.Context, string) ([]runtime.ContainerInfo, error) {
-	return []runtime.ContainerInfo{{ID: r.managedID, Status: r.status}}, nil
+	return []runtime.ContainerInfo{{ID: r.managedID, Status: r.status, Labels: r.labels}}, nil
 }
 
 func (r *createdRecoveryRuntime) Stop(context.Context, string) error {
@@ -680,7 +681,56 @@ func TestRecoverNonRunningAllocationDefersRestartToServer(t *testing.T) {
 			if _, ok := second.reconciler.states["task"]; ok {
 				t.Fatal("non-running recovered allocation entered local restart reconciliation")
 			}
+			request := &api.DrainAllocationRequest{AllocationID: "allocation", Generation: 1}
+			if err := second.DrainGroup(request); err != nil {
+				t.Fatalf("drain recovered allocation: %v", err)
+			}
+			if err := second.ResumeGroup(request); err == nil {
+				t.Fatal("resume accepted a non-running recovered allocation")
+			}
+			if !recovered.Draining {
+				t.Fatal("failed resume cleared the agent drain flag")
+			}
+			if _, ok := second.reconciler.states["task"]; ok {
+				t.Fatal("failed resume started local restart reconciliation")
+			}
 		})
+	}
+}
+
+func TestResumeGroupRecoveredAllocationWithoutSpec(t *testing.T) {
+	rt := &createdRecoveryRuntime{
+		reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning},
+		managedID:         "task",
+		labels: map[string]string{
+			"trellis.allocation-id":         "allocation",
+			"trellis.allocation-generation": "1",
+			"trellis.job-revision":         "1",
+			"trellis.execution-hash":       "hash",
+		},
+	}
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	agent := newOperationTestAgent(t, rt)
+	agent.ConfigureDurability(local, "test")
+	if err := agent.recover(context.Background()); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	recovered := agent.allocations["task"]
+	if recovered == nil || recovered.Spec != nil || recovered.Status != "running" {
+		t.Fatalf("recovered allocation = %+v, want running with nil spec", recovered)
+	}
+	request := &api.DrainAllocationRequest{AllocationID: "allocation", Generation: 1}
+	if err := agent.DrainGroup(request); err != nil {
+		t.Fatalf("drain recovered allocation: %v", err)
+	}
+	if err := agent.ResumeGroup(request); err != nil {
+		t.Fatalf("resume recovered allocation: %v", err)
+	}
+	if recovered.Draining || agent.reconciler.states["task"].stopping {
+		t.Fatal("recovered allocation remains restart-suppressed after resume")
 	}
 }
 

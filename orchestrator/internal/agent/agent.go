@@ -608,20 +608,26 @@ func (a *Agent) ResumeGroup(request *api.DrainAllocationRequest) error {
 			a.mu.Unlock()
 			return fmt.Errorf("%w: current %d, requested %d", ErrStaleGeneration, allocation.Generation, request.Generation)
 		}
-		if allocation.Generation != request.Generation || allocation.Status != "running" {
+		if allocation.Generation != request.Generation {
 			continue
 		}
+		if allocation.Status != "running" {
+			a.mu.Unlock()
+			return fmt.Errorf("cannot resume allocation %s task %s with status %q", request.AllocationID, allocation.ID, allocation.Status)
+		}
+		resumed = append(resumed, allocation)
+	}
+	for _, allocation := range resumed {
 		allocation.Draining = false
 		if err := a.persistAllocation(allocation); err != nil {
 			allocation.Draining = true
 			a.mu.Unlock()
 			return fmt.Errorf("persist resumed allocation: %w", err)
 		}
-		resumed = append(resumed, allocation)
 	}
 	a.mu.Unlock()
 	for _, allocation := range resumed {
-		a.reconciler.ResumeRestarts(allocation.ID, allocation.Spec.HealthCheck != nil, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow)
+		a.reconciler.ResumeRestarts(allocation.ID, allocation.Spec != nil && allocation.Spec.HealthCheck != nil, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow)
 	}
 	return nil
 }
