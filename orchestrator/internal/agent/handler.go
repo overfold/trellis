@@ -30,6 +30,7 @@ func (h *Handler) Register(e *echo.Echo) {
 	v1.GET("/allocations", h.handleList)
 	v1.POST("/allocations", h.handleRun)
 	v1.POST("/allocations/:id/drain", h.handleDrain)
+	v1.DELETE("/allocations/:id/drain", h.handleResume)
 	v1.POST("/network-plans", h.handleNetworkPlan)
 	v1.DELETE("/allocations/:id", h.handleDelete)
 	v1.GET("/allocations/:id/logs", h.handleLogs)
@@ -71,6 +72,20 @@ func (h *Handler) handleDrain(c *echo.Context) error {
 		return operationError(err)
 	}
 	return c.JSON(http.StatusOK, api.OperationResponse{Code: api.OperationOK, Generation: request.Generation})
+}
+
+func (h *Handler) handleResume(c *echo.Context) error {
+	request := api.DrainAllocationRequest{AllocationID: c.Param("id")}
+	if err := c.Bind(&request); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	}
+	if request.Generation == 0 {
+		return echo.NewHTTPError(http.StatusBadRequest, "generation must be greater than zero")
+	}
+	if err := h.agent.ResumeGroup(&request); err != nil {
+		return operationError(err)
+	}
+	return c.JSON(http.StatusOK, api.OperationResponse{Code: api.OperationOK, Generation: request.Generation, Epoch: request.Epoch})
 }
 
 func (h *Handler) handleLogs(c *echo.Context) error {

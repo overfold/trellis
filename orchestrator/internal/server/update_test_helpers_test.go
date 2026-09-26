@@ -19,11 +19,12 @@ func newNopStateController() *StateController {
 }
 
 type testAgent struct {
-	server *httptest.Server
-	host   string
-	port   int
-	mu     sync.Mutex
-	calls  []agentCall
+	server     *httptest.Server
+	host       string
+	port       int
+	mu         sync.Mutex
+	calls      []agentCall
+	failResume bool
 }
 
 type agentCall struct {
@@ -38,7 +39,12 @@ func newTestAgent() *testAgent {
 		body, _ := io.ReadAll(r.Body)
 		agent.mu.Lock()
 		agent.calls = append(agent.calls, agentCall{method: r.Method, path: r.URL.Path, body: body})
+		failResume := agent.failResume
 		agent.mu.Unlock()
+		if failResume && r.Method == http.MethodDelete {
+			http.Error(w, "resume unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(api.OperationResponse{Code: "ok"})
 	}))

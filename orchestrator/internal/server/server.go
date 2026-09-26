@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -32,6 +33,9 @@ import (
 
 const reconcileInterval = 10 * time.Second
 const heartbeatInterval = 10 * time.Second
+
+// ErrNodeNotFound indicates that a requested node is absent.
+var ErrNodeNotFound = errors.New("node not found")
 
 // ClusterJoiner adds and removes Raft cluster members.
 type ClusterJoiner interface {
@@ -353,7 +357,10 @@ type Allocation struct {
 	// Draining marks an allocation being replaced during a rolling update or
 	// node drain. Draining allocations are not restarted on
 	// failure and are not counted toward the desired count.
-	Draining bool `json:"draining,omitempty"`
+	Draining      bool   `json:"draining,omitempty"`
+	DrainSequence uint64 `json:"drain_sequence,omitempty"`
+	// DrainReason distinguishes node evacuation from an explicit replacement.
+	DrainReason string `json:"drain_reason,omitempty"`
 	// Events is an in-memory ring buffer of recent phase transitions.
 	// It is not persisted and resets on leader failover.
 	Events *lifecycle.RingBuffer `json:"-"`
@@ -996,25 +1003,82 @@ func (s *Server) DrainNode(ctx context.Context, id uuid.UUID) error {
 
 // UndrainNode makes a drained node schedulable.
 func (s *Server) UndrainNode(ctx context.Context, id uuid.UUID) error {
-	s.mu.Lock()
-	node := s.nodes[id]
-	if node == nil {
-		s.mu.Unlock()
-		return fmt.Errorf("node not found")
-	}
-	previousStatus := node.Status
-	node.Status = NodeStatusHealthy
-	summary := &NodeSummary{ID: node.ID, Host: node.Host, Port: node.Port, CPU: node.CPU, Memory: node.Memory, OS: node.OS, Arch: node.Arch, Labels: node.Labels, Volumes: node.Volumes, Capabilities: node.Capabilities, Status: node.Status, WireGuardPublicKey: node.WireGuardPublicKey, WireGuardEndpoint: node.WireGuardEndpoint, WireGuardPortBase: node.WireGuardPortBase, WireGuardPortCount: node.WireGuardPortCount, LastHeartbeat: node.LastHeartbeat, Version: node.Version}
-	s.mu.Unlock()
-	if err := s.state.PutNode(ctx, id.String(), summary); err != nil {
-		s.mu.Lock()
-		if current := s.nodes[id]; current == node && current.Status == NodeStatusHealthy {
-			current.Status = previousStatus
-		}
-		s.mu.Unlock()
+	s.reconcileMu.Lock()
+	err := s.resumeNodeAllocations(ctx, id)
+	s.reconcileMu.Unlock()
+	if err != nil {
 		return err
 	}
 	s.Reconcile(ctx)
+	return nil
+}
+
+func (s *Server) resumeNodeAllocations(ctx context.Context, id uuid.UUID) error {
+	s.mu.RLock()
+	node := s.nodes[id]
+	if node == nil {
+		s.mu.RUnlock()
+		return fmt.Errorf("%w: %s", ErrNodeNotFound, id)
+	}
+	allocations := append([]*Allocation(nil), s.allocations...)
+	s.mu.RUnlock()
+	for _, allocation := range allocations {
+		s.mu.RLock()
+		allocation.mu.Lock()
+		if allocation.Node == nil || allocation.Node.ID != id || !allocation.Draining || allocation.DrainReason != "node" ||
+			(allocation.Phase != lifecycle.PhaseRunning && allocation.Phase != lifecycle.PhaseStarting && allocation.Phase != lifecycle.PhasePlaced) {
+			allocation.mu.Unlock()
+			s.mu.RUnlock()
+			continue
+		}
+		job := s.jobs[jobKey(allocation.Namespace, allocation.JobName)]
+		if job == nil || allocation.JobRevision != job.Revision {
+			allocation.mu.Unlock()
+			s.mu.RUnlock()
+			continue
+		}
+		groupExists := false
+		for _, group := range job.Spec.TaskGroups {
+			if group.Name == allocation.TaskGroupName {
+				groupExists = true
+				break
+			}
+		}
+		if !groupExists {
+			allocation.mu.Unlock()
+			s.mu.RUnlock()
+			continue
+		}
+		address := fmt.Sprintf("%s:%d", node.Host, node.Port)
+		request := &api.DrainAllocationRequest{AllocationID: allocation.ID, Generation: allocation.Generation, Epoch: s.controlEpoch, Sequence: allocation.DrainSequence + 1}
+		s.mu.RUnlock()
+		if err := s.client.ResumeAllocation(ctx, id, address, request); err != nil {
+			allocation.mu.Unlock()
+			return fmt.Errorf("resume allocation %s: %w", allocation.ID, err)
+		}
+		allocation.Draining = false
+		allocation.DrainReason = ""
+		allocation.DrainSequence = request.Sequence
+		if err := s.state.PutAllocation(ctx, allocation); err != nil {
+			allocation.Draining = true
+			allocation.DrainReason = "node"
+			allocation.DrainSequence--
+			allocation.mu.Unlock()
+			return fmt.Errorf("persist resumed allocation %s: %w", allocation.ID, err)
+		}
+		allocation.mu.Unlock()
+	}
+	s.mu.RLock()
+	summary := &NodeSummary{ID: node.ID, Host: node.Host, Port: node.Port, CPU: node.CPU, Memory: node.Memory, OS: node.OS, Arch: node.Arch, Labels: node.Labels, Volumes: node.Volumes, Capabilities: node.Capabilities, Status: NodeStatusHealthy, WireGuardPublicKey: node.WireGuardPublicKey, WireGuardEndpoint: node.WireGuardEndpoint, WireGuardPortBase: node.WireGuardPortBase, WireGuardPortCount: node.WireGuardPortCount, LastHeartbeat: node.LastHeartbeat, Version: node.Version}
+	s.mu.RUnlock()
+	if err := s.state.PutNode(ctx, id.String(), summary); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	if s.nodes[id] == node {
+		node.Status = NodeStatusHealthy
+	}
+	s.mu.Unlock()
 	return nil
 }
 
@@ -1129,7 +1193,7 @@ func (s *Server) RestartJob(ctx context.Context, namespace, name string) error {
 	updates := make([]*Allocation, 0)
 	for _, alloc := range allocations {
 		alloc.mu.Lock()
-		if alloc.Namespace == namespace && alloc.JobName == name && !alloc.Draining &&
+		if alloc.Namespace == namespace && alloc.JobName == name && alloc.DrainReason != "restart" &&
 			alloc.Phase != lifecycle.PhaseStopped && alloc.Phase != lifecycle.PhaseFailed && alloc.Phase != lifecycle.PhaseLost {
 			raw, err := json.Marshal(alloc)
 			alloc.mu.Unlock()
@@ -1141,6 +1205,8 @@ func (s *Server) RestartJob(ctx context.Context, namespace, name string) error {
 				return fmt.Errorf("decode restart intent: %w", err)
 			}
 			update.Draining = true
+			update.DrainSequence++
+			update.DrainReason = "restart"
 			updates = append(updates, &update)
 			continue
 		}
@@ -1157,6 +1223,8 @@ func (s *Server) RestartJob(ctx context.Context, namespace, name string) error {
 			alloc.mu.Lock()
 			if alloc.Generation == update.Generation {
 				alloc.Draining = true
+				alloc.DrainSequence = update.DrainSequence
+				alloc.DrainReason = "restart"
 			}
 			alloc.mu.Unlock()
 			break

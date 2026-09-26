@@ -381,7 +381,10 @@ func (h *Handler) handleUndrainNode(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid node ID")
 	}
 	if err := h.server.UndrainNode(c.Request().Context(), id); err != nil {
-		return echo.NewHTTPError(http.StatusNotFound, "node not found")
+		if errors.Is(err, ErrNodeNotFound) {
+			return echo.NewHTTPError(http.StatusNotFound, "node not found")
+		}
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 	return c.NoContent(http.StatusNoContent)
 }

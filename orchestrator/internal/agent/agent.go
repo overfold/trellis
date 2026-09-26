@@ -116,6 +116,8 @@ type Allocation struct {
 	Status      string
 	Health      string
 	Draining    bool
+
+	DrainSequence uint64
 }
 
 const heartbeatInterval = 10 * time.Second
@@ -560,6 +562,9 @@ func (a *Agent) StopGroup(ctx context.Context, request *api.StopAllocationReques
 func (a *Agent) DrainGroup(request *api.DrainAllocationRequest) error {
 	unlock := a.lockAllocationOperation(request.AllocationID)
 	defer unlock()
+	if err := a.AcceptEpoch(request.Epoch); err != nil {
+		return err
+	}
 	a.mu.Lock()
 	var ids []string
 	var persistErr error
@@ -574,18 +579,74 @@ func (a *Agent) DrainGroup(request *api.DrainAllocationRequest) error {
 		if allocation.Generation != request.Generation {
 			continue
 		}
+		if request.Sequence < allocation.DrainSequence {
+			continue
+		}
+		previousDraining, previousSequence := allocation.Draining, allocation.DrainSequence
 		allocation.Draining = true
-		ids = append(ids, allocation.ID)
+		allocation.DrainSequence = request.Sequence
 		if err := a.persistAllocation(allocation); err != nil {
+			allocation.Draining, allocation.DrainSequence = previousDraining, previousSequence
 			persistErr = fmt.Errorf("persist draining allocation: %w", err)
 			break
 		}
+		ids = append(ids, allocation.ID)
 	}
 	a.mu.Unlock()
 	for _, id := range ids {
 		a.reconciler.SuppressRestarts(id)
 	}
 	return persistErr
+}
+
+// ResumeGroup cancels a drain for a retained allocation generation.
+func (a *Agent) ResumeGroup(request *api.DrainAllocationRequest) error {
+	unlock := a.lockAllocationOperation(request.AllocationID)
+	defer unlock()
+	if err := a.AcceptEpoch(request.Epoch); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	var resumed []*Allocation
+	for _, allocation := range a.allocations {
+		if allocation.AllocationID != request.AllocationID {
+			continue
+		}
+		if allocation.Generation > request.Generation {
+			a.mu.Unlock()
+			return fmt.Errorf("%w: current %d, requested %d", ErrStaleGeneration, allocation.Generation, request.Generation)
+		}
+		if allocation.Generation != request.Generation {
+			continue
+		}
+		if request.Sequence < allocation.DrainSequence {
+			continue
+		}
+		if allocation.Status != "running" && allocation.Status != "starting" {
+			a.mu.Unlock()
+			return fmt.Errorf("cannot resume allocation %s task %s with status %q", request.AllocationID, allocation.ID, allocation.Status)
+		}
+		resumed = append(resumed, allocation)
+	}
+	for _, allocation := range resumed {
+		previousDraining, previousSequence := allocation.Draining, allocation.DrainSequence
+		allocation.Draining = false
+		allocation.DrainSequence = request.Sequence
+		if err := a.persistAllocation(allocation); err != nil {
+			allocation.Draining, allocation.DrainSequence = previousDraining, previousSequence
+			a.mu.Unlock()
+			return fmt.Errorf("persist resumed allocation: %w", err)
+		}
+	}
+	a.mu.Unlock()
+	for _, allocation := range resumed {
+		// The control plane will retry the start for a recovered starting task.
+		// Leave it untracked until that retry resolves its runtime state.
+		if allocation.Status == "running" {
+			a.reconciler.ResumeRestarts(allocation.ID, allocation.Spec != nil && allocation.Spec.HealthCheck != nil, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow)
+		}
+	}
+	return nil
 }
 
 // RunAllocation creates and starts one allocation task.

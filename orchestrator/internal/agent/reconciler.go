@@ -137,6 +137,22 @@ func (r *AllocationReconciler) SuppressRestarts(allocID string) {
 	state.operation.Unlock()
 }
 
+// ResumeRestarts restores reconciliation after a drain is cancelled.
+func (r *AllocationReconciler) ResumeRestarts(allocID string, healthManaged bool, policy *spec.RestartPolicySpec, attempts int, window time.Time) {
+	r.mu.Lock()
+	state := r.states[allocID]
+	r.mu.Unlock()
+	if state == nil {
+		r.TrackRecovered(allocID, healthManaged, policy, attempts, window)
+		return
+	}
+	state.operation.Lock()
+	r.mu.Lock()
+	state.stopping = false
+	r.mu.Unlock()
+	state.operation.Unlock()
+}
+
 // BeginStop suppresses restarts before runtime cleanup starts.
 func (r *AllocationReconciler) BeginStop(allocID string) {
 	r.SuppressRestarts(allocID)

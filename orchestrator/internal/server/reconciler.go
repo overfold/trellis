@@ -297,6 +297,8 @@ func (s *Server) Reconcile(ctx context.Context) {
 			}
 			if !allocation.Draining {
 				allocation.Draining = true
+				allocation.DrainSequence++
+				allocation.DrainReason = "node"
 				_ = s.state.PutAllocation(context.WithoutCancel(ctx), allocation)
 				actions = append(actions, Action{Type: ActionDrain, Allocation: allocation})
 			}
@@ -310,6 +312,8 @@ func (s *Server) Reconcile(ctx context.Context) {
 			case spec.UpdateRolling:
 				if !allocation.Draining {
 					allocation.Draining = true
+					allocation.DrainSequence++
+					allocation.DrainReason = "update"
 					_ = s.state.PutAllocation(context.WithoutCancel(ctx), allocation)
 					if allocation.Node != nil && (allocation.Node.Status == NodeStatusHealthy || allocation.Node.Status == NodeStatusDraining) {
 						actions = append(actions, Action{Type: ActionDrain, Allocation: allocation})
@@ -953,7 +957,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 		if nodeStatus != NodeStatusHealthy && nodeStatus != NodeStatusDraining {
 			return fmt.Errorf("node %s is unavailable for allocation drain", alloc.Node.ID)
 		}
-		return s.client.DrainAllocation(ctx, alloc.Node.ID, address, &api.DrainAllocationRequest{AllocationID: alloc.ID, Generation: alloc.Generation})
+		return s.client.DrainAllocation(ctx, alloc.Node.ID, address, &api.DrainAllocationRequest{AllocationID: alloc.ID, Generation: alloc.Generation, Epoch: epoch, Sequence: alloc.DrainSequence})
 	case ActionStop:
 		unlockServer()
 
