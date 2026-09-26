@@ -153,6 +153,7 @@ func Validate(job *JobSpec) error {
 		}
 
 		tasks := make(map[string]struct{})
+		hostPorts := make(map[int]struct{})
 		for j, task := range group.Tasks {
 			taskPath := fmt.Sprintf("%s.tasks[%d]", groupPath, j)
 			if task.Name != "" {
@@ -266,8 +267,13 @@ func Validate(job *JobSpec) error {
 					add(taskPath+".networking.ports", "invalid", "ports require networking mode host")
 				}
 				for k, port := range task.Networking.Ports {
+					path := fmt.Sprintf("%s.networking.ports[%d].port", taskPath, k)
 					if port.Port < 1 || port.Port > 65535 {
-						add(fmt.Sprintf("%s.networking.ports[%d].port", taskPath, k), "out_of_range", "must be between 1 and 65535")
+						add(path, "out_of_range", "must be between 1 and 65535")
+					} else if _, exists := hostPorts[port.Port]; exists {
+						add(path, "duplicate", fmt.Sprintf("duplicate host port %d in task group", port.Port))
+					} else {
+						hostPorts[port.Port] = struct{}{}
 					}
 				}
 			}
