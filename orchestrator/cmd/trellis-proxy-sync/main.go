@@ -103,7 +103,7 @@ func main() {
 
 		var upstreams []upstream
 		for _, alloc := range *allocs {
-			if alloc.Health != "healthy" || alloc.Address == "" || len(alloc.Ports) == 0 {
+			if alloc.Phase != "running" || alloc.Health != "healthy" || alloc.Address == "" || len(alloc.Ports) == 0 {
 				continue
 			}
 			port, ok := selectHostPort(alloc.Ports, containerPort)
