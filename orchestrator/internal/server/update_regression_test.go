@@ -128,6 +128,50 @@ func TestReconcileRollingDoesNotReuseHealthyReplacement(t *testing.T) {
 	}
 }
 
+func TestReconcileStopsPendingFromOldRevision(t *testing.T) {
+	s, agent := newTestServerWithAgent()
+	defer agent.server.Close()
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
+	s.nodes[node.ID] = node
+	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app:v2"}}}}}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: jobSpec, Revision: 2}
+	old := &Allocation{ID: "old", Namespace: "default", JobName: "web", TaskGroupName: "api", Tasks: []spec.TaskSpec{{Name: "server", Image: "app:v1"}}, Generation: 1, JobRevision: 1, Phase: lifecycle.PhasePending}
+	s.allocations = []*Allocation{old}
+
+	s.Reconcile(context.Background())
+
+	if old.Phase != lifecycle.PhaseStopped || old.Node != nil {
+		t.Fatalf("old pending allocation: phase=%s node=%v", old.Phase, old.Node)
+	}
+	if len(s.allocations) != 2 {
+		t.Fatalf("allocation count = %d, want 2", len(s.allocations))
+	}
+	replacement := s.allocations[1]
+	if replacement.JobRevision != 2 || replacement.Tasks[0].Image != "app:v2" || replacement.Node != node {
+		t.Fatalf("replacement = %+v, want current revision and task on node", replacement)
+	}
+}
+
+func TestReconcileStopsObsoletePendingGroupsAndReplicas(t *testing.T) {
+	s, agent := newTestServerWithAgent()
+	defer agent.server.Close()
+	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: jobSpec, Revision: 2}
+	makePending := func(id, group string) *Allocation {
+		return &Allocation{ID: id, Namespace: "default", JobName: "web", TaskGroupName: group, Generation: 1, JobRevision: 2, Phase: lifecycle.PhasePending}
+	}
+	removed := makePending("removed", "worker")
+	first := makePending("first", "api")
+	surplus := makePending("surplus", "api")
+	s.allocations = []*Allocation{removed, first, surplus}
+
+	s.Reconcile(context.Background())
+
+	if removed.Phase != lifecycle.PhaseStopped || first.Phase != lifecycle.PhasePending || surplus.Phase != lifecycle.PhaseStopped {
+		t.Fatalf("pending phases: removed=%s first=%s surplus=%s", removed.Phase, first.Phase, surplus.Phase)
+	}
+}
+
 func TestDrainNodeStopsAllocationAfterReplacementHealthy(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()
