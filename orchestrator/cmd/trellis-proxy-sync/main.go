@@ -145,7 +145,7 @@ func main() {
 	}
 }
 
-func writeConfig(path string, data []byte) error {
+func writeConfig(path string, data []byte) (retErr error) {
 	mode := os.FileMode(0644)
 	var owner *syscall.Stat_t
 	for i := 0; i < 255; i++ {
@@ -182,35 +182,49 @@ func writeConfig(path string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmp.Name())
+	closed := false
+	renamed := false
+	defer func() {
+		if !closed {
+			if err := tmp.Close(); err != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("close temporary config %s: %w", tmp.Name(), err))
+			}
+		}
+		if !renamed {
+			if err := os.Remove(tmp.Name()); err != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("remove temporary config %s: %w", tmp.Name(), err))
+			}
+		}
+	}()
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
 		return err
 	}
 	if owner != nil {
 		if err := tmp.Chown(int(owner.Uid), int(owner.Gid)); err != nil {
-			tmp.Close()
 			return fmt.Errorf("preserve ownership of %s: %w", path, err)
 		}
 	}
 	if err := tmp.Chmod(mode); err != nil {
-		tmp.Close()
 		return err
 	}
 	if owner != nil {
 		if err := copyXattrs(path, tmp); err != nil {
-			tmp.Close()
 			return fmt.Errorf("preserve extended attributes of %s: %w", path, err)
 		}
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
 		return err
 	}
-	if err := tmp.Close(); err != nil {
+	closeErr := tmp.Close()
+	closed = true
+	if closeErr != nil {
+		return fmt.Errorf("close temporary config %s: %w", tmp.Name(), closeErr)
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), path)
+	renamed = true
+	return nil
 }
 
 func copyXattrs(path string, dst *os.File) error {

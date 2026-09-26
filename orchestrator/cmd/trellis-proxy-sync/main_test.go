@@ -135,8 +135,14 @@ func TestWriteConfigRemovesInheritedACL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(probe.Name())
-	defer probe.Close()
+	t.Cleanup(func() {
+		if err := probe.Close(); err != nil {
+			t.Errorf("close ACL probe: %v", err)
+		}
+		if err := os.Remove(probe.Name()); err != nil {
+			t.Errorf("remove ACL probe: %v", err)
+		}
+	})
 	if _, err := unix.Fgetxattr(int(probe.Fd()), "system.posix_acl_access", nil); err != nil {
 		t.Fatalf("temporary file did not inherit ACL: %v", err)
 	}
@@ -221,7 +227,11 @@ func TestWriteConfigRequiresWritableParentDirectory(t *testing.T) {
 	if err := os.Chmod(dir, 0555); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.Chmod(dir, 0755) })
+	t.Cleanup(func() {
+		if err := os.Chmod(dir, 0755); err != nil {
+			t.Errorf("restore directory permissions: %v", err)
+		}
+	})
 	if err := writeConfig(path, []byte("new")); !os.IsPermission(err) {
 		t.Fatalf("writeConfig error = %v; want permission error", err)
 	}
