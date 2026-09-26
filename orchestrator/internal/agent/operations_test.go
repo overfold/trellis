@@ -42,9 +42,27 @@ type failingRemoveRuntime struct {
 
 func (r *failingRemoveRuntime) Remove(context.Context, string) error { return r.removeErr }
 
+type removedStartRuntime struct {
+	*ambiguousStartRuntime
+	removeCount int
+}
+
+func (r *removedStartRuntime) Remove(context.Context, string) error {
+	r.removeCount++
+	return nil
+}
+
+func (r *removedStartRuntime) ListManaged(context.Context, string) ([]runtime.ContainerInfo, error) {
+	return nil, nil
+}
+
 type failingDetachNetworkManager struct {
 	countingNetworkManager
 	detachErr error
+}
+
+func (m *failingDetachNetworkManager) Attach(ctx context.Context, request network.AttachRequest) (*network.Attachment, error) {
+	return staticNetworkManager{}.Attach(ctx, request)
 }
 
 func (m *failingDetachNetworkManager) Detach(ctx context.Context, attachment *network.Attachment) error {
@@ -722,6 +740,58 @@ func TestFailedStartCleanupRetainsAllocationForRetry(t *testing.T) {
 	}
 	if err := local.Get(allocationRecordKey(id), &recorded); err == nil {
 		t.Fatal("allocation record retained after successful cleanup")
+	}
+}
+
+func TestRecoverRetainsFailedStartRecordUntilNetworkDetachSucceeds(t *testing.T) {
+	detachErr := errors.New("detach failed")
+	rt := &removedStartRuntime{ambiguousStartRuntime: &ambiguousStartRuntime{reconcilerRuntime: &reconcilerRuntime{}}}
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	manager := &failingDetachNetworkManager{detachErr: detachErr}
+	first := newOperationTestAgent(t, rt)
+	first.SetNetworkManager(manager)
+	first.ConfigureDurability(local, "test")
+	request := operationTestRequest()
+	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard}}}
+	request.NetworkPlan = &network.Plan{}
+	id := "allocation-g2-first"
+
+	if err := first.RunGroup(context.Background(), request); !errors.Is(err, detachErr) {
+		t.Fatalf("failed start error = %v, want detach failure", err)
+	}
+	if rt.removeCount != 1 {
+		t.Fatalf("container removals = %d, want 1", rt.removeCount)
+	}
+	var recorded Allocation
+	if err := local.Get(allocationRecordKey(id), &recorded); err != nil || recorded.Network == nil {
+		t.Fatalf("failed start record = %+v, error = %v, want network attachment", recorded, err)
+	}
+
+	second := newOperationTestAgent(t, rt)
+	second.SetNetworkManager(manager)
+	second.ConfigureDurability(local, "test")
+	if err := second.recover(context.Background()); err != nil {
+		t.Fatalf("recover with failed detach: %v", err)
+	}
+	if err := local.Get(allocationRecordKey(id), &recorded); err != nil {
+		t.Fatalf("record removed after failed recovery detach: %v", err)
+	}
+
+	manager.detachErr = nil
+	third := newOperationTestAgent(t, rt)
+	third.SetNetworkManager(manager)
+	third.ConfigureDurability(local, "test")
+	if err := third.recover(context.Background()); err != nil {
+		t.Fatalf("recover after detach became possible: %v", err)
+	}
+	if err := local.Get(allocationRecordKey(id), &recorded); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("record after successful recovery detach: %v, want not found", err)
+	}
+	if manager.detachCount != 3 {
+		t.Fatalf("network detaches = %d, want initial cleanup and two recovery attempts", manager.detachCount)
 	}
 }
 

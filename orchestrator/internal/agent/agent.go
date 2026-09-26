@@ -379,7 +379,10 @@ func (a *Agent) recover(ctx context.Context) error {
 			_ = a.ports.Adopt(port)
 			_ = a.ports.Release(port)
 		}
-		_ = a.network.Detach(context.WithoutCancel(ctx), allocation.Network)
+		if err := a.network.Detach(context.WithoutCancel(ctx), allocation.Network); err != nil {
+			a.log.Error("detach network for missing allocation container", "allocation", allocation.AllocationID, "error", err)
+			continue
+		}
 		_ = a.deleteAllocationRecord(allocation.ID)
 	}
 	return nil
