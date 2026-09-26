@@ -255,6 +255,20 @@ func (s *Server) Reconcile(ctx context.Context) {
 			continue
 		}
 		if allocation.Phase == lifecycle.PhasePending {
+			groupExists := false
+			for _, group := range job.Spec.TaskGroups {
+				if group.Name == allocation.TaskGroupName {
+					groupExists = true
+					break
+				}
+			}
+			if !groupExists || allocation.JobRevision != job.Revision {
+				_ = allocation.Transition(lifecycle.PhaseStopping, now, "job_changed", "pending allocation is obsolete")
+				_ = allocation.Transition(lifecycle.PhaseStopped, now, "job_changed", "pending allocation is obsolete")
+				_ = s.state.PutAllocation(context.WithoutCancel(ctx), allocation)
+				allocation.mu.Unlock()
+				continue
+			}
 			valid = append(valid, allocation)
 			allocation.mu.Unlock()
 			continue
@@ -412,6 +426,13 @@ func (s *Server) Reconcile(ctx context.Context) {
 						deficit = 0
 					}
 				}
+			}
+			for len(pending) > deficit {
+				allocation := pending[len(pending)-1]
+				pending = pending[:len(pending)-1]
+				_ = allocation.Transition(lifecycle.PhaseStopping, now, "scaled_down", "pending allocation exceeds the desired count")
+				_ = allocation.Transition(lifecycle.PhaseStopped, now, "scaled_down", "pending allocation exceeds the desired count")
+				_ = s.state.PutAllocation(context.WithoutCancel(ctx), allocation)
 			}
 			requiredCapabilities := spec.GroupRequiredCapabilities(&group)
 			placements := Schedule(&PlacementIntent{Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Count: deficit, Nodes: s.nodePointers(), Allocations: valid, Tasks: group.Tasks, Constraints: group.Constraints, RequiredCapabilities: requiredCapabilities, VolumeOwners: volumeOwners})
