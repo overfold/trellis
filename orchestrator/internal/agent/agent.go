@@ -350,14 +350,7 @@ func (a *Agent) recover(ctx context.Context) error {
 			a.allocations[allocation.ID] = allocation
 			if allocation.Spec != nil {
 				if !stopping && !recoveryPending && allocation.Spec.HealthCheck != nil {
-					check := *allocation.Spec.HealthCheck
-					for _, port := range allocation.Ports {
-						if port.ContainerPort == check.Port {
-							check.Port = port.HostPort
-							break
-						}
-					}
-					a.health.RegisterTask(allocation.ID, allocation.ContainerID, &check)
+					a.health.RegisterTask(allocation.ID, allocation.ContainerID, allocation.Spec.HealthCheck)
 				}
 				if restartSuppressed {
 					a.reconciler.TrackStopping(allocation.ID, allocation.Spec.HealthCheck != nil, allocation.Restart)

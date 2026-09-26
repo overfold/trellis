@@ -51,6 +51,19 @@ type createdRecoveryRuntime struct {
 	removeCount int
 }
 
+type recoveryProbeRuntime struct {
+	*createdRecoveryRuntime
+	commands chan []string
+}
+
+func (r *recoveryProbeRuntime) Exec(_ context.Context, _ string, command []string) (int, error) {
+	select {
+	case r.commands <- command:
+	default:
+	}
+	return 0, nil
+}
+
 func (r *createdRecoveryRuntime) ListManaged(context.Context, string) ([]runtime.ContainerInfo, error) {
 	return []runtime.ContainerInfo{{ID: r.managedID, Status: r.status, Labels: r.labels}}, nil
 }
@@ -747,6 +760,51 @@ func TestRecoverRunningAllocationResetsHealthUntilProbe(t *testing.T) {
 	}
 	if persisted.Health != "unknown" {
 		t.Fatalf("persisted health = %q, want unknown", persisted.Health)
+	}
+}
+
+func TestRecoverRunningAllocationProbesContainerPort(t *testing.T) {
+	for _, checkType := range []spec.HealthCheckType{"http", "tcp"} {
+		t.Run(string(checkType), func(t *testing.T) {
+			rt := &recoveryProbeRuntime{
+				createdRecoveryRuntime: &createdRecoveryRuntime{
+					reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning},
+					managedID:         "task",
+				},
+				commands: make(chan []string, 1),
+			}
+			local := storage.NewLocalStorage(t.TempDir())
+			if err := local.Init(); err != nil {
+				t.Fatal(err)
+			}
+			check := &spec.HealthCheckSpec{Type: checkType, Port: 8080, Path: "/health", Interval: 10 * time.Millisecond, Threshold: 1000}
+			first := newOperationTestAgent(t, rt)
+			first.ConfigureDurability(local, "test")
+			if err := first.persistAllocation(&Allocation{
+				ID: "task", AllocationID: "allocation", ContainerID: "task",
+				Spec:   &spec.TaskSpec{Name: "task", HealthCheck: check},
+				Ports:  []*runtime.Port{{HostPort: 32080, ContainerPort: 8080}},
+				Status: "running", Health: "healthy",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			second := newOperationTestAgent(t, rt)
+			second.ConfigureDurability(local, "test")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			second.health.SetContext(ctx)
+			if err := second.recover(ctx); err != nil {
+				t.Fatalf("recover: %v", err)
+			}
+			select {
+			case command := <-rt.commands:
+				if len(command) < 3 || command[0] != health.ProbeContainerPath || command[1] != string(checkType) || command[2] != "8080" {
+					t.Fatalf("recovered probe command = %v, want %s on container port 8080", command, checkType)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("recovered health probe did not run")
+			}
+		})
 	}
 }
 
