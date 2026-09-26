@@ -1277,6 +1277,10 @@ func (a *Agent) OnReconciledStatus(allocID, status string) {
 			alloc.Health = status
 		} else {
 			alloc.Status = status
+			if status == "running" && alloc.Spec != nil && alloc.Spec.HealthCheck != nil {
+				alloc.Health = "unknown"
+				a.health.RegisterTask(allocID, alloc.ContainerID, alloc.Spec.HealthCheck)
+			}
 		}
 		if err := a.persistAllocation(alloc); err != nil {
 			a.log.Error("persist reconciled allocation", "allocation", alloc.AllocationID, "error", err)

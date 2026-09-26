@@ -3,11 +3,13 @@ package agent
 import (
 	"context"
 	"io"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/clofour/trellis/internal/api"
+	"github.com/clofour/trellis/internal/health"
 	"github.com/clofour/trellis/internal/runtime"
 	"github.com/clofour/trellis/internal/spec"
 )
@@ -153,22 +155,35 @@ func TestLateDrainDoesNotSuppressRestartsAfterResume(t *testing.T) {
 
 func TestAllocationReconcilerWaitsForHealthAfterRestart(t *testing.T) {
 	rt := &reconcilerRuntime{status: runtime.StatusStopped}
-	subscriber := &statusRecorder{}
-	r := NewAllocationReconciler(rt, subscriber)
+	check := &spec.HealthCheckSpec{Type: "script", Interval: time.Hour}
+	manager := health.NewHealthManager(slog.Default(), rt, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	manager.SetContext(ctx)
+	manager.RegisterTask("alloc-1", "alloc-1", check)
+	agent := &Agent{
+		log:         slog.Default(),
+		allocations: map[string]*Allocation{"alloc-1": {ID: "alloc-1", ContainerID: "alloc-1", Health: "healthy", Spec: &spec.TaskSpec{HealthCheck: check}}},
+		health:      manager,
+	}
+	r := NewAllocationReconciler(rt, agent)
 	r.Track("alloc-1", true, nil)
 
 	if err := r.Reconcile(context.Background(), "alloc-1"); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	if got := subscriber.statuses[len(subscriber.statuses)-1]; got != "running" {
+	if got := agent.allocations["alloc-1"].Status; got != "running" {
 		t.Fatalf("status after restart = %q, want running", got)
+	}
+	if got := agent.allocations["alloc-1"].Health; got != "unknown" {
+		t.Fatalf("health after restart = %q, want unknown", got)
 	}
 
 	if err := r.ObserveHealth("alloc-1", true); err != nil {
 		t.Fatalf("observe health: %v", err)
 	}
-	if got := subscriber.statuses[len(subscriber.statuses)-1]; got != "healthy" {
-		t.Fatalf("status after health observation = %q, want healthy", got)
+	if got := agent.allocations["alloc-1"].Health; got != "healthy" {
+		t.Fatalf("health after health observation = %q, want healthy", got)
 	}
 }
 
