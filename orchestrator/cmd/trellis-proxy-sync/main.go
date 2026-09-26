@@ -101,27 +101,7 @@ func main() {
 			return
 		}
 
-		var upstreams []upstream
-		for _, alloc := range *allocs {
-			if alloc.Phase != "running" || alloc.Health != "healthy" || alloc.Address == "" || len(alloc.Ports) == 0 {
-				continue
-			}
-			port, ok := selectHostPort(alloc.Ports, containerPort)
-			if !ok {
-				continue
-			}
-			weight := 1
-			if w, ok := alloc.Labels["trellis/weight"]; ok {
-				if parsed, err := strconv.Atoi(w); err == nil && parsed > 0 {
-					weight = parsed
-				}
-			}
-			upstreams = append(upstreams, upstream{
-				Address: alloc.Address,
-				Port:    port,
-				Weight:  weight,
-			})
-		}
+		upstreams := selectUpstreams(*allocs, containerPort)
 
 		var buf bytes.Buffer
 		if err := tmpl.Execute(&buf, templateData{Upstreams: upstreams}); err != nil {
@@ -159,6 +139,31 @@ func main() {
 			sync()
 		}
 	}
+}
+
+func selectUpstreams(allocs []api.AllocationResponse, containerPort int) []upstream {
+	var upstreams []upstream
+	for _, alloc := range allocs {
+		if alloc.Phase != "running" || alloc.Health != "healthy" || alloc.Address == "" || len(alloc.Ports) == 0 {
+			continue
+		}
+		port, ok := selectHostPort(alloc.Ports, containerPort)
+		if !ok {
+			continue
+		}
+		weight := 1
+		if w, ok := alloc.Labels["trellis/weight"]; ok {
+			if parsed, err := strconv.Atoi(w); err == nil && parsed > 0 {
+				weight = parsed
+			}
+		}
+		upstreams = append(upstreams, upstream{
+			Address: alloc.Address,
+			Port:    port,
+			Weight:  weight,
+		})
+	}
+	return upstreams
 }
 
 func selectHostPort(ports []api.PortMapping, containerPort int) (int, bool) {
