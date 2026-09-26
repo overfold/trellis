@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"text/template"
 	"time"
 
@@ -144,6 +145,7 @@ func main() {
 
 func writeConfig(path string, data []byte) error {
 	mode := os.FileMode(0644)
+	var owner *syscall.Stat_t
 	for i := 0; i < 255; i++ {
 		info, err := os.Lstat(path)
 		if os.IsNotExist(err) {
@@ -154,6 +156,11 @@ func writeConfig(path string, data []byte) error {
 		}
 		if info.Mode()&os.ModeSymlink == 0 {
 			mode = info.Mode()
+			var ok bool
+			owner, ok = info.Sys().(*syscall.Stat_t)
+			if !ok {
+				return fmt.Errorf("read ownership of %s: unsupported file information", path)
+			}
 			break
 		}
 		target, err := os.Readlink(path)
@@ -177,6 +184,12 @@ func writeConfig(path string, data []byte) error {
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		return err
+	}
+	if owner != nil {
+		if err := tmp.Chown(int(owner.Uid), int(owner.Gid)); err != nil {
+			tmp.Close()
+			return fmt.Errorf("preserve ownership of %s: %w", path, err)
+		}
 	}
 	if err := tmp.Chmod(mode); err != nil {
 		tmp.Close()

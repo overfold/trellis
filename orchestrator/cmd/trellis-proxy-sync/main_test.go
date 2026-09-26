@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/clofour/trellis/internal/api"
@@ -55,6 +56,66 @@ func TestWriteConfigPreservesMode(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != 0600 {
 		t.Fatalf("config mode = %04o; want 0600", got)
+	}
+}
+
+func TestWriteConfigPreservesGroup(t *testing.T) {
+	groups, err := os.Getgroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	group := -1
+	for _, gid := range groups {
+		if gid != os.Getgid() {
+			group = gid
+			break
+		}
+	}
+	if group == -1 {
+		t.Skip("requires membership in a second group")
+	}
+
+	path := filepath.Join(t.TempDir(), "proxy.conf")
+	if err := os.WriteFile(path, []byte("old"), 0660); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(path, -1, group); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0660); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeConfig(path, []byte("new")); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := info.Sys().(*syscall.Stat_t)
+	if int(owner.Gid) != group || int(owner.Uid) != os.Geteuid() || info.Mode().Perm() != 0660 {
+		t.Fatalf("config ownership and mode = %d:%d %04o; want %d:%d 0660", owner.Uid, owner.Gid, info.Mode().Perm(), os.Geteuid(), group)
+	}
+}
+
+func TestWriteConfigRequiresWritableParentDirectory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can write to a directory without write permission")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "proxy.conf")
+	if err := os.WriteFile(path, []byte("old"), 0666); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0755) })
+	if err := writeConfig(path, []byte("new")); !os.IsPermission(err) {
+		t.Fatalf("writeConfig error = %v; want permission error", err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "old" {
+		t.Fatalf("config = %q, %v; want old", got, err)
 	}
 }
 
