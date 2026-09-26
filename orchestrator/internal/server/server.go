@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -32,6 +33,9 @@ import (
 
 const reconcileInterval = 10 * time.Second
 const heartbeatInterval = 10 * time.Second
+
+// ErrNodeNotFound indicates that a requested node is absent.
+var ErrNodeNotFound = errors.New("node not found")
 
 // ClusterJoiner adds and removes Raft cluster members.
 type ClusterJoiner interface {
@@ -353,7 +357,8 @@ type Allocation struct {
 	// Draining marks an allocation being replaced during a rolling update or
 	// node drain. Draining allocations are not restarted on
 	// failure and are not counted toward the desired count.
-	Draining bool `json:"draining,omitempty"`
+	Draining      bool   `json:"draining,omitempty"`
+	DrainSequence uint64 `json:"drain_sequence,omitempty"`
 	// DrainReason distinguishes node evacuation from an explicit replacement.
 	DrainReason string `json:"drain_reason,omitempty"`
 	// Events is an in-memory ring buffer of recent phase transitions.
@@ -1013,7 +1018,7 @@ func (s *Server) resumeNodeAllocations(ctx context.Context, id uuid.UUID) error 
 	node := s.nodes[id]
 	if node == nil {
 		s.mu.RUnlock()
-		return fmt.Errorf("node not found")
+		return fmt.Errorf("%w: %s", ErrNodeNotFound, id)
 	}
 	allocations := append([]*Allocation(nil), s.allocations...)
 	s.mu.RUnlock()
@@ -1045,7 +1050,7 @@ func (s *Server) resumeNodeAllocations(ctx context.Context, id uuid.UUID) error 
 			continue
 		}
 		address := fmt.Sprintf("%s:%d", node.Host, node.Port)
-		request := &api.DrainAllocationRequest{AllocationID: allocation.ID, Generation: allocation.Generation, Epoch: s.controlEpoch}
+		request := &api.DrainAllocationRequest{AllocationID: allocation.ID, Generation: allocation.Generation, Epoch: s.controlEpoch, Sequence: allocation.DrainSequence + 1}
 		s.mu.RUnlock()
 		if err := s.client.ResumeAllocation(ctx, id, address, request); err != nil {
 			allocation.mu.Unlock()
@@ -1053,9 +1058,11 @@ func (s *Server) resumeNodeAllocations(ctx context.Context, id uuid.UUID) error 
 		}
 		allocation.Draining = false
 		allocation.DrainReason = ""
+		allocation.DrainSequence = request.Sequence
 		if err := s.state.PutAllocation(ctx, allocation); err != nil {
 			allocation.Draining = true
 			allocation.DrainReason = "node"
+			allocation.DrainSequence--
 			allocation.mu.Unlock()
 			return fmt.Errorf("persist resumed allocation %s: %w", allocation.ID, err)
 		}
@@ -1198,6 +1205,7 @@ func (s *Server) RestartJob(ctx context.Context, namespace, name string) error {
 				return fmt.Errorf("decode restart intent: %w", err)
 			}
 			update.Draining = true
+			update.DrainSequence++
 			update.DrainReason = "restart"
 			updates = append(updates, &update)
 			continue
@@ -1215,6 +1223,7 @@ func (s *Server) RestartJob(ctx context.Context, namespace, name string) error {
 			alloc.mu.Lock()
 			if alloc.Generation == update.Generation {
 				alloc.Draining = true
+				alloc.DrainSequence = update.DrainSequence
 				alloc.DrainReason = "restart"
 			}
 			alloc.mu.Unlock()

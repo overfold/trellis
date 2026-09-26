@@ -2,13 +2,68 @@ package server
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/clofour/trellis/internal/api"
 	"github.com/clofour/trellis/internal/lifecycle"
 	"github.com/clofour/trellis/internal/spec"
 	"github.com/google/uuid"
+	"github.com/labstack/echo/v5"
 )
+
+type undrainFailingStore struct{ memoryStore }
+
+func (undrainFailingStore) Put(context.Context, string, []byte) error {
+	return errors.New("storage unavailable")
+}
+
+func TestHandleUndrainNodeReportsResumeFailure(t *testing.T) {
+	s, agent := newTestServerWithAgent()
+	defer agent.server.Close()
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusDraining}
+	s.nodes[node.ID] = node
+	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: jobSpec, Revision: 1}
+	s.allocations = []*Allocation{{ID: "original", Namespace: "default", JobName: "web", TaskGroupName: "api", Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning, Draining: true, DrainReason: "node"}}
+	agent.mu.Lock()
+	agent.failResume = true
+	agent.mu.Unlock()
+	e := echo.New()
+	NewHandler(s).Register(e)
+	for _, tc := range []struct {
+		id      string
+		status  int
+		message string
+	}{
+		{uuid.NewString(), http.StatusNotFound, "node not found"},
+		{node.ID.String(), http.StatusInternalServerError, "resume allocation original"},
+	} {
+		req := httptest.NewRequest(http.MethodDelete, "/v1/nodes/"+tc.id+"/drain", nil)
+		req = req.WithContext(context.WithValue(req.Context(), AdminContextKey, true))
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		if rec.Code != tc.status || !strings.Contains(rec.Body.String(), tc.message) {
+			t.Fatalf("undrain %s: status %d, body %s", tc.id, rec.Code, rec.Body.String())
+		}
+	}
+	agent.mu.Lock()
+	agent.failResume = false
+	agent.mu.Unlock()
+	s.state = NewStateController(undrainFailingStore{memoryStore{}}, "test")
+	req := httptest.NewRequest(http.MethodDelete, "/v1/nodes/"+node.ID.String()+"/drain", nil)
+	req = req.WithContext(context.WithValue(req.Context(), AdminContextKey, true))
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "persist resumed allocation original") {
+		t.Fatalf("persistence failure: status %d, body %s", rec.Code, rec.Body.String())
+	}
+}
 
 func TestReconcileRollingDoesNotReuseHealthyReplacement(t *testing.T) {
 	s, agent := newTestServerWithAgent()
@@ -131,6 +186,19 @@ func TestUndrainNodeRetainsCurrentAllocation(t *testing.T) {
 	}
 	resumed := false
 	for _, call := range agent.recordedCalls() {
+		if call.path == "/v1/allocations/original/drain" {
+			var request api.DrainAllocationRequest
+			if err := json.Unmarshal(call.body, &request); err != nil {
+				t.Fatal(err)
+			}
+			want := uint64(1)
+			if call.method == http.MethodDelete {
+				want = 2
+			}
+			if request.Sequence != want {
+				t.Fatalf("%s sequence = %d, want %d", call.method, request.Sequence, want)
+			}
+		}
 		if call.method == "DELETE" && call.path == "/v1/allocations/original/drain" {
 			resumed = true
 		}

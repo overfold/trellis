@@ -124,6 +124,33 @@ func TestResumeGroupRestoresAutomaticRestart(t *testing.T) {
 	}
 }
 
+func TestLateDrainDoesNotSuppressRestartsAfterResume(t *testing.T) {
+	rt := &reconcilerRuntime{status: runtime.StatusStopped}
+	r := NewAllocationReconciler(rt, nil)
+	r.Track("task", false, nil)
+	agent := &Agent{
+		allocations: map[string]*Allocation{"task": {ID: "task", AllocationID: "alloc", Generation: 2, Status: "running", Spec: &spec.TaskSpec{}}},
+		reconciler: r,
+	}
+	drain := &api.DrainAllocationRequest{AllocationID: "alloc", Generation: 2, Epoch: 4, Sequence: 1}
+	resume := &api.DrainAllocationRequest{AllocationID: "alloc", Generation: 2, Epoch: 4, Sequence: 2}
+	if err := agent.ResumeGroup(resume); err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.DrainGroup(drain); err != nil {
+		t.Fatal(err)
+	}
+	if agent.allocations["task"].Draining || agent.allocations["task"].DrainSequence != 2 {
+		t.Fatalf("late drain changed resumed allocation: %+v", agent.allocations["task"])
+	}
+	if err := r.Reconcile(context.Background(), "task"); err != nil {
+		t.Fatal(err)
+	}
+	if rt.restartCount != 1 {
+		t.Fatalf("restart count = %d, want 1", rt.restartCount)
+	}
+}
+
 func TestAllocationReconcilerWaitsForHealthAfterRestart(t *testing.T) {
 	rt := &reconcilerRuntime{status: runtime.StatusStopped}
 	subscriber := &statusRecorder{}

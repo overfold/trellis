@@ -116,6 +116,8 @@ type Allocation struct {
 	Status      string
 	Health      string
 	Draining    bool
+
+	DrainSequence uint64
 }
 
 const heartbeatInterval = 10 * time.Second
@@ -577,12 +579,18 @@ func (a *Agent) DrainGroup(request *api.DrainAllocationRequest) error {
 		if allocation.Generation != request.Generation {
 			continue
 		}
+		if request.Sequence < allocation.DrainSequence {
+			continue
+		}
+		previousDraining, previousSequence := allocation.Draining, allocation.DrainSequence
 		allocation.Draining = true
-		ids = append(ids, allocation.ID)
+		allocation.DrainSequence = request.Sequence
 		if err := a.persistAllocation(allocation); err != nil {
+			allocation.Draining, allocation.DrainSequence = previousDraining, previousSequence
 			persistErr = fmt.Errorf("persist draining allocation: %w", err)
 			break
 		}
+		ids = append(ids, allocation.ID)
 	}
 	a.mu.Unlock()
 	for _, id := range ids {
@@ -611,6 +619,9 @@ func (a *Agent) ResumeGroup(request *api.DrainAllocationRequest) error {
 		if allocation.Generation != request.Generation {
 			continue
 		}
+		if request.Sequence < allocation.DrainSequence {
+			continue
+		}
 		if allocation.Status != "running" && allocation.Status != "starting" {
 			a.mu.Unlock()
 			return fmt.Errorf("cannot resume allocation %s task %s with status %q", request.AllocationID, allocation.ID, allocation.Status)
@@ -618,9 +629,11 @@ func (a *Agent) ResumeGroup(request *api.DrainAllocationRequest) error {
 		resumed = append(resumed, allocation)
 	}
 	for _, allocation := range resumed {
+		previousDraining, previousSequence := allocation.Draining, allocation.DrainSequence
 		allocation.Draining = false
+		allocation.DrainSequence = request.Sequence
 		if err := a.persistAllocation(allocation); err != nil {
-			allocation.Draining = true
+			allocation.Draining, allocation.DrainSequence = previousDraining, previousSequence
 			a.mu.Unlock()
 			return fmt.Errorf("persist resumed allocation: %w", err)
 		}
