@@ -124,6 +124,29 @@ func TestScheduleSpreadsTaskGroupReplicas(t *testing.T) {
 	}
 }
 
+func TestScheduleAvoidsOccupiedHostPorts(t *testing.T) {
+	a := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000001"), Status: NodeStatusHealthy}
+	b := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000002"), Status: NodeStatusHealthy}
+	tasks := []spec.TaskSpec{{Name: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkHost, Ports: []spec.PortSpec{{Port: 8080}}}}}
+	occupied := &Allocation{Node: a, Tasks: tasks}
+
+	placements := Schedule(&PlacementIntent{Count: 2, Nodes: []*Node{a, b}, Allocations: []*Allocation{occupied}, Tasks: tasks})
+	if len(placements) != 1 || placements[0].NodeID != b.ID {
+		t.Fatalf("expected only the free node, got %#v", placements)
+	}
+}
+
+func TestScheduleReservesHostPortsWithinBatch(t *testing.T) {
+	a := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000001"), Status: NodeStatusHealthy}
+	b := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000002"), Status: NodeStatusHealthy}
+	tasks := []spec.TaskSpec{{Name: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkHost, Ports: []spec.PortSpec{{Port: 8080}}}}}
+
+	placements := Schedule(&PlacementIntent{Count: 3, Nodes: []*Node{a, b}, Tasks: tasks})
+	if len(placements) != 2 || placements[0].NodeID != a.ID || placements[1].NodeID != b.ID {
+		t.Fatalf("expected one placement per node, got %#v", placements)
+	}
+}
+
 func TestScheduleStacksReplicasWhenOnlyOneNodeFits(t *testing.T) {
 	a := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000001"), Status: NodeStatusHealthy, CPU: 1000}
 	b := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000002"), Status: NodeStatusHealthy, CPU: 50}

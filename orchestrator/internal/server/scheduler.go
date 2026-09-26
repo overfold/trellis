@@ -47,15 +47,41 @@ func Schedule(intent *PlacementIntent) []Placement {
 	replicaCounts := make(map[uuid.UUID]int)
 	usedCPU := make(map[uuid.UUID]int)
 	usedMemory := make(map[uuid.UUID]int64)
+	usedPorts := make(map[uuid.UUID]map[int]bool)
 	for _, alloc := range intent.Allocations {
 		if alloc.Node != nil {
+			if usedPorts[alloc.Node.ID] == nil {
+				usedPorts[alloc.Node.ID] = make(map[int]bool)
+			}
+			for _, port := range alloc.Ports {
+				if port.HostPort > 0 {
+					usedPorts[alloc.Node.ID][port.HostPort] = true
+				}
+			}
 			if alloc.Namespace == intent.Namespace && alloc.JobName == intent.JobName && alloc.TaskGroupName == intent.TaskGroupName {
 				replicaCounts[alloc.Node.ID]++
 			}
 			for _, task := range alloc.Tasks {
+				if task.Networking != nil {
+					for _, port := range task.Networking.Ports {
+						if port.Port > 0 {
+							usedPorts[alloc.Node.ID][port.Port] = true
+						}
+					}
+				}
 				if task.Resources != nil {
 					usedCPU[alloc.Node.ID] = saturatingAddInt(usedCPU[alloc.Node.ID], task.Resources.CPU)
 					usedMemory[alloc.Node.ID] = saturatingAddInt64(usedMemory[alloc.Node.ID], int64(task.Resources.Memory))
+				}
+			}
+		}
+	}
+	requestedPorts := make(map[int]bool)
+	for _, task := range intent.Tasks {
+		if task.Networking != nil {
+			for _, port := range task.Networking.Ports {
+				if port.Port > 0 {
+					requestedPorts[port.Port] = true
 				}
 			}
 		}
@@ -73,6 +99,16 @@ func Schedule(intent *PlacementIntent) []Placement {
 		}
 		for _, node := range nodes {
 			if node.Status != NodeStatusHealthy || !nodeMatchesConstraints(node, intent.Constraints) || !nodeHasTaskVolumes(node.ID, intent.Namespace, intent.Tasks, intent.VolumeOwners) || !nodeHasCapabilities(node, intent.RequiredCapabilities) {
+				continue
+			}
+			portsAvailable := true
+			for port := range requestedPorts {
+				if usedPorts[node.ID][port] {
+					portsAvailable = false
+					break
+				}
+			}
+			if !portsAvailable {
 				continue
 			}
 			if (node.CPU > 0 && saturatingAddInt(usedCPU[node.ID], reqCPU) > node.CPU) || (node.Memory > 0 && saturatingAddInt64(usedMemory[node.ID], reqMemory) > node.Memory) {
@@ -104,6 +140,12 @@ func Schedule(intent *PlacementIntent) []Placement {
 		replicaCounts[target.ID]++
 		usedCPU[target.ID] = saturatingAddInt(usedCPU[target.ID], reqCPU)
 		usedMemory[target.ID] = saturatingAddInt64(usedMemory[target.ID], reqMemory)
+		if usedPorts[target.ID] == nil {
+			usedPorts[target.ID] = make(map[int]bool)
+		}
+		for port := range requestedPorts {
+			usedPorts[target.ID][port] = true
+		}
 	}
 
 	return result
