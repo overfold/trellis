@@ -106,7 +106,7 @@ func TestAcquireLeadershipInvalidatesAndFencesCachedNetworkPlans(t *testing.T) {
 	// using the new term's epoch.
 	s.setDesiredNetworkPlans([]networkPlanTarget{stale})
 	emitted := make(chan *api.NetworkPlanRequest, 1)
-	s.dispatchPendingNetworkPlans(ctx, func(_ context.Context, _ string, request *api.NetworkPlanRequest) error {
+	s.dispatchPendingNetworkPlans(ctx, func(_ context.Context, _ uuid.UUID, _ string, request *api.NetworkPlanRequest) error {
 		emitted <- request
 		return nil
 	})
@@ -120,7 +120,7 @@ func TestAcquireLeadershipInvalidatesAndFencesCachedNetworkPlans(t *testing.T) {
 	fresh.epoch = 4
 	fresh.plan = &network.Plan{ListenPort: 51820, Peers: []network.PeerPlan{{PublicKey: "new-peer"}}}
 	s.setDesiredNetworkPlans([]networkPlanTarget{fresh})
-	s.dispatchPendingNetworkPlans(ctx, func(_ context.Context, _ string, request *api.NetworkPlanRequest) error {
+	s.dispatchPendingNetworkPlans(ctx, func(_ context.Context, _ uuid.UUID, _ string, request *api.NetworkPlanRequest) error {
 		emitted <- request
 		return nil
 	})

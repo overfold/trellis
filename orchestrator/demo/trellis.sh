@@ -33,7 +33,6 @@ HOSTNAME=$(hostname -s)
 ADVERTISE_HOST="${HOSTNAME}.local"
 cat > "$CONFIG_FILE" <<EOF
 cluster: default
-admin_token: $(cat "${TOKEN_FILE}")
 enrollment_token: $(cat "${ENROLLMENT_TOKEN_FILE}")
 node_signing_mode: managed
 data_dir: ${DATA_DIR}
@@ -41,7 +40,9 @@ agent_advertise: ${ADVERTISE_HOST}:8127
 server_advertise: ${ADVERTISE_HOST}:8128
 raft_advertise: ${ADVERTISE_HOST}:8129
 EOF
-if [ "${HOSTNAME}" != "control" ]; then
+if [ "${HOSTNAME}" = "control" ]; then
+    printf 'admin_token_hash: %s\n' "$(sha256sum "${TOKEN_FILE}" | awk '{print $1}')" >> "$CONFIG_FILE"
+else
     for _ in $(seq 1 60); do [ -s "${CA_CERT_FILE}" ] && break; sleep 1; done
     [ -s "${CA_CERT_FILE}" ] || { echo "cluster CA certificate unavailable" >&2; exit 1; }
     install -m 0644 "${CA_CERT_FILE}" /etc/trellis/node-ca.crt

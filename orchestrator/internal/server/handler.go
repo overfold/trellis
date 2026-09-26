@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/clofour/trellis/internal/plan"
 	secretstore "github.com/clofour/trellis/internal/secrets"
 	"github.com/clofour/trellis/internal/spec"
+	"github.com/clofour/trellis/internal/tlsutil"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -547,16 +549,38 @@ func (h *Handler) handleRaftJoin(c *echo.Context) error {
 	if err := c.Bind(&request); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 	}
-	if request.ID == "" || request.NodeID == uuid.Nil || request.RaftAddress == "" {
-		return echo.NewHTTPError(http.StatusBadRequest, "id, node_id, and raft_address are required")
+	if request.RaftAddress == "" || request.ServerAddress == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "raft_address and server_address are required")
 	}
-	if err := requireNode(c, request.NodeID, "Raft join identity does not match certificate"); err != nil {
-		return err
+	nodeID, ok := c.Request().Context().Value(NodeContextKey).(uuid.UUID)
+	if !ok || nodeID == uuid.Nil {
+		return echo.NewHTTPError(http.StatusForbidden, "Raft join requires an authenticated node")
+	}
+	if c.Request().TLS == nil || len(c.Request().TLS.PeerCertificates) == 0 {
+		return echo.NewHTTPError(http.StatusForbidden, "Raft join requires an authenticated node certificate")
+	}
+	certificate := c.Request().TLS.PeerCertificates[0]
+	certificateNodeID, err := tlsutil.NodeID(certificate)
+	if err != nil || certificateNodeID != nodeID {
+		return echo.NewHTTPError(http.StatusForbidden, "Raft join identity does not match certificate")
+	}
+	nodeID = certificateNodeID
+	for _, address := range []string{request.RaftAddress, request.ServerAddress} {
+		host, _, err := net.SplitHostPort(address)
+		if err != nil || host == "" {
+			return echo.NewHTTPError(http.StatusBadRequest, "advertised addresses must be host:port")
+		}
+		if err := certificate.VerifyHostname(host); err != nil {
+			return echo.NewHTTPError(http.StatusForbidden, "advertised address is not bound to the authenticated node certificate")
+		}
 	}
 	if h.server.joiner == nil {
 		return echo.NewHTTPError(http.StatusServiceUnavailable, "cluster join not available")
 	}
-	if err := h.server.joiner.AddVoter(request.ID, request.RaftAddress); err != nil {
+	if err := h.server.RecordNodeServerAddress(c.Request().Context(), nodeID, request.ServerAddress); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if err := h.server.joiner.AddVoter(nodeID.String(), request.RaftAddress); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 	return c.NoContent(http.StatusNoContent)
@@ -570,7 +594,7 @@ func (h *Handler) handleEnrollNode(c *echo.Context) error {
 	if err := c.Bind(&request); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 	}
-	response, err := h.server.EnrollNode(request.NodeID, request.ServerAdvertise, request.AgentAdvertise)
+	response, err := h.server.EnrollNode(request.NodeID, request.ServerAdvertise, request.AgentAdvertise, request.RaftAdvertise)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error())
 	}

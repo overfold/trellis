@@ -19,13 +19,13 @@ Commands with a coherent structured result expose a local `--output json` flag; 
 
 ## Node configuration
 
-Installer-managed nodes keep their durable daemon configuration at `/etc/trellis/trellis.yaml`. The file is root-readable and contains separate administrator and managed-enrollment credentials together with operator-managed settings such as advertise addresses, labels, secret-encryption key path, and WireGuard transport settings. Volume placement is not configured here; namespace-scoped volume ownership is established by first placement and stored in the control plane.
+Installer-managed nodes keep their durable daemon configuration at `/etc/trellis/trellis.yaml`. The file is root-readable and contains the managed-enrollment credential and operator-managed settings such as advertise addresses, labels, secret-encryption key path, and WireGuard transport settings. The first node also contains only the SHA-256 administrator verification hash used to initialize replicated cluster state; the raw administrator credential remains operator-side and is not retained by any daemon. Volume placement is not configured here; namespace-scoped volume ownership is established by first placement and stored in the control plane.
 
 A minimal installed node resembles:
 
 ```yaml
 cluster: default
-admin_token: trls_admin_...
+admin_token_hash: 0123456789abcdef...
 enrollment_token: trls_enroll_...
 node_signing_mode: managed
 data_dir: /var/lib/trellis/data
@@ -65,10 +65,9 @@ Installer-created nodes also keep `/var/lib/trellis/install-state`. It records o
 
 ### Managed signing (default)
 
-Adding a server is explicit rather than another branch in the first-install questionnaire. The joining server needs five pieces of information from an existing member:
+Adding a server is explicit rather than another branch in the first-install questionnaire. The joining server needs four pieces of information from an existing member:
 
 - an existing control-plane address such as `node-a:8128`;
-- the administrator credential used by a node if it later becomes leader;
 - the dedicated node-enrollment credential;
 - a pinned copy of the trusted node CA certificate;
 - the **same secrets-encryption key used by the existing servers**.
@@ -78,13 +77,10 @@ The last requirement is important: encrypted secret records are replicated clust
 On an existing node, make temporary root-readable copies for secure transfer:
 
 ```sh
-sudo awk -F': ' '$1 == "admin_token" { print $2; exit }' \
-  /etc/trellis/trellis.yaml | \
-  sudo tee /root/trellis-admin-token >/dev/null
 sudo awk -F': ' '$1 == "enrollment_token" { print $2; exit }' \
   /etc/trellis/trellis.yaml | \
   sudo tee /root/trellis-enrollment-token >/dev/null
-sudo chmod 600 /root/trellis-admin-token /root/trellis-enrollment-token
+sudo chmod 600 /root/trellis-enrollment-token
 sudo install -m 644 /var/lib/trellis/data/node-ca.crt /root/trellis-node-ca.crt
 sudo install -m 600 /etc/trellis/secrets.key /root/trellis-secrets.key
 ```
@@ -95,7 +91,6 @@ Transfer those files to the new machine over a secure channel, then run:
 curl -fsSL https://raw.githubusercontent.com/clofour/trellis/main/scripts/setup.sh | \
   sudo bash -s -- \
     --join node-a:8128 \
-    --admin-token-file /root/trellis-admin-token \
     --enrollment-token-file /root/trellis-enrollment-token \
     --ca-cert-file /root/trellis-node-ca.crt \
     --secrets-key-file /root/trellis-secrets.key
@@ -111,36 +106,38 @@ After the daemon starts, verify membership from any operator context:
 trellisctl nodes list
 ```
 
-The enrollment credential is accepted only by the managed enrollment endpoint and is never administrator API authority. Enrollment sends it only over TLS authenticated by the pinned CA. After enrollment, node registration, heartbeats, Raft joins, and node-to-agent traffic use the node's unique certificate-bound UUID instead of a shared bearer token. Managed mode deliberately trusts every Trellis node and makes the CA signing key available to every leader-capable member so failover does not disable enrollment. Treat compromise of any node in managed mode as compromise of the cluster.
+The enrollment credential is accepted only by the managed enrollment endpoint and is never administrator API authority. Enrollment sends it only over TLS authenticated by the pinned CA. After enrollment, node registration, heartbeats, Raft joins, and node-to-agent traffic use the node's unique certificate-bound UUID instead of a shared bearer token. Administrator requests are checked against replicated verification material, so followers do not need or retain the raw administrator credential. Managed mode deliberately trusts every Trellis node and makes the CA signing key available to every leader-capable member so failover does not disable enrollment. Treat compromise of any node in managed mode as compromise of the cluster.
 
 ### External signing
 
 Set `node_signing_mode: external` when the operator owns the node CA. Every node configuration must provide `ca_cert`, `cert`, and `key`; omit `ca_key` and `enrollment_token`. Trellis verifies the key pair, trust chain, client-auth usage, and immutable node ID at startup, stores the trusted CA certificate and node key pair, and does not require or persist the CA private key.
 
-Before first start, choose a UUID, write it to `<data_dir>/node-id` with mode `0600`, and have the external signer issue a certificate containing that UUID as URI SAN `trellis-node:UUID`. The certificate must allow TLS client and server authentication and include `trellis` plus the node's advertised DNS names or IP addresses as SANs. A minimal configuration is:
+Before first start, choose a UUID, write it to `<data_dir>/node-id` with mode `0600`, and have the external signer issue a certificate containing that UUID as URI SAN `trellis-node:UUID`. The certificate must allow TLS client and server authentication and include `trellis` plus the node's agent, control-plane, and Raft advertised DNS names or IP addresses as SANs. A minimal first-node configuration is:
 
 ```yaml
 node_signing_mode: external
-admin_token: trls_admin_...
+admin_token_hash: 0123456789abcdef...
 ca_cert: /etc/trellis/node-ca.crt
 cert: /etc/trellis/node.crt
 key: /etc/trellis/node.key
 ```
 
-For another pre-issued node, add `join: node-a:8128`; its authenticated node certificate authorizes the Raft join. Loss of the external signer prevents issuing certificates for new nodes but does not affect operation or leader failover among nodes that already have certificates. A certificate from any other CA, or one whose node ID differs from `<data_dir>/node-id`, is rejected.
+Generate a strong administrator credential on the operator workstation and set `admin_token_hash` to `printf %s "$ADMIN_TOKEN" | sha256sum | awk '{print $1}'`. Keep the raw value in the operator's password manager, not in node configuration.
+
+For another pre-issued node, omit `admin_token_hash` and add `join: node-a:8128`; its authenticated node certificate authorizes only that certificate's UUID as the Raft voter ID. Its advertised control-plane and Raft hosts must match certificate SANs. Loss of the external signer prevents issuing certificates for new nodes but does not affect operation or leader failover among nodes that already have certificates. A certificate from any other CA, or one whose node ID differs from `<data_dir>/node-id`, is rejected.
 
 ## Mint operator credentials
 
 The installer creates one normal `cluster/write` credential for the installing user, but operators often need narrower credentials for another human, a read-only dashboard, or automation. `trellisctl credentials create` is the explicit administrative workflow for that.
 
-Credential minting requires the **administrator** credential. On an installed Trellis node, running the command as root automatically uses the root-readable local node connection, so the administrator value does not need to be copied into shell history:
+Credential minting requires the **administrator** credential held by the operator. Supply it from a password manager or protected environment variable; Trellis nodes do not store it:
 
 ```sh
 # Read-only cluster observer
-sudo trellisctl credentials create --scope cluster --access read
+TRELLIS_TOKEN="$ADMIN_TOKEN" trellisctl credentials create --scope cluster --access read
 
 # Writer restricted to one namespace
-sudo trellisctl credentials create \
+TRELLIS_TOKEN="$ADMIN_TOKEN" trellisctl credentials create \
   --scope namespace \
   --namespace-scope staging \
   --access write
@@ -149,13 +146,13 @@ sudo trellisctl credentials create \
 The default output is the newly minted bearer token so it can be handed directly to a password manager or context setup. Use `--output json` when automation needs the response object instead:
 
 ```sh
-sudo trellisctl credentials create --scope cluster --access read --output json
+TRELLIS_TOKEN="$ADMIN_TOKEN" trellisctl credentials create --scope cluster --access read --output json
 ```
 
 To save a generated credential as an ordinary user context without leaving it in command history:
 
 ```sh
-TOKEN="$(sudo trellisctl credentials create --scope namespace --namespace-scope staging --access write)"
+TOKEN="$(TRELLIS_TOKEN="$ADMIN_TOKEN" trellisctl credentials create --scope namespace --namespace-scope staging --access write)"
 trellisctl --token "$TOKEN" --namespace staging context save staging --use
 unset TOKEN
 ```

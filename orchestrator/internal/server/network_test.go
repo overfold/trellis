@@ -122,7 +122,7 @@ func TestSendNetworkPlanTargetUsesScaledDeadline(t *testing.T) {
 
 	started := time.Now()
 	called := false
-	s.sendNetworkPlanTarget(context.Background(), target, func(ctx context.Context, _ string, _ *api.NetworkPlanRequest) error {
+	s.sendNetworkPlanTarget(context.Background(), target, func(ctx context.Context, _ uuid.UUID, _ string, _ *api.NetworkPlanRequest) error {
 		called = true
 		deadline, ok := ctx.Deadline()
 		if !ok {
@@ -229,7 +229,7 @@ func TestNetworkPlanDispatcherIsolatesBlockedNodeAndRotatesNamespaces(t *testing
 	slowCalls := make(chan string, 2)
 	slowRelease := make(chan struct{}, 2)
 	healthyCalls := make(chan string, 2)
-	update := func(_ context.Context, address string, request *api.NetworkPlanRequest) error {
+	update := func(_ context.Context, _ uuid.UUID, address string, request *api.NetworkPlanRequest) error {
 		if request.Epoch != 7 {
 			t.Errorf("request epoch = %d, want 7", request.Epoch)
 		}
@@ -302,4 +302,3 @@ func TestNetworkPlanDispatcherIsolatesBlockedNodeAndRotatesNamespaces(t *testing
 	}
 	slowRelease <- struct{}{}
 }
-

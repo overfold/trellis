@@ -14,7 +14,7 @@ The default plan is the feature-complete beginner path: create a new single-node
 
 For automation, the same choices are available as flags. `--without-networking` and `--without-gvisor` opt out of the two default capabilities, while `--with-dashboard` or `--dashboard-write` enable the dashboard.
 
-The installer keeps administrator and node-enrollment credentials separate, then mints a normal `cluster/write` operator credential and saves a `local` context for the user who invoked `sudo`. Routine `trellisctl` commands therefore do **not** need `sudo` and do not receive either privileged credential.
+The installer keeps administrator and node-enrollment credentials separate, then mints a normal `cluster/write` operator credential and saves a `local` context for the user who invoked `sudo`. It displays the administrator credential once so you can move it to an operator password manager; the daemon retains only its replicated verification hash. Routine `trellisctl` commands therefore do **not** need `sudo` and do not receive either privileged credential.
 
 Verify the service and saved context:
 
@@ -24,7 +24,7 @@ trellisctl context current
 trellisctl nodes list
 ```
 
-`trellis`, `trellisctl`, and the internal `trellis-health-probe` helper are installed in `/usr/local/bin`. The daemon mounts the helper read-only into managed tasks for HTTP and TCP health checks; it is not an operator CLI. The daemon keeps its administrator and enrollment credentials root-readable under `/etc/trellis`; your user context contains the scoped operator token plus the cluster CA.
+`trellis`, `trellisctl`, and the internal `trellis-health-probe` helper are installed in `/usr/local/bin`. The daemon mounts the helper read-only into managed tasks for HTTP and TCP health checks; it is not an operator CLI. The daemon keeps the managed enrollment credential root-readable under `/etc/trellis`, but not the raw administrator credential; your user context contains the scoped operator token plus the cluster CA.
 
 ## 2. Create the first manifest
 

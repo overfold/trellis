@@ -241,7 +241,8 @@ wait_for_service() {
     local temp_root="$1" attempt
     for attempt in $(seq 1 30); do
         if systemctl is-active --quiet trellis &&
-            local_ctl "$temp_root" nodes list >/dev/null 2>&1; then
+            curl --noproxy '*' -fsS --cacert "${DATA_DIR}/node-ca.crt" \
+                --resolve trellis:8128:127.0.0.1 https://trellis:8128/metrics >/dev/null 2>&1; then
             return 0
         fi
         sleep 1

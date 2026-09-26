@@ -191,7 +191,7 @@ func TestControlPlaneExecutesLocallyOnlyWhenLeaderIsActive(t *testing.T) {
 
 func TestEnrollmentCredentialIsNotAdministratorCredential(t *testing.T) {
 	e := echo.New()
-	e.Use(leaderAuthMiddleware("admin-secret", "enroll-secret", nil))
+	e.Use(leaderAuthMiddleware(func(token string) bool { return token == "admin-secret" }, "enroll-secret", nil))
 	e.POST("/v1/jobs", func(c *echo.Context) error { return c.NoContent(http.StatusNoContent) })
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/jobs", nil)

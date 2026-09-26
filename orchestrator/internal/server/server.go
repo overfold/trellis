@@ -2,11 +2,9 @@ package server
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -237,9 +235,10 @@ func (s *Server) AllocationLogsForNamespace(ctx context.Context, namespace, id s
 		s.mu.RUnlock()
 		return nil, fmt.Errorf("allocation not found")
 	}
+	nodeID := found.Node.ID
 	address := fmt.Sprintf("%s:%d", found.Node.Host, found.Node.Port)
 	s.mu.RUnlock()
-	return s.client.Logs(ctx, address, id, follow, tail)
+	return s.client.Logs(ctx, nodeID, address, id, follow, tail)
 }
 
 // Cluster contains persisted cluster identity and TLS state.
@@ -488,67 +487,41 @@ func (s *Server) SetWireGuardPortCount(count int) error {
 	return nil
 }
 
-// Init initializes cluster state and returns its administrator token.
-func (s *Server) Init(ctx context.Context) (string, error) {
-	return s.InitWithToken(ctx, "")
-}
-
-// InitWithToken initializes cluster state with an optional configured administrator token.
-func (s *Server) InitWithToken(ctx context.Context, configuredToken string) (string, error) {
+// Init initializes cluster state from replicated administrator verification
+// material. Existing members do not need the administrator credential or hash.
+func (s *Server) Init(ctx context.Context, initialAdminHash string) error {
 	cluster, err := s.state.GetCluster(ctx)
 	if err != nil {
-		return "", fmt.Errorf("get cluster: %w", err)
+		return fmt.Errorf("get cluster: %w", err)
 	}
 
 	if cluster != nil {
 		s.log.Info("cluster already initialized")
-
+		if err := s.storage.Delete("token"); err != nil && !os.IsNotExist(unwrapPathError(err)) {
+			return fmt.Errorf("remove legacy local administrator token: %w", err)
+		}
 		s.cluster = cluster
-		token := configuredToken
-		if token == "" {
-			if err := s.storage.Get("token", &token); err != nil && !os.IsNotExist(unwrapPathError(err)) {
-				return "", fmt.Errorf("load local administrator token: %w", err)
-			}
-		}
-		if token == "" || !validateToken(cluster, token) {
-			return "", fmt.Errorf("administrator token is missing or does not match cluster")
-		}
 		s.client = client.NewAgentClient("", s.clientTLS)
 		s.controlEpoch = cluster.ControlEpoch
-		return "", nil
+		return nil
 	}
 
-	token := configuredToken
-	if token == "" {
-		b := make([]byte, 32)
-		if _, err = rand.Read(b); err != nil {
-			return "", fmt.Errorf("generate administrator token: %w", err)
-		}
-		token = base64.RawURLEncoding.EncodeToString(b)
+	decodedHash, err := hex.DecodeString(initialAdminHash)
+	if err != nil || len(decodedHash) != sha256.Size {
+		return fmt.Errorf("initial administrator token hash must be a SHA-256 hex digest")
 	}
-
-	hash := sha256.Sum256([]byte(token))
-	hashHex := hex.EncodeToString(hash[:])
-
-	err = s.storage.Put("token", token)
-	if err != nil {
-		return "", fmt.Errorf("save cluster locally: %w", err)
-	}
-
-	cluster = &Cluster{
-		Hash: hashHex,
-	}
+	cluster = &Cluster{Hash: initialAdminHash}
 
 	err = s.state.PutCluster(ctx, cluster)
 	if err != nil {
-		return "", fmt.Errorf("save cluster remotely: %w", err)
+		return fmt.Errorf("save cluster remotely: %w", err)
 	}
 
 	s.cluster = cluster
 	s.controlEpoch = cluster.ControlEpoch
 	s.client = client.NewAgentClient("", s.clientTLS)
 
-	return token, nil
+	return nil
 }
 
 // SetClientTLS configures TLS for agent requests.
@@ -558,6 +531,17 @@ func (s *Server) SetClientTLS(cfg *tls.Config) {
 
 // SetNodeID configures the immutable identity of this control-plane member.
 func (s *Server) SetNodeID(id uuid.UUID) { s.nodeID = id }
+
+// RecordNodeServerAddress persists the control-plane address used to resolve a
+// Raft node UUID without conflating Raft identity with network location.
+func (s *Server) RecordNodeServerAddress(ctx context.Context, id uuid.UUID, address string) error {
+	return s.state.PutNodeServerAddress(ctx, id.String(), address)
+}
+
+// NodeServerAddress resolves an immutable Raft node UUID to its control-plane address.
+func (s *Server) NodeServerAddress(ctx context.Context, id string) (string, error) {
+	return s.state.GetNodeServerAddress(ctx, id)
+}
 
 // ClusterCA returns the cluster certificate authority materials.
 func (s *Server) ClusterCA() (certPEM, keyPEM string, err error) {
@@ -593,12 +577,6 @@ func (s *Server) EnrollNode(nodeID uuid.UUID, advertised ...string) (*api.NodeEn
 		Cert:   string(cert),
 		Key:    string(key),
 	}, nil
-}
-
-func validateToken(cluster *Cluster, token string) bool {
-	hash := sha256.Sum256([]byte(token))
-	hashHex := hex.EncodeToString(hash[:])
-	return subtle.ConstantTimeCompare([]byte(hashHex), []byte(cluster.Hash)) == 1
 }
 
 // Run starts background reconciliation until the context ends.
@@ -1225,18 +1203,18 @@ func (s *Server) ListJobRevisions(ctx context.Context, namespace, name string) (
 	return result, nil
 }
 
-func (s *Server) allocationAgentAddress(namespace, id string) (string, []spec.TaskSpec, error) {
+func (s *Server) allocationAgentAddress(namespace, id string) (uuid.UUID, string, []spec.TaskSpec, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, alloc := range s.allocations {
 		if alloc.ID == id && alloc.Namespace == namespace {
 			if alloc.Node == nil {
-				return "", nil, fmt.Errorf("allocation not found")
+				return uuid.Nil, "", nil, fmt.Errorf("allocation not found")
 			}
-			return fmt.Sprintf("%s:%d", alloc.Node.Host, alloc.Node.Port), append([]spec.TaskSpec(nil), alloc.Tasks...), nil
+			return alloc.Node.ID, fmt.Sprintf("%s:%d", alloc.Node.Host, alloc.Node.Port), append([]spec.TaskSpec(nil), alloc.Tasks...), nil
 		}
 	}
-	return "", nil, fmt.Errorf("allocation not found")
+	return uuid.Nil, "", nil, fmt.Errorf("allocation not found")
 }
 
 func resolveExecTask(id, task string, tasks []spec.TaskSpec) (string, error) {
@@ -1263,7 +1241,7 @@ func resolveExecTask(id, task string, tasks []spec.TaskSpec) (string, error) {
 
 // ExecAllocation runs a command in an allocation task container.
 func (s *Server) ExecAllocation(ctx context.Context, namespace, id, task string, command []string) (*api.ExecResponse, error) {
-	address, tasks, err := s.allocationAgentAddress(namespace, id)
+	nodeID, address, tasks, err := s.allocationAgentAddress(namespace, id)
 	if err != nil {
 		return nil, err
 	}
@@ -1271,12 +1249,12 @@ func (s *Server) ExecAllocation(ctx context.Context, namespace, id, task string,
 	if err != nil {
 		return nil, err
 	}
-	return s.client.ExecAllocation(ctx, address, id, task, command)
+	return s.client.ExecAllocation(ctx, nodeID, address, id, task, command)
 }
 
 // CreateExecSession starts a persistent interactive terminal in an allocation task.
 func (s *Server) CreateExecSession(ctx context.Context, namespace, id string, request *api.ExecSessionCreateRequest) (*api.ExecSessionResponse, error) {
-	address, tasks, err := s.allocationAgentAddress(namespace, id)
+	nodeID, address, tasks, err := s.allocationAgentAddress(namespace, id)
 	if err != nil {
 		return nil, err
 	}
@@ -1284,43 +1262,43 @@ func (s *Server) CreateExecSession(ctx context.Context, namespace, id string, re
 	if err != nil {
 		return nil, err
 	}
-	return s.client.CreateExecSession(ctx, address, id, request)
+	return s.client.CreateExecSession(ctx, nodeID, address, id, request)
 }
 
 // WriteExecSession sends input to an interactive allocation terminal.
 func (s *Server) WriteExecSession(ctx context.Context, namespace, id, sessionID string, request *api.ExecSessionInputRequest) error {
-	address, _, err := s.allocationAgentAddress(namespace, id)
+	nodeID, address, _, err := s.allocationAgentAddress(namespace, id)
 	if err != nil {
 		return err
 	}
-	return s.client.WriteExecSession(ctx, address, id, sessionID, request)
+	return s.client.WriteExecSession(ctx, nodeID, address, id, sessionID, request)
 }
 
 // ReadExecSession reads output from an interactive allocation terminal.
 func (s *Server) ReadExecSession(ctx context.Context, namespace, id, sessionID string, offset int64) (*api.ExecSessionOutputResponse, error) {
-	address, _, err := s.allocationAgentAddress(namespace, id)
+	nodeID, address, _, err := s.allocationAgentAddress(namespace, id)
 	if err != nil {
 		return nil, err
 	}
-	return s.client.ReadExecSession(ctx, address, id, sessionID, offset)
+	return s.client.ReadExecSession(ctx, nodeID, address, id, sessionID, offset)
 }
 
 // ResizeExecSession changes an interactive allocation terminal's dimensions.
 func (s *Server) ResizeExecSession(ctx context.Context, namespace, id, sessionID string, request *api.ExecSessionResizeRequest) error {
-	address, _, err := s.allocationAgentAddress(namespace, id)
+	nodeID, address, _, err := s.allocationAgentAddress(namespace, id)
 	if err != nil {
 		return err
 	}
-	return s.client.ResizeExecSession(ctx, address, id, sessionID, request)
+	return s.client.ResizeExecSession(ctx, nodeID, address, id, sessionID, request)
 }
 
 // CloseExecSession terminates an interactive allocation terminal.
 func (s *Server) CloseExecSession(ctx context.Context, namespace, id, sessionID string) error {
-	address, _, err := s.allocationAgentAddress(namespace, id)
+	nodeID, address, _, err := s.allocationAgentAddress(namespace, id)
 	if err != nil {
 		return err
 	}
-	return s.client.CloseExecSession(ctx, address, id, sessionID)
+	return s.client.CloseExecSession(ctx, nodeID, address, id, sessionID)
 }
 
 // AllocationMetrics returns resource usage for all tasks in an allocation.
@@ -1337,20 +1315,27 @@ func (s *Server) AllocationMetrics(ctx context.Context, namespace, id string) (a
 		s.mu.RUnlock()
 		return nil, fmt.Errorf("allocation not found")
 	}
+	nodeID := found.Node.ID
 	address := fmt.Sprintf("%s:%d", found.Node.Host, found.Node.Port)
 	s.mu.RUnlock()
-	return s.client.AllocationMetrics(ctx, address, id)
+	return s.client.AllocationMetrics(ctx, nodeID, address, id)
 }
 
 // ValidateAPIToken validates the cluster API token.
 func (s *Server) ValidateAPIToken(token string) bool {
-	if s.cluster == nil {
+	s.mu.RLock()
+	expectedHash := ""
+	if s.cluster != nil {
+		expectedHash = s.cluster.Hash
+	}
+	s.mu.RUnlock()
+	if expectedHash == "" {
 		return false
 	}
 	hash := sha256.Sum256([]byte(token))
 	hashHex := hex.EncodeToString(hash[:])
 
-	return subtle.ConstantTimeCompare([]byte(hashHex), []byte(s.cluster.Hash)) == 1
+	return subtle.ConstantTimeCompare([]byte(hashHex), []byte(expectedHash)) == 1
 }
 
 func unwrapPathError(err error) error {

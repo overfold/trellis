@@ -5,7 +5,9 @@ package integration
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -110,6 +112,7 @@ func newHarness(t *testing.T, count int) *harness {
 		t.Fatalf("build node: %v\n%s", err, out)
 	}
 	h := &harness{t: t, bin: bin, token: "integration-token", client: &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}}
+	adminHash := sha256.Sum256([]byte(h.token))
 	base := t.TempDir()
 	for i := 0; i < count; i++ {
 		n := &node{dir: filepath.Join(base, fmt.Sprintf("node-%d", i))}
@@ -118,7 +121,10 @@ func newHarness(t *testing.T, count int) *harness {
 		for p, listener := range listeners {
 			n.ports[p] = listener.Addr().(*net.TCPAddr).Port
 		}
-		n.args = []string{"--admin-token", h.token, "--enrollment-token", "integration-enrollment", "--cluster", "integration", "--data-dir", n.dir, "--runtime", "injected", "--runtime-faults", filepath.Join(n.dir, "fault.json"), "--agent-listen", addr(n.ports[0]), "--agent-advertise", addr(n.ports[0]), "--server-listen", addr(n.ports[1]), "--server-advertise", addr(n.ports[1]), "--raft-listen", addr(n.ports[2]), "--raft-advertise", addr(n.ports[2]), "--dns-listen", addr(n.ports[3]), "--wireguard-port", fmt.Sprint(n.ports[4]), "--wireguard-port-count", "1"}
+		n.args = []string{"--enrollment-token", "integration-enrollment", "--cluster", "integration", "--data-dir", n.dir, "--runtime", "injected", "--runtime-faults", filepath.Join(n.dir, "fault.json"), "--agent-listen", addr(n.ports[0]), "--agent-advertise", addr(n.ports[0]), "--server-listen", addr(n.ports[1]), "--server-advertise", addr(n.ports[1]), "--raft-listen", addr(n.ports[2]), "--raft-advertise", addr(n.ports[2]), "--dns-listen", addr(n.ports[3]), "--wireguard-port", fmt.Sprint(n.ports[4]), "--wireguard-port-count", "1"}
+		if i == 0 {
+			n.args = append(n.args, "--admin-token-hash", hex.EncodeToString(adminHash[:]))
+		}
 		if i > 0 {
 			n.args = append(n.args, "--join", addr(h.nodes[0].ports[1]), "--ca-cert", filepath.Join(h.nodes[0].dir, "node-ca.crt"))
 		}

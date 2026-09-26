@@ -202,9 +202,8 @@ type ServiceListResponse = []ServiceEntry
 
 // RaftJoinRequest identifies a server joining the Raft cluster.
 type RaftJoinRequest struct {
-	ID          string    `json:"id"`
-	NodeID      uuid.UUID `json:"node_id"`
-	RaftAddress string    `json:"raft_address"`
+	RaftAddress   string `json:"raft_address"`
+	ServerAddress string `json:"server_address"`
 }
 
 // NodeEnrollmentRequest asks a managed cluster to issue one node identity.
@@ -212,6 +211,7 @@ type NodeEnrollmentRequest struct {
 	NodeID          uuid.UUID `json:"node_id"`
 	ServerAdvertise string    `json:"server_advertise"`
 	AgentAdvertise  string    `json:"agent_advertise"`
+	RaftAdvertise   string    `json:"raft_advertise"`
 }
 
 // NodeEnrollmentResponse returns managed node signing materials.

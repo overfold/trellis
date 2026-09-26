@@ -58,7 +58,7 @@ type config struct {
 	ConfigFile                                                                     string
 	AgentListen, AgentAdvertise, ServerListen, ServerAdvertise                     string
 	RaftListen, RaftAdvertise, Join                                                string
-	DataDir, Cluster, AdminToken, EnrollmentToken, SigningMode, ContainerdSock     string
+	DataDir, Cluster, AdminTokenHash, EnrollmentToken, SigningMode, ContainerdSock string
 	Runtime, RuntimeFaults                                                         string
 	WireGuardPool, WireGuardEndpoint                                               string
 	WireGuardPort, WireGuardPortCount                                              int
@@ -106,7 +106,7 @@ func main() {
 	f.StringVar(&cfg.Join, "join", "", "Address of an existing cluster member to join (server API address)")
 	f.StringVar(&cfg.DataDir, "data-dir", "/var/lib/trellis/data", "Directory for local state and volumes")
 	f.StringVar(&cfg.Cluster, "cluster", "default", "Cluster name")
-	f.StringVar(&cfg.AdminToken, "admin-token", "", "Administrator API credential")
+	f.StringVar(&cfg.AdminTokenHash, "admin-token-hash", "", "SHA-256 hash used to initialize administrator API verification")
 	f.StringVar(&cfg.EnrollmentToken, "enrollment-token", "", "Managed-mode node enrollment credential")
 	f.StringVar(&cfg.SigningMode, "node-signing-mode", "managed", "Node certificate signing mode: managed or external")
 	f.StringVar(&cfg.ContainerdSock, "containerd-sock", "/run/containerd/containerd.sock", "Containerd socket path")
@@ -142,8 +142,8 @@ func main() {
 func run(parent context.Context, cfg *config) error {
 	ctx, stop := signal.NotifyContext(parent, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	if cfg.AdminToken == "" {
-		return fmt.Errorf("admin_token or --admin-token is required")
+	if cfg.Join == "" && cfg.AdminTokenHash == "" {
+		return fmt.Errorf("admin_token_hash or --admin-token-hash is required when creating a cluster")
 	}
 	if cfg.SigningMode != "managed" && cfg.SigningMode != "external" {
 		return fmt.Errorf("node_signing_mode must be managed or external")
@@ -217,9 +217,8 @@ func run(parent context.Context, cfg *config) error {
 	}
 	runFile := localconfig.DefaultPath
 	if writeErr := localconfig.Write(runFile, &localconfig.Config{
-		ServerAddr:   net.JoinHostPort("localhost", strconv.Itoa(serverPort)),
-		ClusterToken: cfg.AdminToken,
-		CACert:       string(tlsMaterials.CACert),
+		ServerAddr: net.JoinHostPort("localhost", strconv.Itoa(serverPort)),
+		CACert:     string(tlsMaterials.CACert),
 	}); writeErr != nil {
 		log.Warn("could not write local connection file", "path", runFile, "error", writeErr)
 	} else {
@@ -247,7 +246,7 @@ func run(parent context.Context, cfg *config) error {
 		DataDir:   cfg.DataDir,
 		BindAddr:  cfg.RaftListen,
 		Advertise: cfg.RaftAdvertise,
-		ServerID:  cfg.ServerAdvertise,
+		ServerID:  id.String(),
 		Bootstrap: cfg.Join == "",
 		TLS:       peerTLS,
 	})
@@ -258,7 +257,7 @@ func run(parent context.Context, cfg *config) error {
 
 	if cfg.Join != "" && !raftStore.HadExistingState() {
 		log.Info("joining cluster", "address", cfg.Join)
-		if err := joinClusterRaft(ctx, log, cfg.Join, id, cfg.ServerAdvertise, raftStore.LocalAddr(), clientTLS); err != nil {
+		if err := joinClusterRaft(ctx, log, cfg.Join, cfg.ServerAdvertise, raftStore.LocalAddr(), clientTLS); err != nil {
 			return fmt.Errorf("join cluster: %w", err)
 		}
 	}
@@ -302,7 +301,7 @@ func run(parent context.Context, cfg *config) error {
 	server.RegisterMetrics(control, prometheus.DefaultRegisterer)
 
 	for i := 0; ; i++ {
-		if _, err := control.InitWithToken(ctx, cfg.AdminToken); err == nil {
+		if err := control.Init(ctx, cfg.AdminTokenHash); err == nil {
 			break
 		} else if i >= 30 {
 			return fmt.Errorf("initialize control plane: %w", err)
@@ -311,6 +310,13 @@ func run(parent context.Context, cfg *config) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(500 * time.Millisecond):
+		}
+	}
+	if cfg.Join == "" {
+		if _, err := control.NodeServerAddress(ctx, id.String()); err != nil {
+			if err := control.RecordNodeServerAddress(ctx, id, cfg.ServerAdvertise); err != nil {
+				return fmt.Errorf("record local control-plane address: %w", err)
+			}
 		}
 	}
 
@@ -431,9 +437,9 @@ func run(parent context.Context, cfg *config) error {
 		}
 	}()
 
-	elector := election.NewRaftElector(raftStore.Raft(), election.Leader{NodeID: id, Address: cfg.ServerAdvertise})
+	elector := election.NewRaftElector(raftStore.Raft(), election.Leader{NodeID: id, Address: cfg.ServerAdvertise}, control.NodeServerAddress)
 	leaderHTTP := echo.New()
-	leaderHTTP.Use(middleware.Recover(), leaderAuthMiddleware(cfg.AdminToken, cfg.EnrollmentToken, control.TokenManager()))
+	leaderHTTP.Use(middleware.Recover(), leaderAuthMiddleware(control.ValidateAPIToken, cfg.EnrollmentToken, control.TokenManager()))
 	leaderHTTP.GET("/v1/auth/whoami", server.HandleWhoAmI)
 	server.NewHandler(control).Register(leaderHTTP)
 	apiProxy := newControlPlaneProxy(elector, cfg.ServerAdvertise, leaderHTTP, newHTTPTransport(clientTLS), log)
@@ -638,7 +644,7 @@ func loadOrBootstrapTLS(ctx context.Context, log *slog.Logger, cfg *config, loca
 		if err != nil {
 			return nil, fmt.Errorf("read pinned CA cert: %w", err)
 		}
-		resp, err := joinClusterTLS(ctx, log, cfg.Join, cfg.EnrollmentToken, caCert, nodeID, cfg.ServerAdvertise, cfg.AgentAdvertise)
+		resp, err := joinClusterTLS(ctx, log, cfg.Join, cfg.EnrollmentToken, caCert, nodeID, cfg.ServerAdvertise, cfg.AgentAdvertise, cfg.RaftAdvertise)
 		if err != nil {
 			return nil, fmt.Errorf("join cluster for TLS: %w", err)
 		}
@@ -731,8 +737,8 @@ func saveTLSToStorage(local *storage.LocalStorage, m *tlsutil.Materials) error {
 	return local.Put("tls/node-key", string(m.Key))
 }
 
-func joinClusterTLS(ctx context.Context, log *slog.Logger, joinAddr, enrollmentToken string, caCert []byte, nodeID uuid.UUID, serverAdvertise, agentAdvertise string) (*api.NodeEnrollmentResponse, error) {
-	body, err := json.Marshal(api.NodeEnrollmentRequest{NodeID: nodeID, ServerAdvertise: serverAdvertise, AgentAdvertise: agentAdvertise})
+func joinClusterTLS(ctx context.Context, log *slog.Logger, joinAddr, enrollmentToken string, caCert []byte, nodeID uuid.UUID, serverAdvertise, agentAdvertise, raftAdvertise string) (*api.NodeEnrollmentResponse, error) {
+	body, err := json.Marshal(api.NodeEnrollmentRequest{NodeID: nodeID, ServerAdvertise: serverAdvertise, AgentAdvertise: agentAdvertise, RaftAdvertise: raftAdvertise})
 	if err != nil {
 		return nil, err
 	}
@@ -775,8 +781,8 @@ func joinClusterTLS(ctx context.Context, log *slog.Logger, joinAddr, enrollmentT
 	}
 }
 
-func joinClusterRaft(ctx context.Context, log *slog.Logger, joinAddr string, nodeID uuid.UUID, serverID, raftAddr string, tlsConfig *tls.Config) error {
-	body, err := json.Marshal(api.RaftJoinRequest{ID: serverID, NodeID: nodeID, RaftAddress: raftAddr})
+func joinClusterRaft(ctx context.Context, log *slog.Logger, joinAddr, serverAddr, raftAddr string, tlsConfig *tls.Config) error {
+	body, err := json.Marshal(api.RaftJoinRequest{ServerAddress: serverAddr, RaftAddress: raftAddr})
 	if err != nil {
 		return err
 	}
@@ -941,7 +947,7 @@ func nodeControlPlaneRoute(r *http.Request) bool {
 		(r.Method == http.MethodPost && path == "/v1/raft/join")
 }
 
-func leaderAuthMiddleware(adminToken, enrollmentToken string, tokenManager *auth.TokenManager) echo.MiddlewareFunc {
+func leaderAuthMiddleware(validateAdmin func(string) bool, enrollmentToken string, tokenManager *auth.TokenManager) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c *echo.Context) error {
 			if c.Request().URL.Path == "/metrics" {
@@ -953,7 +959,7 @@ func leaderAuthMiddleware(adminToken, enrollmentToken string, tokenManager *auth
 				c.SetRequest(c.Request().WithContext(ctx))
 				return next(c)
 			}
-			if key != "" && subtle.ConstantTimeCompare([]byte(key), []byte(adminToken)) == 1 {
+			if key != "" && validateAdmin != nil && validateAdmin(key) {
 				principal := auth.AdministratorPrincipal()
 				ctx := context.WithValue(c.Request().Context(), server.AdminContextKey, true)
 				ctx = context.WithValue(ctx, server.PrincipalContextKey, principal)
