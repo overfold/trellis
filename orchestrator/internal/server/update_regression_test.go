@@ -140,6 +140,36 @@ func TestUndrainNodeRetainsCurrentAllocation(t *testing.T) {
 	}
 }
 
+func TestUndrainNodeRetriesRecoveredStartingAllocation(t *testing.T) {
+	s, agent := newTestServerWithAgent()
+	defer agent.server.Close()
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusDraining, LastHeartbeat: s.now()}
+	s.nodes[node.ID] = node
+	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: jobSpec, Revision: 1}
+	allocation := &Allocation{ID: "original", Namespace: "default", JobName: "web", TaskGroupName: "api", Tasks: jobSpec.TaskGroups[0].Tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown, Draining: true, DrainReason: "node", Diagnostic: lifecycle.Diagnostic{CreatedAt: s.now(), TransitionedAt: s.now()}}
+	s.allocations = []*Allocation{allocation}
+
+	if err := s.UndrainNode(context.Background(), node.ID); err != nil {
+		t.Fatalf("undrain starting allocation: %v", err)
+	}
+	if node.Status != NodeStatusHealthy || allocation.Draining || allocation.Phase != lifecycle.PhaseRunning {
+		t.Fatalf("after undrain: node=%s draining=%t phase=%s", node.Status, allocation.Draining, allocation.Phase)
+	}
+	var resumed, started bool
+	for _, call := range agent.recordedCalls() {
+		if call.method == "DELETE" && call.path == "/v1/allocations/original/drain" {
+			resumed = true
+		}
+		if call.method == "POST" && call.path == "/v1/allocations" {
+			started = true
+		}
+	}
+	if !resumed || !started {
+		t.Fatalf("agent calls after undrain: resumed=%t started=%t", resumed, started)
+	}
+}
+
 func TestUndrainNodePreservesRestartIntent(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()

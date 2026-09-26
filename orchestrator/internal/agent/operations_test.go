@@ -604,7 +604,7 @@ func TestRecoverCreatedAllocationCanBeRetriedByControlPlane(t *testing.T) {
 	stale := &Allocation{
 		ID: id, AllocationID: request.AllocationID, ContainerID: id,
 		Generation: request.Generation, JobRevision: request.JobRevision, ExecutionHash: request.ExecutionHash,
-		Spec: &request.Tasks[0], Status: "starting", Health: "unknown",
+		Spec: &request.Tasks[0], Status: "starting", Health: "unknown", Draining: true,
 	}
 
 	first := newOperationTestAgent(t, rt)
@@ -623,6 +623,19 @@ func TestRecoverCreatedAllocationCanBeRetriedByControlPlane(t *testing.T) {
 	}
 	if got := second.allocations[id]; got == nil || got.Status != "starting" {
 		t.Fatalf("recovered allocation = %+v, want starting", got)
+	}
+	if state := second.reconciler.states[id]; state == nil || !state.stopping {
+		t.Fatal("recovered draining allocation is not restart-suppressed")
+	}
+	drain := &api.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation}
+	if err := second.ResumeGroup(drain); err != nil {
+		t.Fatalf("undrain recovered allocation: %v", err)
+	}
+	if second.allocations[id].Draining {
+		t.Fatal("recovered allocation remains draining after undrain")
+	}
+	if state := second.reconciler.states[id]; state == nil || !state.stopping {
+		t.Fatal("created allocation enabled local restart before start retry")
 	}
 
 	// The server's normal reconciliation reissues ActionStart, which reaches
@@ -685,14 +698,14 @@ func TestRecoverNonRunningAllocationDefersRestartToServer(t *testing.T) {
 			if err := second.DrainGroup(request); err != nil {
 				t.Fatalf("drain recovered allocation: %v", err)
 			}
-			if err := second.ResumeGroup(request); err == nil {
-				t.Fatal("resume accepted a non-running recovered allocation")
+			if err := second.ResumeGroup(request); err != nil {
+				t.Fatalf("undrain recovered allocation: %v", err)
 			}
-			if !recovered.Draining {
-				t.Fatal("failed resume cleared the agent drain flag")
+			if recovered.Draining {
+				t.Fatal("recovered allocation remains draining after undrain")
 			}
 			if _, ok := second.reconciler.states["task"]; ok {
-				t.Fatal("failed resume started local restart reconciliation")
+				t.Fatal("undrain started local restart reconciliation before start retry")
 			}
 		})
 	}

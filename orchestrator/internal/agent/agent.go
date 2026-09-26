@@ -591,7 +591,7 @@ func (a *Agent) DrainGroup(request *api.DrainAllocationRequest) error {
 	return persistErr
 }
 
-// ResumeGroup restores automatic restarts for a retained allocation generation.
+// ResumeGroup cancels a drain for a retained allocation generation.
 func (a *Agent) ResumeGroup(request *api.DrainAllocationRequest) error {
 	unlock := a.lockAllocationOperation(request.AllocationID)
 	defer unlock()
@@ -611,7 +611,7 @@ func (a *Agent) ResumeGroup(request *api.DrainAllocationRequest) error {
 		if allocation.Generation != request.Generation {
 			continue
 		}
-		if allocation.Status != "running" {
+		if allocation.Status != "running" && allocation.Status != "starting" {
 			a.mu.Unlock()
 			return fmt.Errorf("cannot resume allocation %s task %s with status %q", request.AllocationID, allocation.ID, allocation.Status)
 		}
@@ -627,7 +627,11 @@ func (a *Agent) ResumeGroup(request *api.DrainAllocationRequest) error {
 	}
 	a.mu.Unlock()
 	for _, allocation := range resumed {
-		a.reconciler.ResumeRestarts(allocation.ID, allocation.Spec != nil && allocation.Spec.HealthCheck != nil, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow)
+		// The control plane will retry the start for a recovered starting task.
+		// Leave it untracked until that retry resolves its runtime state.
+		if allocation.Status == "running" {
+			a.reconciler.ResumeRestarts(allocation.ID, allocation.Spec != nil && allocation.Spec.HealthCheck != nil, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow)
+		}
 	}
 	return nil
 }
