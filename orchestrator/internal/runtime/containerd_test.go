@@ -78,3 +78,57 @@ func TestWriteDNSConfigRejectsNameserverPorts(t *testing.T) {
 		t.Fatal("expected nameserver with port to be rejected")
 	}
 }
+
+func TestRuntimeFilesRejectSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "victim")
+	if err := os.WriteFile(victim, []byte("unchanged"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "allocation-resolv.conf")
+	if err := os.Symlink(victim, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeDNSConfig(link, []string{"198.18.0.53"}); err == nil {
+		t.Fatal("expected symlink to be rejected")
+	}
+	got, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "unchanged" {
+		t.Fatalf("victim changed to %q", got)
+	}
+}
+
+func TestRuntimeDirectoryRejectsUnsafePaths(t *testing.T) {
+	dir := t.TempDir()
+	info, err := os.Lstat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkRuntimeDir(dir, info); (err == nil) != (os.Geteuid() == 0) {
+		t.Fatalf("root ownership check returned %v for uid %d", err, os.Geteuid())
+	}
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	info, err = os.Lstat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkRuntimeDir(dir, info); err == nil {
+		t.Fatal("expected writable directory to be rejected")
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatal(err)
+	}
+	info, err = os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkRuntimeDir(link, info); err == nil {
+		t.Fatal("expected symlink directory to be rejected")
+	}
+}

@@ -4,6 +4,7 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/netip"
@@ -56,7 +57,7 @@ func NewContainerdRuntime(socketPath string) (*ContainerdRuntime, error) {
 
 	return &ContainerdRuntime{
 		client: client,
-		logDir: filepath.Join(os.TempDir(), "trellis-logs"),
+		logDir: "/var/lib/trellis/runtime",
 	}, nil
 }
 
@@ -87,6 +88,11 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 	}
 
 	allMounts := convertMounts(options.Mounts)
+	if len(options.DNSServers) > 0 || len(options.ExtraHosts) > 0 {
+		if err := ensureRuntimeDir(c.logDir); err != nil {
+			return "", fmt.Errorf("prepare runtime directory: %w", err)
+		}
+	}
 	if len(options.DNSServers) > 0 {
 		resolvPath := filepath.Join(c.logDir, options.ID+"-resolv.conf")
 		if err := writeDNSConfig(resolvPath, options.DNSServers); err != nil {
@@ -167,8 +173,8 @@ func (c *ContainerdRuntime) Start(ctx context.Context, containerID string) error
 		return fmt.Errorf("loading container %s: %w", containerID, err)
 	}
 
-	if err := os.MkdirAll(c.logDir, 0o750); err != nil {
-		return fmt.Errorf("create log directory: %w", err)
+	if err := ensureRuntimeDir(c.logDir); err != nil {
+		return fmt.Errorf("prepare runtime directory: %w", err)
 	}
 	task, err := container.NewTask(ctx, cio.LogFile(c.logPath(containerID)))
 	if err != nil {
@@ -489,6 +495,53 @@ func convertMounts(mounts []*Mount) []specs.Mount {
 	return result
 }
 
+func ensureRuntimeDir(path string) error {
+	if parent := filepath.Dir(path); parent != path {
+		if err := ensureRuntimeDir(parent); err != nil {
+			return err
+		}
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		if err = os.Mkdir(path, 0o750); err != nil && !errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("create %s: %w", path, err)
+		}
+		info, err = os.Lstat(path)
+	}
+	if err != nil {
+		return fmt.Errorf("inspect %s: %w", path, err)
+	}
+	return checkRuntimeDir(path, info)
+}
+
+func checkRuntimeDir(path string, info os.FileInfo) error {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !info.IsDir() || !ok || stat.Uid != 0 || info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("unsafe runtime directory %s: must be a root-owned directory without group or other write permission", path)
+	}
+	return nil
+}
+
+func writeRuntimeFile(path string, data []byte) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0o644)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("unsafe runtime file %s: not a regular file", path)
+	}
+	if err := file.Truncate(0); err != nil {
+		return err
+	}
+	_, err = file.Write(data)
+	return err
+}
+
 func writeDNSConfig(path string, servers []string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return fmt.Errorf("create DNS config directory: %w", err)
@@ -500,7 +553,7 @@ func writeDNSConfig(path string, servers []string) error {
 		}
 		content += "nameserver " + server + "\n"
 	}
-	return os.WriteFile(path, []byte(content), 0o644)
+	return writeRuntimeFile(path, []byte(content))
 }
 
 func writeHostsConfig(path string, hosts map[string]string) error {
@@ -516,7 +569,7 @@ func writeHostsConfig(path string, hosts map[string]string) error {
 	for _, name := range names {
 		content += hosts[name] + " " + name + "\n"
 	}
-	return os.WriteFile(path, []byte(content), 0o644)
+	return writeRuntimeFile(path, []byte(content))
 }
 
 // ExecOutput runs a command in a container and returns its captured output.
