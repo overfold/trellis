@@ -91,6 +91,46 @@ func TestValidateRejectsInvalidJobs(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsDuplicateHostPortsInGroup(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		tasks []TaskSpec
+		path  string
+	}{
+		{
+			name: "same task",
+			tasks: []TaskSpec{{Name: "server", Image: "example/server:1", Networking: &TaskNetworkingSpec{Mode: TaskNetworkHost, Ports: []PortSpec{{Port: 8080}, {Port: 8080}}}}},
+			path: "task_groups[api].tasks[server].networking.ports[1].port",
+		},
+		{
+			name: "different tasks",
+			tasks: []TaskSpec{
+				{Name: "server", Image: "example/server:1", Networking: &TaskNetworkingSpec{Mode: TaskNetworkHost, Ports: []PortSpec{{Port: 8080}}}},
+				{Name: "sidecar", Image: "example/sidecar:1", Networking: &TaskNetworkingSpec{Mode: TaskNetworkHost, Ports: []PortSpec{{Port: 8080}}}},
+			},
+			path: "task_groups[api].tasks[sidecar].networking.ports[0].port",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			job := validJob()
+			job.TaskGroups[0].Tasks = test.tasks
+			issues, ok := Validate(job).(ValidationErrors)
+			if !ok || len(issues) != 1 || issues[0].Path != test.path || issues[0].Code != "duplicate" {
+				t.Fatalf("expected duplicate port at %s, got %#v", test.path, issues)
+			}
+		})
+	}
+
+	job := validJob()
+	job.TaskGroups[0].Tasks[0].Networking = &TaskNetworkingSpec{Mode: TaskNetworkHost, Ports: []PortSpec{{Port: 8080}}}
+	otherGroup := job.TaskGroups[0]
+	otherGroup.Name = "worker"
+	job.TaskGroups = append(job.TaskGroups, otherGroup)
+	if err := Validate(job); err != nil {
+		t.Fatalf("same port in separate groups rejected: %v", err)
+	}
+}
+
 func TestValidateAggregatesErrors(t *testing.T) {
 	job := &JobSpec{Namespace: "", Name: "bad name", TaskGroups: []TaskGroupSpec{{Name: "api", Count: 0}}}
 	err := Validate(job)
