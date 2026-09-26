@@ -44,11 +44,24 @@ func TestContainerdAllocationAdoption(t *testing.T) {
 	id := "trellis-e2e-adoption"
 	_ = r.Stop(ctx, id)
 	_ = r.Remove(ctx, id)
-	created, err := r.Create(ctx, runtime.CreateOptions{ID: id, Image: image, Labels: map[string]string{"trellis.cluster": "containerd-e2e", "trellis.managed": "true"}})
+	options := runtime.CreateOptions{
+		ID:         id,
+		Image:      image,
+		Labels:     map[string]string{"trellis.cluster": "containerd-e2e", "trellis.managed": "true"},
+		DNSServers: []string{"198.18.0.53"},
+		ExtraHosts: map[string]string{"trellis": "127.0.0.1"},
+	}
+	created, err := r.Create(ctx, options)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = r.Stop(context.Background(), created); _ = r.Remove(context.Background(), created) }()
+	if _, err := r.Create(ctx, options); err == nil {
+		t.Fatal("retry unexpectedly created the existing container")
+	}
+	if err := r.Start(ctx, created); err != nil {
+		t.Fatalf("start after create retry: %v", err)
+	}
 	managed, err := r.ListManaged(ctx, "containerd-e2e")
 	if err != nil {
 		t.Fatal(err)

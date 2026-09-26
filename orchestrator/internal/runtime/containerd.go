@@ -101,10 +101,10 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 	}()
 	if len(options.DNSServers) > 0 {
 		resolvPath := filepath.Join(c.logDir, options.ID+"-resolv.conf")
-		createdFiles = append(createdFiles, resolvPath)
 		if err := writeDNSConfig(resolvPath, options.DNSServers); err != nil {
 			return "", fmt.Errorf("write resolv.conf for %s: %w", options.ID, err)
 		}
+		createdFiles = append(createdFiles, resolvPath)
 		allMounts = append(allMounts, specs.Mount{
 			Source:      resolvPath,
 			Destination: "/etc/resolv.conf",
@@ -114,10 +114,10 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 	}
 	if len(options.ExtraHosts) > 0 {
 		hostsPath := filepath.Join(c.logDir, options.ID+"-hosts")
-		createdFiles = append(createdFiles, hostsPath)
 		if err := writeHostsConfig(hostsPath, options.ExtraHosts); err != nil {
 			return "", fmt.Errorf("write hosts file for %s: %w", options.ID, err)
 		}
+		createdFiles = append(createdFiles, hostsPath)
 		allMounts = append(allMounts, specs.Mount{
 			Source:      hostsPath,
 			Destination: "/etc/hosts",
@@ -240,12 +240,46 @@ func checkOwnedDir(path string, info os.FileInfo, uid uint32, private bool) erro
 func (c *ContainerdRuntime) Logs(ctx context.Context, containerID string, follow bool, tail int) (io.ReadCloser, error) {
 	file, err := os.Open(c.logPath(containerID))
 	if os.IsNotExist(err) {
-		file, err = os.Open(filepath.Join(c.legacyLogDir, filepath.Base(containerID)+".log"))
+		file, err = c.openLegacyLog(filepath.Base(containerID) + ".log")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("open logs for %s: %w", containerID, err)
 	}
 	return newLogReader(ctx, file, follow, tail)
+}
+
+func (c *ContainerdRuntime) openLegacyLog(name string) (*os.File, error) {
+	dir, err := os.OpenFile(c.legacyLogDir, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_DIRECTORY, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+	info, err := dir.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if err := checkOwnedDir(c.legacyLogDir, info, uint32(os.Geteuid()), true); err != nil {
+		return nil, err
+	}
+	fd, err := syscall.Openat(int(dir.Fd()), name, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fd), filepath.Join(c.legacyLogDir, name))
+	info, err = file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		_ = file.Close()
+		if err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("legacy log %s is not a regular file", name)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uint32(os.Geteuid()) {
+		_ = file.Close()
+		return nil, fmt.Errorf("legacy log %s must be owned by the runtime user", name)
+	}
+	return file, nil
 }
 
 // Restart stops and starts a container.
@@ -351,14 +385,20 @@ func (c *ContainerdRuntime) Remove(ctx context.Context, containerID string) erro
 func (c *ContainerdRuntime) removeAllocationFiles(containerID string) error {
 	name := filepath.Base(containerID)
 	var paths []string
-	for _, dir := range []string{c.logDir, c.legacyLogDir} {
-		paths = append(paths,
-			filepath.Join(dir, name+".log"),
-			filepath.Join(dir, name+"-resolv.conf"),
-			filepath.Join(dir, name+"-hosts"),
-		)
+	for _, suffix := range []string{".log", "-resolv.conf", "-hosts"} {
+		paths = append(paths, filepath.Join(c.logDir, name+suffix))
 	}
-	return removeRuntimeFiles(paths...)
+	err := removeRuntimeFiles(paths...)
+	// Old log locations may be controlled by local users. Cleanup there is best effort.
+	if dir, openErr := os.OpenFile(c.legacyLogDir, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_DIRECTORY, 0); openErr == nil {
+		if info, statErr := dir.Stat(); statErr == nil && checkOwnedDir(c.legacyLogDir, info, uint32(os.Geteuid()), true) == nil {
+			for _, suffix := range []string{".log", "-resolv.conf", "-hosts"} {
+				_ = os.Remove(filepath.Join(c.legacyLogDir, name+suffix))
+			}
+		}
+		_ = dir.Close()
+	}
+	return err
 }
 
 func removeRuntimeFiles(paths ...string) error {
@@ -593,14 +633,18 @@ func writeHostsConfig(path string, hosts map[string]string) error {
 }
 
 func writeRuntimeFile(path, content string) error {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0o644)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o644)
 	if err != nil {
 		return err
 	}
 	_, err = io.WriteString(file, content)
 	closeErr := file.Close()
 	if err != nil {
+		_ = os.Remove(path)
 		return err
+	}
+	if closeErr != nil {
+		_ = os.Remove(path)
 	}
 	return closeErr
 }
