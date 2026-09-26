@@ -56,6 +56,25 @@ type recoveryProbeRuntime struct {
 	commands chan []string
 }
 
+type firstHealthProbeRuntime struct {
+	*reconcilerRuntime
+	started chan struct{}
+	probed  chan struct{}
+}
+
+func (r *firstHealthProbeRuntime) Start(context.Context, string) error {
+	close(r.started)
+	return nil
+}
+
+func (r *firstHealthProbeRuntime) Exec(context.Context, string, []string) (int, error) {
+	select {
+	case r.probed <- struct{}{}:
+	default:
+	}
+	return 0, nil
+}
+
 type blockingRecoveryDetach struct {
 	network.DisabledManager
 	entered chan struct{}
@@ -265,6 +284,66 @@ func TestRunAllocationMountsHealthProbeForEveryNetworkAndRuntime(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestRunAllocationRegistersHealthAfterStoringRunningAllocation(t *testing.T) {
+	rt := &firstHealthProbeRuntime{
+		reconcilerRuntime: &reconcilerRuntime{},
+		started:           make(chan struct{}),
+		probed:            make(chan struct{}, 1),
+	}
+	agent := newOperationTestAgent(t, rt)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	agent.health.SetContext(ctx)
+	callbackDone := make(chan struct{})
+	agent.health.Subscriber = &healthCallbackRecorder{agent: agent, done: callbackDone}
+	task := &spec.TaskSpec{Name: "web", Image: "image", HealthCheck: &spec.HealthCheckSpec{
+		Type: "script", Command: []string{"true"}, Interval: time.Millisecond, Threshold: 1,
+	}}
+
+	// Hold tracking so the old registration order gives a fast probe time to
+	// update the starting allocation before RunAllocation replaces it.
+	agent.reconciler.mu.Lock()
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- agent.RunAllocation(ctx, "alloc", "scheduler", 1, 1, "hash", "default", "job", "group", "web", task, "", nil, nil, nil, nil)
+	}()
+	select {
+	case <-rt.started:
+	case <-time.After(time.Second):
+		agent.reconciler.mu.Unlock()
+		t.Fatal("allocation did not start")
+	}
+	var probedBeforeReady bool
+	select {
+	case <-rt.probed:
+		probedBeforeReady = true
+	case <-time.After(50 * time.Millisecond):
+	}
+	agent.reconciler.mu.Unlock()
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("allocation did not finish starting")
+	}
+	if probedBeforeReady {
+		t.Fatal("health probe ran before the running allocation was stored")
+	}
+	select {
+	case <-callbackDone:
+	case <-time.After(time.Second):
+		t.Fatal("first health probe did not publish its result")
+	}
+	agent.mu.RLock()
+	got := agent.allocations["alloc"].Health
+	agent.mu.RUnlock()
+	if got != "healthy" {
+		t.Fatalf("health after first probe = %q, want healthy", got)
 	}
 }
 

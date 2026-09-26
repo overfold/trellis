@@ -896,12 +896,6 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 			return fmt.Errorf("start container %s: %w", containerID, err)
 		}
 	}
-	if ts.HealthCheck != nil {
-		check := *ts.HealthCheck
-		a.health.RegisterTask(allocID, containerID, &check)
-		healthRegistered = true
-	}
-
 	a.reconciler.Track(allocID, ts.HealthCheck != nil, restartPolicy)
 	tracked = true
 
@@ -936,6 +930,11 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	a.mu.Lock()
 	a.allocations[allocID] = ready
 	a.mu.Unlock()
+	if ts.HealthCheck != nil {
+		check := *ts.HealthCheck
+		a.health.RegisterTask(allocID, containerID, &check)
+		healthRegistered = true
+	}
 	if ts.HealthCheck == nil {
 		if err := a.reconciler.ObserveHealth(allocID, true); err != nil {
 			return fmt.Errorf("mark allocation healthy: %w", err)
