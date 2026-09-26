@@ -1018,7 +1018,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		}
 	}
 	if err := a.volumes.ReleaseStaging(allocID, ts.Volumes); err != nil {
-		return fmt.Errorf("release volume staging: %w", err)
+		a.log.Error("release volume staging after allocation start", "allocation", allocID, "error", err)
 	}
 	committed = true
 

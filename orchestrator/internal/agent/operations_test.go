@@ -790,8 +790,8 @@ func TestFailedCreateMissingContainerCanBeCleanedUpOnRetry(t *testing.T) {
 	}
 }
 
-func TestFailedStartRetainsRecordUntilStagingReleaseSucceeds(t *testing.T) {
-	rt := &ambiguousCreateRuntime{reconcilerRuntime: &reconcilerRuntime{}}
+func TestStagingReleaseFailureKeepsRunningAllocationUntilStop(t *testing.T) {
+	rt := &failingStopRuntime{reconcilerRuntime: &reconcilerRuntime{}}
 	agent := newOperationTestAgent(t, rt)
 	local := storage.NewLocalStorage(t.TempDir())
 	if err := local.Init(); err != nil {
@@ -807,12 +807,24 @@ func TestFailedStartRetainsRecordUntilStagingReleaseSucceeds(t *testing.T) {
 	}
 	agent.volumes.unstage = func(string) error { return nil }
 
-	if err := agent.RunGroup(context.Background(), request); err == nil || !strings.Contains(err.Error(), "release volume staging") {
-		t.Fatalf("run error = %v, want staging release error", err)
+	if err := agent.RunGroup(context.Background(), request); err != nil {
+		t.Fatalf("run allocation: %v", err)
 	}
 	var recorded Allocation
-	if err := local.Get(allocationRecordKey(id), &recorded); err != nil || recorded.Status != "stopping" {
-		t.Fatalf("recorded allocation = %+v, error = %v, want stopping", recorded, err)
+	if err := local.Get(allocationRecordKey(id), &recorded); err != nil || recorded.Status != "running" {
+		t.Fatalf("recorded allocation = %+v, error = %v, want running", recorded, err)
+	}
+	if current := agent.allocations[id]; current == nil || current.Status != "running" {
+		t.Fatalf("live allocation = %+v, want running", current)
+	}
+	if rt.stopCount != 0 || rt.removeCount != 0 {
+		t.Fatalf("cleanup after start: stops = %d, removes = %d, want none", rt.stopCount, rt.removeCount)
+	}
+	if err := agent.RunGroup(context.Background(), request); err != nil {
+		t.Fatalf("retry running allocation: %v", err)
+	}
+	if rt.stopCount != 0 || rt.removeCount != 0 {
+		t.Fatalf("cleanup after retry: stops = %d, removes = %d, want none", rt.stopCount, rt.removeCount)
 	}
 	if err := os.Remove(filepath.Join(stagingPath, "block")); err != nil {
 		t.Fatal(err)
