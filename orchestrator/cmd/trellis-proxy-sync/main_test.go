@@ -4,7 +4,30 @@ import (
 	"testing"
 
 	"github.com/clofour/trellis/internal/api"
+	"github.com/clofour/trellis/internal/lifecycle"
 )
+
+func TestSelectUpstreamsExcludesStoppedHealthyAllocation(t *testing.T) {
+	allocs := []api.AllocationResponse{
+		{
+			Phase:   lifecycle.PhaseStopped,
+			Health:  lifecycle.HealthHealthy,
+			Address: "10.0.0.1",
+			Ports:   []api.PortMapping{{HostPort: 31000, ContainerPort: 8080}},
+		},
+		{
+			Phase:   lifecycle.PhaseRunning,
+			Health:  lifecycle.HealthHealthy,
+			Address: "10.0.0.2",
+			Ports:   []api.PortMapping{{HostPort: 32000, ContainerPort: 8080}},
+		},
+	}
+
+	got := selectUpstreams(allocs, 8080)
+	if len(got) != 1 || got[0] != (upstream{Address: "10.0.0.2", Port: 32000, Weight: 1}) {
+		t.Fatalf("upstreams = %+v; want only the running healthy allocation", got)
+	}
+}
 
 func TestSelectHostPort(t *testing.T) {
 	ports := []api.PortMapping{
