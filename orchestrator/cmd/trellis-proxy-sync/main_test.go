@@ -41,6 +41,69 @@ func TestWriteConfig(t *testing.T) {
 	}
 }
 
+func TestWriteConfigPreservesMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "proxy.conf")
+	if err := os.WriteFile(path, []byte("old"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeConfig(path, []byte("new")); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Fatalf("config mode = %04o; want 0600", got)
+	}
+}
+
+func TestWriteConfigFollowsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "proxy.conf")
+	link := filepath.Join(dir, "output.conf")
+	if err := os.WriteFile(target, []byte("old"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("proxy.conf", link); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeConfig(link, []byte("new")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.Readlink(link); err != nil || got != "proxy.conf" {
+		t.Fatalf("output symlink = %q, %v; want proxy.conf", got, err)
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "new" {
+		t.Fatalf("target config = %q, %v; want new", got, err)
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Fatalf("target mode = %04o; want 0600", got)
+	}
+}
+
+func TestWriteConfigFollowsDanglingSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "proxy.conf")
+	link := filepath.Join(dir, "output.conf")
+	if err := os.Symlink("proxy.conf", link); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeConfig(link, []byte("new")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.Readlink(link); err != nil || got != "proxy.conf" {
+		t.Fatalf("output symlink = %q, %v; want proxy.conf", got, err)
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "new" {
+		t.Fatalf("target config = %q, %v; want new", got, err)
+	}
+}
+
 func TestSelectUpstreamsExcludesStoppedHealthyAllocation(t *testing.T) {
 	allocs := []api.AllocationResponse{
 		{

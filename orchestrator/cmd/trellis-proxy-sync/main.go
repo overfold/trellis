@@ -143,16 +143,42 @@ func main() {
 }
 
 func writeConfig(path string, data []byte) error {
+	mode := os.FileMode(0644)
+	for i := 0; i < 255; i++ {
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			mode = info.Mode()
+			break
+		}
+		target, err := os.Readlink(path)
+		if err != nil {
+			return err
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(path), target)
+		}
+		path = target
+		if i == 254 {
+			return fmt.Errorf("too many symlinks in output path")
+		}
+	}
+
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".trellis-proxy-sync-*")
 	if err != nil {
 		return err
 	}
 	defer os.Remove(tmp.Name())
-	if err := tmp.Chmod(0644); err != nil {
+	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		return err
 	}
-	if _, err := tmp.Write(data); err != nil {
+	if err := tmp.Chmod(mode); err != nil {
 		tmp.Close()
 		return err
 	}
