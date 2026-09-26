@@ -116,6 +116,43 @@ func TestStartExecutionHashIgnoresNetworkPeerChanges(t *testing.T) {
 	}
 }
 
+func TestStartExecutionHashChangesWithNetworkPool(t *testing.T) {
+	s, agent := newTestServerWithAgent()
+	defer agent.server.Close()
+	s.networkPool = netip.MustParsePrefix("10.64.0.0/10")
+	s.networkPorts = map[string]int{"default": 0}
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, WireGuardPortBase: 51820, WireGuardPortCount: 256}
+	s.nodes[node.ID] = node
+	task := spec.TaskSpec{Name: "app", Image: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard}}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Tasks: []spec.TaskSpec{task}}}}, Revision: 1}
+	alloc := &Allocation{ID: "allocation", Namespace: "default", JobName: "web", TaskGroupName: "app", Tasks: []spec.TaskSpec{task}, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhasePlaced}
+	start := &Action{Type: ActionStart, Allocation: alloc}
+	if err := s.Execute(context.Background(), start); err != nil {
+		t.Fatal(err)
+	}
+	s.networkPool = netip.MustParsePrefix("10.128.0.0/10")
+	if err := s.Execute(context.Background(), start); err != nil {
+		t.Fatal(err)
+	}
+	calls := agent.recordedCalls()
+	if len(calls) != 2 {
+		t.Fatalf("start calls = %d, want 2", len(calls))
+	}
+	var first, second api.AllocationRequest
+	if err := json.Unmarshal(calls[0].body, &first); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(calls[1].body, &second); err != nil {
+		t.Fatal(err)
+	}
+	if first.NetworkPlan == nil || second.NetworkPlan == nil || first.NetworkPlan.CIDR == second.NetworkPlan.CIDR || first.NetworkPlan.Gateway == second.NetworkPlan.Gateway {
+		t.Fatalf("network pool change did not change subnet and gateway: first=%+v second=%+v", first.NetworkPlan, second.NetworkPlan)
+	}
+	if first.ExecutionHash == "" || first.ExecutionHash == second.ExecutionHash {
+		t.Fatalf("execution hash did not change with subnet and gateway: %q, %q", first.ExecutionHash, second.ExecutionHash)
+	}
+}
+
 func TestNetworkPlanOperationTimeoutScalesWithWorkAndRetry(t *testing.T) {
 	if got := networkPlanOperationTimeout(&network.Plan{}, 0); got != networkPlanBaseTimeout {
 		t.Fatalf("empty plan timeout = %s, want %s", got, networkPlanBaseTimeout)

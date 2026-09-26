@@ -933,7 +933,11 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 		}
 		hashInput := *request
 		hashInput.Epoch, hashInput.ExecutionHash = 0, ""
-		hashInput.NetworkPlan = nil // Network plans are updated independently of allocation execution.
+		if request.NetworkPlan != nil {
+			// An active allocation cannot move to a different subnet or gateway.
+			// Peer changes can be refreshed independently.
+			hashInput.NetworkPlan = &network.Plan{CIDR: request.NetworkPlan.CIDR, Gateway: request.NetworkPlan.Gateway}
+		}
 		hashInput.Secrets = append([]api.DeliveredSecret(nil), request.Secrets...)
 		for i := range hashInput.Secrets {
 			hashInput.Secrets[i].Value = nil
