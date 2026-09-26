@@ -920,7 +920,13 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	})
 	if err != nil {
 		observed, inspectErr := a.runtime.Inspect(context.WithoutCancel(ctx), containerID)
-		if inspectErr != nil || observed.Labels["trellis.allocation-id"] != schedulerID || observed.Labels["trellis.allocation-generation"] != labels["trellis.allocation-generation"] {
+		if inspectErr != nil {
+			// Create may have succeeded despite its error. Only a successful
+			// removal can confirm cleanup when inspection is unavailable.
+			containerCreated = true
+			return fmt.Errorf("create container %s: %w", containerID, err)
+		}
+		if observed.Labels["trellis.allocation-id"] != schedulerID || observed.Labels["trellis.allocation-generation"] != labels["trellis.allocation-generation"] {
 			return fmt.Errorf("create container %s: %w", containerID, err)
 		}
 	}

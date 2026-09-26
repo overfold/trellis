@@ -201,6 +201,37 @@ type ambiguousStartRuntime struct {
 	onStop    func()
 }
 
+type ambiguousCreateRuntime struct {
+	*reconcilerRuntime
+	createErr   error
+	removeErr   error
+	removeCount int
+	startCount  int
+}
+
+func (r *ambiguousCreateRuntime) Create(_ context.Context, options runtime.CreateOptions) (string, error) {
+	r.status = runtime.StatusCreated
+	return options.ID, r.createErr
+}
+
+func (r *ambiguousCreateRuntime) Inspect(context.Context, string) (*runtime.ContainerInfo, error) {
+	return nil, errors.New("inspect unavailable")
+}
+
+func (r *ambiguousCreateRuntime) Start(context.Context, string) error {
+	r.startCount++
+	return nil
+}
+
+func (r *ambiguousCreateRuntime) Remove(context.Context, string) error {
+	r.removeCount++
+	if r.removeErr != nil {
+		return r.removeErr
+	}
+	r.status = ""
+	return nil
+}
+
 func (r *ambiguousStartRuntime) Start(context.Context, string) error {
 	r.status = runtime.StatusRunning
 	return errors.New("start response lost")
@@ -633,6 +664,51 @@ func TestFailedRunStopPreservesStartedAllocationResources(t *testing.T) {
 	}
 	if rt.removeCount != 1 || manager.detachCount != 1 {
 		t.Fatalf("successful retry removed old container %d times, detached old network %d times", rt.removeCount, manager.detachCount)
+	}
+}
+
+func TestAmbiguousCreateRetainsRecordUntilRemovalSucceeds(t *testing.T) {
+	createErr := errors.New("create response lost")
+	removeErr := errors.New("remove unavailable")
+	rt := &ambiguousCreateRuntime{
+		reconcilerRuntime: &reconcilerRuntime{},
+		createErr:         createErr,
+		removeErr:         removeErr,
+	}
+	agent := newOperationTestAgent(t, rt)
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	agent.ConfigureDurability(local, "test")
+	request := operationTestRequest()
+	request.Tasks = request.Tasks[:1]
+	id := "allocation-g2-first"
+
+	err := agent.RunGroup(context.Background(), request)
+	if !errors.Is(err, createErr) || !errors.Is(err, removeErr) {
+		t.Fatalf("run error = %v, want create and removal errors", err)
+	}
+	if rt.removeCount != 1 || rt.startCount != 0 {
+		t.Fatalf("remove attempts = %d, start attempts = %d, want 1 and 0", rt.removeCount, rt.startCount)
+	}
+	if allocation := agent.allocations[id]; allocation == nil || allocation.Status != "stopping" {
+		t.Fatalf("retained allocation = %+v, want stopping", allocation)
+	}
+	var recorded Allocation
+	if err := local.Get(allocationRecordKey(id), &recorded); err != nil || recorded.Status != "stopping" {
+		t.Fatalf("recorded allocation = %+v, error = %v, want stopping", recorded, err)
+	}
+
+	rt.removeErr = nil
+	if err := agent.StopAllocation(context.Background(), id); err != nil {
+		t.Fatalf("retry cleanup: %v", err)
+	}
+	if rt.removeCount != 2 || agent.allocations[id] != nil {
+		t.Fatalf("remove attempts = %d, allocation = %+v, want 2 and nil", rt.removeCount, agent.allocations[id])
+	}
+	if err := local.Get(allocationRecordKey(id), &recorded); err == nil {
+		t.Fatal("allocation record retained after successful removal")
 	}
 }
 
