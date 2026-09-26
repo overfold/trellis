@@ -203,19 +203,25 @@ type ambiguousStartRuntime struct {
 
 type ambiguousCreateRuntime struct {
 	*reconcilerRuntime
-	createErr   error
-	removeErr   error
-	removeCount int
-	startCount  int
+	createErr        error
+	removeErr        error
+	removeCount      int
+	startCount       int
+	inspectAvailable bool
+	labels           map[string]string
 }
 
 func (r *ambiguousCreateRuntime) Create(_ context.Context, options runtime.CreateOptions) (string, error) {
 	r.status = runtime.StatusCreated
+	r.labels = options.Labels
 	return options.ID, r.createErr
 }
 
-func (r *ambiguousCreateRuntime) Inspect(context.Context, string) (*runtime.ContainerInfo, error) {
-	return nil, errors.New("inspect unavailable")
+func (r *ambiguousCreateRuntime) Inspect(_ context.Context, id string) (*runtime.ContainerInfo, error) {
+	if !r.inspectAvailable {
+		return nil, errors.New("inspect unavailable")
+	}
+	return &runtime.ContainerInfo{ID: id, Labels: r.labels, Status: r.status}, nil
 }
 
 func (r *ambiguousCreateRuntime) Start(context.Context, string) error {
@@ -667,13 +673,11 @@ func TestFailedRunStopPreservesStartedAllocationResources(t *testing.T) {
 	}
 }
 
-func TestAmbiguousCreateRetainsRecordUntilRemovalSucceeds(t *testing.T) {
+func TestAmbiguousCreateRetainsRecordUntilOwnershipVerified(t *testing.T) {
 	createErr := errors.New("create response lost")
-	removeErr := errors.New("remove unavailable")
 	rt := &ambiguousCreateRuntime{
 		reconcilerRuntime: &reconcilerRuntime{},
 		createErr:         createErr,
-		removeErr:         removeErr,
 	}
 	agent := newOperationTestAgent(t, rt)
 	local := storage.NewLocalStorage(t.TempDir())
@@ -686,29 +690,72 @@ func TestAmbiguousCreateRetainsRecordUntilRemovalSucceeds(t *testing.T) {
 	id := "allocation-g2-first"
 
 	err := agent.RunGroup(context.Background(), request)
-	if !errors.Is(err, createErr) || !errors.Is(err, removeErr) {
-		t.Fatalf("run error = %v, want create and removal errors", err)
+	if !errors.Is(err, createErr) {
+		t.Fatalf("run error = %v, want create error", err)
 	}
-	if rt.removeCount != 1 || rt.startCount != 0 {
-		t.Fatalf("remove attempts = %d, start attempts = %d, want 1 and 0", rt.removeCount, rt.startCount)
+	if rt.removeCount != 0 || rt.startCount != 0 {
+		t.Fatalf("remove attempts = %d, start attempts = %d, want 0 and 0", rt.removeCount, rt.startCount)
 	}
 	if allocation := agent.allocations[id]; allocation == nil || allocation.Status != "stopping" {
 		t.Fatalf("retained allocation = %+v, want stopping", allocation)
 	}
 	var recorded Allocation
-	if err := local.Get(allocationRecordKey(id), &recorded); err != nil || recorded.Status != "stopping" {
+	if err := local.Get(allocationRecordKey(id), &recorded); err != nil || recorded.Status != "stopping" || !recorded.ContainerOwnershipUnverified {
 		t.Fatalf("recorded allocation = %+v, error = %v, want stopping", recorded, err)
 	}
 
-	rt.removeErr = nil
+	if err := agent.StopAllocation(context.Background(), id); err == nil || rt.removeCount != 0 {
+		t.Fatalf("cleanup without inspection: error = %v, removals = %d", err, rt.removeCount)
+	}
+	rt.inspectAvailable = true
+	rt.labels["trellis.execution-hash"] = "other-execution"
+	if err := agent.StopAllocation(context.Background(), id); !errors.Is(err, ErrExecutionConflict) || rt.removeCount != 0 {
+		t.Fatalf("cleanup of foreign container: error = %v, removals = %d", err, rt.removeCount)
+	}
+	rt.labels["trellis.execution-hash"] = request.ExecutionHash
 	if err := agent.StopAllocation(context.Background(), id); err != nil {
 		t.Fatalf("retry cleanup: %v", err)
 	}
-	if rt.removeCount != 2 || agent.allocations[id] != nil {
-		t.Fatalf("remove attempts = %d, allocation = %+v, want 2 and nil", rt.removeCount, agent.allocations[id])
+	if rt.removeCount != 1 || agent.allocations[id] != nil {
+		t.Fatalf("remove attempts = %d, allocation = %+v, want 1 and nil", rt.removeCount, agent.allocations[id])
 	}
 	if err := local.Get(allocationRecordKey(id), &recorded); err == nil {
 		t.Fatal("allocation record retained after successful removal")
+	}
+}
+
+func TestFailedStartRetainsRecordUntilStagingReleaseSucceeds(t *testing.T) {
+	rt := &ambiguousCreateRuntime{reconcilerRuntime: &reconcilerRuntime{}}
+	agent := newOperationTestAgent(t, rt)
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	agent.ConfigureDurability(local, "test")
+	request := operationTestRequest()
+	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image", Volumes: []spec.VolumeSpec{{Name: "data", HostPath: "@/data", ContainerPath: "/data"}}}}
+	id := "allocation-g2-first"
+	stagingPath := agent.volumes.stagingPath(id, "data")
+	agent.volumes.stage = func(_ int, target string) error {
+		return os.WriteFile(filepath.Join(target, "block"), []byte("block"), 0o600)
+	}
+	agent.volumes.unstage = func(string) error { return nil }
+
+	if err := agent.RunGroup(context.Background(), request); err == nil || !strings.Contains(err.Error(), "release volume staging") {
+		t.Fatalf("run error = %v, want staging release error", err)
+	}
+	var recorded Allocation
+	if err := local.Get(allocationRecordKey(id), &recorded); err != nil || recorded.Status != "stopping" {
+		t.Fatalf("recorded allocation = %+v, error = %v, want stopping", recorded, err)
+	}
+	if err := os.Remove(filepath.Join(stagingPath, "block")); err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.StopAllocation(context.Background(), id); err != nil {
+		t.Fatalf("retry staging cleanup: %v", err)
+	}
+	if err := local.Get(allocationRecordKey(id), &recorded); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("record after retry: %v, want not found", err)
 	}
 }
 
