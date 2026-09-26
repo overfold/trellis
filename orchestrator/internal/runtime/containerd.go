@@ -237,6 +237,18 @@ func (c *ContainerdRuntime) Stop(ctx context.Context, containerID string) error 
 		return fmt.Errorf("getting task status for %s: %w", containerID, err)
 	}
 
+	// A Created task has been prepared by containerd but its user process has
+	// never started, so there is nothing to signal or wait for. Delete that
+	// task directly so recovery can safely clean up the interrupted Start and
+	// recreate the task on the next control-plane retry.
+	if rawStatus.Status == containerd.Created {
+		_, err = task.Delete(ctx)
+		if err != nil && !errdefs.IsNotFound(err) {
+			return fmt.Errorf("deleting created task for %s: %w", containerID, err)
+		}
+		return nil
+	}
+
 	// Only signal and wait if the process is still running. A task whose
 	// process has already exited (Stopped) must be deleted without signaling —
 	// sending SIGTERM to a dead process returns a FailedPrecondition error
