@@ -5,11 +5,15 @@ package runtime_test
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/clofour/trellis/internal/health"
 	"github.com/clofour/trellis/internal/runtime"
+	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/pkg/cio"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
 )
 
 // This intentionally stays small: distributed behavior belongs in the
@@ -51,6 +55,79 @@ func TestContainerdAllocationAdoption(t *testing.T) {
 	}
 	if len(managed) != 1 || managed[0].ID != created {
 		t.Fatalf("created allocation was not adoptable: %+v", managed)
+	}
+}
+
+func TestContainerdStopsCreatedTask(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("containerd overlayfs E2E requires root; run this test with sudo")
+	}
+	socket := os.Getenv("CONTAINERD_ADDRESS")
+	if socket == "" {
+		socket = "/run/containerd/containerd.sock"
+	}
+	if _, err := os.Stat(socket); err != nil {
+		t.Skipf("containerd unavailable: %v", err)
+	}
+
+	r, err := runtime.NewContainerdRuntime(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	raw, err := containerd.New(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = raw.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	const image = "docker.io/library/nginx:1.27-alpine"
+	if err := r.Pull(ctx, image); err != nil {
+		t.Fatal(err)
+	}
+	const id = "trellis-e2e-created-stop"
+	_ = r.Stop(ctx, id)
+	_ = r.Remove(ctx, id)
+	created, err := r.Create(ctx, runtime.CreateOptions{ID: id, Image: image, Runtime: "runc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Stop(context.Background(), created); _ = r.Remove(context.Background(), created) }()
+
+	nsCtx := namespaces.WithNamespace(ctx, "trellis")
+	container, err := raw.LoadContainer(nsCtx, created)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := container.NewTask(nsCtx, cio.LogFile(filepath.Join(t.TempDir(), "created.log")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := task.Status(nsCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != containerd.Created {
+		t.Fatalf("task status before stop = %q, want created", status.Status)
+	}
+
+	if err := r.Stop(ctx, created); err != nil {
+		t.Fatalf("stop created task: %v", err)
+	}
+	observed, err := r.Inspect(ctx, created)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed.Status != runtime.StatusStopped {
+		t.Fatalf("status after stopping created task = %q, want stopped", observed.Status)
+	}
+
+	// Deleting the Created task must leave the container reusable: Start should
+	// create a fresh task rather than colliding with the interrupted one.
+	if err := r.Start(ctx, created); err != nil {
+		t.Fatalf("start after created-task cleanup: %v", err)
 	}
 }
 
