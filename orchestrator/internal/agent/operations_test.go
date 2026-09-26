@@ -711,6 +711,45 @@ func TestRecoverNonRunningAllocationDefersRestartToServer(t *testing.T) {
 	}
 }
 
+func TestRecoverRunningAllocationResetsHealthUntilProbe(t *testing.T) {
+	rt := &createdRecoveryRuntime{
+		reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning},
+		managedID:         "task",
+	}
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	check := &spec.HealthCheckSpec{Type: "script", Interval: time.Hour}
+	first := newOperationTestAgent(t, rt)
+	first.ConfigureDurability(local, "test")
+	if err := first.persistAllocation(&Allocation{
+		ID: "task", AllocationID: "allocation", ContainerID: "task",
+		Spec: &spec.TaskSpec{Name: "task", HealthCheck: check},
+		Status: "running", Health: "healthy",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	second := newOperationTestAgent(t, rt)
+	second.ConfigureDurability(local, "test")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	second.health.SetContext(ctx)
+	if err := second.recover(ctx); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if got := second.allocations["task"].Health; got != "unknown" {
+		t.Fatalf("recovered health = %q, want unknown", got)
+	}
+	var persisted Allocation
+	if err := local.Get(allocationRecordKey("task"), &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Health != "unknown" {
+		t.Fatalf("persisted health = %q, want unknown", persisted.Health)
+	}
+}
+
 func TestResumeGroupRecoveredAllocationWithoutSpec(t *testing.T) {
 	rt := &createdRecoveryRuntime{
 		reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning},

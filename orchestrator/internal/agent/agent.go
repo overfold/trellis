@@ -337,6 +337,9 @@ func (a *Agent) recover(ctx context.Context) error {
 			allocation.Health = "unknown"
 		} else if !stopping && container.Status == runtime.StatusRunning {
 			allocation.Status = "running"
+			if allocation.Spec != nil && allocation.Spec.HealthCheck != nil {
+				allocation.Health = "unknown"
+			}
 		}
 		if container.Status == runtime.StatusRunning || container.Status == runtime.StatusCreated || container.Status == runtime.StatusStopped {
 			for _, port := range allocation.Ports {
@@ -1248,9 +1251,13 @@ func prepareSecrets(allocID, taskName string, delivered []api.DeliveredSecret) (
 // OnHealthy and OnUnhealthy are observation callbacks from the health manager.
 // They intentionally do not mutate allocation status directly; lifecycle state
 // transitions are centralized in the allocation reconciler.
-func (a *Agent) OnHealthy(_ context.Context, allocID string) error {
+func (a *Agent) OnHealthy(ctx context.Context, allocID string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	// A replaced worker can finish a probe after RegisterTask cancels it.
+	if ctx.Err() != nil {
+		return nil
+	}
 	if allocation := a.allocations[allocID]; allocation != nil {
 		allocation.Health = "healthy"
 		return a.persistAllocation(allocation)
@@ -1259,9 +1266,12 @@ func (a *Agent) OnHealthy(_ context.Context, allocID string) error {
 }
 
 // OnUnhealthy handles an unhealthy allocation.
-func (a *Agent) OnUnhealthy(_ context.Context, allocID string) error {
+func (a *Agent) OnUnhealthy(ctx context.Context, allocID string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if ctx.Err() != nil {
+		return nil
+	}
 	if allocation := a.allocations[allocID]; allocation != nil {
 		allocation.Health = "unhealthy"
 		return a.persistAllocation(allocation)

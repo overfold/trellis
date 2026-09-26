@@ -5,6 +5,8 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -52,6 +54,42 @@ func (r *reconcilerRuntime) Logs(context.Context, string, bool, int) (io.ReadClo
 
 type statusRecorder struct {
 	statuses []string
+}
+
+type inFlightHealthRuntime struct {
+	*reconcilerRuntime
+	started chan struct{}
+	release chan struct{}
+	probes  atomic.Int32
+	code    int
+}
+
+func (r *inFlightHealthRuntime) Exec(ctx context.Context, _ string, _ []string) (int, error) {
+	if r.probes.Add(1) == 1 {
+		close(r.started)
+		<-r.release // Simulate a probe that completes after its worker is cancelled.
+		return r.code, nil
+	}
+	<-ctx.Done()
+	return 0, ctx.Err()
+}
+
+type healthCallbackRecorder struct {
+	agent *Agent
+	done  chan struct{}
+	once  sync.Once
+}
+
+func (r *healthCallbackRecorder) OnHealthy(ctx context.Context, id string) error {
+	err := r.agent.OnHealthy(ctx, id)
+	r.once.Do(func() { close(r.done) })
+	return err
+}
+
+func (r *healthCallbackRecorder) OnUnhealthy(ctx context.Context, id string) error {
+	err := r.agent.OnUnhealthy(ctx, id)
+	r.once.Do(func() { close(r.done) })
+	return err
 }
 
 func (s *statusRecorder) OnReconciledStatus(_ string, status string) {
@@ -184,6 +222,57 @@ func TestAllocationReconcilerWaitsForHealthAfterRestart(t *testing.T) {
 	}
 	if got := agent.allocations["alloc-1"].Health; got != "healthy" {
 		t.Fatalf("health after health observation = %q, want healthy", got)
+	}
+}
+
+func TestRestartIgnoresInFlightHealthProbe(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		code int
+	}{
+		{name: "healthy", code: 0},
+		{name: "unhealthy", code: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := &inFlightHealthRuntime{
+				reconcilerRuntime: &reconcilerRuntime{},
+				started:           make(chan struct{}),
+				release:           make(chan struct{}),
+				code:              tc.code,
+			}
+			check := &spec.HealthCheckSpec{Type: "script", Interval: time.Millisecond, Timeout: time.Hour, Threshold: 1}
+			manager := health.NewHealthManager(slog.Default(), rt, nil)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			manager.SetContext(ctx)
+			agent := &Agent{
+				log:         slog.Default(),
+				allocations: map[string]*Allocation{"alloc-1": {ID: "alloc-1", ContainerID: "alloc-1", Health: tc.name, Spec: &spec.TaskSpec{HealthCheck: check}}},
+				health:      manager,
+			}
+			done := make(chan struct{})
+			manager.Subscriber = &healthCallbackRecorder{agent: agent, done: done}
+			manager.RegisterTask("alloc-1", "alloc-1", check)
+			select {
+			case <-rt.started:
+			case <-time.After(time.Second):
+				t.Fatal("initial probe did not start")
+			}
+
+			agent.OnReconciledStatus("alloc-1", "running")
+			close(rt.release)
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("old probe did not publish its result")
+			}
+			agent.mu.RLock()
+			got := agent.allocations["alloc-1"].Health
+			agent.mu.RUnlock()
+			if got != "unknown" {
+				t.Fatalf("health after old probe = %q, want unknown", got)
+			}
+		})
 	}
 }
 
