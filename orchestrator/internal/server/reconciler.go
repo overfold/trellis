@@ -297,6 +297,7 @@ func (s *Server) Reconcile(ctx context.Context) {
 			}
 			if !allocation.Draining {
 				allocation.Draining = true
+				allocation.DrainReason = "node"
 				_ = s.state.PutAllocation(context.WithoutCancel(ctx), allocation)
 				actions = append(actions, Action{Type: ActionDrain, Allocation: allocation})
 			}
@@ -310,6 +311,7 @@ func (s *Server) Reconcile(ctx context.Context) {
 			case spec.UpdateRolling:
 				if !allocation.Draining {
 					allocation.Draining = true
+					allocation.DrainReason = "update"
 					_ = s.state.PutAllocation(context.WithoutCancel(ctx), allocation)
 					if allocation.Node != nil && (allocation.Node.Status == NodeStatusHealthy || allocation.Node.Status == NodeStatusDraining) {
 						actions = append(actions, Action{Type: ActionDrain, Allocation: allocation})

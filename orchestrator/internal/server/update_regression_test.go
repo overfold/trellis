@@ -140,6 +140,88 @@ func TestUndrainNodeRetainsCurrentAllocation(t *testing.T) {
 	}
 }
 
+func TestUndrainNodePreservesRestartIntent(t *testing.T) {
+	s, agent := newTestServerWithAgent()
+	defer agent.server.Close()
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
+	s.nodes[node.ID] = node
+	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: jobSpec, Revision: 1}
+	allocation := &Allocation{ID: "original", Namespace: "default", JobName: "web", TaskGroupName: "api", Tasks: jobSpec.TaskGroups[0].Tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
+	s.allocations = []*Allocation{allocation}
+
+	if err := s.DrainNode(context.Background(), node.ID); err != nil {
+		t.Fatal(err)
+	}
+	if allocation.DrainReason != "node" {
+		t.Fatalf("drain reason = %q, want node", allocation.DrainReason)
+	}
+	if err := s.RestartJob(context.Background(), "default", "web"); err != nil {
+		t.Fatal(err)
+	}
+	if allocation.DrainReason != "restart" {
+		t.Fatalf("drain reason = %q, want restart", allocation.DrainReason)
+	}
+	if err := s.UndrainNode(context.Background(), node.ID); err != nil {
+		t.Fatal(err)
+	}
+	if !allocation.Draining || allocation.DrainReason != "restart" || len(s.allocations) != 2 {
+		t.Fatalf("restart intent after undrain: draining=%t reason=%q allocations=%d", allocation.Draining, allocation.DrainReason, len(s.allocations))
+	}
+	for _, call := range agent.recordedCalls() {
+		if call.method == "DELETE" && call.path == "/v1/allocations/original/drain" {
+			t.Fatal("undrain resumed an allocation marked for restart")
+		}
+	}
+	persisted, err := s.state.ListAllocations(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !persisted[allocation.ID].Draining || persisted[allocation.ID].DrainReason != "restart" {
+		t.Fatalf("persisted restart intent = %#v", persisted[allocation.ID])
+	}
+}
+
+func TestUndrainNodeResumeFailureLeavesNodeDraining(t *testing.T) {
+	s, agent := newTestServerWithAgent()
+	defer agent.server.Close()
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
+	s.nodes[node.ID] = node
+	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: jobSpec, Revision: 1}
+	allocation := &Allocation{ID: "original", Namespace: "default", JobName: "web", TaskGroupName: "api", Tasks: jobSpec.TaskGroups[0].Tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
+	s.allocations = []*Allocation{allocation}
+
+	if err := s.DrainNode(context.Background(), node.ID); err != nil {
+		t.Fatal(err)
+	}
+	agent.mu.Lock()
+	agent.failResume = true
+	agent.mu.Unlock()
+	if err := s.UndrainNode(context.Background(), node.ID); err == nil {
+		t.Fatal("undrain succeeded despite agent resume failure")
+	}
+	if node.Status != NodeStatusDraining || !allocation.Draining {
+		t.Fatalf("after failed resume: node=%s allocation draining=%t", node.Status, allocation.Draining)
+	}
+	nodes, err := s.state.ListNodes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nodes[node.ID.String()].Status != NodeStatusDraining {
+		t.Fatalf("persisted node status = %s, want draining", nodes[node.ID.String()].Status)
+	}
+	agent.mu.Lock()
+	agent.failResume = false
+	agent.mu.Unlock()
+	if err := s.UndrainNode(context.Background(), node.ID); err != nil {
+		t.Fatal(err)
+	}
+	if node.Status != NodeStatusHealthy || allocation.Draining {
+		t.Fatalf("after retry: node=%s allocation draining=%t", node.Status, allocation.Draining)
+	}
+}
+
 func TestReconcileStopsRemovedGroupOnDrainingNode(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()
