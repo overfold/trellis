@@ -71,16 +71,32 @@ func (r *AllocationReconciler) TrackRecovered(allocID string, healthManaged bool
 	r.trackRecovered(allocID, healthManaged, policy, attempts, window, false)
 }
 
+func restartPolicyLimits(policy *spec.RestartPolicySpec) (int, time.Duration) {
+	if policy == nil {
+		return defaultMaxRestarts, defaultRestartWindow
+	}
+	return policy.MaxRestarts, policy.Window
+}
+
+func advanceRestartState(attempts int, window time.Time, maxRestarts int, restartWindow time.Duration, now time.Time) (int, time.Time, bool) {
+	if window.IsZero() {
+		window = now
+	}
+	if now.Sub(window) > restartWindow {
+		attempts = 0
+		window = now
+	}
+	if attempts >= maxRestarts {
+		return attempts, window, false
+	}
+	return attempts + 1, window, true
+}
+
 func (r *AllocationReconciler) trackRecovered(allocID string, healthManaged bool, policy *spec.RestartPolicySpec, attempts int, window time.Time, stopping bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	maxRestarts := defaultMaxRestarts
-	restartWindow := defaultRestartWindow
-	if policy != nil {
-		maxRestarts = policy.MaxRestarts
-		restartWindow = policy.Window
-	}
+	maxRestarts, restartWindow := restartPolicyLimits(policy)
 	if window.IsZero() {
 		window = time.Now()
 	}
@@ -214,18 +230,15 @@ func (r *AllocationReconciler) restart(ctx context.Context, allocID string) erro
 	state.restarting = true
 
 	now := time.Now()
-	if now.Sub(state.window) > state.restartWindow {
-		state.attempts = 0
-		state.window = now
-	}
-	if state.attempts >= state.maxRestarts {
+	attempts, window, allowed := advanceRestartState(state.attempts, state.window, state.maxRestarts, state.restartWindow, now)
+	if !allowed {
 		state.restarting = false
+		state.window = window
 		r.mu.Unlock()
 		r.publishStatus(allocID, "unhealthy")
 		return nil
 	}
-	state.attempts++
-	attempts, window := state.attempts, state.window
+	state.attempts, state.window = attempts, window
 	healthManaged := state.healthManaged
 	r.mu.Unlock()
 	if subscriber, ok := r.Subscriber.(interface{ OnRestartState(string, int, time.Time) }); ok {
