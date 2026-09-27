@@ -607,7 +607,10 @@ func (c *ContainerdRuntime) Inspect(ctx context.Context, containerID string) (*C
 	return result, nil
 }
 
-// ListManaged lists containers owned by a Trellis cluster.
+// ListManaged lists containers owned by a Trellis cluster. One unreadable
+// container does not abort the listing: it is reported with StatusUnknown, and
+// without labels when its metadata could not be read, so callers never mistake
+// it for an absent container. Containers deleted during the listing are omitted.
 func (c *ContainerdRuntime) ListManaged(ctx context.Context, cluster string) ([]ContainerInfo, error) {
 	ctx = c.withNamespace(ctx)
 	containers, err := c.client.Containers(ctx)
@@ -617,15 +620,21 @@ func (c *ContainerdRuntime) ListManaged(ctx context.Context, cluster string) ([]
 	result := make([]ContainerInfo, 0, len(containers))
 	for _, container := range containers {
 		info, err := container.Info(ctx)
+		if errdefs.IsNotFound(err) {
+			continue
+		}
 		if err != nil {
-			return nil, fmt.Errorf("inspect container %s: %w", container.ID(), err)
+			result = append(result, ContainerInfo{ID: container.ID(), Status: StatusUnknown})
+			continue
 		}
 		if info.Labels["trellis.cluster"] != cluster {
 			continue
 		}
+		// Inspect can also report a missing task, so treat every error as
+		// unknown state rather than as proof that the container is gone.
 		observed, err := c.Inspect(ctx, container.ID())
 		if err != nil {
-			return nil, err
+			observed = &ContainerInfo{ID: container.ID(), Status: StatusUnknown}
 		}
 		observed.Labels = info.Labels
 		result = append(result, *observed)
