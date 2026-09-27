@@ -1098,14 +1098,14 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 func (a *Agent) releaseOrphanedStaging(ctx context.Context, allocID string) error {
 	inUse, err := a.volumes.StagingInUse(allocID)
 	if err != nil {
-		return fmt.Errorf("%w: check volume staging: %w", errStagingInUse, err)
+		return fmt.Errorf("check volume staging: %w", err)
 	}
 	if !inUse {
 		return nil
 	}
 	if _, err := a.runtime.Inspect(ctx, allocID); !errdefs.IsNotFound(err) {
 		if err != nil {
-			return fmt.Errorf("%w: verify container %s: %w", errStagingInUse, allocID, err)
+			return fmt.Errorf("verify container %s before releasing volume staging: %w", allocID, err)
 		}
 		return fmt.Errorf("%w: container %s still exists", errStagingInUse, allocID)
 	}

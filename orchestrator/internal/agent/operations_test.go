@@ -1062,6 +1062,8 @@ func TestStopReleasesStagingOfAllocationRecoveredFromLabels(t *testing.T) {
 	}
 }
 
+var errMountCheck = errors.New("mountinfo unavailable")
+
 type missingContainerRuntime struct{ *reconcilerRuntime }
 
 func (*missingContainerRuntime) Inspect(_ context.Context, id string) (*runtime.ContainerInfo, error) {
@@ -1077,7 +1079,7 @@ func TestStartReleasesStagingOnlyWhenItsContainerIsGone(t *testing.T) {
 		wantUnstaged int
 	}{
 		{name: "container exists", rt: &reconcilerRuntime{}, wantInUse: true},
-		{name: "mount check fails", rt: &missingContainerRuntime{&reconcilerRuntime{}}, checkErr: errors.New("mountinfo unavailable"), wantInUse: true},
+		{name: "mount check fails", rt: &missingContainerRuntime{&reconcilerRuntime{}}, checkErr: errMountCheck},
 		{name: "container missing", rt: &missingContainerRuntime{&reconcilerRuntime{}}, wantUnstaged: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1111,7 +1113,11 @@ func TestStartReleasesStagingOnlyWhenItsContainerIsGone(t *testing.T) {
 			}
 
 			err := agent.RunGroup(context.Background(), request)
-			if tc.wantInUse != errors.Is(err, errStagingInUse) || !tc.wantInUse && err != nil {
+			if tc.checkErr != nil {
+				if !errors.Is(err, tc.checkErr) || errors.Is(err, errStagingInUse) {
+					t.Fatalf("run allocation = %v, want mount check error", err)
+				}
+			} else if tc.wantInUse != errors.Is(err, errStagingInUse) || !tc.wantInUse && err != nil {
 				t.Fatalf("run allocation = %v, want staging in use %t", err, tc.wantInUse)
 			}
 			if unstaged != tc.wantUnstaged {
@@ -1121,8 +1127,9 @@ func TestStartReleasesStagingOnlyWhenItsContainerIsGone(t *testing.T) {
 			if _, err := os.Stat(kept); err != nil {
 				t.Fatalf("staging after start: %v", err)
 			}
-			if _, err := os.Stat(agent.volumes.stagingPath(id, "data")); (err == nil) == tc.wantInUse {
-				t.Fatalf("new staging after start: %v, want present %t", err, !tc.wantInUse)
+			wantStaged := !tc.wantInUse && tc.checkErr == nil
+			if _, err := os.Stat(agent.volumes.stagingPath(id, "data")); (err == nil) != wantStaged {
+				t.Fatalf("new staging after start: %v, want present %t", err, wantStaged)
 			}
 		})
 	}
