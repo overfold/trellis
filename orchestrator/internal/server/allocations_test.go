@@ -410,7 +410,7 @@ func TestHeartbeatFailedTaskFailsGroupInAnyOrder(t *testing.T) {
 	}
 }
 
-func TestHeartbeatDoesNotMoveFailedOrStoppingAllocations(t *testing.T) {
+func TestHeartbeatDoesNotMoveTerminalOrStoppingAllocations(t *testing.T) {
 	nodeID := uuid.MustParse("99999999-9999-9999-9999-999999999999")
 	for _, tc := range []struct {
 		name     string
@@ -420,6 +420,10 @@ func TestHeartbeatDoesNotMoveFailedOrStoppingAllocations(t *testing.T) {
 		{name: "failed allocation cleanup", phase: lifecycle.PhaseFailed, observed: lifecycle.PhaseStopping},
 		{name: "failed allocation recovery", phase: lifecycle.PhaseFailed, observed: lifecycle.PhaseStarting},
 		{name: "server stop in progress", phase: lifecycle.PhaseStopping, observed: lifecycle.PhaseFailed},
+		{name: "lost allocation restarting", phase: lifecycle.PhaseLost, observed: lifecycle.PhaseStarting},
+		{name: "lost allocation running", phase: lifecycle.PhaseLost, observed: lifecycle.PhaseRunning},
+		{name: "lost allocation cleanup", phase: lifecycle.PhaseLost, observed: lifecycle.PhaseStopping},
+		{name: "stopped allocation restarting", phase: lifecycle.PhaseStopped, observed: lifecycle.PhaseStarting},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			node := &Node{ID: nodeID, Host: "node-a", Status: NodeStatusHealthy}

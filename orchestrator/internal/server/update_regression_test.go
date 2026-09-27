@@ -13,14 +13,40 @@ import (
 	"github.com/clofour/trellis/internal/api"
 	"github.com/clofour/trellis/internal/lifecycle"
 	"github.com/clofour/trellis/internal/spec"
+	"github.com/clofour/trellis/internal/state"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 )
 
 type undrainFailingStore struct{ memoryStore }
 
+type memoryStoreWrapper func(memoryStore) state.Store
+
 func (undrainFailingStore) Put(context.Context, string, []byte) error {
 	return errors.New("storage unavailable")
+}
+
+type nodeWriteFailingStore struct{ memoryStore }
+
+func (s nodeWriteFailingStore) Put(ctx context.Context, key string, value []byte) error {
+	if strings.Contains(key, "/nodes/") {
+		return errors.New("storage unavailable")
+	}
+	return s.memoryStore.Put(ctx, key, value)
+}
+
+func resumeCalls(agent *testAgent, id string) []api.DrainAllocationRequest {
+	var requests []api.DrainAllocationRequest
+	for _, call := range agent.recordedCalls() {
+		if call.method != http.MethodDelete || call.path != "/v1/allocations/"+id+"/drain" {
+			continue
+		}
+		var request api.DrainAllocationRequest
+		if err := json.Unmarshal(call.body, &request); err == nil {
+			requests = append(requests, request)
+		}
+	}
+	return requests
 }
 
 func TestHandleUndrainNodeReportsResumeFailure(t *testing.T) {
@@ -31,37 +57,36 @@ func TestHandleUndrainNodeReportsResumeFailure(t *testing.T) {
 	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}
 	s.jobs[jobKey("default", "web")] = &Job{Spec: jobSpec, Revision: 1}
 	s.allocations = []*Allocation{{ID: "original", Namespace: "default", JobName: "web", TaskGroupName: "api", Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning, Draining: true, DrainReason: "node"}}
-	agent.mu.Lock()
-	agent.failResume = true
-	agent.mu.Unlock()
 	e := echo.New()
 	NewHandler(s).Register(e)
-	for _, tc := range []struct {
-		id      string
-		status  int
-		message string
-	}{
-		{uuid.NewString(), http.StatusNotFound, "node not found"},
-		{node.ID.String(), http.StatusInternalServerError, "resume allocation original"},
-	} {
-		req := httptest.NewRequest(http.MethodDelete, "/v1/nodes/"+tc.id+"/drain", nil)
-		req = req.WithContext(context.WithValue(req.Context(), AdminContextKey, true))
-		rec := httptest.NewRecorder()
-		e.ServeHTTP(rec, req)
-		if rec.Code != tc.status || !strings.Contains(rec.Body.String(), tc.message) {
-			t.Fatalf("undrain %s: status %d, body %s", tc.id, rec.Code, rec.Body.String())
-		}
-	}
-	agent.mu.Lock()
-	agent.failResume = false
-	agent.mu.Unlock()
-	s.state = NewStateController(undrainFailingStore{memoryStore{}}, "test")
-	req := httptest.NewRequest(http.MethodDelete, "/v1/nodes/"+node.ID.String()+"/drain", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/v1/nodes/"+uuid.NewString()+"/drain", nil)
 	req = req.WithContext(context.WithValue(req.Context(), AdminContextKey, true))
 	rec := httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "node not found") {
+		t.Fatalf("undrain unknown node: status %d, body %s", rec.Code, rec.Body.String())
+	}
+	stateStore := s.state
+	s.state = NewStateController(undrainFailingStore{memoryStore{}}, "test")
+	req = httptest.NewRequest(http.MethodDelete, "/v1/nodes/"+node.ID.String()+"/drain", nil)
+	req = req.WithContext(context.WithValue(req.Context(), AdminContextKey, true))
+	rec = httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
 	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "persist resumed allocation original") {
 		t.Fatalf("persistence failure: status %d, body %s", rec.Code, rec.Body.String())
+	}
+	// Once the undrain is durable, an agent delivery failure is retried by
+	// reconciliation rather than reported as a failed undrain.
+	s.state = stateStore
+	agent.mu.Lock()
+	agent.failResume = true
+	agent.mu.Unlock()
+	req = httptest.NewRequest(http.MethodDelete, "/v1/nodes/"+node.ID.String()+"/drain", nil)
+	req = req.WithContext(context.WithValue(req.Context(), AdminContextKey, true))
+	rec = httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent || s.allocations[0].Draining {
+		t.Fatalf("delivery failure: status %d, body %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -324,43 +349,116 @@ func TestUndrainNodePreservesRestartIntent(t *testing.T) {
 	}
 }
 
-func TestUndrainNodeResumeFailureLeavesNodeDraining(t *testing.T) {
+func newDrainedNodeFixture(t *testing.T) (*Server, *testAgent, *Node, *Allocation) {
+	t.Helper()
 	s, agent := newTestServerWithAgent()
-	defer agent.server.Close()
 	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
 	s.nodes[node.ID] = node
+	s.controlEpoch = 1
 	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}
 	s.jobs[jobKey("default", "web")] = &Job{Spec: jobSpec, Revision: 1}
 	allocation := &Allocation{ID: "original", Namespace: "default", JobName: "web", TaskGroupName: "api", Tasks: jobSpec.TaskGroups[0].Tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
 	s.allocations = []*Allocation{allocation}
-
 	if err := s.DrainNode(context.Background(), node.ID); err != nil {
 		t.Fatal(err)
 	}
+	if !allocation.Draining || allocation.DrainSequence != 1 {
+		t.Fatalf("drained allocation: draining=%t sequence=%d", allocation.Draining, allocation.DrainSequence)
+	}
+	return s, agent, node, allocation
+}
+
+func TestUndrainNodeSaveFailureSendsNoResume(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		store memoryStoreWrapper
+	}{
+		{name: "allocation save", store: func(m memoryStore) state.Store { return undrainFailingStore{m} }},
+		{name: "node save", store: func(m memoryStore) state.Store { return nodeWriteFailingStore{m} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, agent, node, allocation := newDrainedNodeFixture(t)
+			defer agent.server.Close()
+			persisted := memoryStore{}
+			s.state = NewStateController(tc.store(persisted), "test")
+			if err := s.UndrainNode(context.Background(), node.ID); err == nil {
+				t.Fatal("undrain succeeded despite a failed save")
+			}
+			if requests := resumeCalls(agent, allocation.ID); len(requests) != 0 {
+				t.Fatalf("resume sent before its state was saved: %#v", requests)
+			}
+			if node.Status != NodeStatusDraining {
+				t.Fatalf("node status after failed save = %s, want draining", node.Status)
+			}
+			// Server and agent must agree: whatever was saved, the next pass
+			// converges on a drain newer than anything the agent was sent.
+			s.state = NewStateController(persisted, "test")
+			s.Reconcile(context.Background())
+			if !allocation.Draining {
+				t.Fatal("allocation not draining after reconciliation of a draining node")
+			}
+			var drained uint64
+			for _, call := range agent.recordedCalls() {
+				if call.method == http.MethodPost && call.path == "/v1/allocations/original/drain" {
+					var request api.DrainAllocationRequest
+					if err := json.Unmarshal(call.body, &request); err != nil {
+						t.Fatal(err)
+					}
+					drained = request.Sequence
+				}
+			}
+			if drained != allocation.DrainSequence {
+				t.Fatalf("last delivered drain sequence = %d, want %d", drained, allocation.DrainSequence)
+			}
+		})
+	}
+}
+
+func TestUndrainNodeRedeliversResumeAfterDeliveryFailure(t *testing.T) {
+	s, agent, node, allocation := newDrainedNodeFixture(t)
+	defer agent.server.Close()
 	agent.mu.Lock()
 	agent.failResume = true
 	agent.mu.Unlock()
-	if err := s.UndrainNode(context.Background(), node.ID); err == nil {
-		t.Fatal("undrain succeeded despite agent resume failure")
+	if err := s.UndrainNode(context.Background(), node.ID); err != nil {
+		t.Fatalf("undrain after durable save: %v", err)
 	}
-	if node.Status != NodeStatusDraining || !allocation.Draining {
-		t.Fatalf("after failed resume: node=%s allocation draining=%t", node.Status, allocation.Draining)
+	if node.Status != NodeStatusHealthy || allocation.Draining || allocation.DrainSequence != 2 {
+		t.Fatalf("after undrain: node=%s draining=%t sequence=%d", node.Status, allocation.Draining, allocation.DrainSequence)
 	}
 	nodes, err := s.state.ListNodes(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if nodes[node.ID.String()].Status != NodeStatusDraining {
-		t.Fatalf("persisted node status = %s, want draining", nodes[node.ID.String()].Status)
-	}
-	agent.mu.Lock()
-	agent.failResume = false
-	agent.mu.Unlock()
-	if err := s.UndrainNode(context.Background(), node.ID); err != nil {
+	allocations, err := s.state.ListAllocations(context.Background())
+	if err != nil {
 		t.Fatal(err)
 	}
-	if node.Status != NodeStatusHealthy || allocation.Draining {
-		t.Fatalf("after retry: node=%s allocation draining=%t", node.Status, allocation.Draining)
+	if nodes[node.ID.String()].Status != NodeStatusHealthy || allocations[allocation.ID].Draining || allocations[allocation.ID].DrainSequence != 2 {
+		t.Fatalf("persisted undrain: node=%s allocation=%#v", nodes[node.ID.String()].Status, allocations[allocation.ID])
+	}
+
+	agent.mu.Lock()
+	agent.failResume = false
+	agent.calls = nil
+	agent.mu.Unlock()
+	s.Reconcile(context.Background())
+	requests := resumeCalls(agent, allocation.ID)
+	if len(requests) != 1 || requests[0].Sequence != 2 || requests[0].Generation != 1 || requests[0].Epoch != 1 {
+		t.Fatalf("redelivered resumes = %#v, want one at sequence 2", requests)
+	}
+	s.Reconcile(context.Background())
+	if requests := resumeCalls(agent, allocation.ID); len(requests) != 1 {
+		t.Fatalf("resume redelivered after acknowledgement: %#v", requests)
+	}
+
+	// A new leadership term does not know what the previous one delivered,
+	// so it redelivers the saved resume once under its own epoch.
+	s.controlEpoch = 2
+	s.Reconcile(context.Background())
+	requests = resumeCalls(agent, allocation.ID)
+	if len(requests) != 2 || requests[1].Sequence != 2 || requests[1].Epoch != 2 {
+		t.Fatalf("resumes after leadership change = %#v, want a redelivery at epoch 2", requests)
 	}
 }
 
