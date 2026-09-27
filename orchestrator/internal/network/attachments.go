@@ -1,0 +1,257 @@
+package network
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+// attachmentJournalDir holds one record per attachment below the manager's
+// state directory. The leading dot keeps it apart from per-network lease
+// directories, whose names must be safe identifiers.
+const attachmentJournalDir = ".attachments"
+
+const defaultNetnsDir = "/var/run/netns"
+
+// attachmentRecord is journaled before Attach creates anything, and removed
+// only after every resource it names is gone. It holds what Detach needs that
+// cannot be derived from the allocation ID.
+type attachmentRecord struct {
+	AllocationID string `json:"allocation_id"`
+	Namespace    string `json:"namespace"`
+	Network      string `json:"network"`
+	Gateway      string `json:"gateway"`
+	APIPort      int    `json:"api_port"`
+}
+
+func (m *WireGuardManager) journalPath(allocationID string) string {
+	return filepath.Join(m.stateDir, attachmentJournalDir, allocationID+".json")
+}
+
+func (m *WireGuardManager) netnsPath(allocationID string) string {
+	dir := m.netnsDir
+	if dir == "" {
+		dir = defaultNetnsDir
+	}
+	return filepath.Join(dir, allocationID)
+}
+
+// recordAttachment durably journals an attachment before any of its
+// resources exist. It refuses an allocation that already has a record, so an
+// attach never adopts, and a failed attach never removes, another attempt's
+// resources.
+func (m *WireGuardManager) recordAttachment(record attachmentRecord) error {
+	path := m.journalPath(record.AllocationID)
+	if _, err := os.Lstat(path); err == nil {
+		return fmt.Errorf("network attachment for %s already exists; detach it first", record.AllocationID)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("inspect network attachment record: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create network attachment records: %w", err)
+	}
+	raw, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	if err := writeAtomicFile(path, raw, 0o600); err != nil {
+		return fmt.Errorf("record network attachment: %w", err)
+	}
+	return nil
+}
+
+func (m *WireGuardManager) readAttachmentRecord(allocationID string) (*attachmentRecord, error) {
+	raw, err := os.ReadFile(m.journalPath(allocationID))
+	if err != nil {
+		return nil, err
+	}
+	var record attachmentRecord
+	if err := json.Unmarshal(raw, &record); err != nil {
+		return nil, fmt.Errorf("parse network attachment record for %s: %w", allocationID, err)
+	}
+	if record.AllocationID != allocationID || !safeName.MatchString(record.Namespace) || !safeName.MatchString(record.Network) {
+		return nil, fmt.Errorf("network attachment record for %s is inconsistent", allocationID)
+	}
+	return &record, nil
+}
+
+// DetachAllocation removes whatever Attach created for an allocation, found
+// from the attachment record Attach journaled before creating anything. It
+// is idempotent: resources that are already gone are skipped, and an
+// allocation without a record has nothing left to remove.
+func (m *WireGuardManager) DetachAllocation(ctx context.Context, allocationID string) error {
+	if !safeAllocation.MatchString(allocationID) {
+		return fmt.Errorf("allocation must be a safe identifier")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	record, err := m.readAttachmentRecord(allocationID)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return m.detachLocked(ctx, Attachment{
+		AllocationID: record.AllocationID,
+		Namespace:    record.Namespace,
+		Network:      record.Network,
+		Gateway:      record.Gateway,
+		APIPort:      record.APIPort,
+	})
+}
+
+// Attachments lists the allocation IDs that have an attachment record, so
+// their resources may still exist. Records that cannot be read are reported
+// in the error alongside every readable ID.
+func (m *WireGuardManager) Attachments(context.Context) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	entries, err := os.ReadDir(filepath.Join(m.stateDir, attachmentJournalDir))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list network attachment records: %w", err)
+	}
+	var ids []string
+	var errs []error
+	for _, entry := range entries {
+		name := entry.Name()
+		// Skip temporary files an interrupted atomic write left behind.
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		id, ok := strings.CutSuffix(name, ".json")
+		if !ok || !safeAllocation.MatchString(id) {
+			errs = append(errs, fmt.Errorf("unexpected network attachment record %q", name))
+			continue
+		}
+		if _, err := m.readAttachmentRecord(id); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		ids = append(ids, id)
+	}
+	return ids, errors.Join(errs...)
+}
+
+// detachLocked removes an allocation's veth, network namespace, and address
+// lease, then the namespace path when no other lease remains, and finally
+// the attachment record. Each step tolerates a resource that is already
+// gone, so a retry after a partial attach, detach, or crash converges. Every
+// name is derived from the Trellis allocation, namespace, and network, so
+// state Trellis does not own is never touched.
+func (m *WireGuardManager) detachLocked(ctx context.Context, a Attachment) error {
+	if !safeAllocation.MatchString(a.AllocationID) || !safeName.MatchString(a.Namespace) || !safeName.MatchString(a.Network) {
+		return fmt.Errorf("network attachment has unsafe identifiers")
+	}
+	hostVeth := a.HostVeth
+	if hostVeth == "" {
+		hostVeth = short("vh", a.AllocationID)
+	}
+	// Deleting the host end also deletes its peer, wherever the peer is.
+	if err := m.run.Run(ctx, "ip", "link", "del", hostVeth); err != nil {
+		if m.run.Run(ctx, "ip", "link", "show", "dev", hostVeth) == nil {
+			return fmt.Errorf("remove allocation veth: %w", err)
+		}
+	}
+	if err := m.run.Run(ctx, "ip", "netns", "del", a.AllocationID); err != nil {
+		if _, statErr := os.Lstat(m.netnsPath(a.AllocationID)); !errors.Is(statErr, fs.ErrNotExist) {
+			return fmt.Errorf("remove allocation network namespace: %w", err)
+		}
+	}
+	leaseDir := filepath.Join(m.stateDir, a.Network)
+	if a.LeasePath != "" {
+		if err := os.Remove(a.LeasePath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	} else if err := removeAllocationLeases(leaseDir, a.AllocationID); err != nil {
+		return err
+	}
+
+	entries, err := os.ReadDir(leaseDir)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read network leases: %w", err)
+	}
+	if len(entries) == 0 {
+		if err := m.removeNamespacePathLocked(ctx, a, leaseDir); err != nil {
+			return err
+		}
+	}
+	if err := os.Remove(m.journalPath(a.AllocationID)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove network attachment record: %w", err)
+	}
+	return nil
+}
+
+// removeAllocationLeases removes the address leases an allocation holds. A
+// lease file names its address and contains the owning allocation ID.
+func removeAllocationLeases(leaseDir, allocationID string) error {
+	entries, err := os.ReadDir(leaseDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read network leases: %w", err)
+	}
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() {
+			continue
+		}
+		path := filepath.Join(leaseDir, entry.Name())
+		owner, err := os.ReadFile(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("read address lease %s: %w", entry.Name(), err)
+		}
+		if string(owner) != allocationID {
+			continue
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove address lease %s: %w", entry.Name(), err)
+		}
+	}
+	return nil
+}
+
+// removeNamespacePathLocked tears down a namespace's bridge, WireGuard
+// interface, firewall rules, applied plan, and lease directory once its last
+// local allocation is gone.
+func (m *WireGuardManager) removeNamespacePathLocked(ctx context.Context, a Attachment, leaseDir string) error {
+	bridge := a.Bridge
+	if bridge == "" {
+		bridge = short("tb", a.Namespace+"\x00"+a.Network)
+	}
+	wg := a.WireGuardInterface
+	if wg == "" {
+		wg = short("tw", a.Namespace+"\x00"+a.Network)
+	}
+	_ = m.run.Run(ctx, "iptables", "-D", "FORWARD", "-i", bridge, "!", "-o", wg, "-j", "DROP")
+	_ = m.run.Run(ctx, "iptables", "-D", "FORWARD", "-o", bridge, "!", "-i", wg, "-j", "DROP")
+	if m.dnsAddress != "" {
+		for _, protocol := range []string{"udp", "tcp"} {
+			_ = m.run.Run(ctx, "iptables", "-D", "INPUT", "-i", bridge, "-d", m.dnsAddress, "-p", protocol, "--dport", "53", "-j", "ACCEPT")
+		}
+	}
+	if a.APIPort > 0 {
+		_ = m.run.Run(ctx, "iptables", "-D", "INPUT", "-i", bridge, "-d", a.Gateway, "-p", "tcp", "--dport", fmt.Sprint(a.APIPort), "-j", "ACCEPT")
+	}
+	_ = m.run.Run(ctx, "iptables", "-D", "INPUT", "-i", bridge, "-j", "DROP")
+	_ = m.run.Run(ctx, "ip", "link", "del", wg)
+	_ = m.run.Run(ctx, "ip", "link", "del", bridge)
+	if err := os.Remove(m.planPath(a.Namespace, a.Network)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove applied network plan: %w", err)
+	}
+	if err := os.Remove(leaseDir); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove empty network lease directory: %w", err)
+	}
+	return nil
+}

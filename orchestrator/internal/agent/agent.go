@@ -125,6 +125,7 @@ type Allocation struct {
 	Mounts                       []*runtime.Mount
 	SecretDir                    string
 	Network                      *network.Attachment
+	NetworkIntent                *network.AttachmentIntent
 	Status                       string
 	Health                       string
 	Draining                     bool
@@ -339,7 +340,7 @@ func (a *Agent) Init(ctx context.Context) error {
 	} else if !a.recoveryListPending {
 		// Ownership is only known once recovery has adopted every allocation;
 		// otherwise the recovery retry runs the sweep when it completes.
-		a.removeOrphanedSecretDirs()
+		a.removeOrphanedResources(ctx)
 	}
 
 	go a.runRecoveryRetry(ctx)
@@ -603,7 +604,7 @@ func (a *Agent) recoverMissing(ctx context.Context, allocation *Allocation) {
 		return
 	}
 	var cleanupErr error
-	if err := a.network.Detach(context.WithoutCancel(ctx), allocation.Network); err != nil {
+	if err := a.detachAllocationNetwork(context.WithoutCancel(ctx), allocation); err != nil {
 		cleanupErr = fmt.Errorf("detach network for missing allocation container: %w", err)
 	} else if allocation.SecretDir != "" {
 		if err := removeSecretDir(allocation.SecretDir); err != nil {
@@ -743,13 +744,14 @@ func (a *Agent) relistRecovery(ctx context.Context, managed runtime.ManagedRunti
 		a.mu.Lock()
 		a.recoveryListPending = stillPending || a.hasUnreadableUnknownLocked(containers)
 		// Listing completes at most once, and Init skipped the orphaned
-		// secret sweep while it was incomplete.
+		// resource sweep while it was incomplete.
 		sweep := !a.recoveryListPending
 		a.mu.Unlock()
 		if sweep {
 			// Every listed container is now recorded or retained, so secret
-			// directories without an owner are orphans, as at startup.
-			a.removeOrphanedSecretDirs()
+			// directories and network attachments without an owner are
+			// orphans, as at startup.
+			a.removeOrphanedResources(ctx)
 		}
 	}
 }
@@ -1531,7 +1533,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove container %s: %w", allocID, err))
 			}
 		}
-		if err := a.network.Detach(context.WithoutCancel(ctx), netAttachment); err != nil {
+		if err := a.detachAllocationNetwork(context.WithoutCancel(ctx), alloc); err != nil {
 			cleanupErrs = append(cleanupErrs, fmt.Errorf("detach allocation network: %w", err))
 		}
 		if secretDir != "" {
@@ -1611,6 +1613,12 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	if wireGuard {
 		if networkPlan == nil {
 			return fmt.Errorf("automatic WireGuard network plan is required")
+		}
+		// Record the intent before Attach so a restarted agent can find and
+		// detach an attachment whose result was never recorded.
+		alloc.NetworkIntent = &network.AttachmentIntent{AllocationID: allocID, Namespace: namespace, Network: namespace}
+		if err := a.persistAllocation(alloc); err != nil {
+			return fmt.Errorf("persist network intent: %w", err)
 		}
 		netAttachment, err = a.network.Attach(ctx, network.AttachRequest{AllocationID: allocID, Namespace: namespace, Network: namespace, Plan: *networkPlan})
 		if err != nil {
@@ -1764,6 +1772,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		Draining:      draining,
 		DrainSequence: drainSequence,
 	}
+	ready.NetworkIntent = alloc.NetworkIntent
 	if ts.HealthCheck == nil {
 		ready.Health = "healthy"
 	}
@@ -1885,7 +1894,7 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string) error {
 		errs = append(errs, fmt.Errorf("untrack allocation %s: %w", allocID, err))
 	}
 
-	if err := a.network.Detach(ctx, alloc.Network); err != nil {
+	if err := a.detachAllocationNetwork(ctx, &alloc); err != nil {
 		errs = append(errs, fmt.Errorf("detach allocation network: %w", err))
 	}
 	containerRemoved := true
