@@ -1430,9 +1430,15 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	}
 	a.mu.Lock()
 	existing := a.allocations[allocID]
+	// Restart accounting belongs to the allocation generation. A start retry
+	// for the same generation keeps it, so repeated retries or agent restarts
+	// cannot hide a crash loop behind a fresh budget.
+	var restartAttempts int
+	var restartWindow time.Time
 	if existing != nil {
 		matching := existing.AllocationID == schedulerID && existing.Generation == generation && existing.JobRevision == jobRevision && existing.ExecutionHash == executionHash
 		status, exhausted, unobserved := existing.Status, existing.RestartExhausted, existing.unobserved
+		restartAttempts, restartWindow = existing.RestartAttempts, existing.RestartWindow
 		a.mu.Unlock()
 		if !matching {
 			return fmt.Errorf("%w: %s", ErrAllocationExists, allocID)
@@ -1464,7 +1470,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		}
 		a.mu.Lock()
 	}
-	alloc := &Allocation{ID: allocID, ContainerID: allocID, AllocationID: schedulerID, Generation: generation, JobRevision: jobRevision, ExecutionHash: executionHash, Restart: restartPolicy, Namespace: namespace, JobName: jobName, GroupName: groupName, TaskName: taskName, Spec: ts, Status: "starting", Health: "unknown", Draining: draining, DrainSequence: drainSequence}
+	alloc := &Allocation{ID: allocID, ContainerID: allocID, AllocationID: schedulerID, Generation: generation, JobRevision: jobRevision, ExecutionHash: executionHash, Restart: restartPolicy, RestartAttempts: restartAttempts, RestartWindow: restartWindow, Namespace: namespace, JobName: jobName, GroupName: groupName, TaskName: taskName, Spec: ts, Status: "starting", Health: "unknown", Draining: draining, DrainSequence: drainSequence}
 	starting := *alloc
 	a.allocations[allocID] = &starting
 	a.mu.Unlock()
@@ -1493,7 +1499,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 				// Start may have succeeded even if its response was lost. Track
 				// the retained allocation as stopping from the outset so an
 				// observed stopped task can never be restarted.
-				a.reconciler.TrackStopping(allocID, false, restartPolicy, 0, time.Time{}, false)
+				a.reconciler.TrackStopping(allocID, false, restartPolicy, restartAttempts, restartWindow, false)
 				tracked = true
 			}
 		}
@@ -1748,6 +1754,9 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		Restart:       restartPolicy,
 		Namespace:     namespace,
 
+		RestartAttempts: restartAttempts,
+		RestartWindow:   restartWindow,
+
 		JobName:   jobName,
 		GroupName: groupName,
 		TaskName:  ts.Name,
@@ -1776,9 +1785,9 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	// Track only after the running record is stored, so a restart decision
 	// (including terminal exhaustion) is never overwritten by startup.
 	if draining {
-		a.reconciler.TrackStopping(allocID, ts.HealthCheck != nil, restartPolicy, 0, time.Time{}, false)
+		a.reconciler.TrackStopping(allocID, ts.HealthCheck != nil, restartPolicy, restartAttempts, restartWindow, false)
 	} else {
-		a.reconciler.Track(allocID, ts.HealthCheck != nil, restartPolicy)
+		a.reconciler.TrackRecovered(allocID, ts.HealthCheck != nil, restartPolicy, restartAttempts, restartWindow, false)
 	}
 	tracked = true
 	if ts.HealthCheck != nil {
@@ -2073,7 +2082,11 @@ func (a *Agent) allocationStatuses() []api.AllocationStatus {
 		for _, p := range alloc.Ports {
 			ports = append(ports, api.PortMapping{HostPort: p.HostPort, ContainerPort: p.ContainerPort})
 		}
-		actual = append(actual, api.AllocationStatus{ID: alloc.AllocationID, Generation: alloc.Generation, Task: alloc.TaskName, Address: allocationNetworkAddress(alloc), Phase: lifecycle.Phase(alloc.Status), Health: lifecycle.Health(reportedHealth(alloc)), Ports: ports})
+		var reason api.OperationCode
+		if alloc.Status == "failed" && alloc.RestartExhausted {
+			reason = api.OperationRestartExhausted
+		}
+		actual = append(actual, api.AllocationStatus{ID: alloc.AllocationID, Generation: alloc.Generation, Task: alloc.TaskName, Address: allocationNetworkAddress(alloc), Phase: lifecycle.Phase(alloc.Status), Health: lifecycle.Health(reportedHealth(alloc)), Reason: reason, Ports: ports})
 	}
 	return actual
 }

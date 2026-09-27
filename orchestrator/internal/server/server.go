@@ -753,6 +753,7 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 		Generation    uint64
 		Phase         lifecycle.Phase
 		Health        lifecycle.Health
+		Reason        api.OperationCode
 		Endpoints     []api.AllocationEndpoint
 		Ports         []api.PortMapping
 		ObservedTasks map[string]bool
@@ -761,6 +762,9 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 	for _, a := range actual {
 		if !a.Phase.Valid() || !a.Health.Valid() {
 			return fmt.Errorf("invalid allocation state for %s: phase=%q health=%q", a.ID, a.Phase, a.Health)
+		}
+		if a.Reason != "" && (a.Phase != lifecycle.PhaseFailed || a.Reason != api.OperationRestartExhausted) {
+			return fmt.Errorf("invalid failure reason for %s: phase=%q reason=%q", a.ID, a.Phase, a.Reason)
 		}
 		phase, health := a.Phase, a.Health
 		key := fmt.Sprintf("%s/%d", a.ID, a.Generation)
@@ -785,6 +789,10 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 			info.ObservedTasks = make(map[string]bool)
 		}
 		info.ObservedTasks[a.Task] = true
+		// Keep the reason of a failed task whatever the report order.
+		if a.Reason != "" && (info.Reason == "" || a.Reason < info.Reason) {
+			info.Reason = a.Reason
+		}
 		info.Ports = append(info.Ports, a.Ports...)
 		if a.Task != "" || a.Address != "" || len(a.Ports) > 0 {
 			info.Endpoints = append(info.Endpoints, api.AllocationEndpoint{
@@ -832,7 +840,11 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 			}
 		}
 		if info.Phase.Valid() && lifecycle.CanObserve(a.Phase, info.Phase) {
-			_ = a.Transition(info.Phase, time.Now().UTC(), "", "")
+			var reason string
+			if info.Phase == lifecycle.PhaseFailed {
+				reason = string(info.Reason)
+			}
+			_ = a.Transition(info.Phase, time.Now().UTC(), reason, "")
 		}
 		_ = a.SetHealth(info.Health)
 		sort.Slice(info.Endpoints, func(i, j int) bool { return info.Endpoints[i].Task < info.Endpoints[j].Task })
