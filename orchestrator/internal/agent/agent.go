@@ -544,10 +544,11 @@ func (a *Agent) RunGroup(ctx context.Context, request *api.AllocationRequest) er
 	if err := a.prepareStart(ctx, request); err != nil {
 		return err
 	}
-	draining, drainSequence, newer := a.startDrainState(request)
-	if newer && draining {
+	draining, drainSequence := a.startDrainState(request)
+	if draining {
 		// Tasks that are already running keep their records, so apply the
-		// drain to them before any task of the generation can restart.
+		// drain to them before any task of the generation can restart. Each
+		// start reapplies it so a partially applied drain converges.
 		if err := a.applyDrain(request.AllocationID, request.Generation, drainSequence); err != nil {
 			return err
 		}
@@ -559,9 +560,9 @@ func (a *Agent) RunGroup(ctx context.Context, request *api.AllocationRequest) er
 			return err
 		}
 	}
-	if newer && !draining {
-		// Every task now runs, so a newer resume can reach the tasks that
-		// were already running with an older drain.
+	if !draining && drainSequence > 0 {
+		// Every task now runs, so a resume can reach the tasks that were
+		// already running with an older drain.
 		return a.applyResume(request.AllocationID, request.Generation, drainSequence)
 	}
 	return nil
@@ -570,22 +571,16 @@ func (a *Agent) RunGroup(ctx context.Context, request *api.AllocationRequest) er
 // startDrainState combines the drain state carried by a start request with the
 // newest drain or resume the agent already applied to that generation. The
 // higher sequence wins, so a delayed start cannot roll back a later drain.
-// newer reports that the request's state is newer than every local record.
-func (a *Agent) startDrainState(request *api.AllocationRequest) (draining bool, sequence uint64, newer bool) {
-	draining, sequence = request.Draining, request.DrainSequence
-	var local uint64
+func (a *Agent) startDrainState(request *api.AllocationRequest) (bool, uint64) {
+	draining, sequence := request.Draining, request.DrainSequence
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	for _, allocation := range a.allocations {
-		if allocation.AllocationID != request.AllocationID || allocation.Generation != request.Generation {
-			continue
-		}
-		local = max(local, allocation.DrainSequence)
-		if allocation.DrainSequence > sequence {
+		if allocation.AllocationID == request.AllocationID && allocation.Generation == request.Generation && allocation.DrainSequence > sequence {
 			draining, sequence = allocation.Draining, allocation.DrainSequence
 		}
 	}
-	return draining, sequence, request.DrainSequence > local
+	return draining, sequence
 }
 
 // UpdateNetworkPlan refreshes the network shared by running allocations.

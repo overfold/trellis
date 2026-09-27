@@ -1537,6 +1537,53 @@ func TestDrainingStartSuppressesAlreadyRunningTask(t *testing.T) {
 	}
 }
 
+type pullFailuresRuntime struct {
+	*reconcilerRuntime
+	failures map[string]int
+}
+
+func (r *pullFailuresRuntime) Pull(_ context.Context, image string) error {
+	if r.failures[image] > 0 {
+		r.failures[image]--
+		return errors.New("pull failed")
+	}
+	return nil
+}
+
+func TestPartiallyAppliedStartResumeConvergesOnRetry(t *testing.T) {
+	rt := &pullFailuresRuntime{
+		reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning},
+		failures:          map[string]int{"second-image": 1, "third-image": 1},
+	}
+	agent := newOperationTestAgent(t, rt)
+	request := operationTestRequest()
+	request.Tasks[1].Image = "second-image"
+	request.Tasks = append(request.Tasks, spec.TaskSpec{Name: "third", Image: "third-image"})
+	if err := agent.RunGroup(context.Background(), request); err == nil {
+		t.Fatal("start succeeded despite failed pull")
+	}
+	drain := &api.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Sequence: 3}
+	if err := agent.DrainGroup(drain); err != nil {
+		t.Fatalf("drain partially started allocation: %v", err)
+	}
+
+	// The resume reaches the new second task, then the third task fails.
+	request.Draining, request.DrainSequence = false, 4
+	if err := agent.RunGroup(context.Background(), request); err == nil {
+		t.Fatal("start succeeded despite failed pull")
+	}
+	if err := agent.RunGroup(context.Background(), request); err != nil {
+		t.Fatalf("start retry: %v", err)
+	}
+	firstID := "allocation-g2-first"
+	if got := agent.allocations[firstID]; got.Draining || got.DrainSequence != 4 {
+		t.Fatalf("already running task = %+v, want resumed sequence 4", got)
+	}
+	if state := agent.reconciler.states[firstID]; state == nil || state.stopping {
+		t.Fatal("already running task is still restart-suppressed after resume")
+	}
+}
+
 func TestRecoverNonRunningAllocationDefersRestartToServer(t *testing.T) {
 	for _, durableStatus := range []string{"running", "starting"} {
 		t.Run(durableStatus, func(t *testing.T) {
