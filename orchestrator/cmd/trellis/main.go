@@ -398,7 +398,9 @@ func run(parent context.Context, cfg *config) error {
 	if syscall.Sysinfo(&sysinfo) == nil {
 		memory = int64(sysinfo.Totalram) * int64(sysinfo.Unit)
 	}
-	ag.SetResources(goruntime.NumCPU()*1000, memory, goruntime.GOOS, goruntime.GOARCH)
+	if err := ag.SetResources(goruntime.NumCPU()*1000, memory, goruntime.GOOS, goruntime.GOARCH); err != nil {
+		return fmt.Errorf("configure node resources: %w", err)
+	}
 	ag.SetCapabilities(detectNodeCapabilities(cfg.Runtime))
 	if len(cfg.Labels) > 0 {
 		labels, err := parseLabels(cfg.Labels)

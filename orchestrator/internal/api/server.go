@@ -38,19 +38,27 @@ const (
 
 // NodeResponse contains the reported state and capacity of a node.
 type NodeResponse struct {
-	ID            uuid.UUID             `json:"id"`
-	Host          string                `json:"host"`
-	Port          int                   `json:"port"`
-	Status        NodeStatusResponse    `json:"status"`
-	LastHeartbeat time.Time             `json:"last_heartbeat"`
-	CPU           int                   `json:"cpu"`
-	Memory        int64                 `json:"memory"`
-	OS            string                `json:"os,omitempty"`
-	Arch          string                `json:"arch,omitempty"`
-	Labels        map[string]string     `json:"labels,omitempty"`
-	Volumes       []string              `json:"volumes,omitempty"`
-	Capabilities  []spec.NodeCapability `json:"capabilities,omitempty"`
-	Version       string                `json:"version,omitempty"`
+	ID                uuid.UUID             `json:"id"`
+	Host              string                `json:"host"`
+	Port              int                   `json:"port"`
+	Status            NodeStatusResponse    `json:"status"`
+	LastHeartbeat     time.Time             `json:"last_heartbeat"`
+	CPU               int                   `json:"cpu"`
+	Memory            int64                 `json:"memory"`
+	CPUCapacity       int                   `json:"cpu_capacity"`
+	MemoryCapacity    int64                 `json:"memory_capacity"`
+	CPUAllocatable    int                   `json:"cpu_allocatable"`
+	MemoryAllocatable int64                 `json:"memory_allocatable"`
+	CPUUsage          *float64              `json:"cpu_usage,omitempty"`
+	MemoryUsed        *int64                `json:"memory_used,omitempty"`
+	MemoryAvailable   *int64                `json:"memory_available,omitempty"`
+	MetricsAt         *time.Time            `json:"metrics_at,omitempty"`
+	OS                string                `json:"os,omitempty"`
+	Arch              string                `json:"arch,omitempty"`
+	Labels            map[string]string     `json:"labels,omitempty"`
+	Volumes           []string              `json:"volumes,omitempty"`
+	Capabilities      []spec.NodeCapability `json:"capabilities,omitempty"`
+	Version           string                `json:"version,omitempty"`
 }
 
 // NodeListResponse is the response returned when listing nodes.
@@ -63,6 +71,10 @@ type NodeRegistrationRequest struct {
 	Port               int                   `json:"port"`
 	CPU                int                   `json:"cpu"`
 	Memory             int64                 `json:"memory"`
+	CPUCapacity        int                   `json:"cpu_capacity,omitempty"`
+	MemoryCapacity     int64                 `json:"memory_capacity,omitempty"`
+	CPUAllocatable     int                   `json:"cpu_allocatable,omitempty"`
+	MemoryAllocatable  int64                 `json:"memory_allocatable,omitempty"`
 	OS                 string                `json:"os"`
 	Arch               string                `json:"arch"`
 	Labels             map[string]string     `json:"labels,omitempty"`
@@ -81,12 +93,20 @@ type NodeRegistrationResponse struct {
 
 // HeartbeatRequest reports a node and its current allocations.
 type HeartbeatRequest struct {
-	NodeID       uuid.UUID             `json:"id"`
-	Timestamp    time.Time             `json:"timestamp"`
-	Allocations  []AllocationStatus    `json:"allocations,omitempty"`
-	Volumes      []string              `json:"volumes,omitempty"`
-	Capabilities []spec.NodeCapability `json:"capabilities,omitempty"`
-	Version      string                `json:"version,omitempty"`
+	NodeID            uuid.UUID             `json:"id"`
+	Timestamp         time.Time             `json:"timestamp"`
+	Allocations       []AllocationStatus    `json:"allocations,omitempty"`
+	Volumes           []string              `json:"volumes,omitempty"`
+	Capabilities      []spec.NodeCapability `json:"capabilities,omitempty"`
+	Version           string                `json:"version,omitempty"`
+	CPUCapacity       int                   `json:"cpu_capacity,omitempty"`
+	MemoryCapacity    int64                 `json:"memory_capacity,omitempty"`
+	CPUAllocatable    int                   `json:"cpu_allocatable,omitempty"`
+	MemoryAllocatable int64                 `json:"memory_allocatable,omitempty"`
+	CPUUsage          *float64              `json:"cpu_usage,omitempty"`
+	MemoryUsed        *int64                `json:"memory_used,omitempty"`
+	MemoryAvailable   *int64                `json:"memory_available,omitempty"`
+	MetricsAt         *time.Time            `json:"metrics_at,omitempty"`
 }
 
 // AllocationStatus reports the observed state of an allocation.

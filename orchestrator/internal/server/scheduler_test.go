@@ -81,9 +81,9 @@ func TestScheduleIgnoresNodeAdvertisedVolumeWithoutDurableRegistration(t *testin
 }
 
 func TestScheduleRespectsResourcesAndDrainingNodes(t *testing.T) {
-	a := &Node{ID: uuid.New(), Status: NodeStatusHealthy, CPU: 1000, Memory: 1024}
-	b := &Node{ID: uuid.New(), Status: NodeStatusHealthy, CPU: 2000, Memory: 2048}
-	draining := &Node{ID: uuid.New(), Status: NodeStatusDraining, CPU: 10000, Memory: 10000}
+	a := &Node{ID: uuid.New(), Status: NodeStatusHealthy, CPUAllocatable: 1000, MemoryAllocatable: 1024}
+	b := &Node{ID: uuid.New(), Status: NodeStatusHealthy, CPUAllocatable: 2000, MemoryAllocatable: 2048}
+	draining := &Node{ID: uuid.New(), Status: NodeStatusDraining, CPUAllocatable: 10000, MemoryAllocatable: 10000}
 	tasks := []spec.TaskSpec{{Resources: &spec.ResourcesSpec{CPU: 750, Memory: 700}}}
 	placements := Schedule(&PlacementIntent{Count: 4, Nodes: []*Node{a, b, draining}, Tasks: tasks})
 	if len(placements) != 3 {
@@ -100,7 +100,7 @@ func TestScheduleRespectsResourcesAndDrainingNodes(t *testing.T) {
 
 func TestScheduleTreatsTaskGroupAsOneResourceUnit(t *testing.T) {
 	node := &Node{ID: uuid.New(), Status: NodeStatusHealthy}
-	node.CPU, node.Memory = 1000, 1024
+	node.CPUAllocatable, node.MemoryAllocatable = 1000, 1024
 	tasks := []spec.TaskSpec{
 		{Name: "app", Resources: &spec.ResourcesSpec{CPU: 600, Memory: 256}},
 		{Name: "proxy", Resources: &spec.ResourcesSpec{CPU: 500, Memory: 256}},
@@ -148,8 +148,8 @@ func TestScheduleReservesHostPortsWithinBatch(t *testing.T) {
 }
 
 func TestScheduleStacksReplicasWhenOnlyOneNodeFits(t *testing.T) {
-	a := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000001"), Status: NodeStatusHealthy, CPU: 1000}
-	b := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000002"), Status: NodeStatusHealthy, CPU: 50}
+	a := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000001"), Status: NodeStatusHealthy, CPUAllocatable: 1000}
+	b := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000002"), Status: NodeStatusHealthy, CPUAllocatable: 50}
 	tasks := []spec.TaskSpec{{Name: "server", Resources: &spec.ResourcesSpec{CPU: 100}}}
 
 	placements := Schedule(&PlacementIntent{Namespace: "default", JobName: "web", TaskGroupName: "api", Count: 2, Nodes: []*Node{a, b}, Tasks: tasks})

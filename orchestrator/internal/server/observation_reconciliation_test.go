@@ -21,7 +21,15 @@ func TestHeartbeatReturnsNoContent(t *testing.T) {
 	defer agent.server.Close()
 	node := &Node{ID: uuid.New(), Status: NodeStatusHealthy}
 	s.nodes[node.ID] = node
-	body, err := json.Marshal(api.HeartbeatRequest{NodeID: node.ID, Version: "test"})
+	usage := 0.25
+	used, available := int64(2<<30), int64(6<<30)
+	metricsAt := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	body, err := json.Marshal(api.HeartbeatRequest{
+		NodeID: node.ID, Version: "test",
+		CPUCapacity: 2000, MemoryCapacity: 8 << 30,
+		CPUAllocatable: 1900, MemoryAllocatable: 7 << 30,
+		CPUUsage: &usage, MemoryUsed: &used, MemoryAvailable: &available, MetricsAt: &metricsAt,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,6 +43,15 @@ func TestHeartbeatReturnsNoContent(t *testing.T) {
 	if recorder.Code != http.StatusNoContent || recorder.Body.Len() != 0 {
 		t.Fatalf("heartbeat response = status %d body %q, want empty 204", recorder.Code, recorder.Body.String())
 	}
+	if node.CPUCapacity != 2000 || node.CPUAllocatable != 1900 || node.CPUUsage == nil || *node.CPUUsage != usage {
+		t.Fatalf("node CPU observation = %#v", node)
+	}
+	if node.MemoryCapacity != 8<<30 || node.MemoryAllocatable != 7<<30 || node.MemoryUsed == nil || *node.MemoryUsed != used || node.MemoryAvailable == nil || *node.MemoryAvailable != available {
+		t.Fatalf("node memory observation = %#v", node)
+	}
+	if node.MetricsAt == nil || !node.MetricsAt.Equal(metricsAt) {
+		t.Fatalf("node metrics time = %v, want %v", node.MetricsAt, metricsAt)
+	}
 }
 
 func TestReconcileStopsHeartbeatObservedOrphanAfterRecoveryGrace(t *testing.T) {
@@ -45,7 +62,7 @@ func TestReconcileStopsHeartbeatObservedOrphanAfterRecoveryGrace(t *testing.T) {
 	s.leaderSince = s.now().Add(-leaderRecoveryGrace - time.Second)
 	if err := s.Heartbeat(context.Background(), node.ID, []api.AllocationStatus{{
 		ID: "orphan", Generation: 3, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy,
-	}}, "test", nil, nil); err != nil {
+	}}, "test", nil, nil, nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -71,7 +88,7 @@ func TestReconcileProtectsRecoveredObservationDuringLeaderGrace(t *testing.T) {
 	s.leaderSince = s.now()
 	if err := s.Heartbeat(context.Background(), node.ID, []api.AllocationStatus{{
 		ID: "recovered", Generation: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy,
-	}}, "test", nil, nil); err != nil {
+	}}, "test", nil, nil, nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -99,7 +116,7 @@ func TestReconcileStopsStaleObservedGeneration(t *testing.T) {
 	if err := s.Heartbeat(context.Background(), node.ID, []api.AllocationStatus{
 		{ID: "alloc", Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy},
 		{ID: "alloc", Generation: 2, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy},
-	}, "test", nil, nil); err != nil {
+	}, "test", nil, nil, nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
 	}
 
