@@ -495,44 +495,11 @@ func (c *ContainerdRuntime) Exec(ctx context.Context, containerID string, comman
 	if err != nil {
 		return 1, fmt.Errorf("constructing command %s: %w", command, err)
 	}
-	cleanupExec := true
-	defer func() {
-		if !cleanupExec {
-			return
-		}
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cleanupCancel()
-		_, _ = taskExec.Delete(cleanupCtx)
-	}()
-
-	exitChannel, err := taskExec.Wait(ctx)
-	if err != nil {
-		return 1, fmt.Errorf("waiting on command %s: %w", command, err)
-	}
-
-	err = taskExec.Start(ctx)
+	status, err := runExecProcess(ctx, taskExec)
 	if err != nil {
 		return 1, fmt.Errorf("executing command %s: %w", command, err)
 	}
-
-	var status containerd.ExitStatus
-	select {
-	case status = <-exitChannel:
-	case <-ctx.Done():
-		cleanupExec = false
-		go func() {
-			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-			defer cleanupCancel()
-			_ = taskExec.Kill(cleanupCtx, syscall.SIGKILL)
-			select {
-			case <-exitChannel:
-			case <-cleanupCtx.Done():
-				return
-			}
-			_, _ = taskExec.Delete(cleanupCtx)
-		}()
-		return 1, ctx.Err()
-	}
+	deleteExecProcess(ctx, taskExec)
 	code, _, err := status.Result()
 	if err != nil {
 		return 1, fmt.Errorf("extracting status %s: %w", command, err)
@@ -729,30 +696,100 @@ func (c *ContainerdRuntime) ExecOutput(ctx context.Context, containerID string, 
 	containerSpec, _ := container.Spec(ctx)
 	process := execProcessSpec(containerSpec, command, false)
 
-	var outBuf, errBuf bytes.Buffer
+	var outBuf, errBuf lockedBuffer
 	creator := cio.NewCreator(cio.WithStreams(nil, &outBuf, &errBuf))
 	taskExec, err := task.Exec(ctx, execID, process, creator)
 	if err != nil {
 		return nil, nil, 1, fmt.Errorf("constructing exec for %s: %w", containerID, err)
 	}
-	defer func() { _, _ = taskExec.Delete(ctx) }()
-
-	exitCh, err := taskExec.Wait(ctx)
+	status, err := runExecProcess(ctx, taskExec)
 	if err != nil {
-		return nil, nil, 1, fmt.Errorf("waiting on exec for %s: %w", containerID, err)
+		return nil, nil, 1, fmt.Errorf("exec in %s: %w", containerID, err)
 	}
-
-	if err := taskExec.Start(ctx); err != nil {
-		return nil, nil, 1, fmt.Errorf("starting exec for %s: %w", containerID, err)
-	}
-
-	status := <-exitCh
+	// Deleting the process waits for its output copy to finish.
+	deleteExecProcess(ctx, taskExec)
 	code, _, err := status.Result()
 	if err != nil {
 		return nil, nil, 1, fmt.Errorf("extracting exec status for %s: %w", containerID, err)
 	}
 
 	return outBuf.Bytes(), errBuf.Bytes(), int(code), nil
+}
+
+const execCleanupTimeout = 5 * time.Second
+
+// execProcess is the part of a containerd exec process used to run it to completion.
+type execProcess interface {
+	Wait(context.Context) (<-chan containerd.ExitStatus, error)
+	Start(context.Context) error
+	Kill(context.Context, syscall.Signal, ...containerd.KillOpts) error
+	Delete(context.Context, ...containerd.ProcessDeleteOpts) (*containerd.ExitStatus, error)
+}
+
+// runExecProcess starts a created exec process and waits for it to exit. If
+// ctx ends first, the process is killed and deleted in the background so it
+// does not outlive the request, and ctx's error is returned. On any other
+// error the process has been deleted; after a successful exit the caller
+// deletes it.
+func runExecProcess(ctx context.Context, process execProcess) (containerd.ExitStatus, error) {
+	// Waiting must survive cancellation so cleanup can observe the kill.
+	waitCtx, cancelWait := context.WithCancel(context.WithoutCancel(ctx))
+	exitCh, err := process.Wait(waitCtx)
+	if err != nil {
+		cancelWait()
+		deleteExecProcess(ctx, process)
+		return containerd.ExitStatus{}, fmt.Errorf("waiting on exec: %w", err)
+	}
+	if err := process.Start(ctx); err != nil {
+		cancelWait()
+		deleteExecProcess(ctx, process)
+		return containerd.ExitStatus{}, fmt.Errorf("starting exec: %w", err)
+	}
+	select {
+	case status := <-exitCh:
+		cancelWait()
+		return status, nil
+	case <-ctx.Done():
+		go func() {
+			defer cancelWait()
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), execCleanupTimeout)
+			defer cleanupCancel()
+			if err := process.Kill(cleanupCtx, syscall.SIGKILL); err != nil && !errdefs.IsNotFound(err) {
+				return
+			}
+			select {
+			case <-exitCh:
+			case <-cleanupCtx.Done():
+				return
+			}
+			_, _ = process.Delete(cleanupCtx)
+		}()
+		return containerd.ExitStatus{}, ctx.Err()
+	}
+}
+
+func deleteExecProcess(ctx context.Context, process execProcess) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), execCleanupTimeout)
+	defer cancel()
+	_, _ = process.Delete(cleanupCtx)
+}
+
+// lockedBuffer collects exec output written by containerd's IO copy goroutines.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) Bytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]byte(nil), b.buf.Bytes()...)
 }
 
 const terminalOutputLimit = 2 * 1024 * 1024

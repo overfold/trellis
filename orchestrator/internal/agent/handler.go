@@ -190,6 +190,12 @@ func (h *Handler) handleExec(c *echo.Context) error {
 		if errors.Is(err, ErrAllocationNotFound) {
 			return echo.NewHTTPError(http.StatusNotFound, err.Error())
 		}
+		if errors.Is(err, ErrExecTaskRequired) {
+			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+		}
+		if errors.Is(err, ErrExecutionConflict) {
+			return echo.NewHTTPError(http.StatusConflict, err.Error())
+		}
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 	return c.JSON(http.StatusOK, result)
@@ -216,6 +222,12 @@ func (h *Handler) handleCreateExecSession(c *echo.Context) error {
 	if err != nil {
 		if errors.Is(err, ErrAllocationNotFound) {
 			return echo.NewHTTPError(http.StatusNotFound, err.Error())
+		}
+		if errors.Is(err, ErrExecTaskRequired) {
+			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+		}
+		if errors.Is(err, ErrExecutionConflict) {
+			return echo.NewHTTPError(http.StatusConflict, err.Error())
 		}
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}

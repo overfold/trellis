@@ -59,6 +59,7 @@ type ContainerMetrics struct {
 // Implementations must support concurrent output reads and input writes.
 type TerminalSession interface {
 	Write([]byte) (int, error)
+	// Read returns output produced since offset; offsets past the end return no data.
 	Read(offset int64) (data []byte, nextOffset int64, exited bool, exitCode *int, err error)
 	Resize(ctx context.Context, cols, rows uint32) error
 	Close(ctx context.Context) error
