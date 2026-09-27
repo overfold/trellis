@@ -1590,6 +1590,35 @@ func TestStartResumeReachesRunningTasksDespiteLaterFailure(t *testing.T) {
 	assertResumed("after start retry")
 }
 
+func TestStartDrainStatePrefersHigherSequenceThenDraining(t *testing.T) {
+	agent := &Agent{allocations: map[string]*Allocation{
+		"a": {ID: "a", AllocationID: "allocation", Generation: 2, Draining: false, DrainSequence: 6},
+		"b": {ID: "b", AllocationID: "allocation", Generation: 2, Draining: true, DrainSequence: 6},
+		"c": {ID: "c", AllocationID: "allocation", Generation: 1, Draining: false, DrainSequence: 9},
+	}}
+	for _, test := range []struct {
+		name         string
+		draining     bool
+		sequence     uint64
+		wantDraining bool
+		wantSequence uint64
+	}{
+		{name: "older request", draining: false, sequence: 5, wantDraining: true, wantSequence: 6},
+		{name: "equal request wins", draining: false, sequence: 6, wantDraining: false, wantSequence: 6},
+		{name: "newer request", draining: false, sequence: 7, wantDraining: false, wantSequence: 7},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := &api.AllocationRequest{AllocationID: "allocation", Generation: 2, Draining: test.draining, DrainSequence: test.sequence}
+			for range 20 {
+				draining, sequence := agent.startDrainState(request)
+				if draining != test.wantDraining || sequence != test.wantSequence {
+					t.Fatalf("startDrainState = (%t, %d), want (%t, %d)", draining, sequence, test.wantDraining, test.wantSequence)
+				}
+			}
+		})
+	}
+}
+
 func TestRecoverNonRunningAllocationDefersRestartToServer(t *testing.T) {
 	for _, durableStatus := range []string{"running", "starting"} {
 		t.Run(durableStatus, func(t *testing.T) {

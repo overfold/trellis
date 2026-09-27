@@ -576,7 +576,12 @@ func (a *Agent) startDrainState(request *api.AllocationRequest) (bool, uint64) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	for _, allocation := range a.allocations {
-		if allocation.AllocationID == request.AllocationID && allocation.Generation == request.Generation && allocation.DrainSequence > sequence {
+		if allocation.AllocationID != request.AllocationID || allocation.Generation != request.Generation || allocation.DrainSequence <= request.DrainSequence {
+			continue
+		}
+		// Local records that disagree at one sequence resolve to draining, so
+		// the result never depends on map iteration order.
+		if allocation.DrainSequence > sequence || (allocation.DrainSequence == sequence && allocation.Draining) {
 			draining, sequence = allocation.Draining, allocation.DrainSequence
 		}
 	}
@@ -749,6 +754,8 @@ func (a *Agent) applyResume(allocationID string, generation, sequence uint64, sk
 		}
 		resumed = append(resumed, allocation)
 	}
+	// Snapshot reconciler inputs under a.mu; restart callbacks update them.
+	var running []Allocation
 	for _, allocation := range resumed {
 		previousDraining, previousSequence := allocation.Draining, allocation.DrainSequence
 		allocation.Draining = false
@@ -758,14 +765,15 @@ func (a *Agent) applyResume(allocationID string, generation, sequence uint64, sk
 			a.mu.Unlock()
 			return fmt.Errorf("persist resumed allocation: %w", err)
 		}
-	}
-	a.mu.Unlock()
-	for _, allocation := range resumed {
 		// The control plane will retry the start for a recovered starting task.
 		// Leave it untracked until that retry resolves its runtime state.
 		if allocation.Status == "running" {
-			a.reconciler.ResumeRestarts(allocation.ID, allocation.Spec != nil && allocation.Spec.HealthCheck != nil, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow)
+			running = append(running, *allocation)
 		}
+	}
+	a.mu.Unlock()
+	for _, allocation := range running {
+		a.reconciler.ResumeRestarts(allocation.ID, allocation.Spec != nil && allocation.Spec.HealthCheck != nil, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow)
 	}
 	return nil
 }
