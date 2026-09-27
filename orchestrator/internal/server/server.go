@@ -102,6 +102,14 @@ type Server struct {
 	resumeMu    sync.Mutex
 	resumes     map[resumeDeliveryKey]uint64
 	resumeEpoch uint64
+
+	// replacementPolicy bounds failed-allocation replacement and terminal
+	// record retention; the zero value selects DefaultReplacementPolicy.
+	replacementPolicy ReplacementPolicy
+	// replacementBackoffs holds the committed replacement backoff record of
+	// each job task group, keyed by replacementBackoffKey. Records are
+	// replaced, never mutated in place. Protected by mu.
+	replacementBackoffs map[string]*ReplacementBackoff
 }
 
 // SetSecretStore configures encrypted secret storage.
@@ -328,6 +336,8 @@ type Node struct {
 	WireGuardPortCount  int
 	Version             string
 	observedAllocations []observedAllocation
+	// observedAt is when the leader recorded observedAllocations.
+	observedAt time.Time
 }
 
 type observedAllocation struct {
@@ -454,6 +464,7 @@ func NewServer(log *slog.Logger, storage *storage.LocalStorage, state *StateCont
 		serverAddr:         serverAddr,
 		clusterName:        cluster,
 		jobLimits:          spec.DefaultLimits(),
+		replacementPolicy:  DefaultReplacementPolicy(),
 		now:                time.Now,
 	}
 	s.backupStore, _ = store.(desiredStore)
@@ -820,6 +831,7 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 	s.mu.Lock()
 	if current := s.nodes[nodeID]; current != nil {
 		current.observedAllocations = observed
+		current.observedAt = time.Now().UTC()
 	}
 	s.mu.Unlock()
 	var changed []*Allocation
@@ -1027,6 +1039,10 @@ func (s *Server) Reload(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("load allocations: %w", err)
 	}
+	backoffs, err := s.state.ListReplacementBackoffs(ctx)
+	if err != nil {
+		return fmt.Errorf("load replacement backoffs: %w", err)
+	}
 	nodes := make(map[uuid.UUID]*Node, len(nodeSummaries))
 	for _, summary := range nodeSummaries {
 		status := NodeStatusUnhealthy
@@ -1046,6 +1062,7 @@ func (s *Server) Reload(ctx context.Context) error {
 	s.jobs = jobs
 	s.nodes = nodes
 	s.allocations = allocations
+	s.replacementBackoffs = backoffs
 	s.mu.Unlock()
 	return nil
 }
@@ -1232,6 +1249,7 @@ func (s *Server) ListJobs(namespace string) api.JobListResponse {
 			}
 			a.mu.Unlock()
 		}
+		r.ReplacementBackoff = s.replacementBackoffResponsesLocked(namespace, name)
 		result = append(result, r)
 	}
 	return result
@@ -1266,6 +1284,7 @@ func (s *Server) GetJob(namespace, name string) (*api.JobStatusResponse, bool) {
 		}
 		a.mu.Unlock()
 	}
+	r.ReplacementBackoff = s.replacementBackoffResponsesLocked(namespace, name)
 	return r, true
 }
 

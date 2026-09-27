@@ -318,10 +318,40 @@ func printJobStatus(w io.Writer, status *api.JobStatusResponse) error {
 			return err
 		}
 	}
+	if err := printReplacementBackoff(w, status.ReplacementBackoff); err != nil {
+		return err
+	}
 	if jobReady(status) {
 		return nil
 	}
 	return printJobProblems(w, status)
+}
+
+func printReplacementBackoff(w io.Writer, backoffs []api.ReplacementBackoffResponse) error {
+	if len(backoffs) == 0 {
+		return nil
+	}
+	if _, err := fmt.Fprintln(w, "Replacement backoff:"); err != nil {
+		return err
+	}
+	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "Task group\tFailures\tNext replacement\tLast failure\tDiagnostic"); err != nil {
+		return err
+	}
+	for _, b := range backoffs {
+		diagnostic := b.Reason
+		if diagnostic == "" {
+			diagnostic = "—"
+		}
+		lastFailure := "—"
+		if b.LastAllocationID != "" {
+			lastFailure = shortID(b.LastAllocationID)
+		}
+		if _, err := fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\n", b.Group, b.Failures, b.NextReplacementAt.Format(time.RFC3339), lastFailure, diagnostic); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
 }
 
 func printJobProblems(w io.Writer, status *api.JobStatusResponse) error {

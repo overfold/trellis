@@ -42,6 +42,9 @@ type metricsCollector struct {
 	nodeCPUAllocatedDesc *prometheus.Desc
 	nodeMemAllocatedDesc *prometheus.Desc
 	nodeHeartbeatAgeDesc *prometheus.Desc
+
+	replacementFailuresDesc *prometheus.Desc
+	replacementDelayDesc    *prometheus.Desc
 }
 
 func newDescriptors() (
@@ -98,6 +101,16 @@ func (c *metricsCollector) init() {
 		c.nodeCPUCapacityDesc, c.nodeMemCapacityDesc,
 		c.nodeCPUAllocatedDesc, c.nodeMemAllocatedDesc,
 		c.nodeHeartbeatAgeDesc = newDescriptors()
+	c.replacementFailuresDesc = prometheus.NewDesc(
+		"trellis_replacement_backoff_failures",
+		"Consecutive failed allocations counted toward a task group's replacement backoff.",
+		[]string{"namespace", "job", "group"}, nil,
+	)
+	c.replacementDelayDesc = prometheus.NewDesc(
+		"trellis_replacement_backoff_remaining_seconds",
+		"Seconds until new allocations may be placed for a task group in replacement backoff.",
+		[]string{"namespace", "job", "group"}, nil,
+	)
 }
 
 func (c *metricsCollector) Describe(ch chan<- *prometheus.Desc) {
@@ -110,6 +123,8 @@ func (c *metricsCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.nodeCPUAllocatedDesc
 	ch <- c.nodeMemAllocatedDesc
 	ch <- c.nodeHeartbeatAgeDesc
+	ch <- c.replacementFailuresDesc
+	ch <- c.replacementDelayDesc
 }
 
 func (c *metricsCollector) Collect(ch chan<- prometheus.Metric) {
@@ -185,6 +200,14 @@ func (c *metricsCollector) Collect(ch chan<- prometheus.Metric) {
 		if !node.LastHeartbeat.IsZero() {
 			ch <- prometheus.MustNewConstMetric(c.nodeHeartbeatAgeDesc, prometheus.GaugeValue, now.Sub(node.LastHeartbeat).Seconds(), nodeID)
 		}
+	}
+
+	for _, backoff := range s.replacementBackoffs {
+		if backoff.Failures == 0 {
+			continue
+		}
+		ch <- prometheus.MustNewConstMetric(c.replacementFailuresDesc, prometheus.GaugeValue, float64(backoff.Failures), backoff.Namespace, backoff.JobName, backoff.TaskGroupName)
+		ch <- prometheus.MustNewConstMetric(c.replacementDelayDesc, prometheus.GaugeValue, max(backoff.NextReplacementAt.Sub(now).Seconds(), 0), backoff.Namespace, backoff.JobName, backoff.TaskGroupName)
 	}
 
 	s.mu.RUnlock()

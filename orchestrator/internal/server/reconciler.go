@@ -240,6 +240,10 @@ func (s *Server) Reconcile(ctx context.Context) {
 	if limits == (spec.Limits{}) {
 		limits = spec.DefaultLimits()
 	}
+	policy := s.replacementPolicy
+	if policy == (ReplacementPolicy{}) {
+		policy = DefaultReplacementPolicy()
+	}
 	admittedJobs := make(map[string]bool, len(jobKeys))
 	namespaceDesired := make(map[string]int64)
 	for _, key := range jobKeys {
@@ -446,6 +450,7 @@ func (s *Server) Reconcile(ctx context.Context) {
 		allocation.mu.Unlock()
 	}
 
+	plannedBackoffs := make(map[string]*ReplacementBackoff)
 	for _, key := range jobKeys {
 		job := s.jobs[key]
 		if !admittedJobs[key] {
@@ -454,6 +459,9 @@ func (s *Server) Reconcile(ctx context.Context) {
 		jobName := job.Spec.Name
 		namespace := job.Spec.Namespace
 		for _, group := range job.Spec.TaskGroups {
+			backoffKey := replacementBackoffKey(namespace, jobName, group.Name)
+			backoff := planReplacementBackoff(policy, s.replacementBackoffs[backoffKey], namespace, jobName, group.Name, job.Revision, allocations, now)
+			plannedBackoffs[backoffKey] = backoff
 			var current []*Allocation
 			var pending []*Allocation
 			var draining []*Allocation
@@ -516,6 +524,11 @@ func (s *Server) Reconcile(ctx context.Context) {
 					continue
 				}
 			}
+			if deficit > 0 && backoff.active(now) {
+				// Failed allocations of this group are replaced only after the
+				// backoff elapses; the next pass after it places them.
+				continue
+			}
 			requiredCapabilities := spec.GroupRequiredCapabilities(&group)
 			placements := Schedule(&PlacementIntent{Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Count: deficit, Nodes: s.nodePointers(), Allocations: valid, Tasks: group.Tasks, Constraints: group.Constraints, RequiredCapabilities: requiredCapabilities, VolumeOwners: volumeOwners})
 			for i, placement := range placements {
@@ -544,10 +557,60 @@ func (s *Server) Reconcile(ctx context.Context) {
 			}
 		}
 	}
-	lockedUpdates := make([]*Allocation, 0, len(plannedUpdates))
+	pruned := planTerminalPruning(policy.RetainTerminal, allocations, s.nodes, plannedUpdates)
+	prunedSet := make(map[*Allocation]bool, len(pruned))
+	for _, allocation := range pruned {
+		prunedSet[allocation] = true
+	}
+	retainedGroups := make(map[string]bool)
+	for _, allocation := range allocations {
+		if !prunedSet[allocation] {
+			retainedGroups[replacementBackoffKey(allocation.Namespace, allocation.JobName, allocation.TaskGroupName)] = true
+		}
+	}
+	for _, allocation := range newAllocations {
+		retainedGroups[replacementBackoffKey(allocation.Namespace, allocation.JobName, allocation.TaskGroupName)] = true
+	}
+	var backoffPuts, backoffDeletes []*ReplacementBackoff
+	var delayed []*ReplacementBackoff
+	for key, previous := range s.replacementBackoffs {
+		if _, planned := plannedBackoffs[key]; planned {
+			continue
+		}
+		job := s.jobs[jobKey(previous.Namespace, previous.JobName)]
+		if job != nil && !admittedJobs[jobKey(previous.Namespace, previous.JobName)] {
+			continue
+		}
+		if !retainedGroups[key] {
+			backoffDeletes = append(backoffDeletes, previous)
+			continue
+		}
+		// The group is no longer desired: forget its failures but keep the
+		// record, and with it the failed allocations already seen, while the
+		// group's allocation records remain.
+		plannedBackoffs[key] = planReplacementBackoff(policy, previous, previous.Namespace, previous.JobName, previous.TaskGroupName, 0, allocations, now)
+	}
+	backoffKeys := make([]string, 0, len(plannedBackoffs))
+	for key := range plannedBackoffs {
+		backoffKeys = append(backoffKeys, key)
+	}
+	sort.Strings(backoffKeys)
+	for _, key := range backoffKeys {
+		next, previous := plannedBackoffs[key], s.replacementBackoffs[key]
+		if next == nil || next.equal(previous) {
+			continue
+		}
+		backoffPuts = append(backoffPuts, next)
+		if previous == nil || next.Failures > previous.Failures {
+			delayed = append(delayed, next)
+		}
+	}
+	sort.Slice(backoffDeletes, func(i, j int) bool { return backoffDeletes[i].key() < backoffDeletes[j].key() })
+
+	lockedUpdates := make([]*Allocation, 0, len(plannedUpdates)+len(pruned))
 	canonicalNodes := make(map[*Allocation]*Node, len(plannedUpdates))
 	for _, allocation := range allocations {
-		if !plannedUpdates[allocation] {
+		if !plannedUpdates[allocation] && !prunedSet[allocation] {
 			continue
 		}
 		original := originalByPlan[allocation]
@@ -564,7 +627,7 @@ func (s *Server) Reconcile(ctx context.Context) {
 			}
 			return
 		}
-		if allocation.Node != nil {
+		if plannedUpdates[allocation] && allocation.Node != nil {
 			canonicalNodes[allocation] = s.nodes[allocation.Node.ID]
 			if canonicalNodes[allocation] == nil {
 				original.mu.Unlock()
@@ -620,7 +683,11 @@ func (s *Server) Reconcile(ctx context.Context) {
 		}
 	}
 	updates = append(updates, persistedNewAllocations...)
-	if err := s.state.PutAllocations(ctx, updates); err != nil {
+	prunedIDs := make([]string, len(pruned))
+	for i, allocation := range pruned {
+		prunedIDs[i] = allocation.ID
+	}
+	if err := s.state.CommitReconciliation(ctx, &ReconciliationCommit{Allocations: updates, DeleteAllocations: prunedIDs, Backoffs: backoffPuts, DeleteBackoffs: backoffDeletes}); err != nil {
 		s.log.Error("persist reconciliation allocation updates", "error", err)
 		unlockUpdates()
 		return
@@ -636,10 +703,51 @@ func (s *Server) Reconcile(ctx context.Context) {
 			actions[i].Allocation = original
 		}
 	}
-	if len(newAllocations) > 0 {
+	if len(newAllocations) > 0 || len(pruned) > 0 || len(backoffPuts) > 0 || len(backoffDeletes) > 0 {
 		s.mu.Lock()
+		if len(pruned) > 0 {
+			removed := make(map[*Allocation]bool, len(pruned))
+			for _, allocation := range pruned {
+				removed[originalByPlan[allocation]] = true
+			}
+			kept := s.allocations[:0:0]
+			for _, allocation := range s.allocations {
+				if !removed[allocation] {
+					kept = append(kept, allocation)
+				}
+			}
+			s.allocations = kept
+		}
 		s.allocations = append(s.allocations, newAllocations...)
+		if len(backoffPuts) > 0 || len(backoffDeletes) > 0 {
+			backoffs := make(map[string]*ReplacementBackoff, len(s.replacementBackoffs)+len(backoffPuts))
+			for key, backoff := range s.replacementBackoffs {
+				backoffs[key] = backoff
+			}
+			for _, backoff := range backoffPuts {
+				backoffs[backoff.key()] = backoff
+			}
+			for _, backoff := range backoffDeletes {
+				delete(backoffs, backoff.key())
+			}
+			s.replacementBackoffs = backoffs
+		}
 		s.mu.Unlock()
+	}
+	for _, backoff := range delayed {
+		next := backoff.NextReplacementAt
+		s.log.Info("delaying task group replacement after failed allocations", "namespace", backoff.Namespace, "job", backoff.JobName, "group", backoff.TaskGroupName, "failures", backoff.Failures, "next_replacement_at", next, "last_allocation", backoff.LastAllocationID)
+		s.events.publish(api.ClusterEvent{
+			Type:              api.EventJobReplacementDelayed,
+			Namespace:         backoff.Namespace,
+			JobName:           backoff.JobName,
+			Group:             backoff.TaskGroupName,
+			AllocationID:      backoff.LastAllocationID,
+			Revision:          backoff.JobRevision,
+			Failures:          backoff.Failures,
+			NextReplacementAt: &next,
+			At:                now,
+		})
 	}
 
 	for i := range actions {

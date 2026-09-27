@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/clofour/trellis/internal/api"
 	"github.com/clofour/trellis/internal/lifecycle"
@@ -87,6 +88,33 @@ func TestPrintJobPlanFormatsHumanDurations(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "1m0s -> 2m0s") {
 		t.Fatalf("plan output did not humanize duration: %q", out.String())
+	}
+}
+
+func TestPrintJobStatusIncludesReplacementBackoff(t *testing.T) {
+	next := time.Date(2026, 9, 27, 12, 0, 40, 0, time.UTC)
+	status := &api.JobStatusResponse{
+		Name:     "web",
+		Revision: 1,
+		Desired:  1,
+		ReplacementBackoff: []api.ReplacementBackoffResponse{{
+			Group:             "api",
+			JobRevision:       1,
+			Failures:          3,
+			LastAllocationID:  "default-web-api-1234abcd",
+			Reason:            "restart_budget_exhausted",
+			NextReplacementAt: next,
+		}},
+	}
+	var out strings.Builder
+	if err := printJobStatus(&out, status); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	for _, want := range []string{"Replacement backoff:", "api", "3", "2026-09-27T12:00:40Z", "restart_budget_exhausted"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("status output %q does not contain %q", text, want)
+		}
 	}
 }
 
