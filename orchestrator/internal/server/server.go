@@ -768,7 +768,9 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 		if len(info.ObservedTasks) == 0 {
 			info.ID, info.Generation, info.Phase, info.Health = a.ID, a.Generation, phase, health
 		} else {
-			if phase != lifecycle.PhaseRunning {
+			// A terminally failed task fails the whole group regardless of
+			// the order in which the agent reports sibling tasks.
+			if phase != lifecycle.PhaseRunning && info.Phase != lifecycle.PhaseFailed {
 				info.Phase = phase
 			}
 			if info.Health == lifecycle.HealthUnhealthy || health == lifecycle.HealthUnhealthy {
@@ -829,7 +831,7 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 				break
 			}
 		}
-		if info.Phase.Valid() && lifecycle.CanTransition(a.Phase, info.Phase) {
+		if info.Phase.Valid() && lifecycle.CanObserve(a.Phase, info.Phase) {
 			_ = a.Transition(info.Phase, time.Now().UTC(), "", "")
 		}
 		_ = a.SetHealth(info.Health)

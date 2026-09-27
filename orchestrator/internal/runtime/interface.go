@@ -43,6 +43,9 @@ type ContainerInfo struct {
 
 // ManagedRuntime is implemented by runtimes that can inventory Trellis-owned
 // containers for restart adoption and confirmed orphan collection.
+// ListManaged reports a container it cannot fully read with StatusUnknown
+// rather than failing the listing or omitting it; such an entry may lack
+// labels, in which case its cluster ownership is unknown.
 type ManagedRuntime interface {
 	ListManaged(ctx context.Context, cluster string) ([]ContainerInfo, error)
 }
@@ -59,6 +62,7 @@ type ContainerMetrics struct {
 // Implementations must support concurrent output reads and input writes.
 type TerminalSession interface {
 	Write([]byte) (int, error)
+	// Read returns output produced since offset; offsets past the end return no data.
 	Read(offset int64) (data []byte, nextOffset int64, exited bool, exitCode *int, err error)
 	Resize(ctx context.Context, cols, rows uint32) error
 	Close(ctx context.Context) error

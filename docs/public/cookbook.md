@@ -115,7 +115,7 @@ restart:
   window: 5m
 ```
 
-The group-level policy applies to the tasks in each allocation. Use a small bounded retry budget for failures that are plausibly transient. Once the allowed failures in the window are exhausted, the allocation remains failed so an operator can inspect its reason, message, attempts, events, and logs instead of entering an unlimited crash loop.
+The group-level policy applies to the tasks in each allocation. Use a small bounded retry budget for failures that are plausibly transient. Once the allowed failures in the window are exhausted, the allocation becomes `failed` permanently instead of entering an unlimited crash loop, and its record and event history remain for inspection. The control plane replaces it with a new allocation to keep the group at `count`, so a persistent defect shows up as a series of failed allocations rather than as one restarting container.
 
 Do not treat restart policy as a substitute for readiness checks or correct dependencies. Repeated startup failures usually indicate a bad revision, missing secret, unavailable volume, invalid configuration, or application defect; use `trellisctl jobs status NAME` after the retry budget is exhausted.
 
