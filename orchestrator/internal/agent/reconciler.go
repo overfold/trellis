@@ -281,9 +281,8 @@ func (r *AllocationReconciler) restart(ctx context.Context, allocID string) erro
 	}
 	r.mu.Unlock()
 
-	if healthManaged {
-		r.publishStatus(allocID, "running")
-	} else {
+	r.publishStatus(allocID, "running")
+	if !healthManaged {
 		r.publishStatus(allocID, "healthy")
 	}
 	return nil
