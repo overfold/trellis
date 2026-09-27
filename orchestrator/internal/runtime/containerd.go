@@ -4,6 +4,7 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/netip"
@@ -30,8 +31,9 @@ const gracePeriod = 10 * time.Second
 
 // ContainerdRuntime implements container lifecycle operations with containerd.
 type ContainerdRuntime struct {
-	client *containerd.Client
-	logDir string
+	client       *containerd.Client
+	logDir       string
+	legacyLogDir string
 }
 
 // Port maps a host port to a container port.
@@ -55,8 +57,9 @@ func NewContainerdRuntime(socketPath string) (*ContainerdRuntime, error) {
 	}
 
 	return &ContainerdRuntime{
-		client: client,
-		logDir: filepath.Join(os.TempDir(), "trellis-logs"),
+		client:       client,
+		logDir:       "/var/lib/trellis/runtime",
+		legacyLogDir: filepath.Join(os.TempDir(), "trellis-logs"),
 	}, nil
 }
 
@@ -78,20 +81,50 @@ func (c *ContainerdRuntime) Pull(ctx context.Context, image string) error {
 }
 
 // Create creates a container from the supplied options.
-func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (string, error) {
+func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (id string, err error) {
 	ctx = c.withNamespace(ctx)
+	if err := ensureRuntimeDir(c.logDir); err != nil {
+		return "", fmt.Errorf("create runtime directory: %w", err)
+	}
 
 	image, err := c.client.GetImage(ctx, options.Image)
 	if err != nil {
 		return "", fmt.Errorf("getting image %s: %w", options.Image, err)
 	}
+	if err := reclaimStaleMountFiles(ctx, []string{
+		filepath.Join(c.logDir, options.ID+"-resolv.conf"),
+		filepath.Join(c.logDir, options.ID+"-hosts"),
+	}, func(lookupCtx context.Context) error {
+		_, loadErr := c.client.LoadContainer(lookupCtx, options.ID)
+		return loadErr
+	}); err != nil {
+		return "", fmt.Errorf("reclaim mount files for %s: %w", options.ID, err)
+	}
 
 	allMounts := convertMounts(options.Mounts)
+	var createdFiles []string
+	creationAttempted := false
+	defer func() {
+		if err == nil || len(createdFiles) == 0 {
+			return
+		}
+		if creationAttempted {
+			// A failed response may still have created the container. Only
+			// remove its mount sources when containerd confirms it is absent.
+			err = errors.Join(err, removeCreateFilesAfterFailedCreate(ctx, createdFiles, func(cleanupCtx context.Context) error {
+				_, loadErr := c.client.LoadContainer(cleanupCtx, options.ID)
+				return loadErr
+			}))
+			return
+		}
+		err = errors.Join(err, removeRuntimeFiles(createdFiles...))
+	}()
 	if len(options.DNSServers) > 0 {
 		resolvPath := filepath.Join(c.logDir, options.ID+"-resolv.conf")
 		if err := writeDNSConfig(resolvPath, options.DNSServers); err != nil {
 			return "", fmt.Errorf("write resolv.conf for %s: %w", options.ID, err)
 		}
+		createdFiles = append(createdFiles, resolvPath)
 		allMounts = append(allMounts, specs.Mount{
 			Source:      resolvPath,
 			Destination: "/etc/resolv.conf",
@@ -104,6 +137,7 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 		if err := writeHostsConfig(hostsPath, options.ExtraHosts); err != nil {
 			return "", fmt.Errorf("write hosts file for %s: %w", options.ID, err)
 		}
+		createdFiles = append(createdFiles, hostsPath)
 		allMounts = append(allMounts, specs.Mount{
 			Source:      hostsPath,
 			Destination: "/etc/hosts",
@@ -150,6 +184,7 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 			return "", fmt.Errorf("unsupported runtime %q", options.Runtime)
 		}
 	}
+	creationAttempted = true
 	container, err := c.client.NewContainer(ctx, options.ID, containerOpts...)
 	if err != nil {
 		return "", fmt.Errorf("creating container %s: %w", options.ID, err)
@@ -167,7 +202,7 @@ func (c *ContainerdRuntime) Start(ctx context.Context, containerID string) error
 		return fmt.Errorf("loading container %s: %w", containerID, err)
 	}
 
-	if err := os.MkdirAll(c.logDir, 0o750); err != nil {
+	if err := ensureRuntimeDir(c.logDir); err != nil {
 		return fmt.Errorf("create log directory: %w", err)
 	}
 	task, err := container.NewTask(ctx, cio.LogFile(c.logPath(containerID)))
@@ -188,13 +223,84 @@ func (c *ContainerdRuntime) logPath(containerID string) string {
 	return filepath.Join(c.logDir, filepath.Base(containerID)+".log")
 }
 
+func ensureRuntimeDir(path string) error {
+	return ensureOwnedDir(path, true)
+}
+
+func ensureOwnedDir(path string, private bool) error {
+	if parent := filepath.Dir(path); parent != path {
+		if err := ensureOwnedDir(parent, false); err != nil {
+			return err
+		}
+	}
+	if err := os.Mkdir(path, 0o750); err != nil && !os.IsExist(err) {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	return checkOwnedDir(path, info, 0, private)
+}
+
+func checkOwnedDir(path string, info os.FileInfo, uid uint32, private bool) error {
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", path)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uid || info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("%s must be owned by UID %d and not writable by other users", path, uid)
+	}
+	if private && info.Mode().Perm()&0o007 != 0 {
+		return fmt.Errorf("%s must not be accessible by other users", path)
+	}
+	return nil
+}
+
 // Logs opens the log stream for a container.
 func (c *ContainerdRuntime) Logs(ctx context.Context, containerID string, follow bool, tail int) (io.ReadCloser, error) {
 	file, err := os.Open(c.logPath(containerID))
+	if os.IsNotExist(err) {
+		file, err = c.openLegacyLog(filepath.Base(containerID) + ".log")
+	}
 	if err != nil {
 		return nil, fmt.Errorf("open logs for %s: %w", containerID, err)
 	}
 	return newLogReader(ctx, file, follow, tail)
+}
+
+func (c *ContainerdRuntime) openLegacyLog(name string) (*os.File, error) {
+	dir, err := os.OpenFile(c.legacyLogDir, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_DIRECTORY, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = dir.Close() }()
+	info, err := dir.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if err := checkOwnedDir(c.legacyLogDir, info, uint32(os.Geteuid()), true); err != nil {
+		return nil, err
+	}
+	fd, err := syscall.Openat(int(dir.Fd()), name, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fd), filepath.Join(c.legacyLogDir, name))
+	info, err = file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		_ = file.Close()
+		if err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("legacy log %s is not a regular file", name)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uint32(os.Geteuid()) {
+		_ = file.Close()
+		return nil, fmt.Errorf("legacy log %s must be owned by the runtime user", name)
+	}
+	return file, nil
 }
 
 // Restart stops and starts a container.
@@ -284,17 +390,86 @@ func (c *ContainerdRuntime) Remove(ctx context.Context, containerID string) erro
 
 	container, err := c.client.LoadContainer(ctx, containerID)
 	if err != nil {
-		if errdefs.IsNotFound(err) {
-			return nil
+		if !errdefs.IsNotFound(err) {
+			return fmt.Errorf("loading container %s: %w", containerID, err)
 		}
-		return fmt.Errorf("loading container %s: %w", containerID, err)
+	} else {
+		err = container.Delete(ctx, containerd.WithSnapshotCleanup)
+		if err != nil && !errdefs.IsNotFound(err) {
+			return fmt.Errorf("deleting container %s: %w", containerID, err)
+		}
 	}
 
-	err = container.Delete(ctx, containerd.WithSnapshotCleanup)
-	if err != nil && !errdefs.IsNotFound(err) {
-		return fmt.Errorf("deleting container %s: %w", containerID, err)
-	}
+	return c.removeAllocationFiles(containerID)
+}
 
+func (c *ContainerdRuntime) removeAllocationFiles(containerID string) error {
+	name := filepath.Base(containerID)
+	var paths []string
+	for _, suffix := range []string{".log", "-resolv.conf", "-hosts"} {
+		paths = append(paths, filepath.Join(c.logDir, name+suffix))
+	}
+	err := removeRuntimeFiles(paths...)
+	// Old log locations may be controlled by local users. Cleanup there is best effort.
+	if dir, openErr := os.OpenFile(c.legacyLogDir, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_DIRECTORY, 0); openErr == nil {
+		removeLegacyAllocationFiles(dir, name)
+		_ = dir.Close()
+	}
+	return err
+}
+
+func removeLegacyAllocationFiles(dir *os.File, name string) {
+	info, err := dir.Stat()
+	if err != nil || checkOwnedDir(dir.Name(), info, uint32(os.Geteuid()), true) != nil {
+		return
+	}
+	for _, suffix := range []string{".log", "-resolv.conf", "-hosts"} {
+		// Stay anchored to the checked directory even if a writable ancestor
+		// of the legacy temp directory is renamed or replaced with a symlink.
+		_ = syscall.Unlinkat(int(dir.Fd()), name+suffix)
+	}
+}
+
+func removeRuntimeFiles(paths ...string) error {
+	var errs []error
+	for _, path := range paths {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("remove runtime file %s: %w", path, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func removeCreateFilesIfAbsent(paths []string, loadErr error) error {
+	if !errdefs.IsNotFound(loadErr) {
+		return nil
+	}
+	return removeRuntimeFiles(paths...)
+}
+
+func removeCreateFilesAfterFailedCreate(ctx context.Context, paths []string, load func(context.Context) error) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	return removeCreateFilesIfAbsent(paths, load(cleanupCtx))
+}
+
+func reclaimStaleMountFiles(ctx context.Context, paths []string, load func(context.Context) error) error {
+	for _, path := range paths {
+		if _, err := os.Lstat(path); err == nil {
+			lookupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			loadErr := load(lookupCtx)
+			cancel()
+			if loadErr == nil {
+				return nil
+			}
+			if !errdefs.IsNotFound(loadErr) {
+				return fmt.Errorf("check container before reclaiming mount files: %w", loadErr)
+			}
+			return removeRuntimeFiles(paths...)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("inspect mount file %s: %w", path, err)
+		}
+	}
 	return nil
 }
 
@@ -500,7 +675,7 @@ func writeDNSConfig(path string, servers []string) error {
 		}
 		content += "nameserver " + server + "\n"
 	}
-	return os.WriteFile(path, []byte(content), 0o644)
+	return writeRuntimeFile(path, content)
 }
 
 func writeHostsConfig(path string, hosts map[string]string) error {
@@ -516,7 +691,24 @@ func writeHostsConfig(path string, hosts map[string]string) error {
 	for _, name := range names {
 		content += hosts[name] + " " + name + "\n"
 	}
-	return os.WriteFile(path, []byte(content), 0o644)
+	return writeRuntimeFile(path, content)
+}
+
+func writeRuntimeFile(path, content string) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o644)
+	if err != nil {
+		return err
+	}
+	_, err = io.WriteString(file, content)
+	closeErr := file.Close()
+	if err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	if closeErr != nil {
+		_ = os.Remove(path)
+	}
+	return closeErr
 }
 
 // ExecOutput runs a command in a container and returns its captured output.
