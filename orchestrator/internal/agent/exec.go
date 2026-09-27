@@ -7,6 +7,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -40,14 +41,11 @@ type execSession struct {
 	exitedAt   time.Time
 }
 
-// expired reports whether the session should be reaped. It must be called
-// with the agent lock held.
-func (s *execSession) expired(now time.Time) bool {
-	if s.exitedAt.IsZero() {
-		// Reading from the end of the buffer reports exit without copying output.
-		if _, _, exited, _, err := s.Terminal.Read(math.MaxInt64); err == nil && exited {
-			s.exitedAt = now
-		}
+// expired reports whether the session should be reaped, given whether its
+// process has been observed to exit. It must be called with the agent lock held.
+func (s *execSession) expired(now time.Time, exited bool) bool {
+	if exited && s.exitedAt.IsZero() {
+		s.exitedAt = now
 	}
 	if !s.exitedAt.IsZero() {
 		return now.Sub(s.exitedAt) >= execSessionExitRetention
@@ -174,7 +172,7 @@ func (a *Agent) CreateExecSession(ctx context.Context, allocID, task string, com
 	if a.execSessionsClosed {
 		a.mu.Unlock()
 		a.closeTerminal(ctx, allocID, terminal)
-		return nil, fmt.Errorf("%w: agent is shutting down", ErrAllocationNotFound)
+		return nil, ErrAgentShuttingDown
 	}
 	// A stop marks the record stopping before it closes the record's sessions,
 	// so a session registered here is either closed by that stop or refused.
@@ -283,9 +281,15 @@ func (a *Agent) closeExecSessions(ctx context.Context, match func(*execSession) 
 		}
 	}
 	a.mu.Unlock()
+	var wg sync.WaitGroup
 	for _, session := range sessions {
-		a.closeTerminal(ctx, session.AllocationID, session.Terminal)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			a.closeTerminal(ctx, session.AllocationID, session.Terminal)
+		}()
 	}
+	wg.Wait()
 }
 
 func (a *Agent) closeTerminal(ctx context.Context, allocID string, terminal runtime.TerminalSession) {
@@ -299,7 +303,20 @@ func (a *Agent) closeTerminal(ctx context.Context, allocID string, terminal runt
 // reapExecSessions releases exited sessions after their retention period and
 // closes live sessions that have been idle too long.
 func (a *Agent) reapExecSessions(ctx context.Context, now time.Time) {
-	a.closeExecSessions(ctx, func(session *execSession) bool { return session.expired(now) })
+	// Observe exits without the agent lock; terminal reads can wait on output.
+	a.mu.RLock()
+	sessions := make([]*execSession, 0, len(a.execSessions))
+	for _, session := range a.execSessions {
+		sessions = append(sessions, session)
+	}
+	a.mu.RUnlock()
+	exited := make(map[*execSession]bool)
+	for _, session := range sessions {
+		if _, _, done, _, err := session.Terminal.Read(math.MaxInt64); err == nil && done {
+			exited[session] = true
+		}
+	}
+	a.closeExecSessions(ctx, func(session *execSession) bool { return session.expired(now, exited[session]) })
 }
 
 // CloseExecSessions terminates every interactive session and refuses new

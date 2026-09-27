@@ -287,7 +287,7 @@ func TestCloseExecSessionsTerminatesAndRefusesSessions(t *testing.T) {
 	if rt.terminal("allocation-g1-web").closeCount() != 1 || len(agent.execSessions) != 0 {
 		t.Fatal("shutdown left exec sessions running")
 	}
-	if _, err := agent.CreateExecSession(context.Background(), "allocation", "web", []string{"sh"}, "", 80, 24); !errors.Is(err, ErrAllocationNotFound) {
+	if _, err := agent.CreateExecSession(context.Background(), "allocation", "web", []string{"sh"}, "", 80, 24); !errors.Is(err, ErrAgentShuttingDown) {
 		t.Fatalf("session after shutdown error = %v, want refusal", err)
 	}
 	if rt.terminal("allocation-g1-web").closeCount() != 1 || len(agent.execSessions) != 0 {

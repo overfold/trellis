@@ -220,6 +220,9 @@ func (h *Handler) handleCreateExecSession(c *echo.Context) error {
 	}
 	result, err := h.agent.CreateExecSession(c.Request().Context(), c.Param("id"), request.Task, request.Command, request.Term, request.Cols, request.Rows)
 	if err != nil {
+		if errors.Is(err, ErrAgentShuttingDown) {
+			return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error())
+		}
 		if errors.Is(err, ErrAllocationNotFound) {
 			return echo.NewHTTPError(http.StatusNotFound, err.Error())
 		}

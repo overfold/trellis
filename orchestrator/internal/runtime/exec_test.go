@@ -18,11 +18,10 @@ type fakeExecProcess struct {
 	// startLaunches makes a failed Start still leave the process running.
 	startLaunches bool
 
-	mu       sync.Mutex
-	running  bool
-	startCtx error
-	killed   []syscall.Signal
-	deleted  chan error
+	mu      sync.Mutex
+	running bool
+	killed  []syscall.Signal
+	deleted chan error
 }
 
 func newFakeExecProcess() *fakeExecProcess {
@@ -33,10 +32,9 @@ func (p *fakeExecProcess) Wait(context.Context) (<-chan containerd.ExitStatus, e
 	return p.exitCh, nil
 }
 
-func (p *fakeExecProcess) Start(ctx context.Context) error {
+func (p *fakeExecProcess) Start(context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.startCtx = ctx.Err()
 	p.running = p.startErr == nil || p.startLaunches
 	return p.startErr
 }
@@ -133,9 +131,6 @@ func TestRunExecProcessCleansUpAfterStartFailure(t *testing.T) {
 
 		if _, err := runExecProcess(ctx, process); !errors.Is(err, process.startErr) {
 			t.Fatalf("launched=%v: run error = %v, want start failure", launched, err)
-		}
-		if process.startCtx != nil {
-			t.Fatalf("launched=%v: start used an ended context: %v", launched, process.startCtx)
 		}
 		select {
 		case err := <-process.deleted:

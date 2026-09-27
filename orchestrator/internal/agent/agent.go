@@ -145,6 +145,8 @@ var (
 	ErrExecutionConflict = errors.New("allocation execution metadata conflict")
 	// ErrExecSessionNotFound indicates that an interactive exec session does not exist.
 	ErrExecSessionNotFound = errors.New("exec session not found")
+	// ErrAgentShuttingDown indicates that the agent refuses new work while it shuts down.
+	ErrAgentShuttingDown = errors.New("agent is shutting down")
 	// ErrExecTaskRequired indicates that an exec request must name one of several running tasks.
 	ErrExecTaskRequired = errors.New("exec task selection required")
 )

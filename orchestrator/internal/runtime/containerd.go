@@ -742,9 +742,9 @@ func runExecProcess(ctx context.Context, process execProcess) (containerd.ExitSt
 		_ = deleteExecProcess(ctx, process)
 		return containerd.ExitStatus{}, fmt.Errorf("waiting on exec: %w", err)
 	}
-	// A cancelled Start can still launch the process, so let it finish and
-	// handle cancellation once the process state is known.
-	if err := process.Start(context.WithoutCancel(ctx)); err != nil {
+	// A cancelled Start can still launch the process, so a failed Start is
+	// always followed by a kill.
+	if err := process.Start(ctx); err != nil {
 		killExecProcess(ctx, process, exitCh)
 		cancelWait()
 		return containerd.ExitStatus{}, fmt.Errorf("starting exec: %w", err)
@@ -969,6 +969,11 @@ func (c *ContainerdRuntime) StartTerminal(ctx context.Context, containerID strin
 	go func() {
 		status := <-exitCh
 		code, _, resultErr := status.Result()
+		_ = stdinWriter.Close()
+		_ = stdinReader.Close()
+		// Deleting waits for the output copy, so readers never see the exit
+		// before the final output.
+		_ = deleteExecProcess(ctx, process)
 		session.mu.Lock()
 		session.exited = true
 		if resultErr == nil {
@@ -976,9 +981,6 @@ func (c *ContainerdRuntime) StartTerminal(ctx context.Context, containerID strin
 			session.exitCode = &value
 		}
 		session.mu.Unlock()
-		_ = stdinWriter.Close()
-		_ = stdinReader.Close()
-		_ = deleteExecProcess(ctx, process)
 	}()
 
 	return session, nil
