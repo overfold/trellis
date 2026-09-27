@@ -91,6 +91,12 @@ func (r *InjectedRuntime) Stop(_ context.Context, id string) error {
 	return r.setStatus("stop", id, StatusStopped)
 }
 
+// Pause marks a container as paused, modelling an out-of-band pause; Trellis
+// itself never pauses containers.
+func (r *InjectedRuntime) Pause(_ context.Context, id string) error {
+	return r.setStatus("pause", id, StatusPaused)
+}
+
 // Remove deletes a container from injected state.
 func (r *InjectedRuntime) Remove(_ context.Context, id string) error {
 	return r.operation("remove", func() error {

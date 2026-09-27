@@ -23,7 +23,7 @@ Containerd end-to-end tests need a Linux host, containerd, permissions on its so
 
 ```sh
 CGO_ENABLED=0 go build -o /tmp/trellis-health-probe ./cmd/trellis-health-probe
-sudo env TRELLIS_HEALTH_PROBE=/tmp/trellis-health-probe "$(command -v go)" test -tags=containerd_e2e ./internal/runtime -run 'TestContainerd(AllocationAdoption|HealthProbe)' -count=1 -timeout=3m
+sudo env TRELLIS_HEALTH_PROBE=/tmp/trellis-health-probe "$(command -v go)" test -tags=containerd_e2e ./internal/runtime -run 'TestContainerd(AllocationAdoption|HealthProbe|StopsCreatedTask|RestartsTaskWithManagedVolume|ListsPausedContainer|ListsContainerWithDeletedTask)' -count=1 -timeout=3m
 ```
 
 Multi-node integration uses the test/injected runtime and is separated in CI. Tests beside each package document state-machine invariants, Raft persistence, scheduler behavior, network planning, durability, update regressions, and security validation.
