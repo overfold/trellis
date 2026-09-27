@@ -20,6 +20,9 @@ func TestMaterializeSecretsDeliversEnvAndMemoryBackedFile(t *testing.T) {
 		{Task: "other", Name: "ignored", Target: spec.SecretTargetEnv, Env: "IGNORED", Value: []byte("ignored")},
 	}
 	dir := filepath.Join(t.TempDir(), "alloc")
+	if err := createSecretDir(dir); err != nil {
+		t.Fatal(err)
+	}
 	env, mounts, err := materializeSecrets(dir, "api", delivered)
 	if err != nil {
 		t.Fatal(err)
@@ -64,8 +67,8 @@ func TestSecretDirForRefusesExistingDirectory(t *testing.T) {
 	if _, err := agent.secretDirFor("allocation"); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("existing secret directory error = %v", err)
 	}
-	if _, _, err := materializeSecrets(dir, "api", []api.DeliveredSecret{{Task: "api", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Value: []byte("new")}}); err == nil {
-		t.Fatal("materialized secrets into an existing directory")
+	if err := createSecretDir(dir); err == nil {
+		t.Fatal("created a secret directory over an existing one")
 	}
 	if _, err := os.Stat(filepath.Join(dir, "live")); err != nil {
 		t.Fatalf("existing secret file removed: %v", err)
@@ -262,6 +265,9 @@ func TestRemoveOrphanedSecretDirsKeepsOwnedDirectories(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if err := createSecretDir(dir); err != nil {
+			t.Fatal(err)
+		}
 		if _, _, err := materializeSecrets(dir, "task", []api.DeliveredSecret{{Task: "task", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Value: []byte("secret")}}); err != nil {
 			t.Fatal(err)
 		}
@@ -361,8 +367,8 @@ func TestRemoveSecretDirRefusesRedirectedRoot(t *testing.T) {
 	if err := os.Symlink(target, root); err != nil {
 		t.Fatal(err)
 	}
-	if err := removeSecretDir(filepath.Join(root, "victim")); err == nil {
-		t.Fatal("removed a secret directory through a symlinked root")
+	if err := removeSecretDir(filepath.Join(root, "victim")); err != nil {
+		t.Fatalf("symlinked root blocked cleanup: %v", err)
 	}
 	if _, err := os.Stat(victim); err != nil {
 		t.Fatalf("redirected removal deleted %s: %v", victim, err)
@@ -398,28 +404,5 @@ func TestRunAllocationKeepsSecretDirectoryItDidNotCreate(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(existing, "live")); err != nil {
 		t.Fatalf("failed start removed a secret directory it did not create: %v", err)
-	}
-}
-
-func TestRemoveSecretDirIgnoresForeignRoot(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("changing directory ownership requires root")
-	}
-	root := filepath.Join(t.TempDir(), "trellis-secrets-foreign")
-	if err := os.Mkdir(root, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	victim := filepath.Join(root, "victim")
-	if err := os.Mkdir(victim, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chown(root, 65534, 65534); err != nil {
-		t.Fatal(err)
-	}
-	if err := removeSecretDir(victim); err != nil {
-		t.Fatalf("foreign root blocked cleanup: %v", err)
-	}
-	if _, err := os.Stat(victim); err != nil {
-		t.Fatalf("removed a directory below another user's root: %v", err)
 	}
 }

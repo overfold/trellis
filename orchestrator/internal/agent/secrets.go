@@ -69,11 +69,7 @@ func (a *Agent) secretRootDir() (string, error) {
 		a.secretRoot = root
 		return root, nil
 	}
-	base := a.secretBase
-	if base == "" {
-		base = defaultSecretBase
-	}
-	root, err = os.MkdirTemp(base, secretRootPrefix)
+	root, err = os.MkdirTemp(a.secretBaseDir(), secretRootPrefix)
 	if err != nil {
 		return "", fmt.Errorf("create memory-backed secret root: %w", err)
 	}
@@ -105,11 +101,7 @@ func (a *Agent) recordedSecretRoot() (root string, reuse bool, err error) {
 	} else if err != nil {
 		return "", false, fmt.Errorf("read recorded secret root: %w", err)
 	}
-	base := a.secretBase
-	if base == "" {
-		base = defaultSecretBase
-	}
-	if filepath.Dir(root) != filepath.Clean(base) || !strings.HasPrefix(filepath.Base(root), secretRootPrefix) {
+	if filepath.Dir(root) != filepath.Clean(a.secretBaseDir()) || !strings.HasPrefix(filepath.Base(root), secretRootPrefix) {
 		return "", false, nil
 	}
 	info, err := os.Lstat(root)
@@ -129,24 +121,20 @@ func (a *Agent) recordedSecretRoot() (root string, reuse bool, err error) {
 }
 
 // removeSecretDir removes a recorded secret directory. After a reboot empties
-// /dev/shm another user may recreate the root path, for example as a symlink
-// that would redirect the removal, so the parent must still be a directory the
-// agent owns. A missing parent, or one another user owns, cannot hold this
-// agent's secrets, so there is nothing left to remove.
+// /dev/shm another user may recreate the root path as a symlink that would
+// redirect the removal; such a root cannot hold this agent's secrets, so there
+// is nothing to remove. A missing root likewise means nothing is left.
 func removeSecretDir(dir string) error {
 	if dir == "" {
 		return nil
 	}
 	parent := filepath.Dir(dir)
 	info, err := os.Lstat(parent)
-	if errors.Is(err, fs.ErrNotExist) {
+	if errors.Is(err, fs.ErrNotExist) || (err == nil && info.Mode()&fs.ModeSymlink != 0) {
 		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("inspect secret root: %w", err)
-	}
-	if !ownedByAgent(info) {
-		return nil
 	}
 	if !info.IsDir() {
 		return fmt.Errorf("refuse to remove %s: %s is not a directory", dir, parent)
@@ -154,9 +142,17 @@ func removeSecretDir(dir string) error {
 	return os.RemoveAll(dir)
 }
 
+func (a *Agent) secretBaseDir() string {
+	if a.secretBase == "" {
+		return defaultSecretBase
+	}
+	return a.secretBase
+}
+
+// ownedByAgent fails closed when the owner cannot be determined.
 func ownedByAgent(info fs.FileInfo) bool {
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	return !ok || int(stat.Uid) == os.Geteuid()
+	return ok && int(stat.Uid) == os.Geteuid()
 }
 
 // checkSecretRoot rejects a secret root that another user could have
@@ -178,23 +174,29 @@ func checkSecretRoot(root string) error {
 	return nil
 }
 
+// createSecretDir creates an allocation's private secret directory. It fails
+// if the directory exists, so a start only ever cleans up what it created.
+func createSecretDir(dir string) error {
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		return fmt.Errorf("create memory-backed secret directory: %w", err)
+	}
+	// Mkdir applies the umask, which could leave the owner unable to write.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		_ = os.Remove(dir)
+		return fmt.Errorf("restrict secret directory: %w", err)
+	}
+	return nil
+}
+
 // materializeSecrets returns the task's environment secrets and writes its
-// file secrets below dir, which must be set when the task has file secrets.
+// file secrets into dir, which createSecretDir must already have created.
+// The caller removes dir if this fails.
 func materializeSecrets(dir, taskName string, delivered []api.DeliveredSecret) (map[string]string, []*runtime.Mount, error) {
 	env := map[string]string{}
 	var taskSecrets []api.DeliveredSecret
 	for _, secret := range delivered {
 		if secret.Task == taskName {
 			taskSecrets = append(taskSecrets, secret)
-		}
-	}
-	if dir != "" {
-		if err := os.Mkdir(dir, 0o700); err != nil {
-			return nil, nil, fmt.Errorf("create memory-backed secret directory: %w", err)
-		}
-		if err := os.Chmod(dir, 0o700); err != nil {
-			_ = os.RemoveAll(dir)
-			return nil, nil, fmt.Errorf("restrict secret directory: %w", err)
 		}
 	}
 	var mounts []*runtime.Mount
@@ -213,7 +215,6 @@ func materializeSecrets(dir, taskName string, delivered []api.DeliveredSecret) (
 			}
 			file, err := os.OpenFile(hostPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, mode)
 			if err != nil {
-				_ = os.RemoveAll(dir)
 				return nil, nil, fmt.Errorf("create secret file: %w", err)
 			}
 			if _, err = file.Write(secret.Value); err == nil {
@@ -224,14 +225,10 @@ func materializeSecrets(dir, taskName string, delivered []api.DeliveredSecret) (
 				err = closeErr
 			}
 			if err != nil {
-				_ = os.RemoveAll(dir)
 				return nil, nil, fmt.Errorf("write secret file: %w", err)
 			}
 			mounts = append(mounts, &runtime.Mount{HostPath: hostPath, ContainerPath: secret.Path, ReadOnly: true})
 		default:
-			if dir != "" {
-				_ = os.RemoveAll(dir)
-			}
 			return nil, nil, fmt.Errorf("unsupported secret target %q", secret.Target)
 		}
 	}

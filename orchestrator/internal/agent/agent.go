@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"net/netip"
 	"os"
@@ -936,13 +935,14 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		if err := a.persistAllocation(alloc); err != nil {
 			return fmt.Errorf("persist secret metadata: %w", err)
 		}
+		if err := createSecretDir(secretDir); err != nil {
+			// Never clean up a directory this start did not create.
+			secretDir, alloc.SecretDir = "", ""
+			return err
+		}
 	}
 	secretEnv, secretMounts, err := materializeSecrets(secretDir, taskName, delivered)
 	if err != nil {
-		if errors.Is(err, fs.ErrExist) {
-			// Never clean up a directory this start did not create.
-			secretDir, alloc.SecretDir = "", ""
-		}
 		return err
 	}
 	for k, v := range secretEnv {
