@@ -417,6 +417,7 @@ func TestStopAllocationKeepsPortClaimSharedWithRetainedAllocation(t *testing.T) 
 	if err := agent.recover(context.Background()); err == nil {
 		t.Fatal("recover succeeded despite listing failure")
 	}
+	rt.listErr = nil
 	if err := agent.StopGroup(context.Background(), &api.StopAllocationRequest{AllocationID: "allocation", Generation: 1}); err != nil {
 		t.Fatalf("stop stale allocation: %v", err)
 	}
@@ -604,5 +605,34 @@ func TestStopGroupStopsUnrecordedContainerWhileListingIncomplete(t *testing.T) {
 	}
 	if rt.stopCount != 1 || rt.removeCount != 1 || agent.allocations["task"] != nil {
 		t.Fatalf("stop=%d remove=%d allocation=%+v; want the unrecorded container stopped", rt.stopCount, rt.removeCount, agent.allocations["task"])
+	}
+}
+
+func TestStopGroupChecksUnrecordedSiblingsWhileListingIncomplete(t *testing.T) {
+	rt := &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning}, listErr: errors.New("containerd unavailable")}
+	recorded := recoveryTestAllocation(0)
+	agent, _ := newRecoveryTestAgent(t, rt, recorded)
+	if err := agent.recover(context.Background()); err == nil {
+		t.Fatal("recover succeeded despite listing failure")
+	}
+
+	sibling := recoveryTestAllocation(0)
+	sibling.ID, sibling.ContainerID, sibling.TaskName = "sibling", "sibling", "sibling"
+	rt.listErr = nil
+	rt.containers = []runtime.ContainerInfo{
+		{ID: "sibling", Status: runtime.StatusRunning, Labels: recoveryTestLabels(sibling)},
+		{ID: "unreadable", Status: runtime.StatusUnknown},
+	}
+	stop := &api.StopAllocationRequest{AllocationID: "allocation", Generation: 1}
+	if err := agent.StopGroup(context.Background(), stop); err == nil {
+		t.Fatal("stop succeeded while an unreadable container could belong to the allocation")
+	}
+	if rt.stopCount != 2 || agent.allocations["task"] != nil || agent.allocations["sibling"] != nil {
+		t.Fatalf("stop calls = %d; want the recorded task and its unrecorded sibling stopped", rt.stopCount)
+	}
+
+	rt.containers = nil
+	if err := agent.StopGroup(context.Background(), stop); err != nil {
+		t.Fatalf("stop after every container is accounted for: %v", err)
 	}
 }

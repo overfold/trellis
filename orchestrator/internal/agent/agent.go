@@ -1039,16 +1039,16 @@ func (a *Agent) StopGroup(ctx context.Context, request *api.StopAllocationReques
 	}
 	listPending := a.recoveryListPending
 	a.mu.RUnlock()
-	if len(ids) == 0 && listPending {
-		// Recovery has not listed every container, so the absence of a known
-		// allocation does not prove the stop is complete.
-		return a.stopUnrecorded(ctx, request)
-	}
 	var errs []error
 	for _, id := range ids {
 		if err := a.stopAllocation(ctx, id); err != nil {
 			errs = append(errs, err)
 		}
+	}
+	if listPending {
+		// Recovery has not listed every container, so tasks of this
+		// generation may run without a record.
+		errs = append(errs, a.stopUnrecorded(ctx, request))
 	}
 	return errors.Join(errs...)
 }
@@ -1066,6 +1066,12 @@ func (a *Agent) stopUnrecorded(ctx context.Context, request *api.StopAllocationR
 		return fmt.Errorf("list containers for unrecorded allocation %s: %w", request.AllocationID, err)
 	}
 	var errs []error
+	a.mu.RLock()
+	unidentified := a.hasUnreadableUnknownLocked(containers)
+	a.mu.RUnlock()
+	if unidentified {
+		errs = append(errs, fmt.Errorf("stop allocation %s: an unreadable container may belong to it", request.AllocationID))
+	}
 	for _, container := range containers {
 		allocation := allocationFromRuntime(container)
 		if allocation == nil || allocation.AllocationID != request.AllocationID || allocation.Generation != request.Generation {
@@ -1752,7 +1758,14 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string) error {
 	}
 
 	var errs []error
-	a.closeExecSessionsForAllocation(ctx, alloc.AllocationID)
+	a.mu.RLock()
+	superseded := a.supersededLocked(&alloc)
+	a.mu.RUnlock()
+	if !superseded {
+		// Exec sessions are keyed by scheduler allocation; after a newer
+		// generation starts they belong to it.
+		a.closeExecSessionsForAllocation(ctx, alloc.AllocationID)
+	}
 	a.health.DeregisterTask(allocID)
 	if err := a.reconciler.Untrack(allocID); err != nil {
 		errs = append(errs, fmt.Errorf("untrack allocation %s: %w", allocID, err))
