@@ -356,7 +356,7 @@ func TestRunAllocationRejectsSameGenerationRevisionConflict(t *testing.T) {
 	}}
 	err := agent.RunAllocation(
 		context.Background(), "allocation-g2-task", "allocation", 2, 8, "execution-hash",
-		"default", "job", "group", "task", &spec.TaskSpec{Name: "task", Image: "image"}, "", nil, nil, nil, nil,
+		"default", "job", "group", "task", &spec.TaskSpec{Name: "task", Image: "image"}, "", nil, nil, nil, nil, false, 0,
 	)
 	if !errors.Is(err, ErrAllocationExists) {
 		t.Fatalf("expected allocation conflict, got %v", err)
@@ -382,7 +382,7 @@ func TestRunAllocationMountsHealthProbeForEveryNetworkAndRuntime(t *testing.T) {
 				if mode == spec.TaskNetworkWireGuard {
 					plan = &network.Plan{}
 				}
-				if err := agent.RunAllocation(context.Background(), "alloc", "scheduler", 1, 1, "hash", "default", "job", "group", "web", task, taskRuntime, plan, nil, nil, nil); err != nil {
+				if err := agent.RunAllocation(context.Background(), "alloc", "scheduler", 1, 1, "hash", "default", "job", "group", "web", task, taskRuntime, plan, nil, nil, nil, false, 0); err != nil {
 					t.Fatal(err)
 				}
 
@@ -426,7 +426,7 @@ func TestRunAllocationRegistersHealthAfterStoringRunningAllocation(t *testing.T)
 	agent.reconciler.mu.Lock()
 	runDone := make(chan error, 1)
 	go func() {
-		runDone <- agent.RunAllocation(ctx, "alloc", "scheduler", 1, 1, "hash", "default", "job", "group", "web", task, "", nil, nil, nil, nil)
+		runDone <- agent.RunAllocation(ctx, "alloc", "scheduler", 1, 1, "hash", "default", "job", "group", "web", task, "", nil, nil, nil, nil, false, 0)
 	}()
 	select {
 	case <-rt.started:
@@ -485,7 +485,7 @@ func TestRunAllocationPublishesStableSnapshotDuringStartup(t *testing.T) {
 	}
 	runDone := make(chan error, 1)
 	go func() {
-		runDone <- agent.RunAllocation(context.Background(), "alloc", "scheduler", 1, 1, "hash", "default", "job", "group", "web", task, "", &network.Plan{}, nil, nil, nil)
+		runDone <- agent.RunAllocation(context.Background(), "alloc", "scheduler", 1, 1, "hash", "default", "job", "group", "web", task, "", &network.Plan{}, nil, nil, nil, false, 0)
 	}()
 	select {
 	case <-manager.entered:
@@ -1380,6 +1380,7 @@ func TestDrainSurvivesAgentRestartAndStartRetry(t *testing.T) {
 	request := operationTestRequest()
 	request.Tasks = request.Tasks[:1]
 	agent := recoverCreatedAllocationForRetry(t, rt, local, request, 7)
+	request.Draining, request.DrainSequence = true, 7
 	if state := agent.reconciler.states[rt.managedID]; state == nil || !state.stopping {
 		t.Fatal("recovered draining allocation is not restart-suppressed")
 	}
@@ -1413,6 +1414,7 @@ func TestStaleResumeAfterStartRetryKeepsDrain(t *testing.T) {
 	if err := agent.DrainGroup(drain); err != nil {
 		t.Fatalf("drain recovered allocation: %v", err)
 	}
+	request.Draining, request.DrainSequence = true, drain.Sequence
 
 	if err := agent.RunGroup(context.Background(), request); err != nil {
 		t.Fatalf("control-plane start retry: %v", err)
@@ -1439,57 +1441,36 @@ func TestStaleResumeAfterStartRetryKeepsDrain(t *testing.T) {
 	}
 }
 
-type pullFailOnceRuntime struct {
-	*reconcilerRuntime
-	failImage string
-}
-
-func (r *pullFailOnceRuntime) Pull(_ context.Context, image string) error {
-	if image == r.failImage {
-		r.failImage = ""
-		return errors.New("pull failed")
-	}
-	return nil
-}
-
-func TestTaskStartedAfterDrainInheritsGenerationDrain(t *testing.T) {
-	rt := &pullFailOnceRuntime{reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning}, failImage: "second-image"}
+func TestStartHonorsControlPlaneDrainWithoutLocalRecord(t *testing.T) {
+	rt := &reconcilerRuntime{status: runtime.StatusRunning}
 	agent := newOperationTestAgent(t, rt)
 	request := operationTestRequest()
-	request.Tasks[1].Image = "second-image"
-	if err := agent.RunGroup(context.Background(), request); err == nil {
-		t.Fatal("first start succeeded despite failed pull")
-	}
-	secondID := "allocation-g2-second"
-	if agent.allocations[secondID] != nil {
-		t.Fatal("failed task record was retained after successful cleanup")
-	}
-	// The drain reaches only the task that exists on the node.
-	drain := &api.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Sequence: 4}
-	if err := agent.DrainGroup(drain); err != nil {
-		t.Fatalf("drain partially started allocation: %v", err)
-	}
-
+	// The drain reached the agent before any task record existed, so only the
+	// start request carries it.
+	request.Draining, request.DrainSequence = true, 4
 	if err := agent.RunGroup(context.Background(), request); err != nil {
-		t.Fatalf("control-plane start retry: %v", err)
+		t.Fatalf("start draining allocation: %v", err)
 	}
-	stale := &api.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Sequence: 2}
+	stale := &api.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Sequence: 3}
 	if err := agent.ResumeGroup(stale); err != nil {
 		t.Fatalf("stale resume: %v", err)
 	}
-	got := agent.allocations[secondID]
-	if got == nil || got.Status != "running" || !got.Draining || got.DrainSequence != 4 {
-		t.Fatalf("task started after drain = %+v, want running draining sequence 4", got)
-	}
-	if state := agent.reconciler.states[secondID]; state == nil || !state.stopping {
-		t.Fatal("task started after drain is not restart-suppressed")
-	}
 	rt.status = runtime.StatusStopped
-	if err := agent.reconciler.Reconcile(context.Background(), secondID); err != nil {
-		t.Fatalf("reconcile stopped draining task: %v", err)
+	for _, task := range request.Tasks {
+		id := "allocation-g2-" + task.Name
+		got := agent.allocations[id]
+		if got == nil || got.Status != "running" || !got.Draining || got.DrainSequence != 4 {
+			t.Fatalf("task %s = %+v, want running draining sequence 4", task.Name, got)
+		}
+		if state := agent.reconciler.states[id]; state == nil || !state.stopping {
+			t.Fatalf("task %s is not restart-suppressed", task.Name)
+		}
+		if err := agent.reconciler.Reconcile(context.Background(), id); err != nil {
+			t.Fatalf("reconcile stopped draining task %s: %v", task.Name, err)
+		}
 	}
 	if rt.restartCount != 0 {
-		t.Fatalf("task started after drain restarted %d times", rt.restartCount)
+		t.Fatalf("draining tasks restarted %d times", rt.restartCount)
 	}
 }
 

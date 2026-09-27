@@ -547,7 +547,7 @@ func (a *Agent) RunGroup(ctx context.Context, request *api.AllocationRequest) er
 	for i := range request.Tasks {
 		task := &request.Tasks[i]
 		id := fmt.Sprintf("%s-g%d-%s", request.AllocationID, request.Generation, task.Name)
-		if err := a.RunAllocation(ctx, id, request.AllocationID, request.Generation, request.JobRevision, request.ExecutionHash, request.Namespace, request.JobName, request.GroupName, task.Name, task, request.Runtime, request.NetworkPlan, request.EnvOverrides, request.Secrets, request.Restart); err != nil {
+		if err := a.RunAllocation(ctx, id, request.AllocationID, request.Generation, request.JobRevision, request.ExecutionHash, request.Namespace, request.JobName, request.GroupName, task.Name, task, request.Runtime, request.NetworkPlan, request.EnvOverrides, request.Secrets, request.Restart, request.Draining, request.DrainSequence); err != nil {
 			return err
 		}
 	}
@@ -725,25 +725,10 @@ func (a *Agent) ResumeGroup(request *api.DrainAllocationRequest) error {
 	return nil
 }
 
-// generationDrainStateLocked returns the newest drain state recorded for any
-// task of one allocation generation. Equal sequences prefer draining so an
-// ambiguous record never enables restarts. The caller must hold a.mu.
-func (a *Agent) generationDrainStateLocked(allocationID string, generation uint64) (bool, uint64) {
-	var draining bool
-	var sequence uint64
-	for _, allocation := range a.allocations {
-		if allocation.AllocationID != allocationID || allocation.Generation != generation {
-			continue
-		}
-		if allocation.DrainSequence > sequence || (allocation.DrainSequence == sequence && allocation.Draining) {
-			draining, sequence = allocation.Draining, allocation.DrainSequence
-		}
-	}
-	return draining, sequence
-}
-
-// RunAllocation creates and starts one allocation task.
-func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, generation uint64, jobRevision int, executionHash, namespace, jobName, groupName, taskName string, taskSpec *spec.TaskSpec, groupRuntime string, networkPlan *network.Plan, envOverrides map[string]string, delivered []api.DeliveredSecret, restartPolicy *spec.RestartPolicySpec) (runErr error) {
+// RunAllocation creates and starts one allocation task. draining and
+// drainSequence are the control plane's drain state for the generation; a
+// draining task starts restart-suppressed.
+func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, generation uint64, jobRevision int, executionHash, namespace, jobName, groupName, taskName string, taskSpec *spec.TaskSpec, groupRuntime string, networkPlan *network.Plan, envOverrides map[string]string, delivered []api.DeliveredSecret, restartPolicy *spec.RestartPolicySpec, draining bool, drainSequence uint64) (runErr error) {
 	ts := taskSpec
 	if ts == nil {
 		return fmt.Errorf("task spec is required")
@@ -752,10 +737,6 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		return fmt.Errorf("allocation ID is required")
 	}
 	a.mu.Lock()
-	// Drain is group-scoped: a start retry, or a task whose record did not
-	// exist when the drain arrived, inherits the newest drain state of its
-	// allocation generation instead of resetting it.
-	draining, drainSequence := a.generationDrainStateLocked(schedulerID, generation)
 	existing := a.allocations[allocID]
 	if existing != nil {
 		matching := existing.AllocationID == schedulerID && existing.Generation == generation && existing.JobRevision == jobRevision && existing.ExecutionHash == executionHash
