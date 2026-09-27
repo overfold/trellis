@@ -1423,7 +1423,8 @@ func TestStaleResumeAfterStartRetryKeepsDrain(t *testing.T) {
 	}
 	assertDrainingAfterStartRetry(t, agent, rt, local, 5)
 
-	resume := &api.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Sequence: 5}
+	// The control plane resumes with the next drain sequence.
+	resume := &api.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Sequence: 6}
 	if err := agent.ResumeGroup(resume); err != nil {
 		t.Fatalf("current resume: %v", err)
 	}
