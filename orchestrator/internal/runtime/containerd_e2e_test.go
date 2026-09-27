@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -365,6 +366,21 @@ func TestContainerdListsPausedContainer(t *testing.T) {
 	defer cancel()
 	const cluster = "containerd-e2e-paused"
 	r, raw, id := newListingE2E(ctx, t, "trellis-e2e-list-paused", cluster)
+
+	// The image entrypoint is a shell script that execs nginx. A shell as
+	// PID 1 ignores SIGTERM, so pause only once nginx is PID 1; otherwise the
+	// graceful-stop assertion below measures the entrypoint, not Stop.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		comm, _, code, execErr := r.ExecOutput(ctx, id, []string{"cat", "/proc/1/comm"})
+		if execErr == nil && code == 0 && strings.TrimSpace(string(comm)) == "nginx" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("nginx did not become PID 1: comm %q, exit code %d, error %v", comm, code, execErr)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 
 	nsCtx := namespaces.WithNamespace(ctx, "trellis")
 	container, err := raw.LoadContainer(nsCtx, id)
