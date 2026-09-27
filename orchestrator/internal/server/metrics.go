@@ -174,8 +174,8 @@ func (c *metricsCollector) Collect(ch chan<- prometheus.Metric) {
 		nodeID := node.ID.String()
 		nodeCounts[string(node.Status)]++
 
-		ch <- prometheus.MustNewConstMetric(c.nodeCPUCapacityDesc, prometheus.GaugeValue, float64(node.CPU), nodeID)
-		ch <- prometheus.MustNewConstMetric(c.nodeMemCapacityDesc, prometheus.GaugeValue, float64(node.Memory), nodeID)
+		ch <- prometheus.MustNewConstMetric(c.nodeCPUCapacityDesc, prometheus.GaugeValue, float64(node.CPUAllocatable), nodeID)
+		ch <- prometheus.MustNewConstMetric(c.nodeMemCapacityDesc, prometheus.GaugeValue, float64(node.MemoryAllocatable), nodeID)
 
 		if u := nodeUtils[nodeID]; u != nil {
 			ch <- prometheus.MustNewConstMetric(c.nodeCPUAllocatedDesc, prometheus.GaugeValue, float64(u.cpuMillicores), nodeID)

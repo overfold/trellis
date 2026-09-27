@@ -138,8 +138,10 @@ type NodeInfo struct {
 	ID                 uuid.UUID
 	Host               string
 	Port               int
-	CPU                int
-	Memory             int64
+	CPUCapacity        int
+	MemoryCapacity     int64
+	CPUAllocatable     int
+	MemoryAllocatable  int64
 	OS                 string
 	Arch               string
 	Labels             map[string]string
@@ -153,12 +155,20 @@ type NodeInfo struct {
 
 // Heartbeat contains the state periodically reported by a node.
 type Heartbeat struct {
-	NodeID       uuid.UUID              `json:"id"`
-	Timestamp    time.Time              `json:"timestamp"`
-	Allocations  []api.AllocationStatus `json:"allocations,omitempty"`
-	Volumes      []string               `json:"volumes,omitempty"`
-	Capabilities []spec.NodeCapability  `json:"capabilities,omitempty"`
-	Version      string                 `json:"version,omitempty"`
+	NodeID            uuid.UUID
+	Timestamp         time.Time
+	Allocations       []api.AllocationStatus
+	Volumes           []string
+	Capabilities      []spec.NodeCapability
+	Version           string
+	CPUCapacity       int
+	MemoryCapacity    int64
+	CPUAllocatable    int
+	MemoryAllocatable int64
+	CPUUsage          *float64
+	MemoryUsed        *int64
+	MemoryAvailable   *int64
+	MetricsAt         *time.Time
 }
 
 // NewServerClient creates a client for cluster-scoped server APIs.
@@ -242,8 +252,12 @@ func (s *ServerClient) RegisterNode(ctx context.Context, nodeInfo *NodeInfo) (*a
 		ID:                 nodeInfo.ID,
 		Host:               nodeInfo.Host,
 		Port:               nodeInfo.Port,
-		CPU:                nodeInfo.CPU,
-		Memory:             nodeInfo.Memory,
+		CPU:                nodeInfo.CPUAllocatable,
+		Memory:             nodeInfo.MemoryAllocatable,
+		CPUCapacity:        nodeInfo.CPUCapacity,
+		MemoryCapacity:     nodeInfo.MemoryCapacity,
+		CPUAllocatable:     nodeInfo.CPUAllocatable,
+		MemoryAllocatable:  nodeInfo.MemoryAllocatable,
 		OS:                 nodeInfo.OS,
 		Arch:               nodeInfo.Arch,
 		Labels:             nodeInfo.Labels,
@@ -372,12 +386,20 @@ func (s *ServerClient) ListAllocations(ctx context.Context, label string) (*api.
 // SendHeartbeat reports observed node state.
 func (s *ServerClient) SendHeartbeat(ctx context.Context, id uuid.UUID, heartbeat *Heartbeat) error {
 	requestData := &api.HeartbeatRequest{
-		NodeID:       heartbeat.NodeID,
-		Timestamp:    heartbeat.Timestamp,
-		Allocations:  heartbeat.Allocations,
-		Volumes:      heartbeat.Volumes,
-		Capabilities: heartbeat.Capabilities,
-		Version:      heartbeat.Version,
+		NodeID:            heartbeat.NodeID,
+		Timestamp:         heartbeat.Timestamp,
+		Allocations:       heartbeat.Allocations,
+		Volumes:           heartbeat.Volumes,
+		Capabilities:      heartbeat.Capabilities,
+		Version:           heartbeat.Version,
+		CPUCapacity:       heartbeat.CPUCapacity,
+		MemoryCapacity:    heartbeat.MemoryCapacity,
+		CPUAllocatable:    heartbeat.CPUAllocatable,
+		MemoryAllocatable: heartbeat.MemoryAllocatable,
+		CPUUsage:          heartbeat.CPUUsage,
+		MemoryUsed:        heartbeat.MemoryUsed,
+		MemoryAvailable:   heartbeat.MemoryAvailable,
+		MetricsAt:         heartbeat.MetricsAt,
 	}
 	url := fmt.Sprintf("%s/v1/nodes/%s/heartbeat", s.address(), id)
 	if err := s.client.request(ctx, http.MethodPost, url, requestData, nil); err != nil {

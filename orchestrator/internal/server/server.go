@@ -256,8 +256,10 @@ type NodeRegistration struct {
 	ID                 uuid.UUID
 	Host               string
 	Port               int
-	CPU                int
-	Memory             int64
+	CPUCapacity        int
+	MemoryCapacity     int64
+	CPUAllocatable     int
+	MemoryAllocatable  int64
 	OS                 string
 	Arch               string
 	Labels             map[string]string
@@ -269,6 +271,31 @@ type NodeRegistration struct {
 	WireGuardPortCount int
 }
 
+// nodeResourceObservation is the latest renewable whole-host resource sample.
+type nodeResourceObservation struct {
+	CPUCapacity       int
+	MemoryCapacity    int64
+	CPUAllocatable    int
+	MemoryAllocatable int64
+	CPUUsage          *float64
+	MemoryUsed        *int64
+	MemoryAvailable   *int64
+	MetricsAt         *time.Time
+}
+
+func validateNodeCapacity(cpuCapacity int, memoryCapacity int64, cpuAllocatable int, memoryAllocatable int64) error {
+	if cpuCapacity < 0 || memoryCapacity < 0 || cpuAllocatable < 0 || memoryAllocatable < 0 {
+		return fmt.Errorf("node resources must be non-negative")
+	}
+	if cpuAllocatable > cpuCapacity {
+		return fmt.Errorf("allocatable CPU %dm exceeds node capacity %dm", cpuAllocatable, cpuCapacity)
+	}
+	if memoryAllocatable > memoryCapacity {
+		return fmt.Errorf("allocatable memory %d bytes exceeds node capacity %d bytes", memoryAllocatable, memoryCapacity)
+	}
+	return nil
+}
+
 // Node contains the in-memory state of a registered node.
 type Node struct {
 	ID                  uuid.UUID
@@ -276,8 +303,14 @@ type Node struct {
 	Port                int
 	Status              NodeStatus
 	LastHeartbeat       time.Time
-	CPU                 int
-	Memory              int64
+	CPUCapacity         int
+	MemoryCapacity      int64
+	CPUAllocatable      int
+	MemoryAllocatable   int64
+	CPUUsage            *float64
+	MemoryUsed          *int64
+	MemoryAvailable     *int64
+	MetricsAt           *time.Time
 	OS                  string
 	Arch                string
 	Labels              map[string]string
@@ -313,8 +346,10 @@ type NodeSummary struct {
 	ID                 uuid.UUID
 	Host               string
 	Port               int
-	CPU                int
-	Memory             int64
+	CPUCapacity        int
+	MemoryCapacity     int64
+	CPUAllocatable     int
+	MemoryAllocatable  int64
 	OS                 string
 	Arch               string
 	Labels             map[string]string
@@ -612,6 +647,9 @@ func (s *Server) ListNodes() []Node {
 
 // RegisterNode adds or updates a cluster node.
 func (s *Server) RegisterNode(ctx context.Context, nodeRegistration *NodeRegistration) error {
+	if err := validateNodeCapacity(nodeRegistration.CPUCapacity, nodeRegistration.MemoryCapacity, nodeRegistration.CPUAllocatable, nodeRegistration.MemoryAllocatable); err != nil {
+		return err
+	}
 	if nodeRegistration.WireGuardPublicKey != "" || nodeRegistration.WireGuardEndpoint != "" || nodeRegistration.WireGuardPortBase != 0 || nodeRegistration.WireGuardPortCount != 0 {
 		if nodeRegistration.WireGuardPublicKey == "" || nodeRegistration.WireGuardEndpoint == "" {
 			return fmt.Errorf("WireGuard registration requires a public key and endpoint")
@@ -630,10 +668,11 @@ func (s *Server) RegisterNode(ctx context.Context, nodeRegistration *NodeRegistr
 	}
 	s.mu.RUnlock()
 	err := s.state.PutNode(ctx, nodeRegistration.ID.String(), &NodeSummary{
-		ID:   nodeRegistration.ID,
-		Host: nodeRegistration.Host,
-		Port: nodeRegistration.Port,
-		CPU:  nodeRegistration.CPU, Memory: nodeRegistration.Memory,
+		ID:          nodeRegistration.ID,
+		Host:        nodeRegistration.Host,
+		Port:        nodeRegistration.Port,
+		CPUCapacity: nodeRegistration.CPUCapacity, MemoryCapacity: nodeRegistration.MemoryCapacity,
+		CPUAllocatable: nodeRegistration.CPUAllocatable, MemoryAllocatable: nodeRegistration.MemoryAllocatable,
 		OS: nodeRegistration.OS, Arch: nodeRegistration.Arch, Labels: nodeRegistration.Labels, Status: status,
 		Volumes:            nodeRegistration.Volumes,
 		Capabilities:       nodeRegistration.Capabilities,
@@ -657,7 +696,8 @@ func (s *Server) RegisterNode(ctx context.Context, nodeRegistration *NodeRegistr
 		node.Status = NodeStatusHealthy
 	}
 	node.LastHeartbeat = time.Now()
-	node.CPU, node.Memory = nodeRegistration.CPU, nodeRegistration.Memory
+	node.CPUCapacity, node.MemoryCapacity = nodeRegistration.CPUCapacity, nodeRegistration.MemoryCapacity
+	node.CPUAllocatable, node.MemoryAllocatable = nodeRegistration.CPUAllocatable, nodeRegistration.MemoryAllocatable
 	node.OS, node.Arch = nodeRegistration.OS, nodeRegistration.Arch
 	node.Labels = nodeRegistration.Labels
 	node.Volumes = append([]string(nil), nodeRegistration.Volumes...)
@@ -669,7 +709,16 @@ func (s *Server) RegisterNode(ctx context.Context, nodeRegistration *NodeRegistr
 }
 
 // Heartbeat records a node heartbeat and allocation state.
-func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.AllocationStatus, version string, volumes []string, capabilities []spec.NodeCapability) error {
+func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.AllocationStatus, version string, volumes []string, capabilities []spec.NodeCapability, resources nodeResourceObservation) error {
+	if err := validateNodeCapacity(resources.CPUCapacity, resources.MemoryCapacity, resources.CPUAllocatable, resources.MemoryAllocatable); err != nil {
+		return err
+	}
+	if resources.CPUUsage != nil && (*resources.CPUUsage < 0 || *resources.CPUUsage > 1) {
+		return fmt.Errorf("node CPU usage must be between 0 and 1")
+	}
+	if (resources.MemoryUsed != nil && *resources.MemoryUsed < 0) || (resources.MemoryAvailable != nil && *resources.MemoryAvailable < 0) {
+		return fmt.Errorf("node memory observations must be non-negative")
+	}
 	s.mu.Lock()
 	node, ok := s.nodes[nodeID]
 	if !ok {
@@ -684,13 +733,17 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 	node.Version = version
 	node.Volumes = append([]string(nil), volumes...)
 	node.Capabilities = append([]spec.NodeCapability(nil), capabilities...)
+	node.CPUCapacity, node.MemoryCapacity = resources.CPUCapacity, resources.MemoryCapacity
+	node.CPUAllocatable, node.MemoryAllocatable = resources.CPUAllocatable, resources.MemoryAllocatable
+	node.CPUUsage, node.MemoryUsed = resources.CPUUsage, resources.MemoryUsed
+	node.MemoryAvailable, node.MetricsAt = resources.MemoryAvailable, resources.MetricsAt
 	owned := make([]*Allocation, 0)
 	for _, allocation := range s.allocations {
 		if allocation.Node == node {
 			owned = append(owned, allocation)
 		}
 	}
-	summary := &NodeSummary{ID: node.ID, Host: node.Host, Port: node.Port, CPU: node.CPU, Memory: node.Memory, OS: node.OS, Arch: node.Arch, Labels: node.Labels, Volumes: node.Volumes, Capabilities: node.Capabilities, Status: node.Status, WireGuardPublicKey: node.WireGuardPublicKey, WireGuardEndpoint: node.WireGuardEndpoint, WireGuardPortBase: node.WireGuardPortBase, WireGuardPortCount: node.WireGuardPortCount, LastHeartbeat: node.LastHeartbeat, Version: node.Version}
+	summary := &NodeSummary{ID: node.ID, Host: node.Host, Port: node.Port, CPUCapacity: node.CPUCapacity, MemoryCapacity: node.MemoryCapacity, CPUAllocatable: node.CPUAllocatable, MemoryAllocatable: node.MemoryAllocatable, OS: node.OS, Arch: node.Arch, Labels: node.Labels, Volumes: node.Volumes, Capabilities: node.Capabilities, Status: node.Status, WireGuardPublicKey: node.WireGuardPublicKey, WireGuardEndpoint: node.WireGuardEndpoint, WireGuardPortBase: node.WireGuardPortBase, WireGuardPortCount: node.WireGuardPortCount, LastHeartbeat: node.LastHeartbeat, Version: node.Version}
 	s.mu.Unlock()
 	if err := s.state.PutNode(ctx, node.ID.String(), summary); err != nil {
 		return fmt.Errorf("persist node heartbeat: %w", err)
@@ -960,7 +1013,7 @@ func (s *Server) Reload(ctx context.Context) error {
 		if summary.Status == NodeStatusDraining {
 			status = NodeStatusDraining
 		}
-		nodes[summary.ID] = &Node{ID: summary.ID, Host: summary.Host, Port: summary.Port, CPU: summary.CPU, Memory: summary.Memory, OS: summary.OS, Arch: summary.Arch, Labels: summary.Labels, Volumes: summary.Volumes, Capabilities: summary.Capabilities, Status: status, WireGuardPublicKey: summary.WireGuardPublicKey, WireGuardEndpoint: summary.WireGuardEndpoint, WireGuardPortBase: summary.WireGuardPortBase, WireGuardPortCount: summary.WireGuardPortCount, LastHeartbeat: summary.LastHeartbeat, Version: summary.Version}
+		nodes[summary.ID] = &Node{ID: summary.ID, Host: summary.Host, Port: summary.Port, CPUCapacity: summary.CPUCapacity, MemoryCapacity: summary.MemoryCapacity, CPUAllocatable: summary.CPUAllocatable, MemoryAllocatable: summary.MemoryAllocatable, OS: summary.OS, Arch: summary.Arch, Labels: summary.Labels, Volumes: summary.Volumes, Capabilities: summary.Capabilities, Status: status, WireGuardPublicKey: summary.WireGuardPublicKey, WireGuardEndpoint: summary.WireGuardEndpoint, WireGuardPortBase: summary.WireGuardPortBase, WireGuardPortCount: summary.WireGuardPortCount, LastHeartbeat: summary.LastHeartbeat, Version: summary.Version}
 	}
 	allocations := make([]*Allocation, 0, len(allocationMap))
 	for _, allocation := range allocationMap {
@@ -987,7 +1040,7 @@ func (s *Server) DrainNode(ctx context.Context, id uuid.UUID) error {
 	}
 	previousStatus := node.Status
 	node.Status = NodeStatusDraining
-	summary := &NodeSummary{ID: node.ID, Host: node.Host, Port: node.Port, CPU: node.CPU, Memory: node.Memory, OS: node.OS, Arch: node.Arch, Labels: node.Labels, Volumes: node.Volumes, Capabilities: node.Capabilities, Status: node.Status, WireGuardPublicKey: node.WireGuardPublicKey, WireGuardEndpoint: node.WireGuardEndpoint, WireGuardPortBase: node.WireGuardPortBase, WireGuardPortCount: node.WireGuardPortCount, LastHeartbeat: node.LastHeartbeat, Version: node.Version}
+	summary := &NodeSummary{ID: node.ID, Host: node.Host, Port: node.Port, CPUCapacity: node.CPUCapacity, MemoryCapacity: node.MemoryCapacity, CPUAllocatable: node.CPUAllocatable, MemoryAllocatable: node.MemoryAllocatable, OS: node.OS, Arch: node.Arch, Labels: node.Labels, Volumes: node.Volumes, Capabilities: node.Capabilities, Status: node.Status, WireGuardPublicKey: node.WireGuardPublicKey, WireGuardEndpoint: node.WireGuardEndpoint, WireGuardPortBase: node.WireGuardPortBase, WireGuardPortCount: node.WireGuardPortCount, LastHeartbeat: node.LastHeartbeat, Version: node.Version}
 	s.mu.Unlock()
 	if err := s.state.PutNode(ctx, id.String(), summary); err != nil {
 		s.mu.Lock()
@@ -1069,7 +1122,7 @@ func (s *Server) resumeNodeAllocations(ctx context.Context, id uuid.UUID) error 
 		allocation.mu.Unlock()
 	}
 	s.mu.RLock()
-	summary := &NodeSummary{ID: node.ID, Host: node.Host, Port: node.Port, CPU: node.CPU, Memory: node.Memory, OS: node.OS, Arch: node.Arch, Labels: node.Labels, Volumes: node.Volumes, Capabilities: node.Capabilities, Status: NodeStatusHealthy, WireGuardPublicKey: node.WireGuardPublicKey, WireGuardEndpoint: node.WireGuardEndpoint, WireGuardPortBase: node.WireGuardPortBase, WireGuardPortCount: node.WireGuardPortCount, LastHeartbeat: node.LastHeartbeat, Version: node.Version}
+	summary := &NodeSummary{ID: node.ID, Host: node.Host, Port: node.Port, CPUCapacity: node.CPUCapacity, MemoryCapacity: node.MemoryCapacity, CPUAllocatable: node.CPUAllocatable, MemoryAllocatable: node.MemoryAllocatable, OS: node.OS, Arch: node.Arch, Labels: node.Labels, Volumes: node.Volumes, Capabilities: node.Capabilities, Status: NodeStatusHealthy, WireGuardPublicKey: node.WireGuardPublicKey, WireGuardEndpoint: node.WireGuardEndpoint, WireGuardPortBase: node.WireGuardPortBase, WireGuardPortCount: node.WireGuardPortCount, LastHeartbeat: node.LastHeartbeat, Version: node.Version}
 	s.mu.RUnlock()
 	if err := s.state.PutNode(ctx, id.String(), summary); err != nil {
 		return err

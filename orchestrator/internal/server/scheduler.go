@@ -111,7 +111,7 @@ func Schedule(intent *PlacementIntent) []Placement {
 			if !portsAvailable {
 				continue
 			}
-			if (node.CPU > 0 && saturatingAddInt(usedCPU[node.ID], reqCPU) > node.CPU) || (node.Memory > 0 && saturatingAddInt64(usedMemory[node.ID], reqMemory) > node.Memory) {
+			if (node.CPUAllocatable > 0 && saturatingAddInt(usedCPU[node.ID], reqCPU) > node.CPUAllocatable) || (node.MemoryAllocatable > 0 && saturatingAddInt64(usedMemory[node.ID], reqMemory) > node.MemoryAllocatable) {
 				continue
 			}
 			better := target == nil
@@ -218,11 +218,11 @@ func nodeMatchesConstraints(node *Node, constraints []spec.ConstraintSpec) bool 
 
 func placementUtilization(node *Node, cpu int, memory int64) float64 {
 	var cpuRatio, memoryRatio float64
-	if node.CPU > 0 {
-		cpuRatio = float64(cpu) / float64(node.CPU)
+	if node.CPUAllocatable > 0 {
+		cpuRatio = float64(cpu) / float64(node.CPUAllocatable)
 	}
-	if node.Memory > 0 {
-		memoryRatio = float64(memory) / float64(node.Memory)
+	if node.MemoryAllocatable > 0 {
+		memoryRatio = float64(memory) / float64(node.MemoryAllocatable)
 	}
 	return max(cpuRatio, memoryRatio)
 }

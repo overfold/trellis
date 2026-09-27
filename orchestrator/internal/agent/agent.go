@@ -23,6 +23,7 @@ import (
 	"github.com/clofour/trellis/internal/health"
 	"github.com/clofour/trellis/internal/lifecycle"
 	"github.com/clofour/trellis/internal/network"
+	"github.com/clofour/trellis/internal/nodecapacity"
 	"github.com/clofour/trellis/internal/runtime"
 	"github.com/clofour/trellis/internal/spec"
 	"github.com/clofour/trellis/internal/storage"
@@ -255,9 +256,16 @@ func (a *Agent) SetAdvertiseAddress(host string, port int) {
 	a.nodeInfo.Port = port
 }
 
-// SetResources configures node capacity and platform attributes.
-func (a *Agent) SetResources(cpu int, memory int64, osName, arch string) {
-	a.nodeInfo.CPU, a.nodeInfo.Memory, a.nodeInfo.OS, a.nodeInfo.Arch = cpu, memory, osName, arch
+// SetResources configures physical and schedulable node resources and platform attributes.
+func (a *Agent) SetResources(cpu int, memory int64, osName, arch string) error {
+	allocatableCPU, allocatableMemory, err := nodecapacity.Resolve(cpu, memory)
+	if err != nil {
+		return err
+	}
+	a.nodeInfo.CPUCapacity, a.nodeInfo.MemoryCapacity = cpu, memory
+	a.nodeInfo.CPUAllocatable, a.nodeInfo.MemoryAllocatable = allocatableCPU, allocatableMemory
+	a.nodeInfo.OS, a.nodeInfo.Arch = osName, arch
+	return nil
 }
 
 // SetCapabilities configures the features this node has verified locally.
@@ -1465,14 +1473,29 @@ func (a *Agent) runHeartbeatLoop(ctx context.Context) {
 				actual = append(actual, api.AllocationStatus{ID: alloc.AllocationID, Generation: alloc.Generation, Task: alloc.TaskName, Address: allocationNetworkAddress(alloc), Phase: lifecycle.Phase(alloc.Status), Health: lifecycle.Health(alloc.Health), Ports: ports})
 			}
 			a.mu.RUnlock()
-			err := a.server.SendHeartbeat(ctx, a.nodeID, &client.Heartbeat{
-				NodeID:       a.nodeID,
-				Timestamp:    time.Now(),
-				Allocations:  actual,
-				Volumes:      a.volumes.AvailableHostVolumes(),
-				Capabilities: a.nodeInfo.Capabilities,
-				Version:      a.version,
-			})
+			heartbeat := &client.Heartbeat{
+				NodeID:            a.nodeID,
+				Timestamp:         time.Now(),
+				Allocations:       actual,
+				Volumes:           a.volumes.AvailableHostVolumes(),
+				Capabilities:      a.nodeInfo.Capabilities,
+				Version:           a.version,
+				CPUCapacity:       a.nodeInfo.CPUCapacity,
+				MemoryCapacity:    a.nodeInfo.MemoryCapacity,
+				CPUAllocatable:    a.nodeInfo.CPUAllocatable,
+				MemoryAllocatable: a.nodeInfo.MemoryAllocatable,
+			}
+			if metrics, ok := nodecapacity.SampleHostMetrics(); ok {
+				if metrics.CPUValid {
+					heartbeat.CPUUsage = &metrics.CPUUsage
+				}
+				if metrics.MemoryValid {
+					heartbeat.MemoryUsed = &metrics.MemoryUsed
+					heartbeat.MemoryAvailable = &metrics.MemoryAvailable
+				}
+				heartbeat.MetricsAt = &metrics.CollectedAt
+			}
+			err := a.server.SendHeartbeat(ctx, a.nodeID, heartbeat)
 			if err != nil {
 				a.log.Error("send heartbeat failed", "error", err)
 				registered = false

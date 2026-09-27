@@ -409,8 +409,24 @@ func (h *Handler) handleRegisterNode(c *echo.Context) error {
 	if err := requireNode(c, request.ID, "node registration identity does not match certificate"); err != nil {
 		return err
 	}
+	cpuCapacity, memoryCapacity := request.CPUCapacity, request.MemoryCapacity
+	if cpuCapacity == 0 {
+		cpuCapacity = request.CPU
+	}
+	if memoryCapacity == 0 {
+		memoryCapacity = request.Memory
+	}
+	cpuAllocatable, memoryAllocatable := request.CPUAllocatable, request.MemoryAllocatable
+	if cpuAllocatable == 0 {
+		cpuAllocatable = request.CPU
+	}
+	if memoryAllocatable == 0 {
+		memoryAllocatable = request.Memory
+	}
 	if err := h.server.RegisterNode(c.Request().Context(), &NodeRegistration{
-		ID: request.ID, Host: request.Host, Port: request.Port, CPU: request.CPU, Memory: request.Memory,
+		ID: request.ID, Host: request.Host, Port: request.Port,
+		CPUCapacity: cpuCapacity, MemoryCapacity: memoryCapacity,
+		CPUAllocatable: cpuAllocatable, MemoryAllocatable: memoryAllocatable,
 		OS: request.OS, Arch: request.Arch, Labels: request.Labels, Volumes: request.Volumes, Capabilities: request.Capabilities,
 		WireGuardPublicKey: request.WireGuardPublicKey, WireGuardEndpoint: request.WireGuardEndpoint,
 		WireGuardPortBase: request.WireGuardPortBase, WireGuardPortCount: request.WireGuardPortCount,
@@ -432,7 +448,13 @@ func (h *Handler) handleHeartbeat(c *echo.Context) error {
 	if err := c.Bind(&request); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 	}
-	if err := h.server.Heartbeat(c.Request().Context(), id, request.Allocations, request.Version, request.Volumes, request.Capabilities); err != nil {
+	resources := nodeResourceObservation{
+		CPUCapacity: request.CPUCapacity, MemoryCapacity: request.MemoryCapacity,
+		CPUAllocatable: request.CPUAllocatable, MemoryAllocatable: request.MemoryAllocatable,
+		CPUUsage: request.CPUUsage, MemoryUsed: request.MemoryUsed,
+		MemoryAvailable: request.MemoryAvailable, MetricsAt: request.MetricsAt,
+	}
+	if err := h.server.Heartbeat(c.Request().Context(), id, request.Allocations, request.Version, request.Volumes, request.Capabilities, resources); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "unable to process heartbeat")
 	}
 	return c.NoContent(http.StatusNoContent)
@@ -643,7 +665,11 @@ func (h *Handler) handleMetrics(c *echo.Context) error {
 func (h *Handler) convertNode(node *Node) *api.NodeResponse {
 	return &api.NodeResponse{
 		ID: node.ID, Host: node.Host, Port: node.Port, Status: api.NodeStatusResponse(node.Status),
-		LastHeartbeat: node.LastHeartbeat, CPU: node.CPU, Memory: node.Memory, OS: node.OS, Arch: node.Arch, Labels: node.Labels,
+		LastHeartbeat: node.LastHeartbeat, CPU: node.CPUAllocatable, Memory: node.MemoryAllocatable,
+		CPUCapacity: node.CPUCapacity, MemoryCapacity: node.MemoryCapacity,
+		CPUAllocatable: node.CPUAllocatable, MemoryAllocatable: node.MemoryAllocatable,
+		CPUUsage: node.CPUUsage, MemoryUsed: node.MemoryUsed, MemoryAvailable: node.MemoryAvailable, MetricsAt: node.MetricsAt,
+		OS: node.OS, Arch: node.Arch, Labels: node.Labels,
 		Volumes: node.Volumes, Capabilities: node.Capabilities, Version: node.Version,
 	}
 }

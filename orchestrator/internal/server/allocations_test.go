@@ -326,7 +326,7 @@ func TestHeartbeatPreservesTaskEndpointIdentity(t *testing.T) {
 		{ID: allocation.ID, Generation: 1, Task: "sidecar", Address: "10.86.213.17", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy},
 		{ID: allocation.ID, Generation: 1, Task: "app", Address: "10.86.213.2", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy},
 	}
-	if err := s.Heartbeat(context.Background(), nodeID, actual, "test", nil, nil); err != nil {
+	if err := s.Heartbeat(context.Background(), nodeID, actual, "test", nil, nil, nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(allocation.Endpoints) != 2 ||
@@ -336,7 +336,7 @@ func TestHeartbeatPreservesTaskEndpointIdentity(t *testing.T) {
 	}
 
 	actual[1].Address = ""
-	if err := s.Heartbeat(context.Background(), nodeID, actual, "test", nil, nil); err != nil {
+	if err := s.Heartbeat(context.Background(), nodeID, actual, "test", nil, nil, nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
 	}
 	if got := allocationEndpointAddress(allocation); got != "" {
@@ -363,21 +363,21 @@ func TestHeartbeatRequiresEveryTaskForRunningHealth(t *testing.T) {
 	app := api.AllocationStatus{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
 	sidecar := api.AllocationStatus{ID: allocation.ID, Generation: 1, Task: "sidecar", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
 	for _, actual := range [][]api.AllocationStatus{{app}, {app, app}} {
-		if err := s.Heartbeat(context.Background(), nodeID, actual, "test", nil, nil); err != nil {
+		if err := s.Heartbeat(context.Background(), nodeID, actual, "test", nil, nil, nodeResourceObservation{}); err != nil {
 			t.Fatal(err)
 		}
 		if allocation.Phase != lifecycle.PhaseStarting || allocation.Health != lifecycle.HealthUnknown {
 			t.Fatalf("partial heartbeat: phase=%s health=%s, want starting/unknown", allocation.Phase, allocation.Health)
 		}
 	}
-	if err := s.Heartbeat(context.Background(), nodeID, []api.AllocationStatus{app, sidecar}, "test", nil, nil); err != nil {
+	if err := s.Heartbeat(context.Background(), nodeID, []api.AllocationStatus{app, sidecar}, "test", nil, nil, nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
 	}
 	if allocation.Phase != lifecycle.PhaseRunning || allocation.Health != lifecycle.HealthHealthy {
 		t.Fatalf("complete heartbeat: phase=%s health=%s, want running/healthy", allocation.Phase, allocation.Health)
 	}
 	app.Health = lifecycle.HealthUnhealthy
-	if err := s.Heartbeat(context.Background(), nodeID, []api.AllocationStatus{app}, "test", nil, nil); err != nil {
+	if err := s.Heartbeat(context.Background(), nodeID, []api.AllocationStatus{app}, "test", nil, nil, nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
 	}
 	if allocation.Phase != lifecycle.PhaseStarting || allocation.Health != lifecycle.HealthUnhealthy {
@@ -402,7 +402,7 @@ func TestHeartbeatMissingTaskRetriesRunningAllocation(t *testing.T) {
 	s.allocations = []*Allocation{allocation}
 	app := api.AllocationStatus{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
 	sidecar := api.AllocationStatus{ID: allocation.ID, Generation: 1, Task: "sidecar", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
-	if err := s.Heartbeat(context.Background(), node.ID, []api.AllocationStatus{app}, "test", nil, nil); err != nil {
+	if err := s.Heartbeat(context.Background(), node.ID, []api.AllocationStatus{app}, "test", nil, nil, nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
 	}
 	if allocation.Phase != lifecycle.PhaseStarting || allocation.Health != lifecycle.HealthUnknown {
@@ -420,7 +420,7 @@ func TestHeartbeatMissingTaskRetriesRunningAllocation(t *testing.T) {
 	if allocation.Phase != lifecycle.PhaseRunning || len(s.allocations) != 1 {
 		t.Fatalf("after retry: phase=%s allocations=%d, want running allocation reused", allocation.Phase, len(s.allocations))
 	}
-	if err := s.Heartbeat(context.Background(), node.ID, []api.AllocationStatus{app, sidecar}, "test", nil, nil); err != nil {
+	if err := s.Heartbeat(context.Background(), node.ID, []api.AllocationStatus{app, sidecar}, "test", nil, nil, nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
 	}
 	if allocation.Phase != lifecycle.PhaseRunning || allocation.Health != lifecycle.HealthHealthy {
@@ -452,7 +452,7 @@ func TestHeartbeatEmptyTaskReportRetriesRunningAllocation(t *testing.T) {
 		t.Fatalf("initial catalog = %#v, want one service at %s", services, node.Host)
 	}
 
-	if err := s.Heartbeat(context.Background(), node.ID, nil, "test", nil, nil); err != nil {
+	if err := s.Heartbeat(context.Background(), node.ID, nil, "test", nil, nil, nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
 	}
 	if allocation.Phase != lifecycle.PhaseStarting || allocation.Health != lifecycle.HealthUnknown {
