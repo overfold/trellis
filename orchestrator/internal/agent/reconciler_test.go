@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -53,7 +54,8 @@ func (r *reconcilerRuntime) Logs(context.Context, string, bool, int) (io.ReadClo
 }
 
 type statusRecorder struct {
-	statuses []string
+	statuses     []string
+	exhaustedErr error
 }
 
 type inFlightHealthRuntime struct {
@@ -94,6 +96,19 @@ func (r *healthCallbackRecorder) OnUnhealthy(ctx context.Context, id string) err
 
 func (s *statusRecorder) OnReconciledStatus(_ string, status string) {
 	s.statuses = append(s.statuses, status)
+}
+
+// OnRestartState records terminal exhaustion as the "failed" observation the
+// agent derives from it.
+func (s *statusRecorder) OnRestartState(_ string, _ int, _ time.Time, exhausted bool) error {
+	if !exhausted {
+		return nil
+	}
+	if s.exhaustedErr != nil {
+		return s.exhaustedErr
+	}
+	s.statuses = append(s.statuses, "failed")
+	return nil
 }
 
 func TestAllocationReconcilerRestartsStoppedAllocation(t *testing.T) {
@@ -396,5 +411,26 @@ func TestAllocationReconcilerTrackRecoveredExhaustedDoesNotRestart(t *testing.T)
 	}
 	if len(subscriber.statuses) != 0 {
 		t.Fatalf("statuses = %v, want no republished observation", subscriber.statuses)
+	}
+}
+
+func TestAllocationReconcilerRetriesUnrecordedExhaustion(t *testing.T) {
+	rt := &reconcilerRuntime{status: runtime.StatusStopped}
+	subscriber := &statusRecorder{exhaustedErr: errors.New("disk full")}
+	r := NewAllocationReconciler(rt, subscriber)
+	r.Track("alloc-1", false, &spec.RestartPolicySpec{MaxRestarts: 0, Window: time.Minute})
+
+	if err := r.Reconcile(context.Background(), "alloc-1"); err == nil {
+		t.Fatal("reconcile succeeded although exhaustion was not recorded")
+	}
+	subscriber.exhaustedErr = nil
+	if err := r.Reconcile(context.Background(), "alloc-1"); err != nil {
+		t.Fatalf("retry reconcile: %v", err)
+	}
+	if rt.restartCount != 0 {
+		t.Fatalf("restart count = %d, want 0", rt.restartCount)
+	}
+	if len(subscriber.statuses) != 1 || subscriber.statuses[0] != "failed" {
+		t.Fatalf("statuses = %v, want exhaustion recorded on retry", subscriber.statuses)
 	}
 }

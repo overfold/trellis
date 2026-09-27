@@ -33,6 +33,10 @@ type AllocationReconciler struct {
 // AllocationReconcileSubscriber receives reconciliation state changes.
 type AllocationReconcileSubscriber interface {
 	OnReconciledStatus(allocID, status string)
+	// OnRestartState records restart accounting. When exhausted is true the
+	// allocation has failed terminally; an error means the exhaustion was
+	// not recorded and the reconciler will retry on its next pass.
+	OnRestartState(allocID string, attempts int, window time.Time, exhausted bool) error
 }
 
 type allocationReconcileState struct {
@@ -264,14 +268,19 @@ func (r *AllocationReconciler) restart(ctx context.Context, allocID string) erro
 		state.exhausted = true
 		state.attempts, state.window = attempts, window
 		r.mu.Unlock()
-		r.publishRestartState(allocID, attempts, window, true)
-		r.publishStatus(allocID, "failed")
+		if err := r.publishRestartState(allocID, attempts, window, true); err != nil {
+			r.mu.Lock()
+			state.exhausted = false
+			r.mu.Unlock()
+			return fmt.Errorf("record exhausted restart budget for alloc %s: %w", allocID, err)
+		}
 		return nil
 	}
 	state.attempts, state.window = attempts, window
 	healthManaged := state.healthManaged
 	r.mu.Unlock()
-	r.publishRestartState(allocID, attempts, window, false)
+	// Restart accounting is best effort; the restart itself must proceed.
+	_ = r.publishRestartState(allocID, attempts, window, false)
 
 	if err := r.runtime.Restart(ctx, allocID); err != nil {
 		r.mu.Lock()
@@ -296,12 +305,11 @@ func (r *AllocationReconciler) restart(ctx context.Context, allocID string) erro
 	return nil
 }
 
-func (r *AllocationReconciler) publishRestartState(allocID string, attempts int, window time.Time, exhausted bool) {
-	if subscriber, ok := r.Subscriber.(interface {
-		OnRestartState(string, int, time.Time, bool)
-	}); ok {
-		subscriber.OnRestartState(allocID, attempts, window, exhausted)
+func (r *AllocationReconciler) publishRestartState(allocID string, attempts int, window time.Time, exhausted bool) error {
+	if r.Subscriber == nil {
+		return nil
 	}
+	return r.Subscriber.OnRestartState(allocID, attempts, window, exhausted)
 }
 
 func (r *AllocationReconciler) publishStatus(allocID, status string) {

@@ -352,8 +352,9 @@ func (a *Agent) recover(ctx context.Context) error {
 		restartSuppressed := stopping || allocation.Draining
 		// An exhausted restart budget is terminal for this generation: keep
 		// reporting the failed observation instead of asking for a new start.
-		exhausted := !stopping && allocation.RestartExhausted && (container.Status == runtime.StatusCreated || container.Status == runtime.StatusStopped)
-		recoveryPending := !stopping && !exhausted && (container.Status == runtime.StatusCreated || container.Status == runtime.StatusStopped)
+		notRunning := !stopping && (container.Status == runtime.StatusCreated || container.Status == runtime.StatusStopped)
+		exhausted := notRunning && allocation.RestartExhausted
+		recoveryPending := notRunning && !exhausted
 		if exhausted {
 			allocation.Status = "failed"
 			allocation.Health = "unhealthy"
@@ -393,7 +394,7 @@ func (a *Agent) recover(ctx context.Context) error {
 			} else if restartSuppressed {
 				a.reconciler.TrackStopping(allocation.ID, false, nil)
 			} else if !recoveryPending {
-				a.reconciler.Track(allocation.ID, false, nil)
+				a.reconciler.TrackRecovered(allocation.ID, false, nil, allocation.RestartAttempts, allocation.RestartWindow, allocation.RestartExhausted)
 			}
 			if allocation.Spec != nil && !stopping && !recoveryPending && !exhausted && allocation.Spec.HealthCheck != nil {
 				a.health.RegisterTask(allocation.ID, allocation.ContainerID, allocation.Spec.HealthCheck)
@@ -705,7 +706,7 @@ func (a *Agent) ResumeGroup(request *api.DrainAllocationRequest) error {
 		if request.Sequence < allocation.DrainSequence {
 			continue
 		}
-		if allocation.Status != "running" && allocation.Status != "starting" {
+		if allocation.Status != "running" && allocation.Status != "starting" && allocation.Status != "failed" {
 			a.mu.Unlock()
 			return fmt.Errorf("cannot resume allocation %s task %s with status %q", request.AllocationID, allocation.ID, allocation.Status)
 		}
@@ -745,12 +746,14 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	existing := a.allocations[allocID]
 	if existing != nil {
 		matching := existing.AllocationID == schedulerID && existing.Generation == generation && existing.JobRevision == jobRevision && existing.ExecutionHash == executionHash
-		status := existing.Status
+		status, exhausted := existing.Status, existing.RestartExhausted
 		a.mu.Unlock()
 		if !matching {
 			return fmt.Errorf("%w: %s", ErrAllocationExists, allocID)
 		}
-		if status == "running" {
+		// An exhausted restart budget is terminal for this generation; a
+		// start retry must not recreate the task with a fresh budget.
+		if status == "running" || exhausted {
 			return nil
 		}
 		// A previous start may have reached the runtime but failed before it
@@ -1425,10 +1428,6 @@ func (a *Agent) OnReconciledStatus(allocID, status string) {
 		switch status {
 		case "healthy", "unhealthy":
 			alloc.Health = status
-		case "failed":
-			// The container stopped and will not be restarted; stop probing it.
-			alloc.Status, alloc.Health = status, "unhealthy"
-			a.health.DeregisterTask(allocID)
 		default:
 			alloc.Status = status
 			if status == "running" && alloc.Spec != nil && alloc.Spec.HealthCheck != nil {
@@ -1447,16 +1446,32 @@ func (a *Agent) OnReconciledStatus(allocID, status string) {
 	a.mu.Unlock()
 }
 
-// OnRestartState records allocation restart state.
-func (a *Agent) OnRestartState(allocID string, attempts int, window time.Time, exhausted bool) {
+// OnRestartState records allocation restart state. An exhausted budget also
+// records the terminal failed observation in the same write, so recovery
+// never sees exhaustion without the failure or the reverse.
+func (a *Agent) OnRestartState(allocID string, attempts int, window time.Time, exhausted bool) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if allocation := a.allocations[allocID]; allocation != nil {
-		allocation.RestartAttempts, allocation.RestartWindow, allocation.RestartExhausted = attempts, window, exhausted
-		if err := a.persistAllocation(allocation); err != nil {
-			a.log.Error("persist restart tracking", "allocation", allocation.AllocationID, "error", err)
-		}
+	allocation := a.allocations[allocID]
+	if allocation == nil {
+		return nil
 	}
+	previous := *allocation
+	allocation.RestartAttempts, allocation.RestartWindow, allocation.RestartExhausted = attempts, window, exhausted
+	if exhausted {
+		// The container stopped and will not be restarted; stop probing it.
+		allocation.Status, allocation.Health = "failed", "unhealthy"
+		a.health.DeregisterTask(allocID)
+	}
+	if err := a.persistAllocation(allocation); err != nil {
+		if exhausted {
+			// Keep memory consistent with disk so the reconciler retries.
+			*allocation = previous
+		}
+		a.log.Error("persist restart tracking", "allocation", allocation.AllocationID, "error", err)
+		return fmt.Errorf("persist restart tracking for %s: %w", allocID, err)
+	}
+	return nil
 }
 
 func (a *Agent) runHeartbeatLoop(ctx context.Context) {
