@@ -14,6 +14,7 @@ import (
 
 	"github.com/clofour/trellis/internal/api"
 	"github.com/clofour/trellis/internal/health"
+	"github.com/clofour/trellis/internal/lifecycle"
 	"github.com/clofour/trellis/internal/network"
 	"github.com/clofour/trellis/internal/runtime"
 	"github.com/clofour/trellis/internal/spec"
@@ -115,6 +116,22 @@ type blockingRecoveryDetach struct {
 	network.DisabledManager
 	entered chan struct{}
 	release chan struct{}
+}
+
+type blockingAttachNetworkManager struct {
+	network.DisabledManager
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (m *blockingAttachNetworkManager) Attach(_ context.Context, request network.AttachRequest) (*network.Attachment, error) {
+	close(m.entered)
+	<-m.release
+	return &network.Attachment{
+		AllocationID:     request.AllocationID,
+		Address:          "10.42.0.2/24",
+		NetworkNamespace: "/var/run/netns/" + request.AllocationID,
+	}, nil
 }
 
 func (m *blockingRecoveryDetach) Detach(context.Context, *network.Attachment) error {
@@ -429,6 +446,88 @@ func TestRunAllocationRegistersHealthAfterStoringRunningAllocation(t *testing.T)
 	agent.mu.RUnlock()
 	if got != "healthy" {
 		t.Fatalf("health after first probe = %q, want healthy", got)
+	}
+}
+
+func TestRunAllocationPublishesStableSnapshotDuringStartup(t *testing.T) {
+	rt := &blockingStartRuntime{
+		reconcilerRuntime: &reconcilerRuntime{},
+		started:           make(chan string, 1),
+		release:           make(chan struct{}),
+		labels:            map[string]map[string]string{},
+	}
+	manager := &blockingAttachNetworkManager{entered: make(chan struct{}), release: make(chan struct{})}
+	agent := newOperationTestAgent(t, rt)
+	agent.SetNetworkManager(manager)
+	task := &spec.TaskSpec{
+		Name:  "web",
+		Image: "image",
+		Networking: &spec.TaskNetworkingSpec{
+			Mode:  spec.TaskNetworkWireGuard,
+			Ports: []spec.PortSpec{{}},
+		},
+	}
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- agent.RunAllocation(context.Background(), "alloc", "scheduler", 1, 1, "hash", "default", "job", "group", "web", task, "", &network.Plan{}, nil, nil, nil)
+	}()
+	select {
+	case <-manager.entered:
+	case err := <-runDone:
+		t.Fatalf("allocation failed before network attachment: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("allocation did not begin network attachment")
+	}
+
+	stopSnapshots := make(chan struct{})
+	snapshotsDone := make(chan error, 1)
+	go func() {
+		for {
+			select {
+			case <-stopSnapshots:
+				snapshotsDone <- nil
+				return
+			default:
+			}
+			statuses := agent.allocationStatuses()
+			if len(statuses) != 1 {
+				snapshotsDone <- fmt.Errorf("heartbeat allocations = %d, want 1", len(statuses))
+				return
+			}
+			status := statuses[0]
+			if status.Phase != lifecycle.PhaseStarting || status.Address != "" || len(status.Ports) != 0 {
+				snapshotsDone <- fmt.Errorf("startup heartbeat snapshot = %+v, want stable starting state without runtime resources", status)
+				return
+			}
+			allocations := agent.GetAllocations()
+			if len(allocations) != 1 || allocations[0].Status != "starting" || allocations[0].Network != nil || len(allocations[0].Ports) != 0 {
+				snapshotsDone <- fmt.Errorf("startup allocation snapshot = %+v", allocations)
+				return
+			}
+		}
+	}()
+	close(manager.release)
+	select {
+	case <-rt.started:
+	case err := <-snapshotsDone:
+		close(rt.release)
+		t.Fatal(err)
+	case <-time.After(time.Second):
+		close(rt.release)
+		t.Fatal("allocation did not reach blocked start")
+	}
+	close(stopSnapshots)
+	if err := <-snapshotsDone; err != nil {
+		close(rt.release)
+		t.Fatal(err)
+	}
+	close(rt.release)
+	if err := <-runDone; err != nil {
+		t.Fatal(err)
+	}
+	statuses := agent.allocationStatuses()
+	if len(statuses) != 1 || statuses[0].Phase != lifecycle.PhaseRunning || statuses[0].Address != "10.42.0.2" || len(statuses[0].Ports) != 1 {
+		t.Fatalf("running heartbeat snapshot = %+v", statuses)
 	}
 }
 
