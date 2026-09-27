@@ -706,10 +706,10 @@ func (c *ContainerdRuntime) ExecOutput(ctx context.Context, containerID string, 
 	if err != nil {
 		return nil, nil, 1, fmt.Errorf("exec in %s: %w", containerID, err)
 	}
-	// Deleting the process waits for its output copy to finish.
-	if err := deleteExecProcess(ctx, taskExec); err != nil {
-		return nil, nil, 1, fmt.Errorf("collecting exec output for %s: %w", containerID, err)
-	}
+	// Deleting the process waits for its output copy to finish. The wait is
+	// bounded because a background child can hold the output open after the
+	// command exits; the output collected by then is returned.
+	_ = deleteExecProcess(ctx, taskExec)
 	code, _, err := status.Result()
 	if err != nil {
 		return nil, nil, 1, fmt.Errorf("extracting exec status for %s: %w", containerID, err)
@@ -985,8 +985,6 @@ func (c *ContainerdRuntime) StartTerminal(ctx context.Context, containerID strin
 	go func() {
 		status := <-exitCh
 		code, _, resultErr := status.Result()
-		_ = stdinWriter.Close()
-		_ = stdinReader.Close()
 		// Deleting waits (boundedly) for the output copy, so readers do not
 		// see the exit before the final output.
 		_ = deleteExecProcess(ctx, process)
@@ -997,6 +995,8 @@ func (c *ContainerdRuntime) StartTerminal(ctx context.Context, containerID strin
 			session.exitCode = &value
 		}
 		session.mu.Unlock()
+		_ = stdinWriter.Close()
+		_ = stdinReader.Close()
 	}()
 
 	return session, nil

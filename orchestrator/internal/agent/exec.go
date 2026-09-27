@@ -33,7 +33,6 @@ type execSession struct {
 	AllocationID string
 	TaskID       string
 	ContainerID  string
-	Task         string
 	Terminal     runtime.TerminalSession
 
 	// lastActive holds Unix nanoseconds so session use needs only a read lock.
@@ -183,17 +182,21 @@ func (a *Agent) CreateExecSession(ctx context.Context, allocID, task string, com
 	if err != nil {
 		return nil, fmt.Errorf("start terminal in container %s: %w", target.ContainerID, err)
 	}
+	sessionID := uuid.NewString()
+	session := &execSession{
+		AllocationID: allocID, TaskID: target.ID, ContainerID: target.ContainerID, Terminal: terminal,
+	}
+	session.lastActive.Store(time.Now().UnixNano())
 	// StartTerminal outlives the request; a caller that gave up never learns
 	// the session ID, so the terminal must not be kept.
 	if err := ctx.Err(); err != nil {
-		a.closeTerminal(ctx, allocID, terminal)
+		a.discardExecSession(ctx, sessionID, session)
 		return nil, err
 	}
-	sessionID := uuid.NewString()
 	a.mu.Lock()
 	if a.execSessionsClosed {
 		a.mu.Unlock()
-		a.closeTerminal(ctx, allocID, terminal)
+		a.discardExecSession(ctx, sessionID, session)
 		return nil, ErrAgentShuttingDown
 	}
 	// A stop marks the record stopping before it closes the record's sessions,
@@ -201,14 +204,9 @@ func (a *Agent) CreateExecSession(ctx context.Context, allocID, task string, com
 	current := a.allocations[target.ID]
 	if current == nil || current.ContainerID != target.ContainerID || current.Generation != target.Generation || !execTargetable(current) {
 		a.mu.Unlock()
-		a.closeTerminal(ctx, allocID, terminal)
+		a.discardExecSession(ctx, sessionID, session)
 		return nil, fmt.Errorf("%w: allocation %s task %s stopped while starting exec session", ErrAllocationNotFound, allocID, target.TaskName)
 	}
-	session := &execSession{
-		AllocationID: allocID, TaskID: target.ID, ContainerID: target.ContainerID, Task: target.TaskName,
-		Terminal: terminal,
-	}
-	session.lastActive.Store(time.Now().UnixNano())
 	a.execSessions[sessionID] = session
 	a.mu.Unlock()
 	return &api.ExecSessionResponse{ID: sessionID}, nil
@@ -278,10 +276,7 @@ func (a *Agent) CloseExecSession(ctx context.Context, allocID, sessionID string)
 	}
 	delete(a.execSessions, sessionID)
 	a.mu.Unlock()
-	// The session is no longer tracked, so its close must not be cut short.
-	closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), execSessionCloseTimeout)
-	defer cancel()
-	if err := session.Terminal.Close(closeCtx); err != nil {
+	if err := a.closeTerminal(ctx, sessionID, session); err != nil {
 		return fmt.Errorf("close exec session %s: %w", sessionID, err)
 	}
 	return nil
@@ -298,31 +293,48 @@ func (a *Agent) closeExecSessionsForTask(ctx context.Context, taskID, containerI
 // match is called with the agent lock held.
 func (a *Agent) closeExecSessions(ctx context.Context, match func(*execSession) bool) {
 	a.mu.Lock()
-	var sessions []*execSession
+	sessions := make(map[string]*execSession)
 	for id, session := range a.execSessions {
 		if match(session) {
-			sessions = append(sessions, session)
+			sessions[id] = session
 			delete(a.execSessions, id)
 		}
 	}
 	a.mu.Unlock()
 	var wg sync.WaitGroup
-	for _, session := range sessions {
+	for id, session := range sessions {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			a.closeTerminal(ctx, session.AllocationID, session.Terminal)
+			a.discardExecSession(ctx, id, session)
 		}()
 	}
 	wg.Wait()
 }
 
-func (a *Agent) closeTerminal(ctx context.Context, allocID string, terminal runtime.TerminalSession) {
+// discardExecSession terminates an untracked session, logging a failure.
+func (a *Agent) discardExecSession(ctx context.Context, sessionID string, session *execSession) {
+	if err := a.closeTerminal(ctx, sessionID, session); err != nil {
+		a.log.Warn("close exec session", "allocation", session.AllocationID, "session", sessionID, "error", err)
+	}
+}
+
+// closeTerminal terminates a session that has been removed from the session
+// map. If termination fails, the session is tracked again as idle so the
+// reaper retries it instead of leaving its process unowned.
+func (a *Agent) closeTerminal(ctx context.Context, sessionID string, session *execSession) error {
 	closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), execSessionCloseTimeout)
 	defer cancel()
-	if err := terminal.Close(closeCtx); err != nil {
-		a.log.Warn("close exec session", "allocation", allocID, "error", err)
+	err := session.Terminal.Close(closeCtx)
+	if err != nil {
+		session.lastActive.Store(0)
+		a.mu.Lock()
+		if _, exists := a.execSessions[sessionID]; !exists {
+			a.execSessions[sessionID] = session
+		}
+		a.mu.Unlock()
 	}
+	return err
 }
 
 // reapExecSessions releases exited sessions after their retention period and

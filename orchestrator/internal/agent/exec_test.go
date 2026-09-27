@@ -17,9 +17,10 @@ import (
 )
 
 type execTestTerminal struct {
-	mu     sync.Mutex
-	exited bool
-	closed int
+	mu       sync.Mutex
+	exited   bool
+	closed   int
+	closeErr error
 }
 
 func (t *execTestTerminal) Write(p []byte) (int, error) { return len(p), nil }
@@ -33,6 +34,9 @@ func (t *execTestTerminal) Close(context.Context) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.closed++
+	if t.closeErr != nil {
+		return t.closeErr
+	}
 	t.exited = true
 	return nil
 }
@@ -357,5 +361,34 @@ func TestCancelledExecSessionCreateClosesTerminal(t *testing.T) {
 	}
 	if rt.terminal("allocation-g1-web").closeCount() != 1 || len(agent.execSessions) != 0 {
 		t.Fatal("abandoned session create kept its terminal")
+	}
+}
+
+func TestFailedExecSessionCloseStaysTrackedForRetry(t *testing.T) {
+	rt := newExecTestRuntime()
+	agent := newOperationTestAgent(t, rt)
+	addExecTestTask(agent, "allocation-g1-web", "web", 1, "running")
+	response, err := agent.CreateExecSession(context.Background(), "allocation", "web", []string{"sh"}, "", 80, 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal := rt.terminal("allocation-g1-web")
+	terminal.mu.Lock()
+	terminal.closeErr = errors.New("kill failed")
+	terminal.mu.Unlock()
+
+	if err := agent.CloseExecSession(context.Background(), "allocation", response.ID); err == nil {
+		t.Fatal("close succeeded despite kill failure")
+	}
+	if agent.execSessions[response.ID] == nil {
+		t.Fatal("session whose kill failed is no longer tracked")
+	}
+
+	terminal.mu.Lock()
+	terminal.closeErr = nil
+	terminal.mu.Unlock()
+	agent.reapExecSessions(context.Background(), time.Now())
+	if agent.execSessions[response.ID] != nil || terminal.closeCount() != 2 {
+		t.Fatalf("reaper did not retry the failed close (closes = %d)", terminal.closeCount())
 	}
 }
