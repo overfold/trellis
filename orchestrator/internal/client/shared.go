@@ -53,6 +53,18 @@ func (e *HTTPError) Error() string {
 	return fmt.Sprintf("status %d: %s", e.Status, bytes.TrimSpace(e.Body))
 }
 
+// Message returns the response's JSON "message" field, or its trimmed body
+// when the body carries no such string.
+func (e *HTTPError) Message() string {
+	var body struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(e.Body, &body) == nil && body.Message != "" {
+		return body.Message
+	}
+	return string(bytes.TrimSpace(e.Body))
+}
+
 func (c *client) request(ctx context.Context, method string, url string, requestData any, responseData any) error {
 	var requestBodyBytes []byte
 	if requestData != nil {

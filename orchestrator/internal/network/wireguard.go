@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/netip"
 	"os"
@@ -59,6 +60,8 @@ type WireGuardManager struct {
 	run        commandRunner
 	mu         sync.Mutex
 	dnsAddress string
+	// netnsDir is where "ip netns" keeps named network namespaces.
+	netnsDir string
 }
 
 // ConfigureWorkloadDNS reserves an internal address on loopback for the Trellis
@@ -554,8 +557,29 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 	if err != nil {
 		return nil, err
 	}
+	if !safeName.MatchString(networkName) {
+		return nil, fmt.Errorf("invalid network name %q", networkName)
+	}
 	wg, bridge, hostVeth, peerVeth := short("tw", namespace+"\x00"+networkName), short("tb", namespace+"\x00"+networkName), short("vh", allocation), short("vc", allocation)
-	ns := filepath.Join("/var/run/netns", allocation)
+	ns := m.netnsPath(allocation)
+	// Journal the attachment before creating anything, so an agent that
+	// crashes before it learns the result can still detach by allocation ID.
+	if err := m.recordAttachment(attachmentRecord{AllocationID: allocation, Namespace: namespace, Network: networkName, Gateway: cfg.Gateway, APIPort: request.Plan.APIPort}); err != nil {
+		return nil, err
+	}
+	var lease string
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		// Roll back with the same idempotent detach a restarted agent uses.
+		// If that fails, the record stays so a later detach can finish.
+		rollback := Attachment{AllocationID: allocation, Namespace: namespace, Network: networkName, HostVeth: hostVeth,
+			Bridge: bridge, WireGuardInterface: wg, Gateway: cfg.Gateway, APIPort: request.Plan.APIPort, LeasePath: lease}
+		if err := m.detachLocked(context.WithoutCancel(ctx), rollback); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("roll back network attachment: %w", err))
+		}
+	}()
 	leaseDir := filepath.Join(m.stateDir, networkName)
 	if err := os.MkdirAll(leaseDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create IPAM state: %w", err)
@@ -564,11 +588,6 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		if retErr != nil {
-			_ = os.Remove(lease)
-		}
-	}()
 	// Every command is idempotently reconciled; "replace" is used for routes.
 	if err = m.ensureLink(ctx, bridge, "type", "bridge"); err != nil {
 		return nil, fmt.Errorf("create bridge: %w", err)
@@ -657,14 +676,7 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 	if err = m.run.Run(ctx, "ip", "netns", "add", allocation); err != nil {
 		return nil, err
 	}
-	defer func() {
-		if retErr != nil {
-			_ = m.run.Run(ctx, "ip", "link", "del", hostVeth)
-			_ = m.run.Run(ctx, "ip", "netns", "del", allocation)
-		}
-	}()
 	if err = m.run.Run(ctx, "ip", "link", "add", hostVeth, "type", "veth", "peer", "name", peerVeth); err != nil {
-		_ = m.run.Run(ctx, "ip", "netns", "del", allocation)
 		return nil, err
 	}
 	if err = m.run.Run(ctx, "ip", "link", "set", hostVeth, "master", bridge); err != nil {
@@ -706,57 +718,13 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 	}, nil
 }
 
-// Detach removes networking resources for an allocation.
+// Detach removes networking resources for an allocation. Resources that
+// are already gone are skipped, so a retry after a partial detach converges.
 func (m *WireGuardManager) Detach(ctx context.Context, a *Attachment) error {
 	if a == nil {
 		return nil
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
-	_ = m.run.Run(ctx, "ip", "link", "del", a.HostVeth)
-	_ = m.run.Run(ctx, "ip", "netns", "del", a.AllocationID)
-	if a.LeasePath != "" {
-		if err := os.Remove(a.LeasePath); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-	}
-
-	leaseDir := filepath.Join(m.stateDir, a.Network)
-	entries, err := os.ReadDir(leaseDir)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("read network leases: %w", err)
-	}
-	if len(entries) != 0 {
-		return nil
-	}
-
-	bridge := a.Bridge
-	if bridge == "" {
-		bridge = short("tb", a.Namespace+"\x00"+a.Network)
-	}
-	wg := a.WireGuardInterface
-	if wg == "" {
-		wg = short("tw", a.Namespace+"\x00"+a.Network)
-	}
-	_ = m.run.Run(ctx, "iptables", "-D", "FORWARD", "-i", bridge, "!", "-o", wg, "-j", "DROP")
-	_ = m.run.Run(ctx, "iptables", "-D", "FORWARD", "-o", bridge, "!", "-i", wg, "-j", "DROP")
-	if m.dnsAddress != "" {
-		for _, protocol := range []string{"udp", "tcp"} {
-			_ = m.run.Run(ctx, "iptables", "-D", "INPUT", "-i", bridge, "-d", m.dnsAddress, "-p", protocol, "--dport", "53", "-j", "ACCEPT")
-		}
-	}
-	if a.APIPort > 0 {
-		_ = m.run.Run(ctx, "iptables", "-D", "INPUT", "-i", bridge, "-d", a.Gateway, "-p", "tcp", "--dport", fmt.Sprint(a.APIPort), "-j", "ACCEPT")
-	}
-	_ = m.run.Run(ctx, "iptables", "-D", "INPUT", "-i", bridge, "-j", "DROP")
-	_ = m.run.Run(ctx, "ip", "link", "del", wg)
-	_ = m.run.Run(ctx, "ip", "link", "del", bridge)
-	if err := os.Remove(m.planPath(a.Namespace, a.Network)); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove applied network plan: %w", err)
-	}
-	if err := os.Remove(leaseDir); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove empty network lease directory: %w", err)
-	}
-	return nil
+	return m.detachLocked(ctx, *a)
 }

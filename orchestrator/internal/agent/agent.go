@@ -125,6 +125,7 @@ type Allocation struct {
 	Mounts                       []*runtime.Mount
 	SecretDir                    string
 	Network                      *network.Attachment
+	NetworkIntent                *network.AttachmentIntent
 	Status                       string
 	Health                       string
 	Draining                     bool
@@ -339,7 +340,7 @@ func (a *Agent) Init(ctx context.Context) error {
 	} else if !a.recoveryListPending {
 		// Ownership is only known once recovery has adopted every allocation;
 		// otherwise the recovery retry runs the sweep when it completes.
-		a.removeOrphanedSecretDirs()
+		a.removeOrphanedResources(ctx)
 	}
 
 	go a.runRecoveryRetry(ctx)
@@ -543,7 +544,17 @@ func (a *Agent) recoverContainer(container runtime.ContainerInfo, allocation *Al
 		allocation.Status = "running"
 		if allocation.Spec != nil && allocation.Spec.HealthCheck != nil {
 			allocation.Health = "unknown"
+		} else {
+			// Without a check a running task is healthy, including one
+			// recorded unhealthy while it was paused.
+			allocation.Health = "healthy"
 		}
+	} else if !stopping && container.Status == runtime.StatusPaused {
+		// A paused task still exists, so it is neither restarted nor
+		// replaced, but its frozen processes cannot serve. Configured
+		// probes report health again once it is resumed.
+		allocation.Status = "running"
+		allocation.Health = "unhealthy"
 	}
 	a.adoptPorts(allocation)
 	// Persist the initial observation before a probe can publish a result.
@@ -609,7 +620,7 @@ func (a *Agent) recoverMissing(ctx context.Context, allocation *Allocation) {
 		return
 	}
 	var cleanupErr error
-	if err := a.network.Detach(context.WithoutCancel(ctx), allocation.Network); err != nil {
+	if err := a.detachAllocationNetwork(context.WithoutCancel(ctx), allocation); err != nil {
 		cleanupErr = fmt.Errorf("detach network for missing allocation container: %w", err)
 	} else if allocation.SecretDir != "" {
 		if err := removeSecretDir(allocation.SecretDir); err != nil {
@@ -749,13 +760,14 @@ func (a *Agent) relistRecovery(ctx context.Context, managed runtime.ManagedRunti
 		a.mu.Lock()
 		a.recoveryListPending = stillPending || a.hasUnreadableUnknownLocked(containers)
 		// Listing completes at most once, and Init skipped the orphaned
-		// secret sweep while it was incomplete.
+		// resource sweep while it was incomplete.
 		sweep := !a.recoveryListPending
 		a.mu.Unlock()
 		if sweep {
 			// Every listed container is now recorded or retained, so secret
-			// directories without an owner are orphans, as at startup.
-			a.removeOrphanedSecretDirs()
+			// directories and network attachments without an owner are
+			// orphans, as at startup.
+			a.removeOrphanedResources(ctx)
 		}
 	}
 }
@@ -868,7 +880,7 @@ func (a *Agent) hasUnreadableUnknownLocked(containers []runtime.ContainerInfo) b
 }
 
 func observedStatus(status runtime.ContainerStatus) bool {
-	return status == runtime.StatusRunning || status == runtime.StatusCreated || status == runtime.StatusStopped
+	return status == runtime.StatusRunning || status == runtime.StatusCreated || status == runtime.StatusStopped || status == runtime.StatusPaused
 }
 
 func (a *Agent) reobserve(ctx context.Context, id, allocationID string, container runtime.ContainerInfo, found bool) {
@@ -1436,9 +1448,15 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	}
 	a.mu.Lock()
 	existing := a.allocations[allocID]
+	// Restart accounting belongs to the allocation generation. A start retry
+	// for the same generation keeps it, so repeated retries or agent restarts
+	// cannot hide a crash loop behind a fresh budget.
+	var restartAttempts int
+	var restartWindow time.Time
 	if existing != nil {
 		matching := existing.AllocationID == schedulerID && existing.Generation == generation && existing.JobRevision == jobRevision && existing.ExecutionHash == executionHash
 		status, exhausted, unobserved := existing.Status, existing.RestartExhausted, existing.unobserved
+		restartAttempts, restartWindow = existing.RestartAttempts, existing.RestartWindow
 		a.mu.Unlock()
 		if !matching {
 			return fmt.Errorf("%w: %s", ErrAllocationExists, allocID)
@@ -1470,7 +1488,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		}
 		a.mu.Lock()
 	}
-	alloc := &Allocation{ID: allocID, ContainerID: allocID, AllocationID: schedulerID, Generation: generation, JobRevision: jobRevision, ExecutionHash: executionHash, Restart: restartPolicy, Namespace: namespace, JobName: jobName, GroupName: groupName, TaskName: taskName, Spec: ts, Status: "starting", Health: "unknown", Draining: draining, DrainSequence: drainSequence}
+	alloc := &Allocation{ID: allocID, ContainerID: allocID, AllocationID: schedulerID, Generation: generation, JobRevision: jobRevision, ExecutionHash: executionHash, Restart: restartPolicy, RestartAttempts: restartAttempts, RestartWindow: restartWindow, Namespace: namespace, JobName: jobName, GroupName: groupName, TaskName: taskName, Spec: ts, Status: "starting", Health: "unknown", Draining: draining, DrainSequence: drainSequence}
 	starting := *alloc
 	a.allocations[allocID] = &starting
 	a.mu.Unlock()
@@ -1499,7 +1517,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 				// Start may have succeeded even if its response was lost. Track
 				// the retained allocation as stopping from the outset so an
 				// observed stopped task can never be restarted.
-				a.reconciler.TrackStopping(allocID, false, restartPolicy, 0, time.Time{}, false)
+				a.reconciler.TrackStopping(allocID, false, restartPolicy, restartAttempts, restartWindow, false)
 				tracked = true
 			}
 		}
@@ -1537,7 +1555,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove container %s: %w", allocID, err))
 			}
 		}
-		if err := a.network.Detach(context.WithoutCancel(ctx), netAttachment); err != nil {
+		if err := a.detachAllocationNetwork(context.WithoutCancel(ctx), alloc); err != nil {
 			cleanupErrs = append(cleanupErrs, fmt.Errorf("detach allocation network: %w", err))
 		}
 		if secretDir != "" {
@@ -1617,6 +1635,12 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	if wireGuard {
 		if networkPlan == nil {
 			return fmt.Errorf("automatic WireGuard network plan is required")
+		}
+		// Record the intent before Attach so a restarted agent can find and
+		// detach an attachment whose result was never recorded.
+		alloc.NetworkIntent = &network.AttachmentIntent{AllocationID: allocID, Namespace: namespace, Network: namespace}
+		if err := a.persistAllocation(alloc); err != nil {
+			return fmt.Errorf("persist network intent: %w", err)
 		}
 		netAttachment, err = a.network.Attach(ctx, network.AttachRequest{AllocationID: allocID, Namespace: namespace, Network: namespace, Plan: *networkPlan})
 		if err != nil {
@@ -1754,6 +1778,9 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		Restart:       restartPolicy,
 		Namespace:     namespace,
 
+		RestartAttempts: restartAttempts,
+		RestartWindow:   restartWindow,
+
 		JobName:   jobName,
 		GroupName: groupName,
 		TaskName:  ts.Name,
@@ -1770,6 +1797,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		Draining:      draining,
 		DrainSequence: drainSequence,
 	}
+	ready.NetworkIntent = alloc.NetworkIntent
 	if ts.HealthCheck == nil {
 		ready.Health = "healthy"
 	}
@@ -1782,9 +1810,9 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	// Track only after the running record is stored, so a restart decision
 	// (including terminal exhaustion) is never overwritten by startup.
 	if draining {
-		a.reconciler.TrackStopping(allocID, ts.HealthCheck != nil, restartPolicy, 0, time.Time{}, false)
+		a.reconciler.TrackStopping(allocID, ts.HealthCheck != nil, restartPolicy, restartAttempts, restartWindow, false)
 	} else {
-		a.reconciler.Track(allocID, ts.HealthCheck != nil, restartPolicy)
+		a.reconciler.TrackRecovered(allocID, ts.HealthCheck != nil, restartPolicy, restartAttempts, restartWindow, false)
 	}
 	tracked = true
 	if ts.HealthCheck != nil {
@@ -1891,7 +1919,7 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string) error {
 		errs = append(errs, fmt.Errorf("untrack allocation %s: %w", allocID, err))
 	}
 
-	if err := a.network.Detach(ctx, alloc.Network); err != nil {
+	if err := a.detachAllocationNetwork(ctx, &alloc); err != nil {
 		errs = append(errs, fmt.Errorf("detach allocation network: %w", err))
 	}
 	containerRemoved := true
@@ -2079,7 +2107,11 @@ func (a *Agent) allocationStatuses() []api.AllocationStatus {
 		for _, p := range alloc.Ports {
 			ports = append(ports, api.PortMapping{HostPort: p.HostPort, ContainerPort: p.ContainerPort})
 		}
-		actual = append(actual, api.AllocationStatus{ID: alloc.AllocationID, Generation: alloc.Generation, Task: alloc.TaskName, Address: allocationNetworkAddress(alloc), Phase: lifecycle.Phase(alloc.Status), Health: lifecycle.Health(reportedHealth(alloc)), Ports: ports})
+		var reason api.OperationCode
+		if alloc.Status == "failed" && alloc.RestartExhausted {
+			reason = api.OperationRestartExhausted
+		}
+		actual = append(actual, api.AllocationStatus{ID: alloc.AllocationID, Generation: alloc.Generation, Task: alloc.TaskName, Address: allocationNetworkAddress(alloc), Phase: lifecycle.Phase(alloc.Status), Health: lifecycle.Health(reportedHealth(alloc)), Reason: reason, Ports: ports})
 	}
 	return actual
 }
