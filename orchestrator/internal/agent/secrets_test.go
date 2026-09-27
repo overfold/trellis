@@ -367,8 +367,8 @@ func TestRemoveSecretDirRefusesRedirectedRoot(t *testing.T) {
 	if err := os.Symlink(target, root); err != nil {
 		t.Fatal(err)
 	}
-	if err := removeSecretDir(filepath.Join(root, "victim")); err != nil {
-		t.Fatalf("symlinked root blocked cleanup: %v", err)
+	if err := removeSecretDir(filepath.Join(root, "victim")); err == nil {
+		t.Fatal("removed a secret directory through a symlinked root")
 	}
 	if _, err := os.Stat(victim); err != nil {
 		t.Fatalf("redirected removal deleted %s: %v", victim, err)
@@ -404,5 +404,29 @@ func TestRunAllocationKeepsSecretDirectoryItDidNotCreate(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(existing, "live")); err != nil {
 		t.Fatalf("failed start removed a secret directory it did not create: %v", err)
+	}
+}
+
+func TestRemoveSecretDirTreatsForeignRootAsGone(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("changing file ownership requires root")
+	}
+	for name, create := range map[string]func(path string) error{
+		"directory": func(path string) error { return os.Mkdir(path, 0o755) },
+		"file":      func(path string) error { return os.WriteFile(path, nil, 0o644) },
+		"symlink":   func(path string) error { return os.Symlink(t.TempDir(), path) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "trellis-secrets-foreign")
+			if err := create(root); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Lchown(root, 65534, 65534); err != nil {
+				t.Fatal(err)
+			}
+			if err := removeSecretDir(filepath.Join(root, "dir")); err != nil {
+				t.Fatalf("foreign root blocked cleanup: %v", err)
+			}
+		})
 	}
 }

@@ -121,20 +121,25 @@ func (a *Agent) recordedSecretRoot() (root string, reuse bool, err error) {
 }
 
 // removeSecretDir removes a recorded secret directory. After a reboot empties
-// /dev/shm another user may recreate the root path as a symlink that would
-// redirect the removal; such a root cannot hold this agent's secrets, so there
-// is nothing to remove. A missing root likewise means nothing is left.
+// /dev/shm another user may recreate the root path, for example as a symlink
+// that would redirect the removal. A root owned by another user cannot hold
+// this agent's secrets, and only an agent-owned root is safe from being
+// swapped in sticky /dev/shm between this check and the removal, so anything
+// else is treated as already gone.
 func removeSecretDir(dir string) error {
 	if dir == "" {
 		return nil
 	}
 	parent := filepath.Dir(dir)
 	info, err := os.Lstat(parent)
-	if errors.Is(err, fs.ErrNotExist) || (err == nil && info.Mode()&fs.ModeSymlink != 0) {
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("inspect secret root: %w", err)
+	}
+	if !ownedByAgent(info) {
+		return nil
 	}
 	if !info.IsDir() {
 		return fmt.Errorf("refuse to remove %s: %s is not a directory", dir, parent)
