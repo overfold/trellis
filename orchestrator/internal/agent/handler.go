@@ -51,6 +51,9 @@ func (h *Handler) handleNetworkPlan(c *echo.Context) error {
 	if request.Namespace == "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "namespace is required")
 	}
+	if request.Epoch == 0 {
+		return echo.NewHTTPError(http.StatusBadRequest, ErrInvalidEpoch.Error())
+	}
 	if err := h.agent.UpdateNetworkPlan(c.Request().Context(), &request); err != nil {
 		return operationError(err)
 	}
@@ -66,7 +69,10 @@ func (h *Handler) handleDrain(c *echo.Context) error {
 		request.AllocationID = c.Param("id")
 	}
 	if request.Generation == 0 {
-		return echo.NewHTTPError(http.StatusBadRequest, "generation must be greater than zero")
+		return echo.NewHTTPError(http.StatusBadRequest, ErrInvalidGeneration.Error())
+	}
+	if request.Epoch == 0 {
+		return echo.NewHTTPError(http.StatusBadRequest, ErrInvalidEpoch.Error())
 	}
 	if err := h.agent.DrainGroup(&request); err != nil {
 		return operationError(err)
@@ -80,7 +86,10 @@ func (h *Handler) handleResume(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 	}
 	if request.Generation == 0 {
-		return echo.NewHTTPError(http.StatusBadRequest, "generation must be greater than zero")
+		return echo.NewHTTPError(http.StatusBadRequest, ErrInvalidGeneration.Error())
+	}
+	if request.Epoch == 0 {
+		return echo.NewHTTPError(http.StatusBadRequest, ErrInvalidEpoch.Error())
 	}
 	if err := h.agent.ResumeGroup(&request); err != nil {
 		return operationError(err)
@@ -137,13 +146,16 @@ func (h *Handler) handleRun(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "allocation_id is required")
 	}
 	if request.Generation == 0 {
-		return echo.NewHTTPError(http.StatusBadRequest, "generation must be greater than zero")
+		return echo.NewHTTPError(http.StatusBadRequest, ErrInvalidGeneration.Error())
 	}
 	if request.JobRevision <= 0 {
 		return echo.NewHTTPError(http.StatusBadRequest, "job_revision must be greater than zero")
 	}
 	if request.ExecutionHash == "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "execution_hash is required")
+	}
+	if request.Epoch == 0 {
+		return echo.NewHTTPError(http.StatusBadRequest, ErrInvalidEpoch.Error())
 	}
 	defer func() {
 		for i := range request.Secrets {
@@ -168,6 +180,12 @@ func (h *Handler) handleDelete(c *echo.Context) error {
 	}
 	if request.AllocationID == "" {
 		request.AllocationID = c.Param("id")
+	}
+	if request.Generation == 0 {
+		return echo.NewHTTPError(http.StatusBadRequest, ErrInvalidGeneration.Error())
+	}
+	if request.Epoch == 0 {
+		return echo.NewHTTPError(http.StatusBadRequest, ErrInvalidEpoch.Error())
 	}
 	err := h.agent.StopGroup(ctx, &request)
 	if err != nil {
@@ -318,6 +336,8 @@ func operationError(err error) error {
 		status, code = http.StatusConflict, api.OperationStaleGeneration
 	case errors.Is(err, ErrExecutionConflict), errors.Is(err, ErrAllocationExists):
 		status, code = http.StatusConflict, api.OperationConflict
+	case errors.Is(err, ErrInvalidEpoch), errors.Is(err, ErrInvalidGeneration):
+		status = http.StatusBadRequest
 	case errors.Is(err, ErrRestartBudgetExhausted):
 		status, code = http.StatusConflict, api.OperationRestartExhausted
 	}

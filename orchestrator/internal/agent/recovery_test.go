@@ -222,7 +222,7 @@ func TestRecoverUnknownStatusContainerIsPreservedAndStopFailsHonestly(t *testing
 		t.Fatal("start retry acknowledged an allocation whose container state is unknown")
 	}
 
-	stop := &api.StopAllocationRequest{AllocationID: "allocation", Generation: 1}
+	stop := &api.StopAllocationRequest{AllocationID: "allocation", Generation: 1, Epoch: 1}
 	if err := agent.StopGroup(context.Background(), stop); !errors.Is(err, stopErr) {
 		t.Fatalf("stop error = %v, want %v", err, stopErr)
 	}
@@ -418,7 +418,7 @@ func TestStopAllocationKeepsPortClaimSharedWithRetainedAllocation(t *testing.T) 
 		t.Fatal("recover succeeded despite listing failure")
 	}
 	rt.listErr = nil
-	if err := agent.StopGroup(context.Background(), &api.StopAllocationRequest{AllocationID: "allocation", Generation: 1}); err != nil {
+	if err := agent.StopGroup(context.Background(), &api.StopAllocationRequest{AllocationID: "allocation", Generation: 1, Epoch: 1}); err != nil {
 		t.Fatalf("stop stale allocation: %v", err)
 	}
 	if agent.allocations["task"] != nil || !portClaimed(agent, 18088) {
@@ -597,7 +597,7 @@ func TestStopGroupStopsUnrecordedContainerWhileListingIncomplete(t *testing.T) {
 	if err := agent.recover(context.Background()); err == nil {
 		t.Fatal("recover succeeded despite listing failure")
 	}
-	stop := &api.StopAllocationRequest{AllocationID: "allocation", Generation: 1}
+	stop := &api.StopAllocationRequest{AllocationID: "allocation", Generation: 1, Epoch: 1}
 	if err := agent.StopGroup(context.Background(), stop); err == nil {
 		t.Fatal("stop acknowledged an allocation that recovery could not list")
 	}
@@ -627,7 +627,7 @@ func TestStopGroupChecksUnrecordedSiblingsWhileListingIncomplete(t *testing.T) {
 		{ID: "sibling", Status: runtime.StatusRunning, Labels: recoveryTestLabels(sibling)},
 		{ID: "unreadable", Status: runtime.StatusUnknown},
 	}
-	stop := &api.StopAllocationRequest{AllocationID: "allocation", Generation: 1}
+	stop := &api.StopAllocationRequest{AllocationID: "allocation", Generation: 1, Epoch: 1}
 	if err := agent.StopGroup(context.Background(), stop); err == nil {
 		t.Fatal("stop succeeded while an unreadable container could belong to the allocation")
 	}
@@ -739,7 +739,7 @@ func TestStopGroupStopsOlderUnrecordedGenerationsWhileListingIncomplete(t *testi
 		{ID: "task", Status: runtime.StatusRunning, Labels: recoveryTestLabels(older)},
 		{ID: "task-g2", Status: runtime.StatusRunning, Labels: newerLabels},
 	}
-	if err := agent.StopGroup(context.Background(), &api.StopAllocationRequest{AllocationID: "allocation", Generation: 2}); err != nil {
+	if err := agent.StopGroup(context.Background(), &api.StopAllocationRequest{AllocationID: "allocation", Generation: 2, Epoch: 1}); err != nil {
 		t.Fatalf("stop newer generation: %v", err)
 	}
 	if rt.stopCount != 2 || agent.allocations["task"] != nil || agent.allocations["task-g2"] != nil {
@@ -757,7 +757,7 @@ func TestStopGroupRejectsStaleGenerationWhenNewerUnrecordedIsListed(t *testing.T
 	labels["trellis.allocation-generation"] = "2"
 	rt.listErr = nil
 	rt.containers = []runtime.ContainerInfo{{ID: "task-g2", Status: runtime.StatusRunning, Labels: labels}}
-	err := agent.StopGroup(context.Background(), &api.StopAllocationRequest{AllocationID: "allocation", Generation: 1})
+	err := agent.StopGroup(context.Background(), &api.StopAllocationRequest{AllocationID: "allocation", Generation: 1, Epoch: 1})
 	if !errors.Is(err, ErrStaleGeneration) {
 		t.Fatalf("stop error = %v, want stale generation", err)
 	}
@@ -775,7 +775,7 @@ func TestStopGroupDoesNotReStopRecordedTasksWhileListingIncomplete(t *testing.T)
 	}
 	rt.listErr = nil
 	rt.containers = []runtime.ContainerInfo{{ID: "task", Status: runtime.StatusRunning, Labels: recoveryTestLabels(record)}}
-	if err := agent.StopGroup(context.Background(), &api.StopAllocationRequest{AllocationID: "allocation", Generation: 1}); err != nil {
+	if err := agent.StopGroup(context.Background(), &api.StopAllocationRequest{AllocationID: "allocation", Generation: 1, Epoch: 1}); err != nil {
 		t.Fatalf("stop recorded allocation: %v", err)
 	}
 	if rt.stopCount != 1 || agent.allocations["task"] != nil {

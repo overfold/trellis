@@ -139,7 +139,7 @@ func TestDrainGroupSuppressesAutomaticRestart(t *testing.T) {
 		reconciler: r,
 		operations: make(map[string]*allocationOperation),
 	}
-	if err := agent.DrainGroup(&api.DrainAllocationRequest{AllocationID: "alloc", Generation: 2}); err != nil {
+	if err := agent.DrainGroup(&api.DrainAllocationRequest{AllocationID: "alloc", Generation: 2, Epoch: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.Reconcile(context.Background(), "task"); err != nil {
@@ -162,10 +162,10 @@ func TestResumeGroupRestoresAutomaticRestart(t *testing.T) {
 		reconciler:  r,
 		operations:  make(map[string]*allocationOperation),
 	}
-	if err := agent.DrainGroup(&api.DrainAllocationRequest{AllocationID: "alloc", Generation: 2}); err != nil {
+	if err := agent.DrainGroup(&api.DrainAllocationRequest{AllocationID: "alloc", Generation: 2, Epoch: 1}); err != nil {
 		t.Fatal(err)
 	}
-	if err := agent.ResumeGroup(&api.DrainAllocationRequest{AllocationID: "alloc", Generation: 2}); err != nil {
+	if err := agent.ResumeGroup(&api.DrainAllocationRequest{AllocationID: "alloc", Generation: 2, Epoch: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if agent.allocations["task"].Draining {
