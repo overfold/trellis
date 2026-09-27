@@ -821,7 +821,9 @@ func deleteWithin(ctx context.Context, process execProcess) error {
 }
 
 // execOutputLimit bounds the stdout and stderr each one-shot exec captures.
-const execOutputLimit = 8 * 1024 * 1024
+// Worst-case JSON escaping (6 bytes per byte) of both streams stays within
+// the 64 MiB response limit of the agent and server clients.
+const execOutputLimit = 4 * 1024 * 1024
 
 // lockedBuffer collects exec output written by containerd's IO copy
 // goroutines, keeping at most execOutputLimit bytes. Taking its contents
