@@ -782,8 +782,9 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		}
 		// Publish the latest durable startup state before marking it stopping.
 		// Startup builds alloc privately so readers never observe it changing.
+		failed := *alloc
 		a.mu.Lock()
-		a.allocations[allocID] = alloc
+		a.allocations[allocID] = &failed
 		a.mu.Unlock()
 		persistStopErr := a.markAllocationStopping(allocID)
 		runErr = errors.Join(runErr, persistStopErr)
