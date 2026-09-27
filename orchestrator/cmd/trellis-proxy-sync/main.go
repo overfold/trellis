@@ -4,21 +4,26 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"text/template"
 	"time"
 
 	"github.com/clofour/trellis/internal/api"
 	"github.com/clofour/trellis/internal/client"
+	"golang.org/x/sys/unix"
 )
 
 type upstream struct {
@@ -114,7 +119,7 @@ func main() {
 			return
 		}
 
-		if err := os.WriteFile(outputFile, []byte(rendered), 0644); err != nil {
+		if err := writeConfig(outputFile, []byte(rendered)); err != nil {
 			log.Error("write config", "error", err)
 			return
 		}
@@ -139,6 +144,172 @@ func main() {
 			sync()
 		}
 	}
+}
+
+func writeConfig(path string, data []byte) (retErr error) {
+	mode := os.FileMode(0644)
+	var owner *syscall.Stat_t
+	for i := 0; i < 255; i++ {
+		// Resolve directories before cleaning: symlink/.. refers to the
+		// symlink target's parent, not the lexical parent of the link.
+		dir, base := filepath.Split(path)
+		if dir == "" {
+			dir = "."
+		}
+		dir, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			return err
+		}
+		path = dir + string(os.PathSeparator) + base
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("output config %s is not a regular file", path)
+			}
+			mode = info.Mode()
+			var ok bool
+			owner, ok = info.Sys().(*syscall.Stat_t)
+			if !ok {
+				return fmt.Errorf("read ownership of %s: unsupported file information", path)
+			}
+			break
+		}
+		target, err := os.Readlink(path)
+		if err != nil {
+			return err
+		}
+		if !filepath.IsAbs(target) {
+			target = dir + string(os.PathSeparator) + target
+		}
+		path = target
+		if i == 254 {
+			return fmt.Errorf("too many symlinks in output path")
+		}
+	}
+
+	// New configs retain the old WriteFile creation semantics (0644 filtered
+	// by umask and default ACL). Replacements start private until metadata is set.
+	createMode := os.FileMode(0644)
+	if owner != nil {
+		createMode = 0600
+	}
+	tmp, err := os.OpenFile(filepath.Join(filepath.Dir(path), ".trellis-proxy-sync-"+rand.Text()), os.O_RDWR|os.O_CREATE|os.O_EXCL, createMode)
+	if err != nil {
+		return err
+	}
+	closed := false
+	renamed := false
+	defer func() {
+		if !closed {
+			if err := tmp.Close(); err != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("close temporary config %s: %w", tmp.Name(), err))
+			}
+		}
+		if !renamed {
+			if err := os.Remove(tmp.Name()); err != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("remove temporary config %s: %w", tmp.Name(), err))
+			}
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		return err
+	}
+	if owner != nil {
+		if err := tmp.Chown(int(owner.Uid), int(owner.Gid)); err != nil {
+			return fmt.Errorf("preserve ownership of %s: %w", path, err)
+		}
+		if err := tmp.Chmod(mode); err != nil {
+			return err
+		}
+		if err := copyXattrs(path, tmp); err != nil {
+			return fmt.Errorf("preserve extended attributes of %s: %w", path, err)
+		}
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	closeErr := tmp.Close()
+	closed = true
+	if closeErr != nil {
+		return fmt.Errorf("close temporary config %s: %w", tmp.Name(), closeErr)
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return err
+	}
+	renamed = true
+	return nil
+}
+
+func copyXattrs(path string, dst *os.File) error {
+	source, err := listXattrNames(func(names []byte) (int, error) { return unix.Listxattr(path, names) })
+	if err != nil {
+		return err
+	}
+	destination, err := listXattrNames(func(names []byte) (int, error) { return unix.Flistxattr(int(dst.Fd()), names) })
+	if err != nil {
+		return err
+	}
+	for name := range destination {
+		if _, ok := source[name]; !ok {
+			if err := unix.Fremovexattr(int(dst.Fd()), name); err != nil {
+				return fmt.Errorf("remove %s: %w", name, err)
+			}
+		}
+	}
+	for name := range source {
+		size, err := unix.Getxattr(path, name, nil)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", name, err)
+		}
+		value := make([]byte, size)
+		n, err := unix.Getxattr(path, name, value)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", name, err)
+		}
+		if n > len(value) {
+			return fmt.Errorf("read %s: %w", name, unix.ERANGE)
+		}
+		if err := unix.Fsetxattr(int(dst.Fd()), name, value[:n], 0); err != nil {
+			return fmt.Errorf("set %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func listXattrNames(list func([]byte) (int, error)) (map[string]struct{}, error) {
+	size, err := list(nil)
+	if errors.Is(err, unix.EOPNOTSUPP) {
+		return map[string]struct{}{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	names := make([]byte, size)
+	n, err := list(names)
+	if errors.Is(err, unix.EOPNOTSUPP) {
+		return map[string]struct{}{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	// A zero-length buffer is another size query. If attributes appeared
+	// since the first query, fail this update rather than slicing past names.
+	if n > len(names) {
+		return nil, unix.ERANGE
+	}
+	result := make(map[string]struct{})
+	for _, name := range strings.Split(string(names[:n]), "\x00") {
+		if name != "" {
+			result[name] = struct{}{}
+		}
+	}
+	return result, nil
 }
 
 func selectUpstreams(allocs []api.AllocationResponse, containerPort int) []upstream {
