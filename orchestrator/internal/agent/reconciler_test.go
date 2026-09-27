@@ -276,10 +276,10 @@ func TestRestartIgnoresInFlightHealthProbe(t *testing.T) {
 	}
 }
 
-func TestAllocationReconcilerPublishesUnhealthyAfterRestartBudget(t *testing.T) {
+func TestAllocationReconcilerPublishesFailedAfterRestartBudget(t *testing.T) {
 	rt := &reconcilerRuntime{status: runtime.StatusStopped}
-	subscriber := &statusRecorder{}
-	r := NewAllocationReconciler(rt, subscriber)
+	agent := &Agent{allocations: map[string]*Allocation{"alloc-1": {ID: "alloc-1", Status: "running"}}}
+	r := NewAllocationReconciler(rt, agent)
 	r.Track("alloc-1", false, nil)
 
 	for i := 0; i < defaultMaxRestarts+1; i++ {
@@ -290,8 +290,8 @@ func TestAllocationReconcilerPublishesUnhealthyAfterRestartBudget(t *testing.T) 
 	if rt.restartCount != defaultMaxRestarts {
 		t.Fatalf("restart count = %d, want %d", rt.restartCount, defaultMaxRestarts)
 	}
-	if got := subscriber.statuses[len(subscriber.statuses)-1]; got != "unhealthy" {
-		t.Fatalf("status = %q, want unhealthy", got)
+	if got := agent.allocations["alloc-1"].Status; got != "failed" {
+		t.Fatalf("allocation lifecycle = %q, want failed", got)
 	}
 }
 
@@ -322,8 +322,8 @@ func TestAllocationReconcilerUsesConfiguredRestartBudget(t *testing.T) {
 	if rt.restartCount != 1 {
 		t.Fatalf("restart count = %d, want 1", rt.restartCount)
 	}
-	if got := subscriber.statuses[len(subscriber.statuses)-1]; got != "unhealthy" {
-		t.Fatalf("status = %q, want unhealthy", got)
+	if got := subscriber.statuses[len(subscriber.statuses)-1]; got != "failed" {
+		t.Fatalf("status = %q, want failed", got)
 	}
 }
 

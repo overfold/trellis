@@ -256,7 +256,7 @@ func (r *AllocationReconciler) restart(ctx context.Context, allocID string) erro
 		state.restarting = false
 		state.window = window
 		r.mu.Unlock()
-		r.publishStatus(allocID, "unhealthy")
+		r.publishStatus(allocID, "failed")
 		return nil
 	}
 	state.attempts, state.window = attempts, window
