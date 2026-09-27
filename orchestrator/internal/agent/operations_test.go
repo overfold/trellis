@@ -68,8 +68,7 @@ func (m *failingDetachNetworkManager) Attach(ctx context.Context, request networ
 }
 
 func (m *failingDetachNetworkManager) Detach(ctx context.Context, attachment *network.Attachment) error {
-	m.countingNetworkManager.Detach(ctx, attachment)
-	return m.detachErr
+	return errors.Join(m.countingNetworkManager.Detach(ctx, attachment), m.detachErr)
 }
 
 type stoppedWithErrorRuntime struct {
@@ -213,6 +212,10 @@ type ambiguousCreateRuntime struct {
 	createMissing    bool
 	inspectMissing   bool
 	labels           map[string]string
+}
+
+func (r *ambiguousCreateRuntime) ListManaged(context.Context, string) ([]runtime.ContainerInfo, error) {
+	return nil, nil
 }
 
 func (r *ambiguousCreateRuntime) Create(_ context.Context, options runtime.CreateOptions) (string, error) {
@@ -690,6 +693,8 @@ func TestAmbiguousCreateRetainsRecordUntilOwnershipVerified(t *testing.T) {
 		createErr:         createErr,
 	}
 	agent := newOperationTestAgent(t, rt)
+	manager := &failingDetachNetworkManager{}
+	agent.SetNetworkManager(manager)
 	local := storage.NewLocalStorage(t.TempDir())
 	if err := local.Init(); err != nil {
 		t.Fatal(err)
@@ -697,6 +702,8 @@ func TestAmbiguousCreateRetainsRecordUntilOwnershipVerified(t *testing.T) {
 	agent.ConfigureDurability(local, "test")
 	request := operationTestRequest()
 	request.Tasks = request.Tasks[:1]
+	request.Tasks[0].Networking = &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard}
+	request.NetworkPlan = &network.Plan{}
 	id := "allocation-g2-first"
 
 	err := agent.RunGroup(context.Background(), request)
@@ -706,6 +713,9 @@ func TestAmbiguousCreateRetainsRecordUntilOwnershipVerified(t *testing.T) {
 	if rt.removeCount != 0 || rt.startCount != 0 {
 		t.Fatalf("remove attempts = %d, start attempts = %d, want 0 and 0", rt.removeCount, rt.startCount)
 	}
+	if manager.detachCount != 0 {
+		t.Fatal("network cleanup attempted before verifying container ownership")
+	}
 	if allocation := agent.allocations[id]; allocation == nil || allocation.Status != "stopping" {
 		t.Fatalf("retained allocation = %+v, want stopping", allocation)
 	}
@@ -713,6 +723,21 @@ func TestAmbiguousCreateRetainsRecordUntilOwnershipVerified(t *testing.T) {
 	if err := local.Get(allocationRecordKey(id), &recorded); err != nil || recorded.Status != "stopping" || !recorded.ContainerOwnershipUnverified {
 		t.Fatalf("recorded allocation = %+v, error = %v, want stopping", recorded, err)
 	}
+	// Cluster-filtered listing can omit a colliding container. Recovery must
+	// inspect its ID rather than treating it as absent and forgetting the record.
+	recovered := newOperationTestAgent(t, rt)
+	recovered.SetNetworkManager(manager)
+	recovered.ConfigureDurability(local, "test")
+	if err := recovered.recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if recovered.allocations[id] == nil || manager.detachCount != 0 {
+		t.Fatal("recovery discarded unverified ownership or released resources")
+	}
+	if err := local.Get(allocationRecordKey(id), &recorded); err != nil {
+		t.Fatalf("recovery removed unverified record: %v", err)
+	}
+	agent = recovered
 
 	if err := agent.StopAllocation(context.Background(), id); err == nil || rt.removeCount != 0 {
 		t.Fatalf("cleanup without inspection: error = %v, removals = %d", err, rt.removeCount)
@@ -735,7 +760,7 @@ func TestAmbiguousCreateRetainsRecordUntilOwnershipVerified(t *testing.T) {
 }
 
 func TestFailedCreateMissingContainerCanBeCleanedUpOnRetry(t *testing.T) {
-	for _, retry := range []string{"RunGroup", "StopGroup"} {
+	for _, retry := range []string{"RunGroup", "StopGroup", "Recovery"} {
 		t.Run(retry, func(t *testing.T) {
 			createErr := errors.New("create failed before container creation")
 			rt := &ambiguousCreateRuntime{
@@ -772,8 +797,14 @@ func TestFailedCreateMissingContainerCanBeCleanedUpOnRetry(t *testing.T) {
 				if current := agent.allocations[id]; current == nil || current.Status != "running" || current.ContainerOwnershipUnverified {
 					t.Fatalf("allocation after retry = %+v, want verified running allocation", current)
 				}
-			case "StopGroup":
-				if err := agent.StopGroup(context.Background(), &api.StopAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation}); err != nil {
+			case "StopGroup", "Recovery":
+				if retry == "Recovery" {
+					agent = newOperationTestAgent(t, rt)
+					agent.ConfigureDurability(local, "test")
+					if err := agent.recover(context.Background()); err != nil {
+						t.Fatalf("retry recovery: %v", err)
+					}
+				} else if err := agent.StopGroup(context.Background(), &api.StopAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation}); err != nil {
 					t.Fatalf("retry stop: %v", err)
 				}
 				if agent.allocations[id] != nil {
@@ -917,6 +948,7 @@ func TestFailedStartCleanupRetainsAllocationForRetry(t *testing.T) {
 	agent.ConfigureDurability(local, "test")
 	request := operationTestRequest()
 	request.Tasks = request.Tasks[:1]
+	request.Tasks[0].Networking = &spec.TaskNetworkingSpec{Ports: []spec.PortSpec{{}}}
 	id := "allocation-g2-first"
 
 	err := agent.RunGroup(context.Background(), request)
@@ -930,6 +962,16 @@ func TestFailedStartCleanupRetainsAllocationForRetry(t *testing.T) {
 	if err := local.Get(allocationRecordKey(id), &recorded); err != nil || recorded.Status != "stopping" {
 		t.Fatalf("recorded allocation = %+v, error = %v, want stopping", recorded, err)
 	}
+	port := recorded.Ports[0].HostPort
+	if _, err := agent.ports.Claim(spec.PortSpec{Port: port}); err == nil {
+		t.Fatal("failed start released its port before cleanup completed")
+	}
+	if err := agent.StopAllocation(context.Background(), id); !errors.Is(err, detachErr) {
+		t.Fatalf("failed stop retry = %v, want detach error", err)
+	}
+	if _, err := agent.ports.Claim(spec.PortSpec{Port: port}); err == nil {
+		t.Fatal("failed stop retry released its port before cleanup completed")
+	}
 
 	rt.removeErr = nil
 	manager.detachErr = nil
@@ -941,6 +983,9 @@ func TestFailedStartCleanupRetainsAllocationForRetry(t *testing.T) {
 	}
 	if err := local.Get(allocationRecordKey(id), &recorded); err == nil {
 		t.Fatal("allocation record retained after successful cleanup")
+	}
+	if _, err := agent.ports.Claim(spec.PortSpec{Port: port}); err != nil {
+		t.Fatalf("port unavailable after successful cleanup: %v", err)
 	}
 }
 
@@ -956,7 +1001,7 @@ func TestRecoverRetainsFailedStartRecordUntilNetworkDetachSucceeds(t *testing.T)
 	first.SetNetworkManager(manager)
 	first.ConfigureDurability(local, "test")
 	request := operationTestRequest()
-	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard}}}
+	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard, Ports: []spec.PortSpec{{}}}}}
 	request.NetworkPlan = &network.Plan{}
 	id := "allocation-g2-first"
 
@@ -982,6 +1027,10 @@ func TestRecoverRetainsFailedStartRecordUntilNetworkDetachSucceeds(t *testing.T)
 	}
 	if recovered := second.allocations[id]; recovered == nil || recovered.Status != "stopping" {
 		t.Fatalf("failed cleanup is not reachable after recovery: %+v", recovered)
+	}
+	port := recorded.Ports[0].HostPort
+	if _, err := second.ports.Claim(spec.PortSpec{Port: port}); err == nil {
+		t.Fatal("recovery released the port of an allocation awaiting cleanup")
 	}
 	if err := second.RunGroup(context.Background(), request); !errors.Is(err, detachErr) {
 		t.Fatalf("retry start error = %v, want cleanup failure", err)
@@ -1160,7 +1209,7 @@ func TestRecoverNonRunningAllocationDefersRestartToServer(t *testing.T) {
 			stale := &Allocation{
 				ID: "task", AllocationID: "allocation", ContainerID: "task",
 				Generation: 1, JobRevision: 1, ExecutionHash: "hash",
-				Spec: &spec.TaskSpec{Name: "task", Image: "image"},
+				Spec:   &spec.TaskSpec{Name: "task", Image: "image"},
 				Status: durableStatus, Health: "healthy",
 			}
 			first := newOperationTestAgent(t, rt)
@@ -1216,7 +1265,7 @@ func TestRecoverRunningAllocationResetsHealthUntilProbe(t *testing.T) {
 	first.ConfigureDurability(local, "test")
 	if err := first.persistAllocation(&Allocation{
 		ID: "task", AllocationID: "allocation", ContainerID: "task",
-		Spec: &spec.TaskSpec{Name: "task", HealthCheck: check},
+		Spec:   &spec.TaskSpec{Name: "task", HealthCheck: check},
 		Status: "running", Health: "healthy",
 	}); err != nil {
 		t.Fatal(err)
@@ -1373,8 +1422,8 @@ func TestResumeGroupRecoveredAllocationWithoutSpec(t *testing.T) {
 		labels: map[string]string{
 			"trellis.allocation-id":         "allocation",
 			"trellis.allocation-generation": "1",
-			"trellis.job-revision":         "1",
-			"trellis.execution-hash":       "hash",
+			"trellis.job-revision":          "1",
+			"trellis.execution-hash":        "hash",
 		},
 	}
 	local := storage.NewLocalStorage(t.TempDir())
@@ -1419,7 +1468,7 @@ func TestRecoverStoppingAllocationDoesNotStartOrRestart(t *testing.T) {
 	first.allocations["task"] = &Allocation{
 		ID: "task", AllocationID: "allocation", ContainerID: "task",
 		Generation: 1, JobRevision: 1, ExecutionHash: "hash",
-		Spec: &spec.TaskSpec{Name: "task", Image: "image"},
+		Spec:   &spec.TaskSpec{Name: "task", Image: "image"},
 		Status: "running", Health: "healthy",
 	}
 	first.reconciler.Track("task", false, nil)

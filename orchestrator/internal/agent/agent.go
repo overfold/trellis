@@ -322,6 +322,11 @@ func (a *Agent) recover(ctx context.Context) error {
 		hadRecord := allocation != nil
 		if hadRecord && allocation.ContainerOwnershipUnverified && !a.containerMatchesAllocation(container, allocation) {
 			allocation.Status = "stopping"
+			for _, port := range allocation.Ports {
+				if err := a.ports.Adopt(port); err != nil {
+					a.log.Error("recover port claim", "allocation", allocation.AllocationID, "error", err)
+				}
+			}
 			a.mu.Lock()
 			a.allocations[allocation.ID] = allocation
 			a.mu.Unlock()
@@ -384,9 +389,23 @@ func (a *Agent) recover(ctx context.Context) error {
 		if containerID == "" || seen[containerID] {
 			continue
 		}
-		for _, port := range allocation.Ports {
-			_ = a.ports.Adopt(port)
-			_ = a.ports.Release(port)
+		if allocation.ContainerOwnershipUnverified {
+			// ListManaged is cluster-filtered, so absence does not prove that
+			// an ambiguous Create left no container with this ID. Use the same
+			// ownership verification as a live cleanup retry.
+			allocation.Status = "stopping"
+			for _, port := range allocation.Ports {
+				if err := a.ports.Adopt(port); err != nil {
+					a.log.Error("recover port claim", "allocation", allocation.AllocationID, "error", err)
+				}
+			}
+			a.mu.Lock()
+			a.allocations[allocation.ID] = allocation
+			a.mu.Unlock()
+			if err := a.stopAllocation(context.WithoutCancel(ctx), allocation.ID); err != nil {
+				a.log.Error("recover unverified allocation container", "allocation", allocation.AllocationID, "error", err)
+			}
+			continue
 		}
 		var cleanupErr error
 		if err := a.network.Detach(context.WithoutCancel(ctx), allocation.Network); err != nil {
@@ -407,6 +426,11 @@ func (a *Agent) recover(ctx context.Context) error {
 		if cleanupErr != nil {
 			a.log.Error("recover missing allocation container", "allocation", allocation.AllocationID, "error", cleanupErr)
 			allocation.Status = "stopping"
+			for _, port := range allocation.Ports {
+				if err := a.ports.Adopt(port); err != nil {
+					a.log.Error("recover port claim", "allocation", allocation.AllocationID, "error", err)
+				}
+			}
 			a.mu.Lock()
 			a.allocations[allocation.ID] = allocation
 			a.mu.Unlock()
@@ -757,6 +781,10 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		}
 		persistStopErr := a.markAllocationStopping(allocID)
 		runErr = errors.Join(runErr, persistStopErr)
+		if alloc.ContainerOwnershipUnverified {
+			runErr = errors.Join(runErr, fmt.Errorf("container ownership for %s remains unverified", allocID))
+			return
+		}
 		if startAttempted {
 			if err := a.runtime.Stop(context.WithoutCancel(ctx), allocID); err != nil {
 				runErr = errors.Join(runErr, fmt.Errorf("stop container %s during failed start: %w", allocID, err))
@@ -780,11 +808,6 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		if err := a.network.Detach(context.WithoutCancel(ctx), netAttachment); err != nil {
 			cleanupErrs = append(cleanupErrs, fmt.Errorf("detach allocation network: %w", err))
 		}
-		for _, p := range ports {
-			if err := a.ports.Release(p); err != nil {
-				cleanupErrs = append(cleanupErrs, fmt.Errorf("release port %d: %w", p.HostPort, err))
-			}
-		}
 		if secretDir != "" {
 			if err := os.RemoveAll(secretDir); err != nil {
 				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove secret files: %w", err))
@@ -793,9 +816,6 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		if err := a.volumes.ReleaseStaging(allocID, ts.Volumes); err != nil {
 			cleanupErrs = append(cleanupErrs, fmt.Errorf("release volume staging: %w", err))
 		}
-		if alloc.ContainerOwnershipUnverified {
-			cleanupErrs = append(cleanupErrs, fmt.Errorf("container ownership for %s remains unverified", allocID))
-		}
 		if err := errors.Join(cleanupErrs...); err != nil {
 			runErr = errors.Join(runErr, err)
 			return
@@ -803,6 +823,11 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		if err := a.deleteAllocationRecord(allocID); err != nil {
 			runErr = errors.Join(runErr, fmt.Errorf("delete allocation record: %w", err))
 			return
+		}
+		// Port release is infallible. Keep claims until no cleanup retry can
+		// release a port that has since been assigned to another allocation.
+		for _, p := range ports {
+			_ = a.ports.Release(p)
 		}
 		a.mu.Lock()
 		delete(a.allocations, allocID)
@@ -1265,12 +1290,6 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string) error {
 		}
 	}
 
-	for _, p := range alloc.Ports {
-		err := a.ports.Release(p)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("release port %d: %w", p.HostPort, err))
-		}
-	}
 	if alloc.Spec != nil {
 		if err := a.volumes.ReleaseStaging(allocID, alloc.Spec.Volumes); err != nil {
 			errs = append(errs, fmt.Errorf("release volume staging: %w", err))
@@ -1281,6 +1300,9 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string) error {
 	}
 	if err := a.deleteAllocationRecord(allocID); err != nil {
 		return errors.Join(persistStopErr, fmt.Errorf("delete allocation record: %w", err))
+	}
+	for _, p := range alloc.Ports {
+		_ = a.ports.Release(p)
 	}
 	a.mu.Lock()
 	delete(a.allocations, allocID)
