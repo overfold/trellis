@@ -718,7 +718,10 @@ func (c *ContainerdRuntime) ExecOutput(ctx context.Context, containerID string, 
 	return outBuf.Bytes(), errBuf.Bytes(), int(code), nil
 }
 
-const execCleanupTimeout = 5 * time.Second
+const (
+	execCleanupTimeout    = 5 * time.Second
+	execKillRetryInterval = time.Second
+)
 
 // execProcess is the part of a containerd exec process used to run it to completion.
 type execProcess interface {
@@ -773,12 +776,20 @@ func killExecProcess(ctx context.Context, process execProcess, exitCh <-chan con
 	if err := deleteWithin(cleanupCtx, process); err == nil || !errdefs.IsFailedPrecondition(err) {
 		return
 	}
-	select {
-	case <-exitCh:
-	case <-cleanupCtx.Done():
-		return
+	// Repeat the kill in case the first attempt failed transiently.
+	retry := time.NewTicker(execKillRetryInterval)
+	defer retry.Stop()
+	for {
+		select {
+		case <-exitCh:
+			_ = deleteWithin(cleanupCtx, process)
+			return
+		case <-retry.C:
+			_ = process.Kill(cleanupCtx, syscall.SIGKILL)
+		case <-cleanupCtx.Done():
+			return
+		}
 	}
-	_ = deleteWithin(cleanupCtx, process)
 }
 
 // deleteExecProcess deletes an exited exec process, waiting for its output
@@ -806,22 +817,32 @@ func deleteWithin(ctx context.Context, process execProcess) error {
 	}
 }
 
-// lockedBuffer collects exec output written by containerd's IO copy goroutines.
+// lockedBuffer collects exec output written by containerd's IO copy
+// goroutines. Taking its contents detaches it: a background child can keep
+// writing after the result is returned, and that output is discarded.
 type lockedBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
+	mu       sync.Mutex
+	buf      bytes.Buffer
+	detached bool
 }
 
 func (b *lockedBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.detached {
+		return len(p), nil
+	}
 	return b.buf.Write(p)
 }
 
+// Bytes returns the collected output and discards later writes.
 func (b *lockedBuffer) Bytes() []byte {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return append([]byte(nil), b.buf.Bytes()...)
+	b.detached = true
+	data := b.buf.Bytes()
+	b.buf = bytes.Buffer{}
+	return data
 }
 
 const terminalOutputLimit = 2 * 1024 * 1024

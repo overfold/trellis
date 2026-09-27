@@ -37,12 +37,18 @@ type execSession struct {
 
 	// lastActive holds Unix nanoseconds so session use needs only a read lock.
 	lastActive atomic.Int64
-	exitedAt   time.Time
+	// closeFailed marks a session whose termination failed; the reaper
+	// retries it regardless of client activity.
+	closeFailed atomic.Bool
+	exitedAt    time.Time
 }
 
 // expired reports whether the session should be reaped, given whether its
 // process has been observed to exit. It must be called with the agent lock held.
 func (s *execSession) expired(now time.Time, exited bool) bool {
+	if s.closeFailed.Load() {
+		return true
+	}
 	if exited && s.exitedAt.IsZero() {
 		s.exitedAt = now
 	}
@@ -320,14 +326,14 @@ func (a *Agent) discardExecSession(ctx context.Context, sessionID string, sessio
 }
 
 // closeTerminal terminates a session that has been removed from the session
-// map. If termination fails, the session is tracked again as idle so the
+// map. If termination fails, the session is tracked again, marked so the
 // reaper retries it instead of leaving its process unowned.
 func (a *Agent) closeTerminal(ctx context.Context, sessionID string, session *execSession) error {
 	closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), execSessionCloseTimeout)
 	defer cancel()
 	err := session.Terminal.Close(closeCtx)
 	if err != nil {
-		session.lastActive.Store(0)
+		session.closeFailed.Store(true)
 		a.mu.Lock()
 		if _, exists := a.execSessions[sessionID]; !exists {
 			a.execSessions[sessionID] = session

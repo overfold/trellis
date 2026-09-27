@@ -168,3 +168,52 @@ func TestDeleteWithinGivesUpWhenContextEnds(t *testing.T) {
 		t.Fatalf("delete error = %v, want deadline exceeded", err)
 	}
 }
+
+type flakyKillProcess struct {
+	*fakeExecProcess
+	failures int
+}
+
+func (p *flakyKillProcess) Kill(ctx context.Context, signal syscall.Signal, opts ...containerd.KillOpts) error {
+	p.mu.Lock()
+	if p.failures > 0 {
+		p.failures--
+		p.killed = append(p.killed, signal)
+		p.mu.Unlock()
+		return errors.New("transient kill failure")
+	}
+	p.mu.Unlock()
+	return p.fakeExecProcess.Kill(ctx, signal, opts...)
+}
+
+func TestKillExecProcessRetriesFailedKill(t *testing.T) {
+	process := &flakyKillProcess{fakeExecProcess: newFakeExecProcess(), failures: 1}
+	process.running = true
+
+	killExecProcess(context.Background(), process, process.exitCh)
+	select {
+	case err := <-process.deleted:
+		if err != nil {
+			t.Fatal(err)
+		}
+	default:
+		t.Fatal("process was not deleted after a retried kill")
+	}
+	if signals := process.killSignals(); len(signals) != 2 {
+		t.Fatalf("kill attempts = %d, want 2", len(signals))
+	}
+}
+
+func TestLockedBufferDiscardsWritesAfterSnapshot(t *testing.T) {
+	var buffer lockedBuffer
+	_, _ = buffer.Write([]byte("before"))
+	if got := string(buffer.Bytes()); got != "before" {
+		t.Fatalf("snapshot = %q", got)
+	}
+	if n, err := buffer.Write([]byte("after")); n != 5 || err != nil {
+		t.Fatalf("detached write = %d, %v", n, err)
+	}
+	if got := len(buffer.Bytes()); got != 0 {
+		t.Fatalf("detached buffer kept %d bytes", got)
+	}
+}

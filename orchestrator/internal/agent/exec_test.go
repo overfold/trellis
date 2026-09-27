@@ -383,6 +383,9 @@ func TestFailedExecSessionCloseStaysTrackedForRetry(t *testing.T) {
 	if agent.execSessions[response.ID] == nil {
 		t.Fatal("session whose kill failed is no longer tracked")
 	}
+	if _, err := agent.ReadExecSession("allocation", response.ID, 0); err != nil {
+		t.Fatal(err)
+	}
 
 	terminal.mu.Lock()
 	terminal.closeErr = nil
