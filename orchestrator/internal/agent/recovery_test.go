@@ -501,9 +501,15 @@ func TestRecoverRetryKeepsListingUntilUnrecordedContainerIsInspected(t *testing.
 	if !agent.retryRecovery(context.Background()) {
 		t.Fatal("retry stopped listing while an unrecorded container was uninspected")
 	}
+	// Inspect NotFound alone may describe a missing task, so only a listing
+	// without the container ends the retries.
 	rt.inspectErr = errdefs.ErrNotFound
+	if !agent.retryRecovery(context.Background()) {
+		t.Fatal("retry treated Inspect NotFound as proof of absence")
+	}
+	rt.containers = nil
 	if agent.retryRecovery(context.Background()) {
-		t.Fatal("retry kept listing after the unrecorded container was confirmed gone")
+		t.Fatal("retry kept listing after the container left the listing")
 	}
 }
 
@@ -580,25 +586,23 @@ func TestRecoverRetryQueuesSupersededStopAfterFailedListing(t *testing.T) {
 	}
 }
 
-func TestRecoverRetryStopsContainerStoppedWhileUnlisted(t *testing.T) {
+func TestStopGroupStopsUnrecordedContainerWhileListingIncomplete(t *testing.T) {
 	rt := &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning}, listErr: errors.New("containerd unavailable")}
 	agent, _ := newRecoveryTestAgent(t, rt)
 	if err := agent.recover(context.Background()); err == nil {
 		t.Fatal("recover succeeded despite listing failure")
 	}
-	if err := agent.StopGroup(context.Background(), &api.StopAllocationRequest{AllocationID: "allocation", Generation: 1}); err != nil {
-		t.Fatalf("stop unlisted allocation: %v", err)
+	stop := &api.StopAllocationRequest{AllocationID: "allocation", Generation: 1}
+	if err := agent.StopGroup(context.Background(), stop); err == nil {
+		t.Fatal("stop acknowledged an allocation that recovery could not list")
 	}
 
 	rt.listErr = nil
 	rt.containers = []runtime.ContainerInfo{{ID: "task", Status: runtime.StatusRunning, Labels: recoveryTestLabels(recoveryTestAllocation(0))}}
-	if agent.retryRecovery(context.Background()) {
-		t.Fatal("retry left recovery work pending")
+	if err := agent.StopGroup(context.Background(), stop); err != nil {
+		t.Fatalf("stop unrecorded allocation: %v", err)
 	}
-	if rt.stopCount != 1 || agent.allocations["task"] != nil {
-		t.Fatalf("stop calls = %d, allocation = %+v; want the stopped generation stopped, not adopted", rt.stopCount, agent.allocations["task"])
-	}
-	if agent.recoveryStopped != nil {
-		t.Fatal("recovery kept stop records after listing completed")
+	if rt.stopCount != 1 || rt.removeCount != 1 || agent.allocations["task"] != nil {
+		t.Fatalf("stop=%d remove=%d allocation=%+v; want the unrecorded container stopped", rt.stopCount, rt.removeCount, agent.allocations["task"])
 	}
 }
