@@ -15,7 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/clofour/trellis/internal/api"
@@ -56,6 +55,7 @@ type Agent struct {
 	mu          sync.RWMutex
 	operationMu sync.Mutex
 	operations  map[string]*allocationOperation
+	secretRoot  string
 }
 
 type allocationOperation struct {
@@ -216,6 +216,7 @@ func NewAgent(log *slog.Logger, runtime runtime.ContainerRuntime, health *health
 		execSessions: make(map[string]*execSession),
 		healthProbe:  filepath.Join(filepath.Dir(executable), "trellis-health-probe"),
 		operations:   make(map[string]*allocationOperation),
+		secretRoot:   defaultSecretRoot,
 
 		log: log,
 
@@ -289,6 +290,7 @@ func (a *Agent) Init(ctx context.Context) {
 	if err := a.recover(ctx); err != nil {
 		a.log.Error("recover allocations", "error", err)
 	}
+	a.removeOrphanedSecretDirs()
 
 	go a.runHeartbeatLoop(ctx)
 	go a.reconciler.Run(ctx)
@@ -913,13 +915,21 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	for k, v := range envOverrides {
 		env[k] = v
 	}
-	secretDir, secretEnv, secretMounts, err := prepareSecrets(allocID, taskName, delivered)
+	if taskHasFileSecrets(taskName, delivered) {
+		secretDir, err = a.secretDirFor(allocID)
+		if err != nil {
+			return err
+		}
+		// Record the location before any plaintext is written so a restarted
+		// agent can always find and remove it.
+		alloc.SecretDir = secretDir
+		if err := a.persistAllocation(alloc); err != nil {
+			return fmt.Errorf("persist secret metadata: %w", err)
+		}
+	}
+	secretEnv, secretMounts, err := materializeSecrets(secretDir, taskName, delivered)
 	if err != nil {
 		return err
-	}
-	alloc.SecretDir = secretDir
-	if err := a.persistAllocation(alloc); err != nil {
-		return fmt.Errorf("persist secret metadata: %w", err)
 	}
 	for k, v := range secretEnv {
 		env[k] = v
@@ -1322,61 +1332,6 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string) error {
 	a.mu.Unlock()
 
 	return persistStopErr
-}
-
-func prepareSecrets(allocID, taskName string, delivered []api.DeliveredSecret) (string, map[string]string, []*runtime.Mount, error) {
-	env := map[string]string{}
-	var taskSecrets []api.DeliveredSecret
-	for _, secret := range delivered {
-		if secret.Task == taskName {
-			taskSecrets = append(taskSecrets, secret)
-		}
-	}
-	if len(taskSecrets) == 0 {
-		return "", env, nil, nil
-	}
-	dir, err := os.MkdirTemp("/dev/shm", "trellis-secret-"+filepath.Base(allocID)+"-")
-	if err != nil {
-		return "", nil, nil, fmt.Errorf("create memory-backed secret directory: %w", err)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		_ = os.RemoveAll(dir)
-		return "", nil, nil, err
-	}
-	var mounts []*runtime.Mount
-	for i, secret := range taskSecrets {
-		switch secret.Target {
-		case spec.SecretTargetEnv:
-			env[secret.Env] = string(secret.Value)
-		case spec.SecretTargetFile:
-			hostPath := filepath.Join(dir, fmt.Sprintf("secret-%d", i))
-			mode := os.FileMode(secret.Mode)
-			if mode == 0 {
-				mode = 0o400
-			}
-			file, err := os.OpenFile(hostPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, mode)
-			if err != nil {
-				_ = os.RemoveAll(dir)
-				return "", nil, nil, fmt.Errorf("create secret file: %w", err)
-			}
-			if _, err = file.Write(secret.Value); err == nil {
-				err = file.Sync()
-			}
-			closeErr := file.Close()
-			if err == nil {
-				err = closeErr
-			}
-			if err != nil {
-				_ = os.RemoveAll(dir)
-				return "", nil, nil, fmt.Errorf("write secret file: %w", err)
-			}
-			mounts = append(mounts, &runtime.Mount{HostPath: hostPath, ContainerPath: secret.Path, ReadOnly: true})
-		default:
-			_ = os.RemoveAll(dir)
-			return "", nil, nil, fmt.Errorf("unsupported secret target")
-		}
-	}
-	return dir, env, mounts, nil
 }
 
 // OnHealthy and OnUnhealthy are observation callbacks from the health manager.
