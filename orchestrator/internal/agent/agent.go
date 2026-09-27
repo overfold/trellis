@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -327,8 +328,9 @@ func (a *Agent) Init(ctx context.Context) {
 	a.reconciler.Subscriber = a
 	if err := a.recover(ctx); err != nil {
 		a.log.Error("recover allocations", "error", err)
-	} else {
-		// Ownership is only known once recovery has adopted every allocation.
+	} else if !a.recoverySweepPending {
+		// Ownership is only known once recovery has adopted every allocation;
+		// otherwise the recovery retry runs the sweep when it completes.
 		a.removeOrphanedSecretDirs()
 	}
 
@@ -394,6 +396,7 @@ func (a *Agent) recover(ctx context.Context) error {
 	}
 	a.mu.Lock()
 	a.recoveryListPending = a.hasUnreadableUnknownLocked(containers)
+	a.recoverySweepPending = a.recoveryListPending
 	a.mu.Unlock()
 	for containerID, allocation := range stored {
 		if containerID == "" || seen[containerID] {
@@ -445,6 +448,9 @@ func (a *Agent) recoverContainer(container runtime.ContainerInfo, allocation *Al
 	hadRecord := allocation != nil
 	if allocation == nil {
 		allocation = allocationFromRuntime(container)
+		if allocation != nil {
+			allocation.SecretDir = a.recoveredSecretDir(allocation.ID)
+		}
 	}
 	if allocation == nil {
 		a.log.Warn("leave unidentifiable Trellis container untouched", "container", container.ID)
@@ -667,11 +673,21 @@ func (a *Agent) relistRecovery(ctx context.Context, managed runtime.ManagedRunti
 		a.reobserve(ctx, id, allocation.AllocationID, container, found)
 	}
 	if listPending {
-		stillPending := false
+		// Adopt newer generations first so an older one is recognised as
+		// superseded whatever order the runtime lists them in.
+		adoptable := make([]runtime.ContainerInfo, 0, len(containers))
+		generations := make(map[string]uint64, len(containers))
 		for _, container := range containers {
-			if allocationFromRuntime(container) == nil {
-				continue
+			if allocation := allocationFromRuntime(container); allocation != nil {
+				adoptable = append(adoptable, container)
+				generations[container.ID] = allocation.Generation
 			}
+		}
+		sort.SliceStable(adoptable, func(i, j int) bool {
+			return generations[adoptable[i].ID] > generations[adoptable[j].ID]
+		})
+		stillPending := false
+		for _, container := range adoptable {
 			if !a.adoptUnrecorded(ctx, container) {
 				stillPending = true
 			}

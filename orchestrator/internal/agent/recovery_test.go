@@ -663,3 +663,25 @@ func TestRecoverRetryKeepsExhaustedRestartBudgetTerminal(t *testing.T) {
 		t.Fatalf("restart=%d stop=%d; exhausted allocation must not be restarted or replaced", rt.restartCount, rt.stopCount)
 	}
 }
+
+func TestRecoverRetryAdoptsNewerGenerationFirst(t *testing.T) {
+	rt := &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning}, listErr: errors.New("containerd unavailable")}
+	agent, _ := newRecoveryTestAgent(t, rt)
+	if err := agent.recover(context.Background()); err == nil {
+		t.Fatal("recover succeeded despite listing failure")
+	}
+	older := recoveryTestAllocation(0)
+	newerLabels := recoveryTestLabels(older)
+	newerLabels["trellis.allocation-generation"] = "2"
+	rt.listErr = nil
+	rt.containers = []runtime.ContainerInfo{
+		{ID: "task", Status: runtime.StatusRunning, Labels: recoveryTestLabels(older)},
+		{ID: "task-g2", Status: runtime.StatusRunning, Labels: newerLabels},
+	}
+	if agent.retryRecovery(context.Background()) {
+		t.Fatal("retry left recovery work pending")
+	}
+	if rt.stopCount != 1 || agent.allocations["task"] != nil || agent.allocations["task-g2"] == nil {
+		t.Fatalf("stop calls = %d, older = %+v; want the older generation stopped regardless of listing order", rt.stopCount, agent.allocations["task"])
+	}
+}
