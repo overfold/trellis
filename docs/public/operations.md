@@ -61,6 +61,10 @@ sudo systemctl restart trellis
 
 Installer-created nodes also keep `/var/lib/trellis/install-state`. It records only lifecycle facts the installer can prove, such as which optional features are enabled and which host packages/repositories Trellis itself introduced. It is not cluster desired state and is not used by the scheduler.
 
+The root-run containerd runtime stores task logs and generated DNS/hosts mount files in `/var/lib/trellis/runtime`, independently of `data_dir` and `TMPDIR`. It creates this directory with mode `0750`. The directory and its ancestors must be root-owned, must not be symlinks, and must not be group- or world-writable; the runtime directory must also deny access to other users. Unsafe existing paths cause allocation creation/start to fail rather than being repaired automatically. Do not remove these files while allocations still use them. Allocation removal cleans up their files.
+
+Logs from allocations already running at the former `$TMPDIR/trellis-logs` location (`/tmp/trellis-logs` by default) remain readable only when that directory is owned by the runtime user, is not group- or world-writable, and denies access to other users. Legacy symlinks and non-regular log files are rejected. New task starts use the protected location; Trellis does not migrate existing mount files.
+
 ## Add a node
 
 ### Managed signing (default)

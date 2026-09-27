@@ -31,8 +31,8 @@ const gracePeriod = 10 * time.Second
 
 // ContainerdRuntime implements container lifecycle operations with containerd.
 type ContainerdRuntime struct {
-	client        *containerd.Client
-	logDir        string
+	client       *containerd.Client
+	logDir       string
 	legacyLogDir string
 }
 
@@ -57,8 +57,8 @@ func NewContainerdRuntime(socketPath string) (*ContainerdRuntime, error) {
 	}
 
 	return &ContainerdRuntime{
-		client:        client,
-		logDir:        "/var/lib/trellis/runtime",
+		client:       client,
+		logDir:       "/var/lib/trellis/runtime",
 		legacyLogDir: filepath.Join(os.TempDir(), "trellis-logs"),
 	}, nil
 }
@@ -274,7 +274,7 @@ func (c *ContainerdRuntime) openLegacyLog(name string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer dir.Close()
+	defer func() { _ = dir.Close() }()
 	info, err := dir.Stat()
 	if err != nil {
 		return nil, err
@@ -412,14 +412,22 @@ func (c *ContainerdRuntime) removeAllocationFiles(containerID string) error {
 	err := removeRuntimeFiles(paths...)
 	// Old log locations may be controlled by local users. Cleanup there is best effort.
 	if dir, openErr := os.OpenFile(c.legacyLogDir, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_DIRECTORY, 0); openErr == nil {
-		if info, statErr := dir.Stat(); statErr == nil && checkOwnedDir(c.legacyLogDir, info, uint32(os.Geteuid()), true) == nil {
-			for _, suffix := range []string{".log", "-resolv.conf", "-hosts"} {
-				_ = os.Remove(filepath.Join(c.legacyLogDir, name+suffix))
-			}
-		}
+		removeLegacyAllocationFiles(dir, name)
 		_ = dir.Close()
 	}
 	return err
+}
+
+func removeLegacyAllocationFiles(dir *os.File, name string) {
+	info, err := dir.Stat()
+	if err != nil || checkOwnedDir(dir.Name(), info, uint32(os.Geteuid()), true) != nil {
+		return
+	}
+	for _, suffix := range []string{".log", "-resolv.conf", "-hosts"} {
+		// Stay anchored to the checked directory even if a writable ancestor
+		// of the legacy temp directory is renamed or replaced with a symlink.
+		_ = syscall.Unlinkat(int(dir.Fd()), name+suffix)
+	}
 }
 
 func removeRuntimeFiles(paths ...string) error {
