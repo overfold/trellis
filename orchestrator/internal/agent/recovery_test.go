@@ -128,8 +128,11 @@ func TestRecoverListingFailurePreservesStoredAllocations(t *testing.T) {
 		t.Fatal("retry left recovery work pending after a successful observation")
 	}
 	recovered := agent.allocations["task"]
-	if recovered == nil || recovered.unobserved || recovered.Status != "running" {
-		t.Fatalf("allocation after retry = %+v, want observed running", recovered)
+	if recovered == nil || recovered.unobserved || recovered.Status != "running" || recovered.Health != "healthy" {
+		t.Fatalf("allocation after retry = %+v, want observed running with its recorded health", recovered)
+	}
+	if err := local.Get(allocationRecordKey("task"), &persisted); err != nil || persisted.Health != "healthy" {
+		t.Fatalf("persisted allocation = %+v (%v), want recorded health kept", persisted, err)
 	}
 	if state := agent.reconciler.states["task"]; state == nil || state.stopping {
 		t.Fatal("observed running allocation did not regain local restarts")
@@ -173,6 +176,7 @@ func TestRecoverListingFailureRetryAdoptsUnrecordedContainer(t *testing.T) {
 	}
 
 	rt.listErr = nil
+	rt.status = runtime.StatusRunning
 	labels := recoveryTestLabels(recoveryTestAllocation(0))
 	rt.containers = []runtime.ContainerInfo{{ID: "task", Status: runtime.StatusRunning, Labels: labels}}
 	if agent.retryRecovery(context.Background()) {
@@ -202,6 +206,13 @@ func TestRecoverUnknownStatusContainerIsPreservedAndStopFailsHonestly(t *testing
 	}
 	if rt.restartCount != 0 {
 		t.Fatalf("unknown allocation restarted %d times", rt.restartCount)
+	}
+
+	request := operationTestRequest()
+	request.AllocationID, request.Generation, request.JobRevision, request.ExecutionHash = "allocation", 1, 1, "hash"
+	request.Tasks = []spec.TaskSpec{{Name: "task", Image: "image"}}
+	if err := agent.RunAllocation(context.Background(), "task", "allocation", 1, 1, "hash", "default", "job", "group", "task", &request.Tasks[0], "", nil, nil, nil, nil); err == nil {
+		t.Fatal("start retry acknowledged an allocation whose container state is unknown")
 	}
 
 	stop := &api.StopAllocationRequest{AllocationID: "allocation", Generation: 1}
@@ -266,4 +277,58 @@ func portClaimed(agent *Agent, hostPort int) bool {
 	agent.ports.mu.Lock()
 	defer agent.ports.mu.Unlock()
 	return agent.ports.claims[hostPort] != nil
+}
+
+type staleListingRuntime struct {
+	*listingRecoveryRuntime
+	inspectErr error
+}
+
+func (r *staleListingRuntime) Inspect(context.Context, string) (*runtime.ContainerInfo, error) {
+	return nil, r.inspectErr
+}
+
+func TestRecoverRetryDoesNotResurrectContainerRemovedAfterListing(t *testing.T) {
+	rt := &staleListingRuntime{
+		listingRecoveryRuntime: &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{}, listErr: errors.New("containerd unavailable")},
+		inspectErr:             errors.New("container task not found"),
+	}
+	agent, local := newRecoveryTestAgent(t, rt)
+	if err := agent.recover(context.Background()); err == nil {
+		t.Fatal("recover succeeded despite listing failure")
+	}
+
+	// The listing still names a container that was removed before the
+	// allocation lock was taken.
+	rt.listErr = nil
+	rt.containers = []runtime.ContainerInfo{{ID: "task", Status: runtime.StatusRunning, Labels: recoveryTestLabels(recoveryTestAllocation(0))}}
+	agent.retryRecovery(context.Background())
+	if agent.allocations["task"] != nil {
+		t.Fatal("retry adopted a container that could not be re-inspected")
+	}
+	var persisted Allocation
+	if err := local.Get(allocationRecordKey("task"), &persisted); err == nil {
+		t.Fatal("retry recorded a container that could not be re-inspected")
+	}
+}
+
+func TestRecoverRetryKeepsUnknownContainerWithoutRewritingRecord(t *testing.T) {
+	rt := &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{}}
+	record := recoveryTestAllocation(18084)
+	rt.containers = []runtime.ContainerInfo{{ID: "task", Status: runtime.StatusUnknown, Labels: recoveryTestLabels(record)}}
+	agent, local := newRecoveryTestAgent(t, rt, record)
+	if err := agent.recover(context.Background()); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	var persisted Allocation
+	if err := local.Get(allocationRecordKey("task"), &persisted); err != nil || persisted.Health != "healthy" {
+		t.Fatalf("persisted allocation = %+v (%v), want record unchanged", persisted, err)
+	}
+	before := agent.allocations["task"]
+	if !agent.retryRecovery(context.Background()) {
+		t.Fatal("retry reported no pending work for an unknown container")
+	}
+	if agent.allocations["task"] != before {
+		t.Fatal("retry replaced an allocation whose container is still unknown")
+	}
 }

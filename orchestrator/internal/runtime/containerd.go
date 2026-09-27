@@ -608,9 +608,10 @@ func (c *ContainerdRuntime) Inspect(ctx context.Context, containerID string) (*C
 }
 
 // ListManaged lists containers owned by a Trellis cluster. One unreadable
-// container does not abort the listing: it is reported with StatusUnknown, and
-// without labels when its metadata could not be read, so callers never mistake
-// it for an absent container. Containers deleted during the listing are omitted.
+// container does not abort the listing: it is reported with StatusUnknown so
+// callers never mistake it for an absent container. When its metadata cannot
+// be read, its cluster is unknown and it is reported without labels. Only
+// containers whose metadata lookup reports them deleted are omitted.
 func (c *ContainerdRuntime) ListManaged(ctx context.Context, cluster string) ([]ContainerInfo, error) {
 	ctx = c.withNamespace(ctx)
 	containers, err := c.client.Containers(ctx)
@@ -622,6 +623,9 @@ func (c *ContainerdRuntime) ListManaged(ctx context.Context, cluster string) ([]
 		info, err := container.Info(ctx)
 		if errdefs.IsNotFound(err) {
 			continue
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("list containers: %w", ctxErr)
 		}
 		if err != nil {
 			result = append(result, ContainerInfo{ID: container.ID(), Status: StatusUnknown})
