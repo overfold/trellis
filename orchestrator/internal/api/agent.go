@@ -6,7 +6,8 @@ import (
 	"github.com/clofour/trellis/internal/spec"
 )
 
-// AllocationRequest describes an allocation for an agent to start.
+// AllocationRequest describes an allocation for an agent to start. Generation
+// and Epoch must both be greater than zero.
 type AllocationRequest struct {
 	AllocationID  string                  `json:"allocation_id"`
 	Generation    uint64                  `json:"generation"`
@@ -24,7 +25,8 @@ type AllocationRequest struct {
 	Secrets       []DeliveredSecret       `json:"secrets,omitempty"`
 }
 
-// StopAllocationRequest identifies an allocation generation to stop.
+// StopAllocationRequest identifies an allocation generation to stop. Generation
+// and Epoch must both be greater than zero.
 type StopAllocationRequest struct {
 	AllocationID string `json:"allocation_id"`
 	Generation   uint64 `json:"generation"`
@@ -33,14 +35,16 @@ type StopAllocationRequest struct {
 
 // DrainAllocationRequest identifies an allocation generation whose automatic
 // restarts must be suppressed while the control plane prepares to stop it.
+// Generation and Epoch must both be greater than zero.
 type DrainAllocationRequest struct {
 	AllocationID string `json:"allocation_id"`
 	Generation   uint64 `json:"generation"`
-	Epoch        uint64 `json:"epoch,omitempty"`
+	Epoch        uint64 `json:"epoch"`
 	Sequence     uint64 `json:"sequence"`
 }
 
-// NetworkPlanRequest updates the peers for an active namespace network.
+// NetworkPlanRequest updates the peers for an active namespace network. Epoch
+// must be greater than zero.
 type NetworkPlanRequest struct {
 	Epoch     uint64       `json:"epoch"`
 	Namespace string       `json:"namespace"`

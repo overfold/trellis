@@ -145,6 +145,10 @@ var (
 	ErrStaleEpoch = errors.New("stale control-plane epoch")
 	// ErrStaleGeneration indicates that an operation used an old allocation generation.
 	ErrStaleGeneration = errors.New("stale allocation generation")
+	// ErrInvalidEpoch indicates that a mutating operation omitted its leadership epoch.
+	ErrInvalidEpoch = errors.New("epoch must be greater than zero")
+	// ErrInvalidGeneration indicates that an allocation mutation omitted its generation.
+	ErrInvalidGeneration = errors.New("generation must be greater than zero")
 	// ErrExecutionConflict indicates conflicting allocation execution metadata.
 	ErrExecutionConflict = errors.New("allocation execution metadata conflict")
 	// ErrExecSessionNotFound indicates that an interactive exec session does not exist.
@@ -158,6 +162,9 @@ func (a *Agent) ConfigureDurability(local *storage.LocalStorage, cluster string)
 
 // AcceptEpoch validates and persists a leadership epoch.
 func (a *Agent) AcceptEpoch(epoch uint64) error {
+	if epoch == 0 {
+		return ErrInvalidEpoch
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if epoch < a.epoch {
@@ -604,6 +611,9 @@ func (a *Agent) UpdateNetworkPlan(ctx context.Context, request *api.NetworkPlanR
 
 // StopGroup stops all tasks in an allocation group.
 func (a *Agent) StopGroup(ctx context.Context, request *api.StopAllocationRequest) error {
+	if request.Generation == 0 {
+		return ErrInvalidGeneration
+	}
 	unlock := a.lockAllocationOperation(request.AllocationID)
 	defer unlock()
 	if err := a.AcceptEpoch(request.Epoch); err != nil {
