@@ -326,6 +326,43 @@ func TestHeartbeatKeepsExhaustedAllocationFailed(t *testing.T) {
 	}
 }
 
+func TestHeartbeatFailedTaskTakesPrecedenceOverStartingTask(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		order []string
+	}{
+		{name: "failed first", order: []string{"app", "sidecar"}},
+		{name: "starting first", order: []string{"sidecar", "app"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			nodeID := uuid.New()
+			node := &Node{ID: nodeID, Status: NodeStatusHealthy}
+			allocation := &Allocation{
+				ID: "alloc-1", Node: node, Generation: 1,
+				Tasks: []spec.TaskSpec{{Name: "app"}, {Name: "sidecar"}},
+				Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy,
+			}
+			s := &Server{
+				state:       NewStateController(memoryStore{}, "test"),
+				nodes:       map[uuid.UUID]*Node{nodeID: node},
+				allocations: []*Allocation{allocation},
+				catalog:     catalog.New(),
+			}
+			statuses := map[string]api.AllocationStatus{
+				"app":     {ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseFailed, Health: lifecycle.HealthUnknown},
+				"sidecar": {ID: allocation.ID, Generation: 1, Task: "sidecar", Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown},
+			}
+			actual := []api.AllocationStatus{statuses[tc.order[0]], statuses[tc.order[1]]}
+			if err := s.Heartbeat(context.Background(), nodeID, actual, "test", nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			if allocation.Phase != lifecycle.PhaseFailed {
+				t.Fatalf("phase = %q, want failed", allocation.Phase)
+			}
+		})
+	}
+}
+
 func TestHeartbeatPreservesTaskEndpointIdentity(t *testing.T) {
 	nodeID := uuid.MustParse("88888888-8888-8888-8888-888888888888")
 	node := &Node{ID: nodeID, Host: "node-a", Status: NodeStatusHealthy}

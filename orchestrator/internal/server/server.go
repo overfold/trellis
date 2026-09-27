@@ -715,7 +715,7 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 		if len(info.ObservedTasks) == 0 {
 			info.ID, info.Generation, info.Phase, info.Health = a.ID, a.Generation, phase, health
 		} else {
-			if phase != lifecycle.PhaseRunning {
+			if phase == lifecycle.PhaseFailed || (info.Phase != lifecycle.PhaseFailed && phase != lifecycle.PhaseRunning) {
 				info.Phase = phase
 			}
 			if info.Health == lifecycle.HealthUnhealthy || health == lifecycle.HealthUnhealthy {
