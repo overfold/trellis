@@ -40,6 +40,7 @@ type allocationReconcileState struct {
 	stopping      bool
 	healthManaged bool
 	restarting    bool
+	failed        bool
 	attempts      int
 	window        time.Time
 	maxRestarts   int
@@ -220,7 +221,7 @@ func (r *AllocationReconciler) Reconcile(ctx context.Context, allocID string) er
 	state.operation.Lock()
 	defer state.operation.Unlock()
 	r.mu.Lock()
-	active := r.states[allocID] == state && !state.stopping
+	active := r.states[allocID] == state && !state.stopping && !state.failed
 	r.mu.Unlock()
 	if !active {
 		return nil
@@ -254,6 +255,7 @@ func (r *AllocationReconciler) restart(ctx context.Context, allocID string) erro
 	attempts, window, allowed := advanceRestartState(state.attempts, state.window, state.maxRestarts, state.restartWindow, now)
 	if !allowed {
 		state.restarting = false
+		state.failed = true
 		state.window = window
 		r.mu.Unlock()
 		r.publishStatus(allocID, "failed")

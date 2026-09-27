@@ -347,7 +347,7 @@ func TestAllocationReconcilerResetsBudgetAfterConfiguredWindow(t *testing.T) {
 	}
 }
 
-func TestAllocationReconcilerRestoresLifecycleAfterRestartWindow(t *testing.T) {
+func TestAllocationReconcilerKeepsFailedAllocationStoppedAfterRestartWindow(t *testing.T) {
 	rt := &reconcilerRuntime{status: runtime.StatusStopped}
 	agent := &Agent{allocations: map[string]*Allocation{"alloc-1": {ID: "alloc-1", Status: "running"}}}
 	r := NewAllocationReconciler(rt, agent)
@@ -369,13 +369,10 @@ func TestAllocationReconcilerRestoresLifecycleAfterRestartWindow(t *testing.T) {
 	if err := r.Reconcile(context.Background(), "alloc-1"); err != nil {
 		t.Fatalf("reconcile after window expiry: %v", err)
 	}
-	if rt.restartCount != 2 {
-		t.Fatalf("restart count = %d, want 2", rt.restartCount)
+	if rt.restartCount != 1 {
+		t.Fatalf("restart count = %d, want 1", rt.restartCount)
 	}
-	if got := agent.allocations["alloc-1"].Status; got != "running" {
-		t.Fatalf("lifecycle after restart = %q, want running", got)
-	}
-	if got := agent.allocations["alloc-1"].Health; got != "healthy" {
-		t.Fatalf("health after restart = %q, want healthy", got)
+	if got := agent.allocations["alloc-1"].Status; got != "failed" {
+		t.Fatalf("lifecycle after window expiry = %q, want failed", got)
 	}
 }

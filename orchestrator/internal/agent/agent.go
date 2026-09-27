@@ -326,8 +326,9 @@ func (a *Agent) recover(ctx context.Context) error {
 			continue
 		}
 		stopping := hadRecord && allocation.Status == "stopping"
+		terminalFailed := hadRecord && allocation.Status == "failed"
 		restartSuppressed := stopping || allocation.Draining
-		recoveryPending := !stopping && (container.Status == runtime.StatusCreated || container.Status == runtime.StatusStopped)
+		recoveryPending := !stopping && !terminalFailed && (container.Status == runtime.StatusCreated || container.Status == runtime.StatusStopped)
 		if recoveryPending {
 			// Recovery reports observation; it does not invent desired state.
 			// A non-running recovered task stays restart-suppressed until the
@@ -335,7 +336,7 @@ func (a *Agent) recover(ctx context.Context) error {
 			// appropriate start or stop action.
 			allocation.Status = "starting"
 			allocation.Health = "unknown"
-		} else if !stopping && container.Status == runtime.StatusRunning {
+		} else if !stopping && !terminalFailed && container.Status == runtime.StatusRunning {
 			allocation.Status = "running"
 			if allocation.Spec != nil && allocation.Spec.HealthCheck != nil {
 				allocation.Health = "unknown"
@@ -355,18 +356,19 @@ func (a *Agent) recover(ctx context.Context) error {
 			if persistErr != nil {
 				a.log.Error("refresh recovered allocation record", "allocation", allocation.AllocationID, "error", persistErr)
 			}
-			if allocation.Spec != nil {
+			// An exhausted restart budget remains terminal across agent restarts.
+			if !terminalFailed && allocation.Spec != nil {
 				if restartSuppressed {
 					a.reconciler.TrackStopping(allocation.ID, allocation.Spec.HealthCheck != nil, allocation.Restart)
 				} else if !recoveryPending {
 					a.reconciler.TrackRecovered(allocation.ID, allocation.Spec.HealthCheck != nil, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow)
 				}
-			} else if restartSuppressed {
+			} else if !terminalFailed && restartSuppressed {
 				a.reconciler.TrackStopping(allocation.ID, false, nil)
-			} else if !recoveryPending {
+			} else if !terminalFailed && !recoveryPending {
 				a.reconciler.Track(allocation.ID, false, nil)
 			}
-			if allocation.Spec != nil && !stopping && !recoveryPending && allocation.Spec.HealthCheck != nil {
+			if allocation.Spec != nil && !stopping && !terminalFailed && !recoveryPending && allocation.Spec.HealthCheck != nil {
 				a.health.RegisterTask(allocation.ID, allocation.ContainerID, allocation.Spec.HealthCheck)
 			}
 		}

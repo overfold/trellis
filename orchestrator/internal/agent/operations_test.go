@@ -815,6 +815,41 @@ func TestRecoverNonRunningAllocationDefersRestartToServer(t *testing.T) {
 	}
 }
 
+func TestRecoverFailedAllocationDoesNotResumeRestarts(t *testing.T) {
+	rt := &stoppedWithErrorRuntime{
+		reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusStopped},
+		managedID:         "task",
+	}
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	first := newOperationTestAgent(t, rt)
+	first.ConfigureDurability(local, "test")
+	if err := first.persistAllocation(&Allocation{
+		ID: "task", AllocationID: "allocation", ContainerID: "task",
+		Generation: 1, Spec: &spec.TaskSpec{Name: "task", Image: "image"},
+		Status: "failed", Health: "unknown", RestartAttempts: 1,
+		RestartWindow: time.Now().Add(-time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	second := newOperationTestAgent(t, rt)
+	second.ConfigureDurability(local, "test")
+	if err := second.recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := second.allocations["task"]; got == nil || got.Status != "failed" {
+		t.Fatalf("recovered allocation = %+v, want failed", got)
+	}
+	if _, ok := second.reconciler.states["task"]; ok {
+		t.Fatal("failed allocation entered local restart reconciliation")
+	}
+	if rt.restartCount != 0 || rt.startCount != 0 {
+		t.Fatalf("recovery restarted %d or started %d tasks", rt.restartCount, rt.startCount)
+	}
+}
+
 func TestRecoverRunningAllocationResetsHealthUntilProbe(t *testing.T) {
 	rt := &createdRecoveryRuntime{
 		reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning},

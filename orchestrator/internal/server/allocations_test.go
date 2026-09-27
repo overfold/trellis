@@ -298,6 +298,33 @@ func TestAllocationEndpointKeepsDistinctTaskAddresses(t *testing.T) {
 	}
 }
 
+func TestHeartbeatKeepsExhaustedAllocationFailed(t *testing.T) {
+	nodeID := uuid.New()
+	node := &Node{ID: nodeID, Status: NodeStatusHealthy}
+	allocation := &Allocation{
+		ID: "alloc-1", Node: node, Generation: 1,
+		Tasks: []spec.TaskSpec{{Name: "app"}},
+		Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy,
+	}
+	s := &Server{
+		state:       NewStateController(memoryStore{}, "test"),
+		nodes:       map[uuid.UUID]*Node{nodeID: node},
+		allocations: []*Allocation{allocation},
+		catalog:     catalog.New(),
+	}
+	failed := []api.AllocationStatus{{
+		ID: allocation.ID, Generation: 1, Task: "app",
+		Phase: lifecycle.PhaseFailed, Health: lifecycle.HealthUnknown,
+	}}
+	for i := 0; i < 2; i++ {
+		if err := s.Heartbeat(context.Background(), nodeID, failed, "test", nil, nil); err != nil {
+			t.Fatalf("heartbeat %d: %v", i, err)
+		}
+		if allocation.Phase != lifecycle.PhaseFailed {
+			t.Fatalf("phase after heartbeat %d = %q, want failed", i, allocation.Phase)
+		}
+	}
+}
 
 func TestHeartbeatPreservesTaskEndpointIdentity(t *testing.T) {
 	nodeID := uuid.MustParse("88888888-8888-8888-8888-888888888888")
