@@ -292,3 +292,148 @@ func TestContainerdHealthProbe(t *testing.T) {
 		t.Fatalf("TCP probe failed: exit code %d, error %v", code, err)
 	}
 }
+
+// newListingE2E connects to containerd and starts a long-running managed
+// container labelled for cluster, returning the runtime, a raw client for
+// out-of-band manipulation, and the container ID.
+func newListingE2E(ctx context.Context, t *testing.T, id, cluster string) (*runtime.ContainerdRuntime, *containerd.Client, string) {
+	t.Helper()
+	if os.Geteuid() != 0 {
+		t.Skip("containerd overlayfs E2E requires root; run this test with sudo")
+	}
+	socket := os.Getenv("CONTAINERD_ADDRESS")
+	if socket == "" {
+		socket = "/run/containerd/containerd.sock"
+	}
+	if _, err := os.Stat(socket); err != nil {
+		t.Skipf("containerd unavailable: %v", err)
+	}
+	r, err := runtime.NewContainerdRuntime(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+	raw, err := containerd.New(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	const image = "docker.io/library/nginx:1.27-alpine"
+	if err := r.Pull(ctx, image); err != nil {
+		t.Fatal(err)
+	}
+	_ = r.Stop(ctx, id)
+	_ = r.Remove(ctx, id)
+	created, err := r.Create(ctx, runtime.CreateOptions{
+		ID:      id,
+		Image:   image,
+		Runtime: "runc",
+		Labels:  map[string]string{"trellis.cluster": cluster, "trellis.managed": "true"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r.Stop(context.Background(), created); _ = r.Remove(context.Background(), created) })
+	if err := r.Start(ctx, created); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	return r, raw, created
+}
+
+func listedContainer(ctx context.Context, t *testing.T, r *runtime.ContainerdRuntime, cluster, id string) runtime.ContainerInfo {
+	t.Helper()
+	managed, err := r.ListManaged(ctx, cluster)
+	if err != nil {
+		t.Fatalf("list managed containers: %v", err)
+	}
+	for _, container := range managed {
+		if container.ID == id {
+			if container.Labels["trellis.cluster"] != cluster {
+				t.Fatalf("listed container %s labels = %v, want cluster %q", id, container.Labels, cluster)
+			}
+			return container
+		}
+	}
+	t.Fatalf("container %s was dropped from the listing: %+v", id, managed)
+	return runtime.ContainerInfo{}
+}
+
+// A paused task still exists, so the listing must report it as paused rather
+// than drop it or report unknown state, and a stop must still complete.
+func TestContainerdListsPausedContainer(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	const cluster = "containerd-e2e-paused"
+	r, raw, id := newListingE2E(ctx, t, "trellis-e2e-list-paused", cluster)
+
+	nsCtx := namespaces.WithNamespace(ctx, "trellis")
+	container, err := raw.LoadContainer(nsCtx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := container.Task(nsCtx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := task.Pause(nsCtx); err != nil {
+		t.Fatalf("pause task: %v", err)
+	}
+
+	if listed := listedContainer(ctx, t, r, cluster, id); listed.Status != runtime.StatusPaused {
+		t.Fatalf("listed paused container status = %q, want %q", listed.Status, runtime.StatusPaused)
+	}
+	observed, err := r.Inspect(ctx, id)
+	if err != nil || observed.Status != runtime.StatusPaused {
+		t.Fatalf("inspect paused container = %+v, %v; want paused", observed, err)
+	}
+
+	// The frozen process cannot handle SIGTERM until the task is resumed.
+	// Stopping must thaw it so nginx exits on SIGTERM instead of waiting out
+	// the 10s grace period for SIGKILL.
+	stopStarted := time.Now()
+	if err := r.Stop(ctx, id); err != nil {
+		t.Fatalf("stop paused container: %v", err)
+	}
+	if elapsed := time.Since(stopStarted); elapsed >= 8*time.Second {
+		t.Fatalf("stopping the paused container took %s; it was not stopped gracefully", elapsed)
+	}
+	if listed := listedContainer(ctx, t, r, cluster, id); listed.Status != runtime.StatusStopped {
+		t.Fatalf("listed container status after stop = %q, want %q", listed.Status, runtime.StatusStopped)
+	}
+}
+
+// A container whose task is deleted underneath it still exists, so the
+// listing must keep it, report it stopped, and keep its labels.
+func TestContainerdListsContainerWithDeletedTask(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	const cluster = "containerd-e2e-deleted-task"
+	r, raw, id := newListingE2E(ctx, t, "trellis-e2e-list-deleted-task", cluster)
+
+	nsCtx := namespaces.WithNamespace(ctx, "trellis")
+	container, err := raw.LoadContainer(nsCtx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := container.Task(nsCtx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := task.Delete(nsCtx, containerd.WithProcessKill); err != nil {
+		t.Fatalf("delete task underneath container: %v", err)
+	}
+	if _, err := container.Task(nsCtx, nil); err == nil {
+		t.Fatal("task still exists after deletion")
+	}
+
+	if listed := listedContainer(ctx, t, r, cluster, id); listed.Status != runtime.StatusStopped {
+		t.Fatalf("listed container status without a task = %q, want %q", listed.Status, runtime.StatusStopped)
+	}
+	// The container can still be started again with a fresh task.
+	if err := r.Start(ctx, id); err != nil {
+		t.Fatalf("start after task deletion: %v", err)
+	}
+	if listed := listedContainer(ctx, t, r, cluster, id); listed.Status != runtime.StatusRunning {
+		t.Fatalf("listed container status after restart = %q, want %q", listed.Status, runtime.StatusRunning)
+	}
+}

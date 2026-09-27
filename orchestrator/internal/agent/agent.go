@@ -537,7 +537,17 @@ func (a *Agent) recoverContainer(container runtime.ContainerInfo, allocation *Al
 		allocation.Status = "running"
 		if allocation.Spec != nil && allocation.Spec.HealthCheck != nil {
 			allocation.Health = "unknown"
+		} else {
+			// Without a check a running task is healthy, including one
+			// recorded unhealthy while it was paused.
+			allocation.Health = "healthy"
 		}
+	} else if !stopping && container.Status == runtime.StatusPaused {
+		// A paused task still exists, so it is neither restarted nor
+		// replaced, but its frozen processes cannot serve. Configured
+		// probes report health again once it is resumed.
+		allocation.Status = "running"
+		allocation.Health = "unhealthy"
 	}
 	a.adoptPorts(allocation)
 	// Persist the initial observation before a probe can publish a result.
@@ -862,7 +872,7 @@ func (a *Agent) hasUnreadableUnknownLocked(containers []runtime.ContainerInfo) b
 }
 
 func observedStatus(status runtime.ContainerStatus) bool {
-	return status == runtime.StatusRunning || status == runtime.StatusCreated || status == runtime.StatusStopped
+	return status == runtime.StatusRunning || status == runtime.StatusCreated || status == runtime.StatusStopped || status == runtime.StatusPaused
 }
 
 func (a *Agent) reobserve(ctx context.Context, id, allocationID string, container runtime.ContainerInfo, found bool) {

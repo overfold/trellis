@@ -349,6 +349,14 @@ func (c *ContainerdRuntime) Stop(ctx context.Context, containerID string) error 
 	// task deletion below. WithProcessKill handles Created tasks whose shim PID
 	// is already nonzero while remaining safe for Stopped tasks.
 	if rawStatus.Status != containerd.Created && rawStatus.Status != containerd.Stopped {
+		// A frozen process cannot handle SIGTERM, so thaw a paused task
+		// first to give it the same graceful stop as a running one.
+		if rawStatus.Status == containerd.Paused || rawStatus.Status == containerd.Pausing {
+			err = task.Resume(ctx)
+			if err != nil && !errdefs.IsNotFound(err) {
+				return fmt.Errorf("resuming paused task for %s: %w", containerID, err)
+			}
+		}
 		exitChannel, err := task.Wait(ctx)
 		if err != nil {
 			return fmt.Errorf("waiting on task for %s: %w", containerID, err)
@@ -560,25 +568,35 @@ func (c *ContainerdRuntime) Inspect(ctx context.Context, containerID string) (*C
 		return nil, fmt.Errorf("getting task status for %s: %w", containerID, err)
 	}
 
-	switch rawStatus.Status {
-	case containerd.Created:
-		result.Status = StatusCreated
-	case containerd.Running:
-		result.Status = StatusRunning
-	case containerd.Stopped:
-		result.Status = StatusStopped
-	default:
-		result.Status = StatusUnknown
-	}
-
+	result.Status = containerStatus(rawStatus.Status)
 	return result, nil
+}
+
+// containerStatus maps a containerd task status to a runtime status. A task
+// that is paused or pausing still exists, so it is reported as paused rather
+// than as unknown state.
+func containerStatus(status containerd.ProcessStatus) ContainerStatus {
+	switch status {
+	case containerd.Created:
+		return StatusCreated
+	case containerd.Running:
+		return StatusRunning
+	case containerd.Stopped:
+		return StatusStopped
+	case containerd.Paused, containerd.Pausing:
+		return StatusPaused
+	default:
+		return StatusUnknown
+	}
 }
 
 // ListManaged lists containers owned by a Trellis cluster. One unreadable
 // container does not abort the listing: it is reported with StatusUnknown so
 // callers never mistake it for an absent container. When its metadata cannot
-// be read, its cluster is unknown and it is reported without labels. Only
-// containers whose metadata lookup reports them deleted are omitted.
+// be read, its cluster is unknown and it is reported without labels. A
+// container without a task is reported stopped and one with a paused task
+// is reported paused. Only containers whose metadata lookup reports them
+// deleted are omitted.
 func (c *ContainerdRuntime) ListManaged(ctx context.Context, cluster string) ([]ContainerInfo, error) {
 	ctx = c.withNamespace(ctx)
 	containers, err := c.client.Containers(ctx)

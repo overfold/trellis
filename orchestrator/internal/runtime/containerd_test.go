@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"testing"
 
+	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/errdefs"
 	"github.com/opencontainers/runtime-spec/specs-go"
@@ -480,5 +481,20 @@ func TestFailedCreateWithCanceledContextAllowsRetry(t *testing.T) {
 	}
 	if err := writeHostsConfig(hosts, map[string]string{"trellis": "127.0.0.1"}); err != nil {
 		t.Fatalf("retry hosts config for same allocation: %v", err)
+	}
+}
+
+func TestContainerStatusReportsPausedTasks(t *testing.T) {
+	for raw, want := range map[containerd.ProcessStatus]ContainerStatus{
+		containerd.Created: StatusCreated,
+		containerd.Running: StatusRunning,
+		containerd.Stopped: StatusStopped,
+		containerd.Paused:  StatusPaused,
+		containerd.Pausing: StatusPaused,
+		containerd.Unknown: StatusUnknown,
+	} {
+		if got := containerStatus(raw); got != want {
+			t.Errorf("containerStatus(%q) = %q, want %q", raw, got, want)
+		}
 	}
 }

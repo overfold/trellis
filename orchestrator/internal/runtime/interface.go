@@ -15,6 +15,9 @@ const (
 	StatusRunning ContainerStatus = "running"
 	// StatusStopped indicates that a container has stopped.
 	StatusStopped ContainerStatus = "stopped"
+	// StatusPaused indicates that a container's task exists but its processes
+	// are frozen. Trellis never pauses containers itself.
+	StatusPaused ContainerStatus = "paused"
 	// StatusUnknown indicates that container state is unavailable.
 	StatusUnknown ContainerStatus = "unknown"
 )
