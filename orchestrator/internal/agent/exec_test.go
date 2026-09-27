@@ -265,7 +265,7 @@ func TestReapExecSessionsReleasesExitedAndIdleSessions(t *testing.T) {
 	}
 
 	later := start.Add(execSessionIdleTimeout)
-	agent.execSessions[ids["active"]].lastActive.Store(later.Add(-time.Minute).UnixNano())
+	agent.execSessions[ids["active"]].lastActive.Store(execClockNanos(later.Add(-time.Minute)))
 	agent.reapExecSessions(context.Background(), later)
 	if len(agent.execSessions) != 1 || agent.execSessions[ids["active"]] == nil {
 		t.Fatalf("sessions after reap = %v, want only the active session", agent.execSessions)

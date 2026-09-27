@@ -35,7 +35,7 @@ type execSession struct {
 	ContainerID  string
 	Terminal     runtime.TerminalSession
 
-	// lastActive holds Unix nanoseconds so session use needs only a read lock.
+	// lastActive holds execClockNanos so session use needs only a read lock.
 	lastActive atomic.Int64
 	// closeFailed marks a session whose termination failed; the reaper
 	// retries it regardless of client activity.
@@ -43,19 +43,22 @@ type execSession struct {
 	exitedAt    time.Time
 }
 
-// expired reports whether the session should be reaped, given whether its
-// process has been observed to exit. It must be called with the agent lock held.
-func (s *execSession) expired(now time.Time, exited bool) bool {
+// execClock anchors session activity times so idleness is measured on the
+// monotonic clock and wall-clock steps cannot expire or extend sessions.
+var execClock = time.Now()
+
+func execClockNanos(t time.Time) int64 { return int64(t.Sub(execClock)) }
+
+// expired reports whether the session should be reaped. It must be called
+// with the agent lock held.
+func (s *execSession) expired(now time.Time) bool {
 	if s.closeFailed.Load() {
 		return true
-	}
-	if exited && s.exitedAt.IsZero() {
-		s.exitedAt = now
 	}
 	if !s.exitedAt.IsZero() {
 		return now.Sub(s.exitedAt) >= execSessionExitRetention
 	}
-	return now.Sub(time.Unix(0, s.lastActive.Load())) >= execSessionIdleTimeout
+	return time.Duration(execClockNanos(now)-s.lastActive.Load()) >= execSessionIdleTimeout
 }
 
 // execTarget identifies the task record and container an exec request addresses.
@@ -192,7 +195,7 @@ func (a *Agent) CreateExecSession(ctx context.Context, allocID, task string, com
 	session := &execSession{
 		AllocationID: allocID, TaskID: target.ID, ContainerID: target.ContainerID, Terminal: terminal,
 	}
-	session.lastActive.Store(time.Now().UnixNano())
+	session.lastActive.Store(execClockNanos(time.Now()))
 	// StartTerminal outlives the request; a caller that gave up never learns
 	// the session ID, so the terminal must not be kept.
 	if err := ctx.Err(); err != nil {
@@ -227,7 +230,7 @@ func (a *Agent) useExecSession(allocID, sessionID string, mutate bool) (*execSes
 	if session == nil || session.AllocationID != allocID || (mutate && session.closeFailed.Load()) {
 		return nil, fmt.Errorf("%w: %s", ErrExecSessionNotFound, sessionID)
 	}
-	session.lastActive.Store(time.Now().UnixNano())
+	session.lastActive.Store(execClockNanos(time.Now()))
 	return session, nil
 }
 
@@ -361,7 +364,12 @@ func (a *Agent) reapExecSessions(ctx context.Context, now time.Time) {
 			exited[session] = true
 		}
 	}
-	a.closeExecSessions(ctx, func(session *execSession) bool { return session.expired(now, exited[session]) })
+	a.closeExecSessions(ctx, func(session *execSession) bool {
+		if exited[session] && session.exitedAt.IsZero() {
+			session.exitedAt = now
+		}
+		return session.expired(now)
+	})
 }
 
 // CloseExecSessions terminates every interactive session and refuses new

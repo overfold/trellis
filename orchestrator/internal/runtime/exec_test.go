@@ -220,3 +220,16 @@ func TestLockedBufferDiscardsWritesAfterSnapshot(t *testing.T) {
 		t.Fatalf("detached buffer kept %d bytes", got)
 	}
 }
+
+func TestLockedBufferCapsOutput(t *testing.T) {
+	var buffer lockedBuffer
+	chunk := make([]byte, execOutputLimit/2+1)
+	for i := 0; i < 3; i++ {
+		if n, err := buffer.Write(chunk); n != len(chunk) || err != nil {
+			t.Fatalf("write = %d, %v", n, err)
+		}
+	}
+	if got := len(buffer.take()); got != execOutputLimit {
+		t.Fatalf("captured %d bytes, want %d", got, execOutputLimit)
+	}
+}

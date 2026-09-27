@@ -820,9 +820,14 @@ func deleteWithin(ctx context.Context, process execProcess) error {
 	}
 }
 
+// execOutputLimit bounds the stdout and stderr each one-shot exec captures.
+const execOutputLimit = 8 * 1024 * 1024
+
 // lockedBuffer collects exec output written by containerd's IO copy
-// goroutines. Taking its contents detaches it: a background child can keep
-// writing after the result is returned, and that output is discarded.
+// goroutines, keeping at most execOutputLimit bytes. Taking its contents
+// detaches it: a background child can keep writing after the result is
+// returned, and that output is discarded. Discarded writes still succeed so
+// the command is never blocked or signalled by a full buffer.
 type lockedBuffer struct {
 	mu       sync.Mutex
 	buf      bytes.Buffer
@@ -833,6 +838,10 @@ func (b *lockedBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.detached {
+		return len(p), nil
+	}
+	if room := execOutputLimit - b.buf.Len(); len(p) > room {
+		b.buf.Write(p[:room])
 		return len(p), nil
 	}
 	return b.buf.Write(p)
@@ -1009,6 +1018,9 @@ func (c *ContainerdRuntime) StartTerminal(ctx context.Context, containerID strin
 	go func() {
 		status := <-exitCh
 		code, _, resultErr := status.Result()
+		// Input can no longer be delivered, so writes fail instead of blocking.
+		_ = stdinWriter.Close()
+		_ = stdinReader.Close()
 		// Deleting waits (boundedly) for the output copy, so readers do not
 		// see the exit before the final output.
 		_ = deleteExecProcess(ctx, process)
@@ -1019,8 +1031,6 @@ func (c *ContainerdRuntime) StartTerminal(ctx context.Context, containerID strin
 			session.exitCode = &value
 		}
 		session.mu.Unlock()
-		_ = stdinWriter.Close()
-		_ = stdinReader.Close()
 	}()
 
 	return session, nil
