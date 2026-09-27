@@ -520,7 +520,7 @@ func (a *Agent) prepareStart(ctx context.Context, request *api.AllocationRequest
 			a.mu.RUnlock()
 			return fmt.Errorf("%w: current %d, requested %d", ErrStaleGeneration, allocation.Generation, request.Generation)
 		}
-		if allocation.Generation == request.Generation && allocation.ExecutionHash != request.ExecutionHash {
+		if allocation.Generation == request.Generation && (allocation.JobRevision != request.JobRevision || allocation.ExecutionHash != request.ExecutionHash) {
 			a.mu.RUnlock()
 			return fmt.Errorf("%w: allocation %s generation %d", ErrExecutionConflict, request.AllocationID, request.Generation)
 		}
@@ -737,7 +737,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	a.mu.Lock()
 	existing := a.allocations[allocID]
 	if existing != nil {
-		matching := existing.AllocationID == schedulerID && existing.Generation == generation && existing.ExecutionHash == executionHash
+		matching := existing.AllocationID == schedulerID && existing.Generation == generation && existing.JobRevision == jobRevision && existing.ExecutionHash == executionHash
 		status := existing.Status
 		a.mu.Unlock()
 		if !matching {

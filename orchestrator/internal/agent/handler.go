@@ -139,6 +139,9 @@ func (h *Handler) handleRun(c *echo.Context) error {
 	if request.Generation == 0 {
 		return echo.NewHTTPError(http.StatusBadRequest, "generation must be greater than zero")
 	}
+	if request.JobRevision <= 0 {
+		return echo.NewHTTPError(http.StatusBadRequest, "job_revision must be greater than zero")
+	}
 	if request.ExecutionHash == "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "execution_hash is required")
 	}

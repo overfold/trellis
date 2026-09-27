@@ -347,6 +347,22 @@ func operationTestRequest() *api.AllocationRequest {
 	}
 }
 
+func TestRunAllocationRejectsSameGenerationRevisionConflict(t *testing.T) {
+	agent := &Agent{allocations: map[string]*Allocation{
+		"allocation-g2-task": {
+			ID: "allocation-g2-task", AllocationID: "allocation", Generation: 2,
+			JobRevision: 7, ExecutionHash: "execution-hash", Status: "running",
+		},
+	}}
+	err := agent.RunAllocation(
+		context.Background(), "allocation-g2-task", "allocation", 2, 8, "execution-hash",
+		"default", "job", "group", "task", &spec.TaskSpec{Name: "task", Image: "image"}, "", nil, nil, nil, nil,
+	)
+	if !errors.Is(err, ErrAllocationExists) {
+		t.Fatalf("expected allocation conflict, got %v", err)
+	}
+}
+
 func TestRunAllocationMountsHealthProbeForEveryNetworkAndRuntime(t *testing.T) {
 	for _, mode := range []spec.TaskNetworkMode{spec.TaskNetworkHost, spec.TaskNetworkIsolated, spec.TaskNetworkWireGuard} {
 		for _, taskRuntime := range []string{"runc", "runsc"} {
