@@ -34,6 +34,7 @@ type blockingStartRuntime struct {
 type failingStopRuntime struct {
 	*reconcilerRuntime
 	stopErr     error
+	removeErr   error
 	stopCount   int
 	removeCount int
 }
@@ -297,7 +298,7 @@ func (r *failingStopRuntime) Stop(context.Context, string) error {
 }
 func (r *failingStopRuntime) Remove(context.Context, string) error {
 	r.removeCount++
-	return nil
+	return r.removeErr
 }
 
 type countingNetworkManager struct{ detachCount int }
@@ -938,7 +939,7 @@ func TestFailedCreateMissingContainerCanBeCleanedUpOnRetry(t *testing.T) {
 	}
 }
 
-func TestStagingReleaseFailureKeepsRunningAllocationUntilStop(t *testing.T) {
+func TestManagedVolumeStagingOutlivesStartUntilStop(t *testing.T) {
 	rt := &failingStopRuntime{reconcilerRuntime: &reconcilerRuntime{}}
 	agent := newOperationTestAgent(t, rt)
 	local := storage.NewLocalStorage(t.TempDir())
@@ -953,7 +954,11 @@ func TestStagingReleaseFailureKeepsRunningAllocationUntilStop(t *testing.T) {
 	agent.volumes.stage = func(_ int, target string) error {
 		return os.WriteFile(filepath.Join(target, "block"), []byte("block"), 0o600)
 	}
-	agent.volumes.unstage = func(string) error { return nil }
+	unstaged := 0
+	agent.volumes.unstage = func(string) error {
+		unstaged++
+		return nil
+	}
 
 	if err := agent.RunGroup(context.Background(), request); err != nil {
 		t.Fatalf("run allocation: %v", err)
@@ -965,14 +970,40 @@ func TestStagingReleaseFailureKeepsRunningAllocationUntilStop(t *testing.T) {
 	if current := agent.allocations[id]; current == nil || current.Status != "running" {
 		t.Fatalf("live allocation = %+v, want running", current)
 	}
-	if rt.stopCount != 0 || rt.removeCount != 0 {
-		t.Fatalf("cleanup after start: stops = %d, removes = %d, want none", rt.stopCount, rt.removeCount)
+	// The staging mount is the container's OCI mount source; an in-place
+	// restart creates a new task that resolves it again.
+	if unstaged != 0 {
+		t.Fatalf("unstage calls after start = %d, want none", unstaged)
+	}
+	if _, err := os.Stat(filepath.Join(stagingPath, "block")); err != nil {
+		t.Fatalf("staging mount after start: %v", err)
 	}
 	if err := agent.RunGroup(context.Background(), request); err != nil {
 		t.Fatalf("retry running allocation: %v", err)
 	}
-	if rt.stopCount != 0 || rt.removeCount != 0 {
-		t.Fatalf("cleanup after retry: stops = %d, removes = %d, want none", rt.stopCount, rt.removeCount)
+	if rt.stopCount != 0 || rt.removeCount != 0 || unstaged != 0 {
+		t.Fatalf("cleanup after retry: stops = %d, removes = %d, unstages = %d, want none", rt.stopCount, rt.removeCount, unstaged)
+	}
+
+	// A container that could not be removed keeps its mount sources.
+	rt.removeErr = errors.New("remove failed")
+	if err := agent.StopAllocation(context.Background(), id); !errors.Is(err, rt.removeErr) {
+		t.Fatalf("stop with failed removal = %v, want removal error", err)
+	}
+	if unstaged != 0 {
+		t.Fatalf("unstage calls after failed removal = %d, want none", unstaged)
+	}
+	if _, err := os.Stat(filepath.Join(stagingPath, "block")); err != nil {
+		t.Fatalf("staging mount after failed removal: %v", err)
+	}
+	rt.removeErr = nil
+
+	// A failed staging release keeps the stopping record so a retry can finish.
+	if err := agent.StopAllocation(context.Background(), id); err == nil {
+		t.Fatal("stop succeeded while staging directory could not be removed")
+	}
+	if err := local.Get(allocationRecordKey(id), &recorded); err != nil || recorded.Status != "stopping" {
+		t.Fatalf("recorded allocation = %+v, error = %v, want stopping", recorded, err)
 	}
 	if err := os.Remove(filepath.Join(stagingPath, "block")); err != nil {
 		t.Fatal(err)
@@ -980,8 +1011,176 @@ func TestStagingReleaseFailureKeepsRunningAllocationUntilStop(t *testing.T) {
 	if err := agent.StopAllocation(context.Background(), id); err != nil {
 		t.Fatalf("retry staging cleanup: %v", err)
 	}
+	if unstaged == 0 {
+		t.Fatal("stop did not release the staging mount")
+	}
+	if _, err := os.Stat(stagingPath); !os.IsNotExist(err) {
+		t.Fatalf("staging path after stop: %v, want not found", err)
+	}
 	if err := local.Get(allocationRecordKey(id), &recorded); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("record after retry: %v, want not found", err)
+	}
+}
+
+func TestStopReleasesStagingOfAllocationRecoveredFromLabels(t *testing.T) {
+	rt := &createdRecoveryRuntime{
+		reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning},
+		managedID:         "task",
+		labels: map[string]string{
+			"trellis.allocation-id": "allocation", "trellis.allocation-generation": "1",
+			"trellis.job-revision": "1", "trellis.execution-hash": "hash",
+		},
+	}
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	agent := newOperationTestAgent(t, rt)
+	agent.ConfigureDurability(local, "test")
+	if err := agent.recover(context.Background()); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if recovered := agent.allocations["task"]; recovered == nil || recovered.Spec != nil {
+		t.Fatalf("recovered allocation = %+v, want one without a task spec", recovered)
+	}
+	staging := agent.volumes.stagingPath("task", "data")
+	if err := os.MkdirAll(staging, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	unstaged := 0
+	agent.volumes.unstage = func(string) error {
+		unstaged++
+		return nil
+	}
+
+	if err := agent.StopAllocation(context.Background(), "task"); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if unstaged != 1 {
+		t.Fatalf("unstage calls = %d, want 1", unstaged)
+	}
+	if _, err := os.Stat(filepath.Dir(staging)); !os.IsNotExist(err) {
+		t.Fatalf("staging after stop: %v, want not found", err)
+	}
+}
+
+var errMountCheck = errors.New("mountinfo unavailable")
+
+type missingContainerRuntime struct{ *reconcilerRuntime }
+
+func (*missingContainerRuntime) Inspect(_ context.Context, id string) (*runtime.ContainerInfo, error) {
+	return nil, fmt.Errorf("inspect %s: %w", id, errdefs.ErrNotFound)
+}
+
+func TestStartReleasesStagingOnlyWhenItsContainerIsGone(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		rt           runtime.ContainerRuntime
+		checkErr     error
+		wantInUse    bool
+		wantUnstaged int
+	}{
+		{name: "container exists", rt: &reconcilerRuntime{}, wantInUse: true},
+		{name: "mount check fails", rt: &missingContainerRuntime{&reconcilerRuntime{}}, checkErr: errMountCheck},
+		{name: "container missing", rt: &missingContainerRuntime{&reconcilerRuntime{}}, wantUnstaged: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := newOperationTestAgent(t, tc.rt)
+			local := storage.NewLocalStorage(t.TempDir())
+			if err := local.Init(); err != nil {
+				t.Fatal(err)
+			}
+			agent.ConfigureDurability(local, "test")
+			request := operationTestRequest()
+			request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image", Volumes: []spec.VolumeSpec{
+				{Name: "data", HostPath: "@/data", ContainerPath: "/data"},
+				{Name: "logs", HostPath: "@/logs", ContainerPath: "/logs"},
+			}}}
+			id := "allocation-g2-first"
+			// Staging kept by recovery, or left behind when it could not list
+			// containers.
+			kept := agent.volumes.stagingPath(id, "logs")
+			if err := os.MkdirAll(kept, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			agent.volumes.hasMounts = func(dir string) (bool, error) {
+				_, err := os.Stat(filepath.Join(dir, "logs"))
+				return err == nil, tc.checkErr
+			}
+			agent.volumes.stage = func(int, string) error { return nil }
+			unstaged := 0
+			agent.volumes.unstage = func(string) error {
+				unstaged++
+				return nil
+			}
+
+			err := agent.RunGroup(context.Background(), request)
+			if tc.checkErr != nil {
+				if !errors.Is(err, tc.checkErr) || errors.Is(err, errStagingInUse) {
+					t.Fatalf("run allocation = %v, want mount check error", err)
+				}
+			} else if tc.wantInUse != errors.Is(err, errStagingInUse) || !tc.wantInUse && err != nil {
+				t.Fatalf("run allocation = %v, want staging in use %t", err, tc.wantInUse)
+			}
+			if unstaged != tc.wantUnstaged {
+				t.Fatalf("unstage calls = %d, want %d", unstaged, tc.wantUnstaged)
+			}
+			// Kept staging survives; released orphaned staging is staged anew.
+			if _, err := os.Stat(kept); err != nil {
+				t.Fatalf("staging after start: %v", err)
+			}
+			wantStaged := !tc.wantInUse && tc.checkErr == nil
+			if _, err := os.Stat(agent.volumes.stagingPath(id, "data")); (err == nil) != wantStaged {
+				t.Fatalf("new staging after start: %v, want present %t", err, wantStaged)
+			}
+		})
+	}
+}
+
+func TestRecoverKeepsVolumeStagingForExistingContainers(t *testing.T) {
+	rt := &createdRecoveryRuntime{
+		reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning},
+		managedID:         "task",
+	}
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	agent := newOperationTestAgent(t, rt)
+	agent.ConfigureDurability(local, "test")
+	if err := agent.persistAllocation(&Allocation{
+		ID: "task", AllocationID: "allocation", ContainerID: "task",
+		Spec:   &spec.TaskSpec{Name: "task", Volumes: []spec.VolumeSpec{{Name: "data", HostPath: "@/data", ContainerPath: "/data"}}},
+		Status: "running", Health: "healthy",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Staging left by the previous agent process exists before the volume
+	// manager starts.
+	dataRoot := t.TempDir()
+	previous := &VolumeManager{dataRootPath: dataRoot}
+	live := previous.stagingPath("task", "data")
+	orphan := previous.stagingPath("removed-task", "data")
+	for _, path := range []string{live, orphan} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	agent.volumes = NewVolumeManager(dataRoot)
+
+	if err := agent.recover(context.Background()); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(live)); err != nil {
+		t.Fatalf("staging for existing container: %v", err)
+	}
+	// Without a staging mount, the kept directory would be an empty substitute
+	// for the volume.
+	if _, err := os.Stat(live); !os.IsNotExist(err) {
+		t.Fatalf("unmounted staging for existing container: %v, want not found", err)
+	}
+	if _, err := os.Stat(filepath.Dir(orphan)); !os.IsNotExist(err) {
+		t.Fatalf("orphaned staging after recovery: %v, want not found", err)
 	}
 }
 
