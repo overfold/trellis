@@ -284,7 +284,9 @@ func (r *AllocationReconciler) restart(ctx context.Context, allocID string) erro
 	healthManaged := state.healthManaged
 	r.mu.Unlock()
 	// Restart accounting is best effort; the restart itself must proceed.
-	_ = r.publishRestartState(allocID, attempts, window, false)
+	if err := r.publishRestartState(allocID, attempts, window, false); err != nil {
+		r.log.Error("record restart attempt", "alloc", allocID, "error", err)
+	}
 
 	if err := r.runtime.Restart(ctx, allocID); err != nil {
 		r.mu.Lock()

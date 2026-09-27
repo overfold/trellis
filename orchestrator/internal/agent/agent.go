@@ -400,10 +400,10 @@ func (a *Agent) recover(ctx context.Context) error {
 				a.log.Error("refresh recovered allocation record", "allocation", allocation.AllocationID, "error", persistErr)
 			}
 			healthManaged := allocation.Spec != nil && allocation.Spec.HealthCheck != nil
-			if restartSuppressed {
-				a.reconciler.TrackStopping(allocation.ID, healthManaged, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow, allocation.RestartExhausted)
-			} else if exhausted {
+			if exhausted {
 				a.reconciler.TrackFailed(allocation.ID, healthManaged, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow)
+			} else if restartSuppressed {
+				a.reconciler.TrackStopping(allocation.ID, healthManaged, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow, allocation.RestartExhausted)
 			} else if !recoveryPending {
 				a.reconciler.TrackRecovered(allocation.ID, healthManaged, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow, allocation.RestartExhausted)
 			}
@@ -531,6 +531,7 @@ func (a *Agent) prepareStart(ctx context.Context, request *api.AllocationRequest
 	}
 	a.mu.RLock()
 	var oldIDs []string
+	var exhaustedTask string
 	for id, allocation := range a.allocations {
 		if allocation.AllocationID != request.AllocationID {
 			continue
@@ -543,15 +544,19 @@ func (a *Agent) prepareStart(ctx context.Context, request *api.AllocationRequest
 			a.mu.RUnlock()
 			return fmt.Errorf("%w: allocation %s generation %d", ErrExecutionConflict, request.AllocationID, request.Generation)
 		}
-		// Reject before touching any task so a start retry cannot churn the
-		// siblings of a task whose restart budget is terminally exhausted.
-		if allocation.Generation == request.Generation && allocation.RestartExhausted {
-			a.mu.RUnlock()
-			return fmt.Errorf("%w: allocation %s generation %d task %s", ErrRestartBudgetExhausted, request.AllocationID, request.Generation, allocation.TaskName)
+		if allocation.Generation == request.Generation && allocation.RestartExhausted && (exhaustedTask == "" || allocation.TaskName < exhaustedTask) {
+			exhaustedTask = allocation.TaskName
 		}
 		if allocation.Generation < request.Generation {
 			oldIDs = append(oldIDs, id)
 		}
+	}
+	// Reject after the fencing checks, and before touching any task, so a
+	// start retry cannot churn the siblings of a task whose restart budget is
+	// terminally exhausted. Pick the task deterministically.
+	if exhaustedTask != "" {
+		a.mu.RUnlock()
+		return fmt.Errorf("%w: allocation %s generation %d task %s", ErrRestartBudgetExhausted, request.AllocationID, request.Generation, exhaustedTask)
 	}
 	a.mu.RUnlock()
 	for _, id := range oldIDs {
@@ -1505,10 +1510,7 @@ func (a *Agent) OnRestartState(allocID string, attempts int, window time.Time, e
 	}
 	if err := a.persistAllocation(allocation); err != nil {
 		// Keep reporting the accurate in-memory observation; the reconciler
-		// retries persisting an exhaustion on its next pass and logs it.
-		if !exhausted {
-			a.log.Error("persist restart tracking", "allocation", allocation.AllocationID, "error", err)
-		}
+		// logs the error and retries persisting an exhaustion on its next pass.
 		return fmt.Errorf("persist restart tracking for %s: %w", allocID, err)
 	}
 	return nil
