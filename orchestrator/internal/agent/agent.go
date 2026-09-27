@@ -55,6 +55,8 @@ type Agent struct {
 	mu          sync.RWMutex
 	operationMu sync.Mutex
 	operations  map[string]*allocationOperation
+	secretMu    sync.Mutex
+	secretBase  string
 	secretRoot  string
 }
 
@@ -216,7 +218,6 @@ func NewAgent(log *slog.Logger, runtime runtime.ContainerRuntime, health *health
 		execSessions: make(map[string]*execSession),
 		healthProbe:  filepath.Join(filepath.Dir(executable), "trellis-health-probe"),
 		operations:   make(map[string]*allocationOperation),
-		secretRoot:   defaultSecretRoot,
 
 		log: log,
 

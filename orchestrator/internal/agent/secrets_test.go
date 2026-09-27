@@ -78,37 +78,78 @@ func TestMaterializeSecretsEnvOnlyNeedsNoDirectory(t *testing.T) {
 	}
 }
 
-func TestSecretDirForIsDeterministicAndRejectsUnsafeRoot(t *testing.T) {
+func TestSecretDirForIsRecordedAndDeterministicAcrossRestart(t *testing.T) {
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
 	agent := newOperationTestAgent(t, &reconcilerRuntime{})
+	agent.ConfigureDurability(local, "test")
 	dir, err := agent.secretDirFor("allocation-g2-first")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := filepath.Join(agent.secretRoot, base64.RawURLEncoding.EncodeToString([]byte("allocation-g2-first"))); dir != want {
-		t.Fatalf("secret dir = %q, want %q", dir, want)
+	root := filepath.Dir(dir)
+	if filepath.Base(dir) != base64.RawURLEncoding.EncodeToString([]byte("allocation-g2-first")) {
+		t.Fatalf("secret dir = %q", dir)
 	}
-	if info, err := os.Lstat(agent.secretRoot); err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+	if info, err := os.Lstat(root); err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
 		t.Fatalf("secret root = %v, %v", info, err)
 	}
-
-	target := t.TempDir()
-	agent.secretRoot = filepath.Join(t.TempDir(), "link")
-	if err := os.Symlink(target, agent.secretRoot); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := agent.secretDirFor("allocation"); err == nil || !strings.Contains(err.Error(), "not a directory") {
-		t.Fatalf("symlinked secret root error = %v", err)
+	var recorded string
+	if err := local.Get(secretRootKey, &recorded); err != nil || recorded != root {
+		t.Fatalf("recorded secret root = %q, %v, want %q", recorded, err, root)
 	}
 
-	agent.secretRoot = filepath.Join(t.TempDir(), "shared")
-	if err := os.Mkdir(agent.secretRoot, 0o755); err != nil {
-		t.Fatal(err)
+	restarted := newOperationTestAgent(t, &reconcilerRuntime{})
+	restarted.ConfigureDurability(local, "test")
+	again, err := restarted.secretDirFor("allocation-g2-first")
+	if err != nil || again != dir {
+		t.Fatalf("secret dir after restart = %q, %v, want %q", again, err, dir)
 	}
-	if err := os.Chmod(agent.secretRoot, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := agent.secretDirFor("allocation"); err == nil || !strings.Contains(err.Error(), "accessible to other users") {
-		t.Fatalf("shared secret root error = %v", err)
+}
+
+func TestSecretDirForReplacesUntrustworthyRecordedRoot(t *testing.T) {
+	for name, prepare := range map[string]func(t *testing.T, path string){
+		"missing": func(*testing.T, string) {},
+		"symlink": func(t *testing.T, path string) {
+			if err := os.Symlink(t.TempDir(), path); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"shared": func(t *testing.T, path string) {
+			if err := os.Mkdir(path, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			local := storage.NewLocalStorage(t.TempDir())
+			if err := local.Init(); err != nil {
+				t.Fatal(err)
+			}
+			agent := newOperationTestAgent(t, &reconcilerRuntime{})
+			agent.ConfigureDurability(local, "test")
+			untrusted := filepath.Join(agent.secretBase, "trellis-secrets-untrusted")
+			prepare(t, untrusted)
+			if err := local.Put(secretRootKey, untrusted); err != nil {
+				t.Fatal(err)
+			}
+			dir, err := agent.secretDirFor("allocation")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if root := filepath.Dir(dir); root == untrusted {
+				t.Fatalf("reused untrustworthy secret root %q", root)
+			}
+			var recorded string
+			if err := local.Get(secretRootKey, &recorded); err != nil || recorded != filepath.Dir(dir) {
+				t.Fatalf("recorded secret root = %q, %v", recorded, err)
+			}
+		})
 	}
 }
 
@@ -218,6 +259,7 @@ func TestRemoveOrphanedSecretDirsKeepsOwnedDirectories(t *testing.T) {
 }
 
 func TestRemoveOrphanedSecretDirsSkipsWithoutVerifiableOwnership(t *testing.T) {
+	// Without durable records there is no recorded root or ownership to verify.
 	agent := newOperationTestAgent(t, &reconcilerRuntime{})
 	dir, err := agent.secretDirFor("orphan")
 	if err != nil {
@@ -226,23 +268,30 @@ func TestRemoveOrphanedSecretDirsSkipsWithoutVerifiableOwnership(t *testing.T) {
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	// Without durable records there is no ownership to verify.
 	agent.removeOrphanedSecretDirs()
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("secret directory removed without durable records: %v", err)
 	}
 
+	// An unreadable record may belong to any allocation.
 	root := t.TempDir()
 	local := storage.NewLocalStorage(root)
 	if err := local.Init(); err != nil {
 		t.Fatal(err)
 	}
+	agent = newOperationTestAgent(t, &reconcilerRuntime{})
 	agent.ConfigureDurability(local, "test")
+	dir, err = agent.secretDirFor("orphan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	recordDir := filepath.Join(root, "agent", "allocations")
 	if err := os.MkdirAll(recordDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	// An unreadable record may belong to any allocation.
 	if err := os.Symlink(filepath.Join(root, "missing"), filepath.Join(recordDir, "unreadable")); err != nil {
 		t.Fatal(err)
 	}
