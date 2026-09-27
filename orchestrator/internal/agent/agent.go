@@ -756,7 +756,8 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		a.mu.Lock()
 	}
 	alloc := &Allocation{ID: allocID, ContainerID: allocID, AllocationID: schedulerID, Generation: generation, JobRevision: jobRevision, ExecutionHash: executionHash, Restart: restartPolicy, Namespace: namespace, JobName: jobName, GroupName: groupName, TaskName: taskName, Spec: ts, Status: "starting", Health: "unknown"}
-	a.allocations[allocID] = alloc
+	starting := *alloc
+	a.allocations[allocID] = &starting
 	a.mu.Unlock()
 	if err := a.persistAllocation(alloc); err != nil {
 		a.mu.Lock()
@@ -787,6 +788,12 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 				tracked = true
 			}
 		}
+		// Publish the latest durable startup state before marking it stopping.
+		// Startup builds alloc privately so readers never observe it changing.
+		failed := *alloc
+		a.mu.Lock()
+		a.allocations[allocID] = &failed
+		a.mu.Unlock()
 		persistStopErr := a.markAllocationStopping(allocID)
 		runErr = errors.Join(runErr, persistStopErr)
 		if alloc.ContainerOwnershipUnverified {
@@ -894,9 +901,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		if err != nil {
 			return fmt.Errorf("attach WireGuard network: %w", err)
 		}
-		a.mu.Lock()
 		alloc.Network = netAttachment
-		a.mu.Unlock()
 		if err := a.persistAllocation(alloc); err != nil {
 			return fmt.Errorf("persist network attachment: %w", err)
 		}
@@ -1463,20 +1468,10 @@ func (a *Agent) runHeartbeatLoop(ctx context.Context) {
 			if !registered {
 				continue
 			}
-			a.mu.RLock()
-			actual := make([]api.AllocationStatus, 0, len(a.allocations))
-			for _, alloc := range a.allocations {
-				ports := make([]api.PortMapping, 0, len(alloc.Ports))
-				for _, p := range alloc.Ports {
-					ports = append(ports, api.PortMapping{HostPort: p.HostPort, ContainerPort: p.ContainerPort})
-				}
-				actual = append(actual, api.AllocationStatus{ID: alloc.AllocationID, Generation: alloc.Generation, Task: alloc.TaskName, Address: allocationNetworkAddress(alloc), Phase: lifecycle.Phase(alloc.Status), Health: lifecycle.Health(alloc.Health), Ports: ports})
-			}
-			a.mu.RUnlock()
 			heartbeat := &client.Heartbeat{
 				NodeID:            a.nodeID,
 				Timestamp:         time.Now(),
-				Allocations:       actual,
+				Allocations:       a.allocationStatuses(),
 				Volumes:           a.volumes.AvailableHostVolumes(),
 				Capabilities:      a.nodeInfo.Capabilities,
 				Version:           a.version,
@@ -1502,4 +1497,18 @@ func (a *Agent) runHeartbeatLoop(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func (a *Agent) allocationStatuses() []api.AllocationStatus {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	actual := make([]api.AllocationStatus, 0, len(a.allocations))
+	for _, alloc := range a.allocations {
+		ports := make([]api.PortMapping, 0, len(alloc.Ports))
+		for _, p := range alloc.Ports {
+			ports = append(ports, api.PortMapping{HostPort: p.HostPort, ContainerPort: p.ContainerPort})
+		}
+		actual = append(actual, api.AllocationStatus{ID: alloc.AllocationID, Generation: alloc.Generation, Task: alloc.TaskName, Address: allocationNetworkAddress(alloc), Phase: lifecycle.Phase(alloc.Status), Health: lifecycle.Health(alloc.Health), Ports: ports})
+	}
+	return actual
 }
