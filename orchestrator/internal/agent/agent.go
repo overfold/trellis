@@ -296,6 +296,7 @@ func (a *Agent) Init(ctx context.Context) {
 
 func (a *Agent) recover(ctx context.Context) error {
 	if a.local == nil {
+		a.cleanupVolumeStaging(nil)
 		return nil
 	}
 	var epoch uint64
@@ -317,12 +318,20 @@ func (a *Agent) recover(ctx context.Context) error {
 	}
 	managed, ok := a.runtime.(runtime.ManagedRuntime)
 	if !ok {
+		a.cleanupVolumeStaging(nil)
 		return nil
 	}
 	containers, err := managed.ListManaged(ctx, a.cluster)
 	if err != nil {
 		return err
 	}
+	// Existing containers still reference their staging mounts as OCI mount
+	// sources; keep those so a later restart can create a new task.
+	liveContainers := make([]string, 0, len(containers))
+	for _, container := range containers {
+		liveContainers = append(liveContainers, container.ID)
+	}
+	a.cleanupVolumeStaging(liveContainers)
 	seen := make(map[string]bool, len(containers))
 	for _, container := range containers {
 		seen[container.ID] = true
@@ -445,6 +454,12 @@ func (a *Agent) recover(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (a *Agent) cleanupVolumeStaging(liveContainers []string) {
+	if err := a.volumes.CleanupStaging(liveContainers); err != nil {
+		a.log.Error("clean up stale volume staging mounts", "error", err)
+	}
 }
 
 func allocationFromRuntime(container runtime.ContainerInfo) *Allocation {
@@ -1055,9 +1070,8 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 			return fmt.Errorf("mark allocation healthy: %w", err)
 		}
 	}
-	if err := a.volumes.ReleaseStaging(allocID, ts.Volumes); err != nil {
-		a.log.Error("release volume staging after allocation start", "allocation", allocID, "error", err)
-	}
+	// Keep managed-volume staging mounts until the container is removed: they
+	// are its OCI mount sources, which every restarted task resolves again.
 	committed = true
 
 	return nil

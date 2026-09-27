@@ -9,8 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/clofour/trellis/internal/agent"
 	"github.com/clofour/trellis/internal/health"
 	"github.com/clofour/trellis/internal/runtime"
+	"github.com/clofour/trellis/internal/spec"
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
@@ -162,6 +164,64 @@ func TestContainerdStopsCreatedTask(t *testing.T) {
 	// create a fresh task rather than colliding with the interrupted one.
 	if err := r.Start(ctx, created); err != nil {
 		t.Fatalf("start after created-task cleanup: %v", err)
+	}
+}
+
+// A managed volume's staging mount is the container's OCI mount source, so a
+// restart that creates a new task must still find it.
+func TestContainerdRestartsTaskWithManagedVolume(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("containerd overlayfs E2E requires root; run this test with sudo")
+	}
+	socket := os.Getenv("CONTAINERD_ADDRESS")
+	if socket == "" {
+		socket = "/run/containerd/containerd.sock"
+	}
+	if _, err := os.Stat(socket); err != nil {
+		t.Skipf("containerd unavailable: %v", err)
+	}
+	r, err := runtime.NewContainerdRuntime(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	const image = "docker.io/library/nginx:1.27-alpine"
+	if err := r.Pull(ctx, image); err != nil {
+		t.Fatal(err)
+	}
+	const id = "trellis-e2e-managed-volume-restart"
+	_ = r.Stop(ctx, id)
+	_ = r.Remove(ctx, id)
+
+	dataRoot := t.TempDir()
+	volumes := agent.NewVolumeManager(dataRoot)
+	if err := volumes.CleanupStaging(nil); err != nil {
+		t.Fatal(err)
+	}
+	volume := spec.VolumeSpec{Name: "data", HostPath: "@/data", ContainerPath: "/data"}
+	mount, err := volumes.Create("e2e", "job", id, volume)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = volumes.ReleaseStaging(id, []spec.VolumeSpec{volume}) }()
+	created, err := r.Create(ctx, runtime.CreateOptions{ID: id, Image: image, Runtime: "runc", Mounts: []*runtime.Mount{mount}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Stop(context.Background(), created); _ = r.Remove(context.Background(), created) }()
+	if err := r.Start(ctx, created); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if err := r.Restart(ctx, created); err != nil {
+		t.Fatalf("restart with managed volume: %v", err)
+	}
+	if code, err := r.Exec(ctx, created, []string{"touch", "/data/after-restart"}); err != nil || code != 0 {
+		t.Fatalf("write managed volume after restart: code = %d, error = %v", code, err)
+	}
+	if _, err := os.Stat(filepath.Join(dataRoot, "volumes", "namespaces", "e2e", "data", "after-restart")); err != nil {
+		t.Fatalf("restarted task did not mount the managed volume: %v", err)
 	}
 }
 

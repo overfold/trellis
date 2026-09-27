@@ -936,7 +936,7 @@ func TestFailedCreateMissingContainerCanBeCleanedUpOnRetry(t *testing.T) {
 	}
 }
 
-func TestStagingReleaseFailureKeepsRunningAllocationUntilStop(t *testing.T) {
+func TestManagedVolumeStagingOutlivesStartUntilStop(t *testing.T) {
 	rt := &failingStopRuntime{reconcilerRuntime: &reconcilerRuntime{}}
 	agent := newOperationTestAgent(t, rt)
 	local := storage.NewLocalStorage(t.TempDir())
@@ -951,26 +951,37 @@ func TestStagingReleaseFailureKeepsRunningAllocationUntilStop(t *testing.T) {
 	agent.volumes.stage = func(_ int, target string) error {
 		return os.WriteFile(filepath.Join(target, "block"), []byte("block"), 0o600)
 	}
-	agent.volumes.unstage = func(string) error { return nil }
+	unstaged := 0
+	agent.volumes.unstage = func(string) error {
+		unstaged++
+		return nil
+	}
 
 	if err := agent.RunGroup(context.Background(), request); err != nil {
 		t.Fatalf("run allocation: %v", err)
 	}
-	var recorded Allocation
-	if err := local.Get(allocationRecordKey(id), &recorded); err != nil || recorded.Status != "running" {
-		t.Fatalf("recorded allocation = %+v, error = %v, want running", recorded, err)
+	// The staging mount is the container's OCI mount source; an in-place
+	// restart creates a new task that resolves it again.
+	if unstaged != 0 {
+		t.Fatalf("unstage calls after start = %d, want none", unstaged)
 	}
-	if current := agent.allocations[id]; current == nil || current.Status != "running" {
-		t.Fatalf("live allocation = %+v, want running", current)
-	}
-	if rt.stopCount != 0 || rt.removeCount != 0 {
-		t.Fatalf("cleanup after start: stops = %d, removes = %d, want none", rt.stopCount, rt.removeCount)
+	if _, err := os.Stat(filepath.Join(stagingPath, "block")); err != nil {
+		t.Fatalf("staging mount after start: %v", err)
 	}
 	if err := agent.RunGroup(context.Background(), request); err != nil {
 		t.Fatalf("retry running allocation: %v", err)
 	}
-	if rt.stopCount != 0 || rt.removeCount != 0 {
-		t.Fatalf("cleanup after retry: stops = %d, removes = %d, want none", rt.stopCount, rt.removeCount)
+	if rt.stopCount != 0 || rt.removeCount != 0 || unstaged != 0 {
+		t.Fatalf("cleanup after retry: stops = %d, removes = %d, unstages = %d, want none", rt.stopCount, rt.removeCount, unstaged)
+	}
+
+	// A failed staging release keeps the stopping record so a retry can finish.
+	if err := agent.StopAllocation(context.Background(), id); err == nil {
+		t.Fatal("stop succeeded while staging directory could not be removed")
+	}
+	var recorded Allocation
+	if err := local.Get(allocationRecordKey(id), &recorded); err != nil || recorded.Status != "stopping" {
+		t.Fatalf("recorded allocation = %+v, error = %v, want stopping", recorded, err)
 	}
 	if err := os.Remove(filepath.Join(stagingPath, "block")); err != nil {
 		t.Fatal(err)
@@ -978,8 +989,56 @@ func TestStagingReleaseFailureKeepsRunningAllocationUntilStop(t *testing.T) {
 	if err := agent.StopAllocation(context.Background(), id); err != nil {
 		t.Fatalf("retry staging cleanup: %v", err)
 	}
+	if unstaged == 0 {
+		t.Fatal("stop did not release the staging mount")
+	}
+	if _, err := os.Stat(stagingPath); !os.IsNotExist(err) {
+		t.Fatalf("staging path after stop: %v, want not found", err)
+	}
 	if err := local.Get(allocationRecordKey(id), &recorded); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("record after retry: %v, want not found", err)
+	}
+}
+
+func TestRecoverKeepsVolumeStagingForExistingContainers(t *testing.T) {
+	rt := &createdRecoveryRuntime{
+		reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning},
+		managedID:         "task",
+	}
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	agent := newOperationTestAgent(t, rt)
+	agent.ConfigureDurability(local, "test")
+	if err := agent.persistAllocation(&Allocation{
+		ID: "task", AllocationID: "allocation", ContainerID: "task",
+		Spec:   &spec.TaskSpec{Name: "task", Volumes: []spec.VolumeSpec{{Name: "data", HostPath: "@/data", ContainerPath: "/data"}}},
+		Status: "running", Health: "healthy",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Staging left by the previous agent process exists before the volume
+	// manager starts.
+	dataRoot := t.TempDir()
+	previous := &VolumeManager{dataRootPath: dataRoot}
+	live := previous.stagingPath("task", "data")
+	orphan := previous.stagingPath("removed-task", "data")
+	for _, path := range []string{live, orphan} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	agent.volumes = NewVolumeManager(dataRoot)
+
+	if err := agent.recover(context.Background()); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if _, err := os.Stat(live); err != nil {
+		t.Fatalf("staging for existing container: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(orphan)); !os.IsNotExist(err) {
+		t.Fatalf("orphaned staging after recovery: %v, want not found", err)
 	}
 }
 

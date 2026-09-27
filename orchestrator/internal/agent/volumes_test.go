@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -128,5 +129,41 @@ func TestVolumeManagerPersistsRegistrations(t *testing.T) {
 	reloaded := newTestVolumeManager(root)
 	if got := reloaded.AvailableHostVolumes(); !slices.Contains(got, "acme/uploads") {
 		t.Fatalf("registration did not survive reload: %v", got)
+	}
+}
+
+func TestCleanupStagingKeepsMountsOfExistingContainers(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("staging bind mounts require root")
+	}
+	root := t.TempDir()
+	manager := NewVolumeManager(root)
+	volume := spec.VolumeSpec{Name: "data", HostPath: "@/data", ContainerPath: "/data"}
+	for _, id := range []string{"live", "orphan"} {
+		if _, err := manager.Create("ns", "job", id, volume); err != nil {
+			if errors.Is(err, unix.EPERM) {
+				t.Skipf("bind mounts unavailable: %v", err)
+			}
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { _ = manager.ReleaseStaging("live", []spec.VolumeSpec{volume}) })
+
+	restarted := NewVolumeManager(root)
+	if err := restarted.CleanupStaging([]string{"live"}); err != nil {
+		t.Fatalf("cleanup staging: %v", err)
+	}
+	mounts, err := stagingMounts(filepath.Join(root, "volume-staging"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{restarted.stagingPath("live", "data")}; !slices.Equal(mounts, want) {
+		t.Fatalf("staging mounts after cleanup = %v, want %v", mounts, want)
+	}
+	if _, err := os.Stat(filepath.Dir(restarted.stagingPath("orphan", "data"))); !os.IsNotExist(err) {
+		t.Fatalf("orphaned staging directory: %v, want not found", err)
+	}
+	if err := restarted.ReleaseStaging("live", []spec.VolumeSpec{volume}); err != nil {
+		t.Fatalf("release live staging: %v", err)
 	}
 }
