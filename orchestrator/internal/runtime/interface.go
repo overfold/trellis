@@ -43,6 +43,9 @@ type ContainerInfo struct {
 
 // ManagedRuntime is implemented by runtimes that can inventory Trellis-owned
 // containers for restart adoption and confirmed orphan collection.
+// ListManaged reports a container it cannot fully read with StatusUnknown
+// rather than failing the listing or omitting it; such an entry may lack
+// labels, in which case its cluster ownership is unknown.
 type ManagedRuntime interface {
 	ListManaged(ctx context.Context, cluster string) ([]ContainerInfo, error)
 }
