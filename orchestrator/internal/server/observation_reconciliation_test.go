@@ -80,6 +80,58 @@ func TestReconcileStopsHeartbeatObservedOrphanAfterRecoveryGrace(t *testing.T) {
 	}
 }
 
+func TestReconcileStopsTerminalAllocationReportedByReturningNode(t *testing.T) {
+	for _, phase := range []lifecycle.Phase{lifecycle.PhaseLost, lifecycle.PhaseStopped} {
+		t.Run(string(phase), func(t *testing.T) {
+			s, agent := newTestServerWithAgent()
+			defer agent.server.Close()
+			node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
+			s.nodes[node.ID] = node
+			s.leaderSince = s.now().Add(-leaderRecoveryGrace - time.Second)
+			tasks := []spec.TaskSpec{{Name: "app", Image: "app"}}
+			s.jobs[jobKey("default", "web")] = &Job{Spec: &spec.JobSpec{
+				Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: tasks}},
+			}, Revision: 1}
+			old := &Allocation{
+				ID: "old", Namespace: "default", JobName: "web", TaskGroupName: "app", Tasks: tasks,
+				Node: node, Generation: 1, JobRevision: 1, Phase: phase, Health: lifecycle.HealthUnknown,
+				Diagnostic: lifecycle.Diagnostic{CreatedAt: s.now(), TransitionedAt: s.now()},
+			}
+			replacement := &Allocation{
+				ID: "replacement", Namespace: "default", JobName: "web", TaskGroupName: "app", Tasks: tasks,
+				Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy,
+				Diagnostic: lifecycle.Diagnostic{CreatedAt: s.now(), TransitionedAt: s.now()},
+			}
+			s.allocations = []*Allocation{old, replacement}
+			if err := s.Heartbeat(context.Background(), node.ID, []api.AllocationStatus{
+				{ID: "old", Generation: 1, Task: "app", Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown},
+				{ID: "replacement", Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy},
+			}, "test", nil, nil, nodeResourceObservation{}); err != nil {
+				t.Fatal(err)
+			}
+			if old.Phase != phase {
+				t.Fatalf("reported %s allocation phase = %s, want %s", phase, old.Phase, phase)
+			}
+
+			s.Reconcile(context.Background())
+			calls := agent.recordedCalls()
+			if len(calls) != 1 || calls[0].method != http.MethodDelete || calls[0].path != "/v1/allocations/old" {
+				t.Fatalf("agent calls = %#v, want one stop of the %s allocation's container", calls, phase)
+			}
+			var request api.StopAllocationRequest
+			if err := json.Unmarshal(calls[0].body, &request); err != nil {
+				t.Fatal(err)
+			}
+			if request.AllocationID != "old" || request.Generation != 1 {
+				t.Fatalf("stop request = %#v, want old generation 1", request)
+			}
+			if old.Phase != phase || replacement.Phase != lifecycle.PhaseRunning {
+				t.Fatalf("phases after reconcile: old=%s replacement=%s, want %s/running", old.Phase, replacement.Phase, phase)
+			}
+		})
+	}
+}
+
 func TestReconcileProtectsRecoveredObservationDuringLeaderGrace(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()

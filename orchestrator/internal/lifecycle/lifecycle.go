@@ -67,12 +67,14 @@ func CanTransition(from, to Phase) bool {
 }
 
 // CanObserve reports whether a node observation may move an allocation between
-// two phases. A failed allocation is terminal for observations: cleanup of its
-// tasks must not make it active again. A control-plane stop owns a stopping
-// allocation until it completes, so an observed task failure does not
-// override it.
+// two phases. Failed, lost, and stopped allocations are terminal for
+// observations: a task a node still reports for them is cleaned up as an
+// unowned observation, and must not make the allocation active again where it
+// could count toward the group and displace its replacement. A control-plane
+// stop owns a stopping allocation until it completes, so an observed task
+// failure does not override it.
 func CanObserve(from, to Phase) bool {
-	if from == PhaseFailed || (from == PhaseStopping && to == PhaseFailed) {
+	if from == PhaseFailed || from == PhaseLost || from == PhaseStopped || (from == PhaseStopping && to == PhaseFailed) {
 		return false
 	}
 	return CanTransition(from, to)

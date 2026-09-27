@@ -242,6 +242,6 @@ Ports `8127`, `8128`, and `8129` must be reachable between appropriate cluster m
 
 ## Failure recovery
 
-A missed-heartbeat node becomes unhealthy; allocations may become lost after leader recovery grace and an availability timeout. Reconciliation replaces missing desired capacity when placement remains valid. A namespace-scoped volume registration stays bound to its original node even while that node is absent, so Trellis leaves a dependent workload unplaced rather than creating an unrelated second copy elsewhere. If the data is intentionally abandoned, use a new volume name; changing only `host_path` does not change the owning node.
+A missed-heartbeat node becomes unhealthy; allocations may become lost after leader recovery grace and an availability timeout. Reconciliation replaces missing desired capacity when placement remains valid. A lost allocation is not re-adopted: if its node returns with the old containers still running, Trellis stops them and keeps the replacement. A namespace-scoped volume registration stays bound to its original node even while that node is absent, so Trellis leaves a dependent workload unplaced rather than creating an unrelated second copy elsewhere. If the data is intentionally abandoned, use a new volume name; changing only `host_path` does not change the owning node.
 
 [Documentation index](../README.md) · [Previous: CLI workflows](cli.md) · [Next: Cookbook](cookbook.md)

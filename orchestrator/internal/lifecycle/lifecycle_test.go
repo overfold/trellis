@@ -32,7 +32,7 @@ func TestTransitionRejectsUnknownPhases(t *testing.T) {
 	}
 }
 
-func TestCanObserveKeepsFailedTerminalAndStopsAuthoritative(t *testing.T) {
+func TestCanObserveKeepsTerminalPhasesAndStopsAuthoritative(t *testing.T) {
 	for _, tc := range []struct {
 		from, to Phase
 		want     bool
@@ -43,6 +43,11 @@ func TestCanObserveKeepsFailedTerminalAndStopsAuthoritative(t *testing.T) {
 		{PhaseFailed, PhaseStopping, false},
 		{PhaseFailed, PhaseStarting, false},
 		{PhaseStopping, PhaseFailed, false},
+		{PhaseLost, PhaseStarting, false},
+		{PhaseLost, PhaseStopping, false},
+		{PhaseLost, PhaseStopped, false},
+		{PhaseStopped, PhaseStarting, false},
+		{PhaseStopping, PhaseStopped, true},
 	} {
 		if got := CanObserve(tc.from, tc.to); got != tc.want {
 			t.Errorf("CanObserve(%s, %s) = %v, want %v", tc.from, tc.to, got, tc.want)
