@@ -218,7 +218,7 @@ func TestRecoverUnknownStatusContainerIsPreservedAndStopFailsHonestly(t *testing
 	request := operationTestRequest()
 	request.AllocationID, request.Generation, request.JobRevision, request.ExecutionHash = "allocation", 1, 1, "hash"
 	request.Tasks = []spec.TaskSpec{{Name: "task", Image: "image"}}
-	if err := agent.RunAllocation(context.Background(), "task", "allocation", 1, 1, "hash", "default", "job", "group", "task", &request.Tasks[0], "", nil, nil, nil, nil); err == nil {
+	if err := agent.RunAllocation(context.Background(), "task", "allocation", 1, 1, "hash", "default", "job", "group", "task", &request.Tasks[0], "", nil, nil, nil, nil, false, 0); err == nil {
 		t.Fatal("start retry acknowledged an allocation whose container state is unknown")
 	}
 
@@ -350,7 +350,7 @@ func TestRunAllocationObservesRecoveredAllocationOnDemand(t *testing.T) {
 
 	rt.status = runtime.StatusRunning
 	task := &spec.TaskSpec{Name: "task", Image: "image"}
-	if err := agent.RunAllocation(context.Background(), "task", "allocation", 1, 1, "hash", "default", "job", "group", "task", task, "", nil, nil, nil, nil); err != nil {
+	if err := agent.RunAllocation(context.Background(), "task", "allocation", 1, 1, "hash", "default", "job", "group", "task", task, "", nil, nil, nil, nil, false, 0); err != nil {
 		t.Fatalf("start retry for observed running allocation: %v", err)
 	}
 	recovered := agent.allocations["task"]
@@ -477,7 +477,7 @@ func TestRunAllocationReplacesRecoveredAllocationConfirmedMissing(t *testing.T) 
 
 	rt.listErr = nil
 	task := &spec.TaskSpec{Name: "task", Image: "image"}
-	if err := agent.RunAllocation(context.Background(), "task", "allocation", 1, 1, "hash", "default", "job", "group", "task", task, "", nil, nil, nil, nil); err != nil {
+	if err := agent.RunAllocation(context.Background(), "task", "allocation", 1, 1, "hash", "default", "job", "group", "task", task, "", nil, nil, nil, nil, false, 0); err != nil {
 		t.Fatalf("start retry after confirmed missing container: %v", err)
 	}
 	if rt.created != 1 || rt.stopCount != 0 {

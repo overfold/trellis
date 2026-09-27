@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -53,7 +54,8 @@ func (r *reconcilerRuntime) Logs(context.Context, string, bool, int) (io.ReadClo
 }
 
 type statusRecorder struct {
-	statuses []string
+	statuses     []string
+	exhaustedErr error
 }
 
 type inFlightHealthRuntime struct {
@@ -94,6 +96,19 @@ func (r *healthCallbackRecorder) OnUnhealthy(ctx context.Context, id string) err
 
 func (s *statusRecorder) OnReconciledStatus(_ string, status string) {
 	s.statuses = append(s.statuses, status)
+}
+
+// OnRestartState records terminal exhaustion as the "failed" observation the
+// agent derives from it.
+func (s *statusRecorder) OnRestartState(_ string, _ int, _ time.Time, exhausted bool) error {
+	if !exhausted {
+		return nil
+	}
+	if s.exhaustedErr != nil {
+		return s.exhaustedErr
+	}
+	s.statuses = append(s.statuses, "failed")
+	return nil
 }
 
 func TestAllocationReconcilerRestartsStoppedAllocation(t *testing.T) {
@@ -144,8 +159,8 @@ func TestResumeGroupRestoresAutomaticRestart(t *testing.T) {
 	r.Track("task", false, nil)
 	agent := &Agent{
 		allocations: map[string]*Allocation{"task": {ID: "task", AllocationID: "alloc", Generation: 2, Status: "running", Spec: &spec.TaskSpec{}}},
-		reconciler: r,
-		operations: make(map[string]*allocationOperation),
+		reconciler:  r,
+		operations:  make(map[string]*allocationOperation),
 	}
 	if err := agent.DrainGroup(&api.DrainAllocationRequest{AllocationID: "alloc", Generation: 2}); err != nil {
 		t.Fatal(err)
@@ -170,7 +185,7 @@ func TestLateDrainDoesNotSuppressRestartsAfterResume(t *testing.T) {
 	r.Track("task", false, nil)
 	agent := &Agent{
 		allocations: map[string]*Allocation{"task": {ID: "task", AllocationID: "alloc", Generation: 2, Status: "running", Spec: &spec.TaskSpec{}}},
-		reconciler: r,
+		reconciler:  r,
 	}
 	drain := &api.DrainAllocationRequest{AllocationID: "alloc", Generation: 2, Epoch: 4, Sequence: 1}
 	resume := &api.DrainAllocationRequest{AllocationID: "alloc", Generation: 2, Epoch: 4, Sequence: 2}
@@ -276,7 +291,7 @@ func TestRestartIgnoresInFlightHealthProbe(t *testing.T) {
 	}
 }
 
-func TestAllocationReconcilerPublishesUnhealthyAfterRestartBudget(t *testing.T) {
+func TestAllocationReconcilerPublishesFailedAfterRestartBudget(t *testing.T) {
 	rt := &reconcilerRuntime{status: runtime.StatusStopped}
 	subscriber := &statusRecorder{}
 	r := NewAllocationReconciler(rt, subscriber)
@@ -290,8 +305,8 @@ func TestAllocationReconcilerPublishesUnhealthyAfterRestartBudget(t *testing.T) 
 	if rt.restartCount != defaultMaxRestarts {
 		t.Fatalf("restart count = %d, want %d", rt.restartCount, defaultMaxRestarts)
 	}
-	if got := subscriber.statuses[len(subscriber.statuses)-1]; got != "unhealthy" {
-		t.Fatalf("status = %q, want unhealthy", got)
+	if got := subscriber.statuses[len(subscriber.statuses)-1]; got != "failed" {
+		t.Fatalf("status = %q, want failed", got)
 	}
 }
 
@@ -322,8 +337,8 @@ func TestAllocationReconcilerUsesConfiguredRestartBudget(t *testing.T) {
 	if rt.restartCount != 1 {
 		t.Fatalf("restart count = %d, want 1", rt.restartCount)
 	}
-	if got := subscriber.statuses[len(subscriber.statuses)-1]; got != "unhealthy" {
-		t.Fatalf("status = %q, want unhealthy", got)
+	if got := subscriber.statuses[len(subscriber.statuses)-1]; got != "failed" {
+		t.Fatalf("status = %q, want failed", got)
 	}
 }
 
@@ -344,5 +359,125 @@ func TestAllocationReconcilerResetsBudgetAfterConfiguredWindow(t *testing.T) {
 	}
 	if rt.restartCount != 2 {
 		t.Fatalf("restart count = %d, want 2", rt.restartCount)
+	}
+}
+
+func TestAllocationReconcilerExhaustionIsTerminalAfterWindow(t *testing.T) {
+	rt := &reconcilerRuntime{status: runtime.StatusStopped}
+	subscriber := &statusRecorder{}
+	r := NewAllocationReconciler(rt, subscriber)
+	window := time.Second
+	r.Track("alloc-1", false, &spec.RestartPolicySpec{MaxRestarts: 1, Window: window})
+
+	for i := 0; i < 2; i++ {
+		if err := r.Reconcile(context.Background(), "alloc-1"); err != nil {
+			t.Fatalf("reconcile %d: %v", i, err)
+		}
+	}
+	// A window that has since elapsed must not grant a new restart budget.
+	r.mu.Lock()
+	r.states["alloc-1"].window = time.Now().Add(-10 * window)
+	r.mu.Unlock()
+	for i := 0; i < 3; i++ {
+		if err := r.Reconcile(context.Background(), "alloc-1"); err != nil {
+			t.Fatalf("reconcile after window %d: %v", i, err)
+		}
+	}
+	if rt.restartCount != 1 {
+		t.Fatalf("restart count = %d, want 1", rt.restartCount)
+	}
+	failed := 0
+	for _, status := range subscriber.statuses {
+		if status == "failed" {
+			failed++
+		}
+	}
+	if failed != 1 || subscriber.statuses[len(subscriber.statuses)-1] != "failed" {
+		t.Fatalf("statuses = %v, want exactly one terminal failed observation", subscriber.statuses)
+	}
+}
+
+func TestAllocationReconcilerTrackRecoveredExhaustedDoesNotRestart(t *testing.T) {
+	rt := &reconcilerRuntime{status: runtime.StatusStopped}
+	subscriber := &statusRecorder{}
+	r := NewAllocationReconciler(rt, subscriber)
+	r.TrackRecovered("alloc-1", false, &spec.RestartPolicySpec{MaxRestarts: 1, Window: time.Second}, 1, time.Now().Add(-time.Hour), true)
+
+	for i := 0; i < 3; i++ {
+		if err := r.Reconcile(context.Background(), "alloc-1"); err != nil {
+			t.Fatalf("reconcile %d: %v", i, err)
+		}
+	}
+	if rt.restartCount != 0 {
+		t.Fatalf("restart count = %d, want 0 for exhausted allocation", rt.restartCount)
+	}
+	if len(subscriber.statuses) != 1 || subscriber.statuses[0] != "failed" {
+		t.Fatalf("statuses = %v, want exhaustion confirmed exactly once", subscriber.statuses)
+	}
+}
+
+func TestAllocationReconcilerRecoveredExhaustedRunningFailsWhenItStops(t *testing.T) {
+	rt := &reconcilerRuntime{status: runtime.StatusRunning}
+	subscriber := &statusRecorder{}
+	r := NewAllocationReconciler(rt, subscriber)
+	r.TrackRecovered("alloc-1", false, &spec.RestartPolicySpec{MaxRestarts: 1, Window: time.Second}, 1, time.Now().Add(-time.Hour), true)
+
+	if err := r.Reconcile(context.Background(), "alloc-1"); err != nil {
+		t.Fatalf("reconcile running: %v", err)
+	}
+	if len(subscriber.statuses) != 0 {
+		t.Fatalf("statuses = %v, want no failure while the container runs", subscriber.statuses)
+	}
+	rt.status = runtime.StatusStopped
+	for i := 0; i < 2; i++ {
+		if err := r.Reconcile(context.Background(), "alloc-1"); err != nil {
+			t.Fatalf("reconcile stopped %d: %v", i, err)
+		}
+	}
+	if rt.restartCount != 0 {
+		t.Fatalf("restart count = %d, want 0 for exhausted allocation", rt.restartCount)
+	}
+	if len(subscriber.statuses) != 1 || subscriber.statuses[0] != "failed" {
+		t.Fatalf("statuses = %v, want one failed observation after the container stops", subscriber.statuses)
+	}
+}
+
+func TestAllocationReconcilerRetriesUnrecordedExhaustion(t *testing.T) {
+	rt := &reconcilerRuntime{status: runtime.StatusStopped}
+	subscriber := &statusRecorder{exhaustedErr: errors.New("disk full")}
+	r := NewAllocationReconciler(rt, subscriber)
+	r.Track("alloc-1", false, &spec.RestartPolicySpec{MaxRestarts: 0, Window: time.Minute})
+
+	if err := r.Reconcile(context.Background(), "alloc-1"); err == nil {
+		t.Fatal("reconcile succeeded although exhaustion was not recorded")
+	}
+	subscriber.exhaustedErr = nil
+	if err := r.Reconcile(context.Background(), "alloc-1"); err != nil {
+		t.Fatalf("retry reconcile: %v", err)
+	}
+	if rt.restartCount != 0 {
+		t.Fatalf("restart count = %d, want 0", rt.restartCount)
+	}
+	if len(subscriber.statuses) != 1 || subscriber.statuses[0] != "failed" {
+		t.Fatalf("statuses = %v, want exhaustion recorded on retry", subscriber.statuses)
+	}
+}
+
+func TestResumeRestartsAfterExhaustedStoppingTrackDoesNotRestart(t *testing.T) {
+	rt := &reconcilerRuntime{status: runtime.StatusStopped}
+	subscriber := &statusRecorder{}
+	r := NewAllocationReconciler(rt, subscriber)
+	policy := &spec.RestartPolicySpec{MaxRestarts: 1, Window: time.Second}
+	r.TrackStopping("alloc-1", false, policy, 1, time.Now().Add(-time.Hour), true)
+	r.ResumeRestarts("alloc-1", false, policy, 1, time.Now().Add(-time.Hour), true)
+
+	if err := r.Reconcile(context.Background(), "alloc-1"); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if rt.restartCount != 0 {
+		t.Fatalf("restart count = %d, want 0 after resuming an exhausted allocation", rt.restartCount)
+	}
+	if len(subscriber.statuses) != 1 || subscriber.statuses[0] != "failed" {
+		t.Fatalf("statuses = %v, want one failed observation", subscriber.statuses)
 	}
 }

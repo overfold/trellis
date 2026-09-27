@@ -22,6 +22,11 @@ type AllocationRequest struct {
 	EnvOverrides  map[string]string       `json:"env_overrides,omitempty"`
 	Restart       *spec.RestartPolicySpec `json:"restart,omitempty"`
 	Secrets       []DeliveredSecret       `json:"secrets,omitempty"`
+	// Draining and DrainSequence carry the control plane's drain state for this
+	// generation so a started task honors a drain the agent never recorded.
+	// They are excluded from the execution hash.
+	Draining      bool   `json:"draining,omitempty"`
+	DrainSequence uint64 `json:"drain_sequence,omitempty"`
 }
 
 // StopAllocationRequest identifies an allocation generation to stop.
@@ -59,6 +64,9 @@ const (
 	OperationStaleGeneration OperationCode = "stale_generation"
 	// OperationConflict indicates a conflicting allocation execution.
 	OperationConflict OperationCode = "execution_conflict"
+	// OperationRestartExhausted indicates that the allocation generation failed
+	// terminally after exhausting its restart policy.
+	OperationRestartExhausted OperationCode = "restart_budget_exhausted"
 	// OperationFailed indicates that an agent operation failed.
 	OperationFailed OperationCode = "operation_failed"
 )

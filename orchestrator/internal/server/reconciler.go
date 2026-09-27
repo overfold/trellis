@@ -1007,7 +1007,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 				break
 			}
 		}
-		request := &api.AllocationRequest{AllocationID: alloc.ID, Generation: alloc.Generation, JobRevision: alloc.JobRevision, Epoch: epoch, Namespace: alloc.Namespace, JobName: alloc.JobName, GroupName: alloc.TaskGroupName, Tasks: alloc.Tasks, Runtime: groupRuntime, Restart: groupRestart}
+		request := &api.AllocationRequest{AllocationID: alloc.ID, Generation: alloc.Generation, JobRevision: alloc.JobRevision, Epoch: epoch, Namespace: alloc.Namespace, JobName: alloc.JobName, GroupName: alloc.TaskGroupName, Tasks: alloc.Tasks, Runtime: groupRuntime, Restart: groupRestart, Draining: alloc.Draining, DrainSequence: alloc.DrainSequence}
 		if groupUsesWireGuard {
 			plan, err := s.networkPlan(alloc.Namespace, alloc.Node)
 			if err != nil {
@@ -1068,6 +1068,8 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 		}
 		hashInput := *request
 		hashInput.Epoch, hashInput.ExecutionHash = 0, ""
+		// Drain state changes while an execution is unchanged.
+		hashInput.Draining, hashInput.DrainSequence = false, 0
 		if request.NetworkPlan != nil {
 			// An active allocation cannot move to a different subnet or gateway.
 			// Peer changes can be refreshed independently.
@@ -1102,7 +1104,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 		if err := s.client.RunAllocation(ctx, alloc.Node.ID, address, request); err != nil {
 			if code := agentOperationCode(err); code == api.OperationStaleEpoch {
 				return err
-			} else if code == api.OperationStaleGeneration || code == api.OperationConflict {
+			} else if code == api.OperationStaleGeneration || code == api.OperationConflict || code == api.OperationRestartExhausted {
 				_ = alloc.Transition(lifecycle.PhaseFailed, now, string(code), err.Error())
 				alloc.NextRetryAt = nil
 				_ = s.state.PutAllocation(context.WithoutCancel(ctx), alloc)

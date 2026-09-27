@@ -187,10 +187,7 @@ func (h *Handler) handleExec(c *echo.Context) error {
 	}
 	result, err := h.agent.ExecAllocation(c.Request().Context(), c.Param("id"), request.Task, request.Command)
 	if err != nil {
-		if errors.Is(err, ErrAllocationNotFound) {
-			return echo.NewHTTPError(http.StatusNotFound, err.Error())
-		}
-		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+		return execError(err)
 	}
 	return c.JSON(http.StatusOK, result)
 }
@@ -214,12 +211,25 @@ func (h *Handler) handleCreateExecSession(c *echo.Context) error {
 	}
 	result, err := h.agent.CreateExecSession(c.Request().Context(), c.Param("id"), request.Task, request.Command, request.Term, request.Cols, request.Rows)
 	if err != nil {
-		if errors.Is(err, ErrAllocationNotFound) {
-			return echo.NewHTTPError(http.StatusNotFound, err.Error())
-		}
-		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+		return execError(err)
 	}
 	return c.JSON(http.StatusCreated, result)
+}
+
+// execError maps an exec or session-creation failure to its HTTP status.
+func execError(err error) error {
+	switch {
+	case errors.Is(err, ErrAllocationNotFound):
+		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+	case errors.Is(err, ErrExecTaskRequired):
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	case errors.Is(err, ErrExecutionConflict):
+		return echo.NewHTTPError(http.StatusConflict, err.Error())
+	case errors.Is(err, ErrAgentShuttingDown):
+		return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error())
+	default:
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
 }
 
 func (h *Handler) handleExecSessionInput(c *echo.Context) error {
@@ -308,6 +318,8 @@ func operationError(err error) error {
 		status, code = http.StatusConflict, api.OperationStaleGeneration
 	case errors.Is(err, ErrExecutionConflict), errors.Is(err, ErrAllocationExists):
 		status, code = http.StatusConflict, api.OperationConflict
+	case errors.Is(err, ErrRestartBudgetExhausted):
+		status, code = http.StatusConflict, api.OperationRestartExhausted
 	}
 	raw, _ := json.Marshal(api.OperationResponse{Code: code, Message: err.Error()})
 	return echo.NewHTTPError(status, string(raw))

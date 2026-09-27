@@ -14,6 +14,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/containerd/errdefs"
 )
 
 type injectedState struct {
@@ -189,7 +191,7 @@ func (r *InjectedRuntime) Inspect(_ context.Context, id string) (*ContainerInfo,
 	defer r.mu.Unlock()
 	c, ok := r.state.Containers[id]
 	if !ok {
-		return nil, fmt.Errorf("container %s not found", id)
+		return nil, fmt.Errorf("container %s: %w", id, errdefs.ErrNotFound)
 	}
 	result := c
 	result.Labels = cloneLabels(c.Labels)

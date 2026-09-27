@@ -31,3 +31,21 @@ func TestTransitionRejectsUnknownPhases(t *testing.T) {
 		}
 	}
 }
+
+func TestCanObserveKeepsFailedTerminalAndStopsAuthoritative(t *testing.T) {
+	for _, tc := range []struct {
+		from, to Phase
+		want     bool
+	}{
+		{PhaseRunning, PhaseFailed, true},
+		{PhaseStarting, PhaseFailed, true},
+		{PhaseRunning, PhaseStarting, true},
+		{PhaseFailed, PhaseStopping, false},
+		{PhaseFailed, PhaseStarting, false},
+		{PhaseStopping, PhaseFailed, false},
+	} {
+		if got := CanObserve(tc.from, tc.to); got != tc.want {
+			t.Errorf("CanObserve(%s, %s) = %v, want %v", tc.from, tc.to, got, tc.want)
+		}
+	}
+}

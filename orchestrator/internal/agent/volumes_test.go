@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -128,5 +129,56 @@ func TestVolumeManagerPersistsRegistrations(t *testing.T) {
 	reloaded := newTestVolumeManager(root)
 	if got := reloaded.AvailableHostVolumes(); !slices.Contains(got, "acme/uploads") {
 		t.Fatalf("registration did not survive reload: %v", got)
+	}
+}
+
+func TestCleanupStagingKeepsMountsOfExistingContainers(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("staging bind mounts require root")
+	}
+	// mountinfo reports resolved paths; the data directory may be a symlink.
+	root := filepath.Join(t.TempDir(), "data")
+	if err := os.Symlink(t.TempDir(), root); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewVolumeManager(root)
+	volume := spec.VolumeSpec{Name: "data", HostPath: "@/data", ContainerPath: "/data"}
+	for _, id := range []string{"live", "orphan"} {
+		if _, err := manager.Create("ns", "job", id, volume); err != nil {
+			if errors.Is(err, unix.EPERM) {
+				t.Skipf("bind mounts unavailable: %v", err)
+			}
+			t.Fatal(err)
+		}
+		// Unmount before TempDir removal can recurse into the volume.
+		t.Cleanup(func() { _ = manager.ReleaseStaging(id) })
+	}
+
+	restarted := NewVolumeManager(root)
+	if err := restarted.CleanupStaging([]string{"live"}); err != nil {
+		t.Fatalf("cleanup staging: %v", err)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mounts, err := stagingMounts(filepath.Join(resolvedRoot, "volume-staging"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved := &VolumeManager{dataRootPath: resolvedRoot}
+	if want := []string{resolved.stagingPath("live", "data")}; !slices.Equal(mounts, want) {
+		t.Fatalf("staging mounts after cleanup = %v, want %v", mounts, want)
+	}
+	if _, err := os.Stat(filepath.Dir(restarted.stagingPath("orphan", "data"))); !os.IsNotExist(err) {
+		t.Fatalf("orphaned staging directory: %v, want not found", err)
+	}
+	for id, want := range map[string]bool{"live": true, "orphan": false} {
+		if inUse, err := restarted.StagingInUse(id); err != nil || inUse != want {
+			t.Fatalf("StagingInUse(%q) = %t, %v, want %t", id, inUse, err, want)
+		}
+	}
+	if err := restarted.ReleaseStaging("live"); err != nil {
+		t.Fatalf("release live staging: %v", err)
 	}
 }
