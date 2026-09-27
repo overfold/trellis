@@ -330,12 +330,12 @@ func (a *Agent) SetLabels(labels map[string]string) {
 func (a *Agent) SetVersion(version string) { a.version = version }
 
 // Init restores durable allocations and starts reconciliation.
-func (a *Agent) Init(ctx context.Context) {
+func (a *Agent) Init(ctx context.Context) error {
 	a.health.Subscriber = a
 	a.health.SetContext(ctx)
 	a.reconciler.Subscriber = a
 	if err := a.recover(ctx); err != nil {
-		a.log.Error("recover allocations", "error", err)
+		return fmt.Errorf("recover allocations: %w", err)
 	} else if !a.recoveryListPending {
 		// Ownership is only known once recovery has adopted every allocation;
 		// otherwise the recovery retry runs the sweep when it completes.
@@ -346,6 +346,7 @@ func (a *Agent) Init(ctx context.Context) {
 	go a.runHeartbeatLoop(ctx)
 	go a.reconciler.Run(ctx)
 	go a.runExecSessionReaper(ctx)
+	return nil
 }
 
 func (a *Agent) recover(ctx context.Context) error {
@@ -354,24 +355,43 @@ func (a *Agent) recover(ctx context.Context) error {
 		return nil
 	}
 	var epoch uint64
-	if err := a.local.Get("agent/control-epoch", &epoch); err == nil {
-		a.epoch = epoch
+	epochErr := a.local.Get("agent/control-epoch", &epoch)
+	if epochErr != nil && !errors.Is(epochErr, os.ErrNotExist) {
+		return fmt.Errorf("read control-plane epoch: %w", epochErr)
 	}
 	records, recordErrs := a.local.ListRaw("agent/allocations")
+	if err := errors.Join(recordErrs...); err != nil {
+		return fmt.Errorf("read allocation recovery records: %w", err)
+	}
 	stored := make(map[string]*Allocation, len(records))
 	for name, raw := range records {
 		var allocation Allocation
 		if err := json.Unmarshal(raw, &allocation); err != nil {
-			a.log.Error("skip malformed allocation record", "record", name, "error", err)
-			continue
+			return fmt.Errorf("decode allocation recovery record %s: %w", name, err)
+		}
+		if allocation.ID == "" || allocation.ContainerID == "" || allocation.AllocationID == "" {
+			return fmt.Errorf("decode allocation recovery record %s: allocation identity is required", name)
+		}
+		expectedName := base64.RawURLEncoding.EncodeToString([]byte(allocation.ID))
+		if name != expectedName {
+			return fmt.Errorf("decode allocation recovery record %s: record name does not match allocation ID %q", name, allocation.ID)
+		}
+		if _, exists := stored[allocation.ContainerID]; exists {
+			return fmt.Errorf("decode allocation recovery record %s: duplicate container ID %q", name, allocation.ContainerID)
 		}
 		stored[allocation.ContainerID] = &allocation
 	}
-	for _, err := range recordErrs {
-		a.log.Error("read allocation recovery record", "error", err)
-	}
 	managed, ok := a.runtime.(runtime.ManagedRuntime)
 	if !ok {
+		if len(records) != 0 {
+			return fmt.Errorf("runtime cannot recover existing allocation records")
+		}
+		if epochErr != nil {
+			if err := a.local.Put("agent/control-epoch", epoch); err != nil {
+				return fmt.Errorf("initialize control-plane epoch: %w", err)
+			}
+		}
+		a.epoch = epoch
 		a.cleanupVolumeStaging(nil)
 		return nil
 	}
@@ -389,6 +409,20 @@ func (a *Agent) recover(ctx context.Context) error {
 		}
 		return fmt.Errorf("list managed containers: %w", err)
 	}
+	if epochErr != nil {
+		if len(records) != 0 || len(containers) != 0 {
+			return fmt.Errorf("control-plane epoch is missing while recoverable allocation state exists")
+		}
+		if err := a.local.Put("agent/control-epoch", epoch); err != nil {
+			return fmt.Errorf("initialize control-plane epoch: %w", err)
+		}
+	}
+	for _, container := range containers {
+		if stored[container.ID] == nil {
+			return fmt.Errorf("managed runtime container %q has no durable allocation record", container.ID)
+		}
+	}
+	a.epoch = epoch
 	// Existing containers still reference their staging mounts as OCI mount
 	// sources; keep those so a later restart can create a new task.
 	liveContainers := make([]string, 0, len(containers))

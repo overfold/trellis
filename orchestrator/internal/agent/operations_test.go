@@ -342,6 +342,13 @@ func newOperationTestAgent(t *testing.T, rt runtime.ContainerRuntime) *Agent {
 	return agent
 }
 
+func persistTestRecoveryEpoch(t *testing.T, local *storage.LocalStorage) {
+	t.Helper()
+	if err := local.Put("agent/control-epoch", uint64(0)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func operationTestRequest() *api.AllocationRequest {
 	return &api.AllocationRequest{
 		AllocationID: "allocation", Generation: 2, JobRevision: 7, Epoch: 1, ExecutionHash: "execution-hash",
@@ -846,6 +853,7 @@ func TestAmbiguousCreateRetainsRecordUntilOwnershipVerified(t *testing.T) {
 	recovered := newOperationTestAgent(t, rt)
 	recovered.SetNetworkManager(manager)
 	recovered.ConfigureDurability(local, "test")
+	persistTestRecoveryEpoch(t, local)
 	if err := recovered.recover(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -919,6 +927,7 @@ func TestFailedCreateMissingContainerCanBeCleanedUpOnRetry(t *testing.T) {
 				if retry == "Recovery" {
 					agent = newOperationTestAgent(t, rt)
 					agent.ConfigureDurability(local, "test")
+					persistTestRecoveryEpoch(t, local)
 					if err := agent.recover(context.Background()); err != nil {
 						t.Fatalf("retry recovery: %v", err)
 					}
@@ -1019,48 +1028,6 @@ func TestManagedVolumeStagingOutlivesStartUntilStop(t *testing.T) {
 	}
 	if err := local.Get(allocationRecordKey(id), &recorded); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("record after retry: %v, want not found", err)
-	}
-}
-
-func TestStopReleasesStagingOfAllocationRecoveredFromLabels(t *testing.T) {
-	rt := &createdRecoveryRuntime{
-		reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning},
-		managedID:         "task",
-		labels: map[string]string{
-			"trellis.allocation-id": "allocation", "trellis.allocation-generation": "1",
-			"trellis.job-revision": "1", "trellis.execution-hash": "hash",
-		},
-	}
-	local := storage.NewLocalStorage(t.TempDir())
-	if err := local.Init(); err != nil {
-		t.Fatal(err)
-	}
-	agent := newOperationTestAgent(t, rt)
-	agent.ConfigureDurability(local, "test")
-	if err := agent.recover(context.Background()); err != nil {
-		t.Fatalf("recover: %v", err)
-	}
-	if recovered := agent.allocations["task"]; recovered == nil || recovered.Spec != nil {
-		t.Fatalf("recovered allocation = %+v, want one without a task spec", recovered)
-	}
-	staging := agent.volumes.stagingPath("task", "data")
-	if err := os.MkdirAll(staging, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	unstaged := 0
-	agent.volumes.unstage = func(string) error {
-		unstaged++
-		return nil
-	}
-
-	if err := agent.StopAllocation(context.Background(), "task"); err != nil {
-		t.Fatalf("stop: %v", err)
-	}
-	if unstaged != 1 {
-		t.Fatalf("unstage calls = %d, want 1", unstaged)
-	}
-	if _, err := os.Stat(filepath.Dir(staging)); !os.IsNotExist(err) {
-		t.Fatalf("staging after stop: %v, want not found", err)
 	}
 }
 
@@ -1168,6 +1135,7 @@ func TestRecoverKeepsVolumeStagingForExistingContainers(t *testing.T) {
 	}
 	agent.volumes = NewVolumeManager(dataRoot)
 
+	persistTestRecoveryEpoch(t, local)
 	if err := agent.recover(context.Background()); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
@@ -1335,6 +1303,7 @@ func TestRecoverRetainsFailedStartRecordUntilNetworkDetachSucceeds(t *testing.T)
 	second := newOperationTestAgent(t, rt)
 	second.SetNetworkManager(manager)
 	second.ConfigureDurability(local, "test")
+	persistTestRecoveryEpoch(t, local)
 	if err := second.recover(context.Background()); err != nil {
 		t.Fatalf("recover with failed detach: %v", err)
 	}
@@ -1387,6 +1356,7 @@ func TestRecoverMissingContainerRemovesSecretDirectoryBeforeRecord(t *testing.T)
 
 	second := newOperationTestAgent(t, rt)
 	second.ConfigureDurability(local, "test")
+	persistTestRecoveryEpoch(t, local)
 	if err := second.recover(context.Background()); err != nil {
 		t.Fatalf("recover with failed secret removal: %v", err)
 	}
@@ -1408,6 +1378,7 @@ func TestRecoverMissingContainerRemovesSecretDirectoryBeforeRecord(t *testing.T)
 	}
 	third := newOperationTestAgent(t, rt)
 	third.ConfigureDurability(local, "test")
+	persistTestRecoveryEpoch(t, local)
 	if err := third.recover(context.Background()); err != nil {
 		t.Fatalf("recover after secret removal became possible: %v", err)
 	}
@@ -1471,6 +1442,7 @@ func TestRecoverCreatedAllocationCanBeRetriedByControlPlane(t *testing.T) {
 
 	second := newOperationTestAgent(t, rt)
 	second.ConfigureDurability(local, "test")
+	persistTestRecoveryEpoch(t, local)
 	if err := second.recover(context.Background()); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
@@ -1534,6 +1506,7 @@ func recoverCreatedAllocationForRetry(t *testing.T, rt *createdRecoveryRuntime, 
 
 	second := newOperationTestAgent(t, rt)
 	second.ConfigureDurability(local, "test")
+	persistTestRecoveryEpoch(t, local)
 	if err := second.recover(context.Background()); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
@@ -1845,6 +1818,7 @@ func TestRecoverNonRunningAllocationDefersRestartToServer(t *testing.T) {
 
 			second := newOperationTestAgent(t, rt)
 			second.ConfigureDurability(local, "test")
+			persistTestRecoveryEpoch(t, local)
 			if err := second.recover(context.Background()); err != nil {
 				t.Fatalf("recover: %v", err)
 			}
@@ -1900,6 +1874,7 @@ func TestRecoverRunningAllocationResetsHealthUntilProbe(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	second.health.SetContext(ctx)
+	persistTestRecoveryEpoch(t, local)
 	if err := second.recover(ctx); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
@@ -1951,6 +1926,7 @@ func TestRecoverPersistsProbeResultBeforeReturning(t *testing.T) {
 	detach := &blockingRecoveryDetach{entered: make(chan struct{}), release: make(chan struct{})}
 	second.SetNetworkManager(detach)
 	done := make(chan error, 1)
+	persistTestRecoveryEpoch(t, local)
 	go func() { done <- second.recover(ctx) }()
 	defer func() {
 		select {
@@ -2025,6 +2001,7 @@ func TestRecoverRunningAllocationProbesContainerPort(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			second.health.SetContext(ctx)
+			persistTestRecoveryEpoch(t, local)
 			if err := second.recover(ctx); err != nil {
 				t.Fatalf("recover: %v", err)
 			}
@@ -2037,42 +2014,6 @@ func TestRecoverRunningAllocationProbesContainerPort(t *testing.T) {
 				t.Fatal("recovered health probe did not run")
 			}
 		})
-	}
-}
-
-func TestResumeGroupRecoveredAllocationWithoutSpec(t *testing.T) {
-	rt := &createdRecoveryRuntime{
-		reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning},
-		managedID:         "task",
-		labels: map[string]string{
-			"trellis.allocation-id":         "allocation",
-			"trellis.allocation-generation": "1",
-			"trellis.job-revision":          "1",
-			"trellis.execution-hash":        "hash",
-		},
-	}
-	local := storage.NewLocalStorage(t.TempDir())
-	if err := local.Init(); err != nil {
-		t.Fatal(err)
-	}
-	agent := newOperationTestAgent(t, rt)
-	agent.ConfigureDurability(local, "test")
-	if err := agent.recover(context.Background()); err != nil {
-		t.Fatalf("recover: %v", err)
-	}
-	recovered := agent.allocations["task"]
-	if recovered == nil || recovered.Spec != nil || recovered.Status != "running" {
-		t.Fatalf("recovered allocation = %+v, want running with nil spec", recovered)
-	}
-	request := &api.DrainAllocationRequest{AllocationID: "allocation", Generation: 1, Epoch: 1}
-	if err := agent.DrainGroup(request); err != nil {
-		t.Fatalf("drain recovered allocation: %v", err)
-	}
-	if err := agent.ResumeGroup(request); err != nil {
-		t.Fatalf("resume recovered allocation: %v", err)
-	}
-	if recovered.Draining || agent.reconciler.states["task"].stopping {
-		t.Fatal("recovered allocation remains restart-suppressed after resume")
 	}
 }
 
@@ -2109,6 +2050,7 @@ func TestRecoverStoppingAllocationDoesNotStartOrRestart(t *testing.T) {
 
 	second := newOperationTestAgent(t, rt)
 	second.ConfigureDurability(local, "test")
+	persistTestRecoveryEpoch(t, local)
 	if err := second.recover(context.Background()); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
@@ -2216,6 +2158,7 @@ func TestRestartExhaustionReportsFailedAndSurvivesAgentRestart(t *testing.T) {
 	second := newOperationTestAgent(t, rt)
 	second.ConfigureDurability(local, "test")
 	second.reconciler.Subscriber = second
+	persistTestRecoveryEpoch(t, local)
 	if err := second.recover(context.Background()); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
@@ -2269,6 +2212,7 @@ func TestRecoverExhaustedAllocationWithoutSpecStaysFailed(t *testing.T) {
 	}
 	second := newOperationTestAgent(t, rt)
 	second.ConfigureDurability(local, "test")
+	persistTestRecoveryEpoch(t, local)
 	if err := second.recover(context.Background()); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
@@ -2305,6 +2249,7 @@ func TestRecoverDrainingExhaustedAllocationKeepsBudgetOnResume(t *testing.T) {
 	second := newOperationTestAgent(t, rt)
 	second.ConfigureDurability(local, "test")
 	second.reconciler.Subscriber = second
+	persistTestRecoveryEpoch(t, local)
 	if err := second.recover(context.Background()); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
