@@ -372,7 +372,30 @@ func (a *Agent) recover(ctx context.Context) error {
 		}
 		a.recoverMissing(ctx, allocation)
 	}
+	a.queueSupersededStops()
 	return nil
+}
+
+// queueSupersededStops schedules stops for retained older generations. A
+// superseded stop that failed before a restart survives only as its stopping
+// record, and the control plane rejects stops for that generation as stale.
+func (a *Agent) queueSupersededStops() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for id, allocation := range a.allocations {
+		if allocation.Status != "stopping" || allocation.unobserved {
+			continue
+		}
+		for _, known := range a.allocations {
+			if known.AllocationID == allocation.AllocationID && known.Generation > allocation.Generation {
+				if a.supersededStops == nil {
+					a.supersededStops = make(map[string]string)
+				}
+				a.supersededStops[id] = allocation.AllocationID
+				break
+			}
+		}
+	}
 }
 
 // recoverContainer restores one observed container. allocation is its durable

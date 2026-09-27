@@ -526,3 +526,30 @@ func TestRecoverKeepsListingWhileUnreadableContainerIsUnaccounted(t *testing.T) 
 		t.Fatal("readable unrecorded container was not adopted")
 	}
 }
+
+func TestRecoverRetriesSupersededStopAfterRestart(t *testing.T) {
+	rt := &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning}}
+	older := recoveryTestAllocation(0)
+	older.Status = "stopping"
+	newer := recoveryTestAllocation(0)
+	newer.ID, newer.ContainerID, newer.Generation = "task-g2", "task-g2", 2
+	newerLabels := recoveryTestLabels(newer)
+	newerLabels["trellis.allocation-generation"] = "2"
+	rt.containers = []runtime.ContainerInfo{
+		{ID: "task", Status: runtime.StatusRunning, Labels: recoveryTestLabels(older)},
+		{ID: "task-g2", Status: runtime.StatusRunning, Labels: newerLabels},
+	}
+	agent, _ := newRecoveryTestAgent(t, rt, older, newer)
+	if err := agent.recover(context.Background()); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if !agent.recoveryPending() {
+		t.Fatal("retained superseded generation is not scheduled for a stop")
+	}
+	if agent.retryRecovery(context.Background()) {
+		t.Fatal("retry left recovery work pending after stopping the superseded generation")
+	}
+	if rt.stopCount != 1 || agent.allocations["task"] != nil || agent.allocations["task-g2"] == nil {
+		t.Fatalf("stop calls = %d, older = %+v, newer present = %v; want only the older generation stopped", rt.stopCount, agent.allocations["task"], agent.allocations["task-g2"] != nil)
+	}
+}
