@@ -193,6 +193,76 @@ func (s *StateController) PutAllocations(ctx context.Context, allocations []*All
 	return nil
 }
 
+// ReconciliationCommit is the durable outcome of one reconciliation pass.
+type ReconciliationCommit struct {
+	Allocations       []*Allocation
+	DeleteAllocations []string
+	Backoffs          []*ReplacementBackoff
+	DeleteBackoffs    []*ReplacementBackoff
+}
+
+// CommitReconciliation applies allocation updates, terminal-record pruning,
+// and replacement backoff changes as one durable state transition. The
+// mutations carry every value, including leader-chosen timestamps, so replaying
+// the Raft entry is deterministic.
+func (s *StateController) CommitReconciliation(ctx context.Context, commit *ReconciliationCommit) error {
+	if commit == nil || len(commit.Allocations)+len(commit.DeleteAllocations)+len(commit.Backoffs)+len(commit.DeleteBackoffs) == 0 {
+		return nil
+	}
+	atomic, ok := s.store.(state.AtomicStore)
+	if !ok {
+		return fmt.Errorf("state store does not support atomic reconciliation updates")
+	}
+	mutations := make([]state.Mutation, 0, len(commit.Allocations)+len(commit.DeleteAllocations)+len(commit.Backoffs)+len(commit.DeleteBackoffs))
+	for _, allocation := range commit.Allocations {
+		raw, err := json.Marshal(allocation)
+		if err != nil {
+			return fmt.Errorf("marshal allocation %s: %w", allocation.ID, err)
+		}
+		mutations = append(mutations, state.Mutation{Key: s.allocationKey(allocation.ID), Value: raw})
+	}
+	for _, id := range commit.DeleteAllocations {
+		mutations = append(mutations, state.Mutation{Key: s.allocationKey(id)})
+	}
+	for _, backoff := range commit.Backoffs {
+		raw, err := json.Marshal(backoff)
+		if err != nil {
+			return fmt.Errorf("marshal replacement backoff for %s/%s/%s: %w", backoff.Namespace, backoff.JobName, backoff.TaskGroupName, err)
+		}
+		mutations = append(mutations, state.Mutation{Key: s.replacementBackoffKey(backoff), Value: raw})
+	}
+	for _, backoff := range commit.DeleteBackoffs {
+		mutations = append(mutations, state.Mutation{Key: s.replacementBackoffKey(backoff)})
+	}
+	if err := atomic.Batch(ctx, mutations); err != nil {
+		return fmt.Errorf("commit reconciliation: %w", err)
+	}
+	return nil
+}
+
+// ListReplacementBackoffs loads persisted replacement backoff records keyed by
+// namespace, job, and task group.
+func (s *StateController) ListReplacementBackoffs(ctx context.Context) (map[string]*ReplacementBackoff, error) {
+	prefix := fmt.Sprintf("%s/%s/replacement-backoffs/", trellisNamespace, s.cluster)
+	values, err := listValues[ReplacementBackoff](ctx, s.store, prefix)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]*ReplacementBackoff, len(values))
+	for _, backoff := range values {
+		result[backoff.key()] = backoff
+	}
+	return result, nil
+}
+
+func (s *StateController) allocationKey(id string) string {
+	return fmt.Sprintf("%s/%s/allocations/%s", trellisNamespace, s.cluster, id)
+}
+
+func (s *StateController) replacementBackoffKey(backoff *ReplacementBackoff) string {
+	return fmt.Sprintf("%s/%s/replacement-backoffs/%s/%s/%s", trellisNamespace, s.cluster, url.QueryEscape(backoff.Namespace), url.QueryEscape(backoff.JobName), url.QueryEscape(backoff.TaskGroupName))
+}
+
 // DeleteAllocation removes a persisted allocation.
 func (s *StateController) DeleteAllocation(ctx context.Context, id string) error {
 	key := fmt.Sprintf("%s/%s/allocations/%s", trellisNamespace, s.cluster, id)

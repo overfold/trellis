@@ -146,7 +146,24 @@ type JobStatusResponse struct {
 	Running     int                  `json:"running"`
 	Healthy     int                  `json:"healthy"`
 	Allocations []AllocationResponse `json:"allocations"`
-	Spec        *spec.JobSpec        `json:"spec,omitempty"`
+	// ReplacementBackoff lists task groups with consecutive failed
+	// allocations. New placements for such a group wait until
+	// next_replacement_at.
+	ReplacementBackoff []ReplacementBackoffResponse `json:"replacement_backoff,omitempty"`
+	Spec               *spec.JobSpec                `json:"spec,omitempty"`
+}
+
+// ReplacementBackoffResponse describes why replacements for a task group are
+// delayed after its allocations failed.
+type ReplacementBackoffResponse struct {
+	Group             string    `json:"group"`
+	JobRevision       int       `json:"job_revision"`
+	Failures          int       `json:"failures"`
+	LastFailureAt     time.Time `json:"last_failure_at"`
+	LastAllocationID  string    `json:"last_allocation_id,omitempty"`
+	Reason            string    `json:"reason,omitempty"`
+	Message           string    `json:"message,omitempty"`
+	NextReplacementAt time.Time `json:"next_replacement_at"`
 }
 
 // AllocationResponse describes an allocation and its latest state.
@@ -307,6 +324,9 @@ const (
 	EventJobRegistered EventType = "job.registered"
 	// EventJobDeleted fires when a job is deleted.
 	EventJobDeleted EventType = "job.deleted"
+	// EventJobReplacementDelayed fires when failed allocations put a task
+	// group's replacements into backoff.
+	EventJobReplacementDelayed EventType = "job.replacement_delayed"
 )
 
 // ClusterEvent carries a typed cluster event payload.
@@ -318,5 +338,9 @@ type ClusterEvent struct {
 	Phase        string    `json:"phase,omitempty"`
 	Health       string    `json:"health,omitempty"`
 	Revision     int       `json:"revision,omitempty"`
-	At           time.Time `json:"at"`
+	Group        string    `json:"group,omitempty"`
+	// Failures and NextReplacementAt describe a replacement backoff.
+	Failures          int        `json:"failures,omitempty"`
+	NextReplacementAt *time.Time `json:"next_replacement_at,omitempty"`
+	At                time.Time  `json:"at"`
 }
