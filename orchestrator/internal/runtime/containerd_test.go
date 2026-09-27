@@ -11,9 +11,49 @@ import (
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
+	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/errdefs"
 	"github.com/opencontainers/runtime-spec/specs-go"
 )
+
+func TestContainerSpecDropsRawSocketCapability(t *testing.T) {
+	capabilities := []string{"CAP_CHOWN", "CAP_NET_RAW"}
+	s := oci.Spec{Process: &specs.Process{Capabilities: &specs.LinuxCapabilities{
+		Bounding:    append([]string(nil), capabilities...),
+		Effective:   append([]string(nil), capabilities...),
+		Permitted:   append([]string(nil), capabilities...),
+		Inheritable: append([]string(nil), capabilities...),
+	}}}
+	if err := withoutRawSocketCapability()(context.Background(), nil, nil, &s); err != nil {
+		t.Fatal(err)
+	}
+	for name, got := range map[string][]string{
+		"bounding": s.Process.Capabilities.Bounding, "effective": s.Process.Capabilities.Effective,
+		"permitted": s.Process.Capabilities.Permitted, "inheritable": s.Process.Capabilities.Inheritable,
+	} {
+		if !reflect.DeepEqual(got, []string{"CAP_CHOWN"}) {
+			t.Errorf("%s capabilities = %v, want CAP_NET_RAW removed", name, got)
+		}
+	}
+}
+
+func TestRawSocketCapabilityDropIsLimitedToNamespaceNetworking(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		networkNamespace string
+		want             bool
+	}{
+		{name: "isolated"},
+		{name: "host", networkNamespace: "/proc/1/ns/net"},
+		{name: "namespace", networkNamespace: "/var/run/netns/allocation", want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldDropRawSocketCapability(tc.networkNamespace); got != tc.want {
+				t.Fatalf("shouldDropRawSocketCapability(%q) = %t, want %t", tc.networkNamespace, got, tc.want)
+			}
+		})
+	}
+}
 
 func TestContainerdLogsFallsBackToLegacyDirectory(t *testing.T) {
 	dir := t.TempDir()
