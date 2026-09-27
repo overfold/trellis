@@ -116,6 +116,41 @@ func TestStartExecutionHashIgnoresNetworkPeerChanges(t *testing.T) {
 	}
 }
 
+func TestStartRequestCarriesDrainOutsideExecutionHash(t *testing.T) {
+	s, agent := newTestServerWithAgent()
+	defer agent.server.Close()
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
+	s.nodes[node.ID] = node
+	task := spec.TaskSpec{Name: "app", Image: "app"}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Tasks: []spec.TaskSpec{task}}}}, Revision: 1}
+	alloc := &Allocation{ID: "allocation", Namespace: "default", JobName: "web", TaskGroupName: "app", Tasks: []spec.TaskSpec{task}, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhasePlaced}
+	start := &Action{Type: ActionStart, Allocation: alloc}
+	if err := s.Execute(context.Background(), start); err != nil {
+		t.Fatal(err)
+	}
+	alloc.Draining, alloc.DrainSequence = true, 3
+	if err := s.Execute(context.Background(), start); err != nil {
+		t.Fatal(err)
+	}
+	calls := agent.recordedCalls()
+	if len(calls) != 2 {
+		t.Fatalf("start calls = %d, want 2", len(calls))
+	}
+	var first, second api.AllocationRequest
+	if err := json.Unmarshal(calls[0].body, &first); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(calls[1].body, &second); err != nil {
+		t.Fatal(err)
+	}
+	if first.Draining || first.DrainSequence != 0 || !second.Draining || second.DrainSequence != 3 {
+		t.Fatalf("start drain state first=(%t,%d) second=(%t,%d), want (false,0) then (true,3)", first.Draining, first.DrainSequence, second.Draining, second.DrainSequence)
+	}
+	if first.ExecutionHash == "" || first.ExecutionHash != second.ExecutionHash {
+		t.Fatalf("execution hash changed with drain state: %q, %q", first.ExecutionHash, second.ExecutionHash)
+	}
+}
+
 func TestStartExecutionHashChangesWithNetworkPool(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()

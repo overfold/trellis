@@ -15,7 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/clofour/trellis/internal/api"
@@ -58,6 +57,9 @@ type Agent struct {
 	mu          sync.RWMutex
 	operationMu sync.Mutex
 	operations  map[string]*allocationOperation
+	secretMu    sync.Mutex
+	secretBase  string
+	secretRoot  string
 }
 
 type allocationOperation struct {
@@ -175,8 +177,14 @@ func (a *Agent) AcceptEpoch(epoch uint64) error {
 	return nil
 }
 
+// allocationFileName encodes an allocation ID as one safe path element. Record
+// and secret directory names share it so the startup sweep can match them.
+func allocationFileName(id string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(id))
+}
+
 func allocationRecordKey(id string) string {
-	return "agent/allocations/" + base64.RawURLEncoding.EncodeToString([]byte(id))
+	return "agent/allocations/" + allocationFileName(id)
 }
 
 func (a *Agent) persistAllocation(allocation *Allocation) error {
@@ -288,6 +296,9 @@ func (a *Agent) Init(ctx context.Context) {
 	a.reconciler.Subscriber = a
 	if err := a.recover(ctx); err != nil {
 		a.log.Error("recover allocations", "error", err)
+	} else {
+		// Ownership is only known once recovery has adopted every allocation.
+		a.removeOrphanedSecretDirs()
 	}
 
 	go a.runHeartbeatLoop(ctx)
@@ -420,7 +431,7 @@ func (a *Agent) recover(ctx context.Context) error {
 		if err := a.network.Detach(context.WithoutCancel(ctx), allocation.Network); err != nil {
 			cleanupErr = fmt.Errorf("detach network for missing allocation container: %w", err)
 		} else if allocation.SecretDir != "" {
-			if err := os.RemoveAll(allocation.SecretDir); err != nil {
+			if err := removeSecretDir(allocation.SecretDir); err != nil {
 				cleanupErr = fmt.Errorf("remove secret files for missing allocation container: %w", err)
 			}
 		}
@@ -545,14 +556,48 @@ func (a *Agent) RunGroup(ctx context.Context, request *api.AllocationRequest) er
 	if err := a.prepareStart(ctx, request); err != nil {
 		return err
 	}
+	draining, drainSequence := a.startDrainState(request)
+	// Tasks that are already running keep their records, so apply the drain
+	// state to them before any task starts. Each start reapplies it so a
+	// partially applied state converges. Records that are neither running nor
+	// starting are rebuilt by RunAllocation with the same state.
+	var err error
+	if draining {
+		err = a.applyDrain(request.AllocationID, request.Generation, drainSequence)
+	} else if drainSequence > 0 {
+		err = a.applyResume(request.AllocationID, request.Generation, drainSequence, true)
+	}
+	if err != nil {
+		return err
+	}
 	for i := range request.Tasks {
 		task := &request.Tasks[i]
 		id := fmt.Sprintf("%s-g%d-%s", request.AllocationID, request.Generation, task.Name)
-		if err := a.RunAllocation(ctx, id, request.AllocationID, request.Generation, request.JobRevision, request.ExecutionHash, request.Namespace, request.JobName, request.GroupName, task.Name, task, request.Runtime, request.NetworkPlan, request.EnvOverrides, request.Secrets, request.Restart); err != nil {
+		if err := a.RunAllocation(ctx, id, request.AllocationID, request.Generation, request.JobRevision, request.ExecutionHash, request.Namespace, request.JobName, request.GroupName, task.Name, task, request.Runtime, request.NetworkPlan, request.EnvOverrides, request.Secrets, request.Restart, draining, drainSequence); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// startDrainState combines the drain state carried by a start request with the
+// newest drain or resume the agent already applied to that generation. The
+// higher sequence wins, so a delayed start cannot roll back a later drain.
+func (a *Agent) startDrainState(request *api.AllocationRequest) (bool, uint64) {
+	draining, sequence := request.Draining, request.DrainSequence
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	for _, allocation := range a.allocations {
+		if allocation.AllocationID != request.AllocationID || allocation.Generation != request.Generation || allocation.DrainSequence <= request.DrainSequence {
+			continue
+		}
+		// Local records that disagree at one sequence resolve to draining, so
+		// the result never depends on map iteration order.
+		if allocation.DrainSequence > sequence || (allocation.DrainSequence == sequence && allocation.Draining) {
+			draining, sequence = allocation.Draining, allocation.DrainSequence
+		}
+	}
+	return draining, sequence
 }
 
 // UpdateNetworkPlan refreshes the network shared by running allocations.
@@ -642,26 +687,32 @@ func (a *Agent) DrainGroup(request *api.DrainAllocationRequest) error {
 	if err := a.AcceptEpoch(request.Epoch); err != nil {
 		return err
 	}
+	return a.applyDrain(request.AllocationID, request.Generation, request.Sequence)
+}
+
+// applyDrain marks one allocation generation draining at sequence. The caller
+// must hold the allocation operation lock.
+func (a *Agent) applyDrain(allocationID string, generation, sequence uint64) error {
 	a.mu.Lock()
 	var ids []string
 	var persistErr error
 	for _, allocation := range a.allocations {
-		if allocation.AllocationID != request.AllocationID {
+		if allocation.AllocationID != allocationID {
 			continue
 		}
-		if allocation.Generation > request.Generation {
+		if allocation.Generation > generation {
 			a.mu.Unlock()
-			return fmt.Errorf("%w: current %d, requested %d", ErrStaleGeneration, allocation.Generation, request.Generation)
+			return fmt.Errorf("%w: current %d, requested %d", ErrStaleGeneration, allocation.Generation, generation)
 		}
-		if allocation.Generation != request.Generation {
+		if allocation.Generation != generation {
 			continue
 		}
-		if request.Sequence < allocation.DrainSequence {
+		if sequence < allocation.DrainSequence {
 			continue
 		}
 		previousDraining, previousSequence := allocation.Draining, allocation.DrainSequence
 		allocation.Draining = true
-		allocation.DrainSequence = request.Sequence
+		allocation.DrainSequence = sequence
 		if err := a.persistAllocation(allocation); err != nil {
 			allocation.Draining, allocation.DrainSequence = previousDraining, previousSequence
 			persistErr = fmt.Errorf("persist draining allocation: %w", err)
@@ -683,51 +734,66 @@ func (a *Agent) ResumeGroup(request *api.DrainAllocationRequest) error {
 	if err := a.AcceptEpoch(request.Epoch); err != nil {
 		return err
 	}
+	return a.applyResume(request.AllocationID, request.Generation, request.Sequence, false)
+}
+
+// applyResume cancels a drain for one allocation generation at sequence. A
+// record that is neither running nor starting fails the resume unless
+// skipInactive is set. The caller must hold the allocation operation lock.
+func (a *Agent) applyResume(allocationID string, generation, sequence uint64, skipInactive bool) error {
 	a.mu.Lock()
 	var resumed []*Allocation
 	for _, allocation := range a.allocations {
-		if allocation.AllocationID != request.AllocationID {
+		if allocation.AllocationID != allocationID {
 			continue
 		}
-		if allocation.Generation > request.Generation {
+		if allocation.Generation > generation {
 			a.mu.Unlock()
-			return fmt.Errorf("%w: current %d, requested %d", ErrStaleGeneration, allocation.Generation, request.Generation)
+			return fmt.Errorf("%w: current %d, requested %d", ErrStaleGeneration, allocation.Generation, generation)
 		}
-		if allocation.Generation != request.Generation {
+		if allocation.Generation != generation {
 			continue
 		}
-		if request.Sequence < allocation.DrainSequence {
+		if sequence < allocation.DrainSequence {
 			continue
 		}
 		if allocation.Status != "running" && allocation.Status != "starting" {
+			if skipInactive {
+				continue
+			}
 			a.mu.Unlock()
-			return fmt.Errorf("cannot resume allocation %s task %s with status %q", request.AllocationID, allocation.ID, allocation.Status)
+			return fmt.Errorf("cannot resume allocation %s task %s with status %q", allocationID, allocation.ID, allocation.Status)
 		}
 		resumed = append(resumed, allocation)
 	}
+	// Snapshot reconciler inputs under a.mu; restart callbacks update them.
+	var running []Allocation
 	for _, allocation := range resumed {
 		previousDraining, previousSequence := allocation.Draining, allocation.DrainSequence
 		allocation.Draining = false
-		allocation.DrainSequence = request.Sequence
+		allocation.DrainSequence = sequence
 		if err := a.persistAllocation(allocation); err != nil {
 			allocation.Draining, allocation.DrainSequence = previousDraining, previousSequence
 			a.mu.Unlock()
 			return fmt.Errorf("persist resumed allocation: %w", err)
 		}
-	}
-	a.mu.Unlock()
-	for _, allocation := range resumed {
 		// The control plane will retry the start for a recovered starting task.
 		// Leave it untracked until that retry resolves its runtime state.
 		if allocation.Status == "running" {
-			a.reconciler.ResumeRestarts(allocation.ID, allocation.Spec != nil && allocation.Spec.HealthCheck != nil, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow)
+			running = append(running, *allocation)
 		}
+	}
+	a.mu.Unlock()
+	for _, allocation := range running {
+		a.reconciler.ResumeRestarts(allocation.ID, allocation.Spec != nil && allocation.Spec.HealthCheck != nil, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow)
 	}
 	return nil
 }
 
-// RunAllocation creates and starts one allocation task.
-func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, generation uint64, jobRevision int, executionHash, namespace, jobName, groupName, taskName string, taskSpec *spec.TaskSpec, groupRuntime string, networkPlan *network.Plan, envOverrides map[string]string, delivered []api.DeliveredSecret, restartPolicy *spec.RestartPolicySpec) (runErr error) {
+// RunAllocation creates and starts one allocation task. draining and
+// drainSequence are the generation's drain state; a draining task starts
+// restart-suppressed. RunGroup applies that state to existing records first.
+func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, generation uint64, jobRevision int, executionHash, namespace, jobName, groupName, taskName string, taskSpec *spec.TaskSpec, groupRuntime string, networkPlan *network.Plan, envOverrides map[string]string, delivered []api.DeliveredSecret, restartPolicy *spec.RestartPolicySpec, draining bool, drainSequence uint64) (runErr error) {
 	ts := taskSpec
 	if ts == nil {
 		return fmt.Errorf("task spec is required")
@@ -756,7 +822,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		}
 		a.mu.Lock()
 	}
-	alloc := &Allocation{ID: allocID, ContainerID: allocID, AllocationID: schedulerID, Generation: generation, JobRevision: jobRevision, ExecutionHash: executionHash, Restart: restartPolicy, Namespace: namespace, JobName: jobName, GroupName: groupName, TaskName: taskName, Spec: ts, Status: "starting", Health: "unknown"}
+	alloc := &Allocation{ID: allocID, ContainerID: allocID, AllocationID: schedulerID, Generation: generation, JobRevision: jobRevision, ExecutionHash: executionHash, Restart: restartPolicy, Namespace: namespace, JobName: jobName, GroupName: groupName, TaskName: taskName, Spec: ts, Status: "starting", Health: "unknown", Draining: draining, DrainSequence: drainSequence}
 	starting := *alloc
 	a.allocations[allocID] = &starting
 	a.mu.Unlock()
@@ -825,7 +891,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 			cleanupErrs = append(cleanupErrs, fmt.Errorf("detach allocation network: %w", err))
 		}
 		if secretDir != "" {
-			if err := os.RemoveAll(secretDir); err != nil {
+			if err := removeSecretDir(secretDir); err != nil {
 				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove secret files: %w", err))
 			}
 		}
@@ -914,13 +980,26 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	for k, v := range envOverrides {
 		env[k] = v
 	}
-	secretDir, secretEnv, secretMounts, err := prepareSecrets(allocID, taskName, delivered)
+	if taskHasFileSecrets(taskName, delivered) {
+		secretDir, err = a.secretDirFor(allocID)
+		if err != nil {
+			return err
+		}
+		// Record the location before any plaintext is written so a restarted
+		// agent can always find and remove it.
+		alloc.SecretDir = secretDir
+		if err := a.persistAllocation(alloc); err != nil {
+			return fmt.Errorf("persist secret metadata: %w", err)
+		}
+		if err := createSecretDir(secretDir); err != nil {
+			// Never clean up a directory this start did not create.
+			secretDir, alloc.SecretDir = "", ""
+			return err
+		}
+	}
+	secretEnv, secretMounts, err := materializeSecrets(secretDir, taskName, delivered)
 	if err != nil {
 		return err
-	}
-	alloc.SecretDir = secretDir
-	if err := a.persistAllocation(alloc); err != nil {
-		return fmt.Errorf("persist secret metadata: %w", err)
 	}
 	for k, v := range secretEnv {
 		env[k] = v
@@ -1012,7 +1091,11 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 			return fmt.Errorf("start container %s: %w", containerID, err)
 		}
 	}
-	a.reconciler.Track(allocID, ts.HealthCheck != nil, restartPolicy)
+	if draining {
+		a.reconciler.TrackStopping(allocID, ts.HealthCheck != nil, restartPolicy)
+	} else {
+		a.reconciler.Track(allocID, ts.HealthCheck != nil, restartPolicy)
+	}
 	tracked = true
 
 	ready := &Allocation{
@@ -1036,6 +1119,9 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		Network:     netAttachment,
 		Status:      "running",
 		Health:      "unknown",
+
+		Draining:      draining,
+		DrainSequence: drainSequence,
 	}
 	if ts.HealthCheck == nil {
 		ready.Health = "healthy"
@@ -1137,7 +1223,7 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string) error {
 		}
 	}
 	if alloc.SecretDir != "" {
-		if err := os.RemoveAll(alloc.SecretDir); err != nil {
+		if err := removeSecretDir(alloc.SecretDir); err != nil {
 			errs = append(errs, fmt.Errorf("remove secret files: %w", err))
 		}
 	}
@@ -1161,61 +1247,6 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string) error {
 	a.mu.Unlock()
 
 	return persistStopErr
-}
-
-func prepareSecrets(allocID, taskName string, delivered []api.DeliveredSecret) (string, map[string]string, []*runtime.Mount, error) {
-	env := map[string]string{}
-	var taskSecrets []api.DeliveredSecret
-	for _, secret := range delivered {
-		if secret.Task == taskName {
-			taskSecrets = append(taskSecrets, secret)
-		}
-	}
-	if len(taskSecrets) == 0 {
-		return "", env, nil, nil
-	}
-	dir, err := os.MkdirTemp("/dev/shm", "trellis-secret-"+filepath.Base(allocID)+"-")
-	if err != nil {
-		return "", nil, nil, fmt.Errorf("create memory-backed secret directory: %w", err)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		_ = os.RemoveAll(dir)
-		return "", nil, nil, err
-	}
-	var mounts []*runtime.Mount
-	for i, secret := range taskSecrets {
-		switch secret.Target {
-		case spec.SecretTargetEnv:
-			env[secret.Env] = string(secret.Value)
-		case spec.SecretTargetFile:
-			hostPath := filepath.Join(dir, fmt.Sprintf("secret-%d", i))
-			mode := os.FileMode(secret.Mode)
-			if mode == 0 {
-				mode = 0o400
-			}
-			file, err := os.OpenFile(hostPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, mode)
-			if err != nil {
-				_ = os.RemoveAll(dir)
-				return "", nil, nil, fmt.Errorf("create secret file: %w", err)
-			}
-			if _, err = file.Write(secret.Value); err == nil {
-				err = file.Sync()
-			}
-			closeErr := file.Close()
-			if err == nil {
-				err = closeErr
-			}
-			if err != nil {
-				_ = os.RemoveAll(dir)
-				return "", nil, nil, fmt.Errorf("write secret file: %w", err)
-			}
-			mounts = append(mounts, &runtime.Mount{HostPath: hostPath, ContainerPath: secret.Path, ReadOnly: true})
-		default:
-			_ = os.RemoveAll(dir)
-			return "", nil, nil, fmt.Errorf("unsupported secret target")
-		}
-	}
-	return dir, env, mounts, nil
 }
 
 // OnHealthy and OnUnhealthy are observation callbacks from the health manager.
