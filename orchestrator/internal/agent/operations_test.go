@@ -1550,7 +1550,7 @@ func (r *pullFailuresRuntime) Pull(_ context.Context, image string) error {
 	return nil
 }
 
-func TestPartiallyAppliedStartResumeConvergesOnRetry(t *testing.T) {
+func TestStartResumeReachesRunningTasksDespiteLaterFailure(t *testing.T) {
 	rt := &pullFailuresRuntime{
 		reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning},
 		failures:          map[string]int{"second-image": 1, "third-image": 1},
@@ -1567,21 +1567,27 @@ func TestPartiallyAppliedStartResumeConvergesOnRetry(t *testing.T) {
 		t.Fatalf("drain partially started allocation: %v", err)
 	}
 
-	// The resume reaches the new second task, then the third task fails.
+	// The start carries the resume; its third task fails after the second
+	// task was created at the new sequence.
 	request.Draining, request.DrainSequence = false, 4
+	firstID := "allocation-g2-first"
+	assertResumed := func(stage string) {
+		t.Helper()
+		if got := agent.allocations[firstID]; got.Draining || got.DrainSequence != 4 {
+			t.Fatalf("%s: already running task = %+v, want resumed sequence 4", stage, got)
+		}
+		if state := agent.reconciler.states[firstID]; state == nil || state.stopping {
+			t.Fatalf("%s: already running task is still restart-suppressed", stage)
+		}
+	}
 	if err := agent.RunGroup(context.Background(), request); err == nil {
 		t.Fatal("start succeeded despite failed pull")
 	}
+	assertResumed("after failed start")
 	if err := agent.RunGroup(context.Background(), request); err != nil {
 		t.Fatalf("start retry: %v", err)
 	}
-	firstID := "allocation-g2-first"
-	if got := agent.allocations[firstID]; got.Draining || got.DrainSequence != 4 {
-		t.Fatalf("already running task = %+v, want resumed sequence 4", got)
-	}
-	if state := agent.reconciler.states[firstID]; state == nil || state.stopping {
-		t.Fatal("already running task is still restart-suppressed after resume")
-	}
+	assertResumed("after start retry")
 }
 
 func TestRecoverNonRunningAllocationDefersRestartToServer(t *testing.T) {

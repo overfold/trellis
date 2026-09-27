@@ -545,13 +545,18 @@ func (a *Agent) RunGroup(ctx context.Context, request *api.AllocationRequest) er
 		return err
 	}
 	draining, drainSequence := a.startDrainState(request)
+	// Tasks that are already running keep their records, so apply the drain
+	// state to them before any task starts. Each start reapplies it so a
+	// partially applied state converges. Records that are neither running nor
+	// starting are rebuilt by RunAllocation with the same state.
+	var err error
 	if draining {
-		// Tasks that are already running keep their records, so apply the
-		// drain to them before any task of the generation can restart. Each
-		// start reapplies it so a partially applied drain converges.
-		if err := a.applyDrain(request.AllocationID, request.Generation, drainSequence); err != nil {
-			return err
-		}
+		err = a.applyDrain(request.AllocationID, request.Generation, drainSequence)
+	} else if drainSequence > 0 {
+		err = a.applyResume(request.AllocationID, request.Generation, drainSequence, true)
+	}
+	if err != nil {
+		return err
 	}
 	for i := range request.Tasks {
 		task := &request.Tasks[i]
@@ -559,11 +564,6 @@ func (a *Agent) RunGroup(ctx context.Context, request *api.AllocationRequest) er
 		if err := a.RunAllocation(ctx, id, request.AllocationID, request.Generation, request.JobRevision, request.ExecutionHash, request.Namespace, request.JobName, request.GroupName, task.Name, task, request.Runtime, request.NetworkPlan, request.EnvOverrides, request.Secrets, request.Restart, draining, drainSequence); err != nil {
 			return err
 		}
-	}
-	if !draining && drainSequence > 0 {
-		// Every task now runs, so a resume can reach the tasks that were
-		// already running with an older drain.
-		return a.applyResume(request.AllocationID, request.Generation, drainSequence)
 	}
 	return nil
 }
@@ -717,12 +717,13 @@ func (a *Agent) ResumeGroup(request *api.DrainAllocationRequest) error {
 	if err := a.AcceptEpoch(request.Epoch); err != nil {
 		return err
 	}
-	return a.applyResume(request.AllocationID, request.Generation, request.Sequence)
+	return a.applyResume(request.AllocationID, request.Generation, request.Sequence, false)
 }
 
-// applyResume cancels a drain for one allocation generation at sequence. The
-// caller must hold the allocation operation lock.
-func (a *Agent) applyResume(allocationID string, generation, sequence uint64) error {
+// applyResume cancels a drain for one allocation generation at sequence. A
+// record that is neither running nor starting fails the resume unless
+// skipInactive is set. The caller must hold the allocation operation lock.
+func (a *Agent) applyResume(allocationID string, generation, sequence uint64, skipInactive bool) error {
 	a.mu.Lock()
 	var resumed []*Allocation
 	for _, allocation := range a.allocations {
@@ -740,6 +741,9 @@ func (a *Agent) applyResume(allocationID string, generation, sequence uint64) er
 			continue
 		}
 		if allocation.Status != "running" && allocation.Status != "starting" {
+			if skipInactive {
+				continue
+			}
 			a.mu.Unlock()
 			return fmt.Errorf("cannot resume allocation %s task %s with status %q", allocationID, allocation.ID, allocation.Status)
 		}
@@ -768,7 +772,7 @@ func (a *Agent) applyResume(allocationID string, generation, sequence uint64) er
 
 // RunAllocation creates and starts one allocation task. draining and
 // drainSequence are the generation's drain state; a draining task starts
-// restart-suppressed. RunGroup applies that state to tasks already running.
+// restart-suppressed. RunGroup applies that state to existing records first.
 func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, generation uint64, jobRevision int, executionHash, namespace, jobName, groupName, taskName string, taskSpec *spec.TaskSpec, groupRuntime string, networkPlan *network.Plan, envOverrides map[string]string, delivered []api.DeliveredSecret, restartPolicy *spec.RestartPolicySpec, draining bool, drainSequence uint64) (runErr error) {
 	ts := taskSpec
 	if ts == nil {
