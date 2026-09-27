@@ -34,6 +34,7 @@ type blockingStartRuntime struct {
 type failingStopRuntime struct {
 	*reconcilerRuntime
 	stopErr     error
+	removeErr   error
 	stopCount   int
 	removeCount int
 }
@@ -297,7 +298,7 @@ func (r *failingStopRuntime) Stop(context.Context, string) error {
 }
 func (r *failingStopRuntime) Remove(context.Context, string) error {
 	r.removeCount++
-	return nil
+	return r.removeErr
 }
 
 type countingNetworkManager struct{ detachCount int }
@@ -960,6 +961,13 @@ func TestManagedVolumeStagingOutlivesStartUntilStop(t *testing.T) {
 	if err := agent.RunGroup(context.Background(), request); err != nil {
 		t.Fatalf("run allocation: %v", err)
 	}
+	var recorded Allocation
+	if err := local.Get(allocationRecordKey(id), &recorded); err != nil || recorded.Status != "running" {
+		t.Fatalf("recorded allocation = %+v, error = %v, want running", recorded, err)
+	}
+	if current := agent.allocations[id]; current == nil || current.Status != "running" {
+		t.Fatalf("live allocation = %+v, want running", current)
+	}
 	// The staging mount is the container's OCI mount source; an in-place
 	// restart creates a new task that resolves it again.
 	if unstaged != 0 {
@@ -975,11 +983,23 @@ func TestManagedVolumeStagingOutlivesStartUntilStop(t *testing.T) {
 		t.Fatalf("cleanup after retry: stops = %d, removes = %d, unstages = %d, want none", rt.stopCount, rt.removeCount, unstaged)
 	}
 
+	// A container that could not be removed keeps its mount sources.
+	rt.removeErr = errors.New("remove failed")
+	if err := agent.StopAllocation(context.Background(), id); !errors.Is(err, rt.removeErr) {
+		t.Fatalf("stop with failed removal = %v, want removal error", err)
+	}
+	if unstaged != 0 {
+		t.Fatalf("unstage calls after failed removal = %d, want none", unstaged)
+	}
+	if _, err := os.Stat(filepath.Join(stagingPath, "block")); err != nil {
+		t.Fatalf("staging mount after failed removal: %v", err)
+	}
+	rt.removeErr = nil
+
 	// A failed staging release keeps the stopping record so a retry can finish.
 	if err := agent.StopAllocation(context.Background(), id); err == nil {
 		t.Fatal("stop succeeded while staging directory could not be removed")
 	}
-	var recorded Allocation
 	if err := local.Get(allocationRecordKey(id), &recorded); err != nil || recorded.Status != "stopping" {
 		t.Fatalf("recorded allocation = %+v, error = %v, want stopping", recorded, err)
 	}
@@ -1034,8 +1054,13 @@ func TestRecoverKeepsVolumeStagingForExistingContainers(t *testing.T) {
 	if err := agent.recover(context.Background()); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
-	if _, err := os.Stat(live); err != nil {
+	if _, err := os.Stat(filepath.Dir(live)); err != nil {
 		t.Fatalf("staging for existing container: %v", err)
+	}
+	// Without a staging mount, the kept directory would be an empty substitute
+	// for the volume.
+	if _, err := os.Stat(live); !os.IsNotExist(err) {
+		t.Fatalf("unmounted staging for existing container: %v, want not found", err)
 	}
 	if _, err := os.Stat(filepath.Dir(orphan)); !os.IsNotExist(err) {
 		t.Fatalf("orphaned staging after recovery: %v, want not found", err)

@@ -830,8 +830,10 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 				cleanupErrs = append(cleanupErrs, fmt.Errorf("untrack allocation %s: %w", allocID, err))
 			}
 		}
+		containerRemoved := true
 		if containerCreated {
 			if err := a.runtime.Remove(context.WithoutCancel(ctx), allocID); err != nil {
+				containerRemoved = false
 				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove container %s: %w", allocID, err))
 			}
 		}
@@ -843,8 +845,12 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove secret files: %w", err))
 			}
 		}
-		if err := a.volumes.ReleaseStaging(allocID, ts.Volumes); err != nil {
-			cleanupErrs = append(cleanupErrs, fmt.Errorf("release volume staging: %w", err))
+		// A container that still exists keeps its staging mounts as OCI mount
+		// sources; a cleanup retry releases them after removal succeeds.
+		if containerRemoved {
+			if err := a.volumes.ReleaseStaging(allocID, ts.Volumes); err != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("release volume staging: %w", err))
+			}
 		}
 		if err := errors.Join(cleanupErrs...); err != nil {
 			runErr = errors.Join(runErr, err)
@@ -1306,8 +1312,10 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string) error {
 	if err := a.network.Detach(ctx, alloc.Network); err != nil {
 		errs = append(errs, fmt.Errorf("detach allocation network: %w", err))
 	}
+	containerRemoved := true
 	if !containerMissing {
 		if err := a.runtime.Remove(ctx, containerID); err != nil {
+			containerRemoved = false
 			errs = append(errs, fmt.Errorf("remove container %s: %w", containerID, err))
 		}
 	}
@@ -1317,7 +1325,9 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string) error {
 		}
 	}
 
-	if alloc.Spec != nil {
+	// Staging mounts remain the OCI mount sources of a container that still
+	// exists; a stop retry releases them after removal succeeds.
+	if alloc.Spec != nil && containerRemoved {
 		if err := a.volumes.ReleaseStaging(allocID, alloc.Spec.Volumes); err != nil {
 			errs = append(errs, fmt.Errorf("release volume staging: %w", err))
 		}

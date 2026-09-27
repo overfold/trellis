@@ -233,15 +233,22 @@ func (vm *VolumeManager) ReleaseStaging(allocationID string, volumes []spec.Volu
 			errs = append(errs, fmt.Errorf("removing volume staging directory %s: %w", volume.Name, err))
 		}
 	}
-	if err := os.Remove(filepath.Dir(vm.stagingPath(allocationID, "placeholder"))); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(vm.stagingAllocationDir(allocationID)); err != nil && !os.IsNotExist(err) {
 		errs = append(errs, fmt.Errorf("removing allocation staging directory: %w", err))
 	}
 	return errors.Join(errs...)
 }
 
 func (vm *VolumeManager) stagingPath(allocationID, volumeName string) string {
-	allocationKey := fmt.Sprintf("%x", sha256.Sum256([]byte(allocationID)))
-	return filepath.Join(vm.dataRootPath, "volume-staging", allocationKey, volumeName)
+	return filepath.Join(vm.stagingAllocationDir(allocationID), volumeName)
+}
+
+func (vm *VolumeManager) stagingAllocationDir(allocationID string) string {
+	return filepath.Join(vm.dataRootPath, "volume-staging", stagingAllocationKey(allocationID))
+}
+
+func stagingAllocationKey(allocationID string) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(allocationID)))
 }
 
 // CleanupStaging removes staging bind mounts left behind when an earlier agent
@@ -252,7 +259,7 @@ func (vm *VolumeManager) stagingPath(allocationID, volumeName string) string {
 func (vm *VolumeManager) CleanupStaging(liveAllocationIDs []string) error {
 	keep := make(map[string]bool, len(liveAllocationIDs))
 	for _, id := range liveAllocationIDs {
-		keep[filepath.Base(filepath.Dir(vm.stagingPath(id, "placeholder")))] = true
+		keep[stagingAllocationKey(id)] = true
 	}
 	err := vm.cleanupStaging(keep)
 	vm.mu.Lock()
@@ -271,7 +278,7 @@ func (vm *VolumeManager) cleanupStaging(keep map[string]bool) error {
 			}
 			return err
 		}
-		mounts = slices.DeleteFunc(mounts, func(mount string) bool { return keep[stagingAllocationKey(root, mount)] })
+		mounts = slices.DeleteFunc(mounts, func(mount string) bool { return keep[stagingMountKey(root, mount)] })
 		if len(mounts) == 0 {
 			break
 		}
@@ -291,11 +298,16 @@ func (vm *VolumeManager) cleanupStaging(keep map[string]bool) error {
 	// No orphaned mount remains, so each orphaned staging directory holds only
 	// empty mount points. Remove rather than RemoveAll so an unexpected mount
 	// can never expose volume data to recursive deletion.
+	mounts, err := stagingMounts(root)
+	if err != nil {
+		return err
+	}
+	mounted := make(map[string]bool, len(mounts))
+	for _, mount := range mounts {
+		mounted[mount] = true
+	}
 	var errs []error
 	for _, entry := range entries {
-		if keep[entry.Name()] {
-			continue
-		}
 		dir := filepath.Join(root, entry.Name())
 		if entry.IsDir() {
 			children, err := os.ReadDir(dir)
@@ -304,10 +316,20 @@ func (vm *VolumeManager) cleanupStaging(keep map[string]bool) error {
 				continue
 			}
 			for _, child := range children {
-				if err := os.Remove(filepath.Join(dir, child.Name())); err != nil {
+				// A kept staging directory that is no longer a mount point
+				// (for example after a host reboot) must not become an empty
+				// substitute for the volume; remove it so a new task fails.
+				path := filepath.Join(dir, child.Name())
+				if keep[entry.Name()] && mounted[path] {
+					continue
+				}
+				if err := os.Remove(path); err != nil {
 					errs = append(errs, err)
 				}
 			}
+		}
+		if keep[entry.Name()] {
+			continue
 		}
 		if err := os.Remove(dir); err != nil {
 			errs = append(errs, err)
@@ -316,9 +338,9 @@ func (vm *VolumeManager) cleanupStaging(keep map[string]bool) error {
 	return errors.Join(errs...)
 }
 
-// stagingAllocationKey returns the allocation directory name for a mount below
-// the staging root, or "" for the root itself.
-func stagingAllocationKey(root, mount string) string {
+// stagingMountKey returns the allocation directory name for a mount below the
+// staging root, or "" for the root itself.
+func stagingMountKey(root, mount string) string {
 	rel, err := filepath.Rel(root, mount)
 	if err != nil || rel == "." {
 		return ""

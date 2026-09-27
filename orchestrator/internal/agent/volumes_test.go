@@ -146,8 +146,9 @@ func TestCleanupStagingKeepsMountsOfExistingContainers(t *testing.T) {
 			}
 			t.Fatal(err)
 		}
+		// Unmount before TempDir removal can recurse into the volume.
+		t.Cleanup(func() { _ = manager.ReleaseStaging(id, []spec.VolumeSpec{volume}) })
 	}
-	t.Cleanup(func() { _ = manager.ReleaseStaging("live", []spec.VolumeSpec{volume}) })
 
 	restarted := NewVolumeManager(root)
 	if err := restarted.CleanupStaging([]string{"live"}); err != nil {
