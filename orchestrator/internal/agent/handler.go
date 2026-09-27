@@ -318,6 +318,8 @@ func operationError(err error) error {
 		status, code = http.StatusConflict, api.OperationStaleGeneration
 	case errors.Is(err, ErrExecutionConflict), errors.Is(err, ErrAllocationExists):
 		status, code = http.StatusConflict, api.OperationConflict
+	case errors.Is(err, ErrRestartBudgetExhausted):
+		status, code = http.StatusConflict, api.OperationRestartExhausted
 	}
 	raw, _ := json.Marshal(api.OperationResponse{Code: code, Message: err.Error()})
 	return echo.NewHTTPError(status, string(raw))

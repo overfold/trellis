@@ -26,6 +26,7 @@ type VolumeManager struct {
 	registrations map[string]string
 	stage         func(sourceFD int, target string) error
 	unstage       func(target string) error
+	hasMounts     func(dir string) (bool, error)
 	stagingErr    error
 }
 
@@ -38,7 +39,7 @@ func NewVolumeManager(dataRoot ...string) *VolumeManager {
 	vm := &VolumeManager{dataRootPath: root, registrations: make(map[string]string)}
 	vm.stage = stageDirectory
 	vm.unstage = func(target string) error { return unix.Unmount(target, unix.MNT_DETACH) }
-	vm.stagingErr = vm.cleanupStaging()
+	vm.hasMounts = hasMounts
 	_ = vm.loadRegistrations()
 	return vm
 }
@@ -67,8 +68,11 @@ func (vm *VolumeManager) Create(namespace string, _ string, allocationID string,
 		return nil, err
 	}
 	if managed {
-		if vm.stagingErr != nil {
-			return nil, fmt.Errorf("cleaning stale volume staging mounts: %w", vm.stagingErr)
+		vm.mu.RLock()
+		stagingErr := vm.stagingErr
+		vm.mu.RUnlock()
+		if stagingErr != nil {
+			return nil, fmt.Errorf("cleaning stale volume staging mounts: %w", stagingErr)
 		}
 		hostPath, err = vm.prepareManagedDirectory(namespace, allocationID, volume.Name, volume.HostPath)
 		if err != nil {
@@ -135,8 +139,10 @@ func (vm *VolumeManager) resolveHostPath(namespace, hostPath string) (string, bo
 // prepareManagedDirectory creates each managed-volume component through a
 // descriptor rooted at the namespace directory, then bind-mounts the resolved
 // inode at a Trellis-controlled staging path. This preserves the resolved inode
-// until containerd consumes the mount rather than returning an attacker-writable
-// pathname for it to resolve again.
+// for containerd rather than returning an attacker-writable pathname for it to
+// resolve again. The staging mount remains the container's OCI mount source,
+// so it must outlive every task started from that container, including
+// in-place restarts.
 func (vm *VolumeManager) prepareManagedDirectory(namespace, allocationID, volumeName, hostPath string) (string, error) {
 	if !spec.ValidIdentifier(volumeName) {
 		return "", fmt.Errorf("invalid volume name %q", volumeName)
@@ -212,55 +218,189 @@ func stageDirectory(sourceFD int, target string) error {
 	return nil
 }
 
-// ReleaseStaging removes temporary bind-mount anchors after the runtime has
-// consumed them. The container keeps its own bind mount after this point.
-func (vm *VolumeManager) ReleaseStaging(allocationID string, volumes []spec.VolumeSpec) error {
-	var errs []error
-	for _, volume := range volumes {
-		if !strings.HasPrefix(volume.HostPath, "@/") || !spec.ValidIdentifier(volume.Name) {
-			continue
+// ReleaseStaging removes an allocation's staging bind mounts. Call it only once
+// the allocation's container has been removed or never existed: containerd
+// re-resolves the OCI mount source whenever it creates a new task. It needs no
+// task spec, so allocations recovered only from runtime labels are released too.
+func (vm *VolumeManager) ReleaseStaging(allocationID string) error {
+	dir := vm.stagingAllocationDir(allocationID)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
 		}
-		target := vm.stagingPath(allocationID, volume.Name)
+		return fmt.Errorf("reading allocation staging directory: %w", err)
+	}
+	var errs []error
+	for _, entry := range entries {
+		target := filepath.Join(dir, entry.Name())
 		if err := vm.unstage(target); err != nil && err != unix.EINVAL && err != unix.ENOENT {
-			errs = append(errs, fmt.Errorf("unstaging volume %s: %w", volume.Name, err))
+			errs = append(errs, fmt.Errorf("unstaging volume %s: %w", entry.Name(), err))
 		}
 		if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
-			errs = append(errs, fmt.Errorf("removing volume staging directory %s: %w", volume.Name, err))
+			errs = append(errs, fmt.Errorf("removing volume staging directory %s: %w", entry.Name(), err))
 		}
 	}
-	if err := os.Remove(filepath.Dir(vm.stagingPath(allocationID, "placeholder"))); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(dir); err != nil && !os.IsNotExist(err) {
 		errs = append(errs, fmt.Errorf("removing allocation staging directory: %w", err))
 	}
 	return errors.Join(errs...)
 }
 
-func (vm *VolumeManager) stagingPath(allocationID, volumeName string) string {
-	allocationKey := fmt.Sprintf("%x", sha256.Sum256([]byte(allocationID)))
-	return filepath.Join(vm.dataRootPath, "volume-staging", allocationKey, volumeName)
+// errStagingInUse reports staging kept for a container that still exists.
+var errStagingInUse = errors.New("managed volume staging is already in use")
+
+// StagingInUse reports whether staging mounts exist for an allocation, which
+// recovery keeps for containers that still exist.
+func (vm *VolumeManager) StagingInUse(allocationID string) (bool, error) {
+	return vm.hasMounts(vm.stagingAllocationDir(allocationID))
 }
 
-// cleanupStaging removes orphaned staging bind mounts left behind when an agent
-// exits before ReleaseStaging. Repeat because lazy-unmounting a stacked mount
-// can reveal another mount at the same path.
-func (vm *VolumeManager) cleanupStaging() error {
-	root := filepath.Join(vm.dataRootPath, "volume-staging")
+func (vm *VolumeManager) stagingPath(allocationID, volumeName string) string {
+	return filepath.Join(vm.stagingAllocationDir(allocationID), volumeName)
+}
+
+func (vm *VolumeManager) stagingAllocationDir(allocationID string) string {
+	return filepath.Join(vm.dataRootPath, "volume-staging", stagingAllocationKey(allocationID))
+}
+
+func stagingAllocationKey(allocationID string) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(allocationID)))
+}
+
+// CleanupStaging removes staging bind mounts left behind when an earlier agent
+// process exited before ReleaseStaging, except those of the given allocations,
+// whose containers still exist and may need a new task. Repeat because
+// lazy-unmounting a stacked mount can reveal another mount at the same path.
+// After a failed cleanup, Create refuses managed volumes until one succeeds.
+func (vm *VolumeManager) CleanupStaging(liveAllocationIDs []string) error {
+	keep := make(map[string]bool, len(liveAllocationIDs))
+	for _, id := range liveAllocationIDs {
+		keep[stagingAllocationKey(id)] = true
+	}
+	err := vm.cleanupStaging(keep)
+	vm.mu.Lock()
+	vm.stagingErr = err
+	vm.mu.Unlock()
+	return err
+}
+
+func (vm *VolumeManager) cleanupStaging(keep map[string]bool) error {
+	root, err := resolveMountPath(filepath.Join(vm.dataRootPath, "volume-staging"))
+	if err != nil || root == "" {
+		return err
+	}
+	var mounts, previous []string
 	for {
-		mounts, err := stagingMounts(root)
+		mounts, err = stagingMounts(root)
 		if err != nil {
 			if os.IsNotExist(err) {
 				return nil
 			}
 			return err
 		}
-		if len(mounts) == 0 {
-			return os.RemoveAll(root)
+		orphaned := slices.DeleteFunc(slices.Clone(mounts), func(mount string) bool {
+			key := stagingMountKey(root, mount)
+			// Detaching a mounted staging root would also detach kept mounts.
+			return keep[key] || key == "" && len(keep) > 0
+		})
+		if len(orphaned) == 0 {
+			break
 		}
-		for _, mount := range mounts {
+		if slices.Equal(orphaned, previous) {
+			return fmt.Errorf("orphaned staging mounts remain after unmount: %v", orphaned)
+		}
+		previous = orphaned
+		for _, mount := range orphaned {
 			if err := unix.Unmount(mount, unix.MNT_DETACH); err != nil && err != unix.EINVAL && err != unix.ENOENT {
 				return fmt.Errorf("unstaging orphaned mount %s: %w", mount, err)
 			}
 		}
 	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	// No orphaned mount remains, so each orphaned staging directory holds only
+	// empty mount points. Remove rather than RemoveAll so an unexpected mount
+	// can never expose volume data to recursive deletion.
+	mounted := make(map[string]bool, len(mounts))
+	for _, mount := range mounts {
+		mounted[mount] = true
+	}
+	var errs []error
+	for _, entry := range entries {
+		dir := filepath.Join(root, entry.Name())
+		if entry.IsDir() {
+			children, err := os.ReadDir(dir)
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			for _, child := range children {
+				// A kept staging directory that is no longer a mount point
+				// (for example after a host reboot) must not become an empty
+				// substitute for the volume; remove it so a new task fails.
+				path := filepath.Join(dir, child.Name())
+				if keep[entry.Name()] && mounted[path] {
+					continue
+				}
+				if err := os.Remove(path); err != nil {
+					errs = append(errs, err)
+				}
+			}
+		}
+		if keep[entry.Name()] {
+			continue
+		}
+		if err := os.Remove(dir); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// stagingMountKey returns the allocation directory name for a mount below the
+// staging root, or "" for the root itself.
+func stagingMountKey(root, mount string) string {
+	rel, err := filepath.Rel(root, mount)
+	if err != nil || rel == "." {
+		return ""
+	}
+	key, _, _ := strings.Cut(rel, string(filepath.Separator))
+	return key
+}
+
+func hasMounts(dir string) (bool, error) {
+	dir, err := resolveMountPath(dir)
+	if err != nil || dir == "" {
+		return false, err
+	}
+	mounts, err := stagingMounts(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return len(mounts) > 0, nil
+}
+
+// resolveMountPath returns path as mountinfo reports it (absolute, with
+// symlinks resolved), or "" when it does not exist.
+func resolveMountPath(path string) (string, error) {
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	path, err = filepath.EvalSymlinks(path)
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	return path, err
 }
 
 func stagingMounts(root string) ([]string, error) {

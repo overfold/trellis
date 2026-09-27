@@ -93,15 +93,16 @@ func (a *Agent) lockAllocationOperation(allocationID string) func() {
 
 // Allocation contains agent-local allocation state.
 type Allocation struct {
-	ID              string
-	AllocationID    string
-	Generation      uint64
-	JobRevision     int
-	ExecutionHash   string
-	Restart         *spec.RestartPolicySpec
-	RestartAttempts int
-	RestartWindow   time.Time
-	Namespace       string
+	ID               string
+	AllocationID     string
+	Generation       uint64
+	JobRevision      int
+	ExecutionHash    string
+	Restart          *spec.RestartPolicySpec
+	RestartAttempts  int
+	RestartWindow    time.Time
+	RestartExhausted bool
+	Namespace        string
 
 	JobName   string
 	GroupName string
@@ -151,6 +152,9 @@ var (
 	ErrAgentShuttingDown = errors.New("agent is shutting down")
 	// ErrExecTaskRequired indicates that an exec request must name one of several running tasks.
 	ErrExecTaskRequired = errors.New("exec task selection required")
+	// ErrRestartBudgetExhausted indicates that an allocation generation failed
+	// terminally after exhausting its restart policy.
+	ErrRestartBudgetExhausted = errors.New("restart budget exhausted")
 )
 
 // ConfigureDurability enables persistent agent state.
@@ -308,6 +312,7 @@ func (a *Agent) Init(ctx context.Context) {
 
 func (a *Agent) recover(ctx context.Context) error {
 	if a.local == nil {
+		a.cleanupVolumeStaging(nil)
 		return nil
 	}
 	var epoch uint64
@@ -329,12 +334,20 @@ func (a *Agent) recover(ctx context.Context) error {
 	}
 	managed, ok := a.runtime.(runtime.ManagedRuntime)
 	if !ok {
+		a.cleanupVolumeStaging(nil)
 		return nil
 	}
 	containers, err := managed.ListManaged(ctx, a.cluster)
 	if err != nil {
 		return err
 	}
+	// Existing containers still reference their staging mounts as OCI mount
+	// sources; keep those so a later restart can create a new task.
+	liveContainers := make([]string, 0, len(containers))
+	for _, container := range containers {
+		liveContainers = append(liveContainers, container.ID)
+	}
+	a.cleanupVolumeStaging(liveContainers)
 	seen := make(map[string]bool, len(containers))
 	for _, container := range containers {
 		seen[container.ID] = true
@@ -361,8 +374,15 @@ func (a *Agent) recover(ctx context.Context) error {
 		}
 		stopping := hadRecord && allocation.Status == "stopping"
 		restartSuppressed := stopping || allocation.Draining
-		recoveryPending := !stopping && (container.Status == runtime.StatusCreated || container.Status == runtime.StatusStopped)
-		if recoveryPending {
+		// An exhausted restart budget is terminal for this generation: keep
+		// reporting the failed observation instead of asking for a new start.
+		notRunning := !stopping && (container.Status == runtime.StatusCreated || container.Status == runtime.StatusStopped)
+		exhausted := notRunning && allocation.RestartExhausted
+		recoveryPending := notRunning && !exhausted
+		if exhausted {
+			allocation.Status = "failed"
+			allocation.Health = "unhealthy"
+		} else if recoveryPending {
 			// Recovery reports observation; it does not invent desired state.
 			// A non-running recovered task stays restart-suppressed until the
 			// control plane observes "starting" and reconciliation reissues the
@@ -389,18 +409,15 @@ func (a *Agent) recover(ctx context.Context) error {
 			if persistErr != nil {
 				a.log.Error("refresh recovered allocation record", "allocation", allocation.AllocationID, "error", persistErr)
 			}
-			if allocation.Spec != nil {
-				if restartSuppressed {
-					a.reconciler.TrackStopping(allocation.ID, allocation.Spec.HealthCheck != nil, allocation.Restart)
-				} else if !recoveryPending {
-					a.reconciler.TrackRecovered(allocation.ID, allocation.Spec.HealthCheck != nil, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow)
-				}
+			healthManaged := allocation.Spec != nil && allocation.Spec.HealthCheck != nil
+			if exhausted {
+				a.reconciler.TrackFailed(allocation.ID, healthManaged, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow)
 			} else if restartSuppressed {
-				a.reconciler.TrackStopping(allocation.ID, false, nil)
+				a.reconciler.TrackStopping(allocation.ID, healthManaged, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow, allocation.RestartExhausted)
 			} else if !recoveryPending {
-				a.reconciler.Track(allocation.ID, false, nil)
+				a.reconciler.TrackRecovered(allocation.ID, healthManaged, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow, allocation.RestartExhausted)
 			}
-			if allocation.Spec != nil && !stopping && !recoveryPending && allocation.Spec.HealthCheck != nil {
+			if healthManaged && !stopping && !recoveryPending && !exhausted {
 				a.health.RegisterTask(allocation.ID, allocation.ContainerID, allocation.Spec.HealthCheck)
 			}
 		}
@@ -435,9 +452,7 @@ func (a *Agent) recover(ctx context.Context) error {
 				cleanupErr = fmt.Errorf("remove secret files for missing allocation container: %w", err)
 			}
 		}
-		if allocation.Spec != nil {
-			cleanupErr = errors.Join(cleanupErr, a.volumes.ReleaseStaging(allocation.ID, allocation.Spec.Volumes))
-		}
+		cleanupErr = errors.Join(cleanupErr, a.volumes.ReleaseStaging(allocation.ID))
 		if cleanupErr == nil {
 			if err := a.deleteAllocationRecord(allocation.ID); err != nil {
 				cleanupErr = fmt.Errorf("delete missing allocation record: %w", err)
@@ -457,6 +472,12 @@ func (a *Agent) recover(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (a *Agent) cleanupVolumeStaging(liveContainers []string) {
+	if err := a.volumes.CleanupStaging(liveContainers); err != nil {
+		a.log.Error("clean up stale volume staging mounts", "error", err)
+	}
 }
 
 func allocationFromRuntime(container runtime.ContainerInfo) *Allocation {
@@ -524,6 +545,7 @@ func (a *Agent) prepareStart(ctx context.Context, request *api.AllocationRequest
 	}
 	a.mu.RLock()
 	var oldIDs []string
+	var exhaustedTask string
 	for id, allocation := range a.allocations {
 		if allocation.AllocationID != request.AllocationID {
 			continue
@@ -536,9 +558,19 @@ func (a *Agent) prepareStart(ctx context.Context, request *api.AllocationRequest
 			a.mu.RUnlock()
 			return fmt.Errorf("%w: allocation %s generation %d", ErrExecutionConflict, request.AllocationID, request.Generation)
 		}
+		if allocation.Generation == request.Generation && allocation.RestartExhausted && (exhaustedTask == "" || allocation.TaskName < exhaustedTask) {
+			exhaustedTask = allocation.TaskName
+		}
 		if allocation.Generation < request.Generation {
 			oldIDs = append(oldIDs, id)
 		}
+	}
+	// Reject after the fencing checks, and before touching any task, so a
+	// start retry cannot churn the siblings of a task whose restart budget is
+	// terminally exhausted. Pick the task deterministically.
+	if exhaustedTask != "" {
+		a.mu.RUnlock()
+		return fmt.Errorf("%w: allocation %s generation %d task %s", ErrRestartBudgetExhausted, request.AllocationID, request.Generation, exhaustedTask)
 	}
 	a.mu.RUnlock()
 	for _, id := range oldIDs {
@@ -757,7 +789,7 @@ func (a *Agent) applyResume(allocationID string, generation, sequence uint64, sk
 		if sequence < allocation.DrainSequence {
 			continue
 		}
-		if allocation.Status != "running" && allocation.Status != "starting" {
+		if allocation.Status != "running" && allocation.Status != "starting" && allocation.Status != "failed" {
 			if skipInactive {
 				continue
 			}
@@ -778,14 +810,15 @@ func (a *Agent) applyResume(allocationID string, generation, sequence uint64, sk
 			return fmt.Errorf("persist resumed allocation: %w", err)
 		}
 		// The control plane will retry the start for a recovered starting task.
-		// Leave it untracked until that retry resolves its runtime state.
+		// Leave it untracked until that retry resolves its runtime state. A
+		// terminally failed task stays restart-suppressed.
 		if allocation.Status == "running" {
 			running = append(running, *allocation)
 		}
 	}
 	a.mu.Unlock()
 	for _, allocation := range running {
-		a.reconciler.ResumeRestarts(allocation.ID, allocation.Spec != nil && allocation.Spec.HealthCheck != nil, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow)
+		a.reconciler.ResumeRestarts(allocation.ID, allocation.Spec != nil && allocation.Spec.HealthCheck != nil, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow, allocation.RestartExhausted)
 	}
 	return nil
 }
@@ -801,14 +834,30 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	if allocID == "" {
 		return fmt.Errorf("allocation ID is required")
 	}
+	a.mu.RLock()
+	known := a.allocations[allocID] != nil
+	a.mu.RUnlock()
+	if !known {
+		// Checked before any start state exists, so a refused start never
+		// reaches cleanup that would release staging it does not own. A tracked
+		// allocation's staging is released by its own stop below.
+		if err := a.releaseOrphanedStaging(ctx, allocID); err != nil {
+			return err
+		}
+	}
 	a.mu.Lock()
 	existing := a.allocations[allocID]
 	if existing != nil {
 		matching := existing.AllocationID == schedulerID && existing.Generation == generation && existing.JobRevision == jobRevision && existing.ExecutionHash == executionHash
-		status := existing.Status
+		status, exhausted := existing.Status, existing.RestartExhausted
 		a.mu.Unlock()
 		if !matching {
 			return fmt.Errorf("%w: %s", ErrAllocationExists, allocID)
+		}
+		// An exhausted restart budget is terminal for this generation; a
+		// start retry must not recreate the task with a fresh budget.
+		if exhausted {
+			return fmt.Errorf("%w: allocation %s", ErrRestartBudgetExhausted, allocID)
 		}
 		if status == "running" {
 			return nil
@@ -851,7 +900,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 				// Start may have succeeded even if its response was lost. Track
 				// the retained allocation as stopping from the outset so an
 				// observed stopped task can never be restarted.
-				a.reconciler.TrackStopping(allocID, false, restartPolicy)
+				a.reconciler.TrackStopping(allocID, false, restartPolicy, 0, time.Time{}, false)
 				tracked = true
 			}
 		}
@@ -882,8 +931,10 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 				cleanupErrs = append(cleanupErrs, fmt.Errorf("untrack allocation %s: %w", allocID, err))
 			}
 		}
+		containerRemoved := true
 		if containerCreated {
 			if err := a.runtime.Remove(context.WithoutCancel(ctx), allocID); err != nil {
+				containerRemoved = false
 				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove container %s: %w", allocID, err))
 			}
 		}
@@ -895,8 +946,12 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove secret files: %w", err))
 			}
 		}
-		if err := a.volumes.ReleaseStaging(allocID, ts.Volumes); err != nil {
-			cleanupErrs = append(cleanupErrs, fmt.Errorf("release volume staging: %w", err))
+		// A container that still exists keeps its staging mounts as OCI mount
+		// sources; a cleanup retry releases them after removal succeeds.
+		if containerRemoved {
+			if err := a.volumes.ReleaseStaging(allocID); err != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("release volume staging: %w", err))
+			}
 		}
 		if err := errors.Join(cleanupErrs...); err != nil {
 			runErr = errors.Join(runErr, err)
@@ -1091,13 +1146,6 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 			return fmt.Errorf("start container %s: %w", containerID, err)
 		}
 	}
-	if draining {
-		a.reconciler.TrackStopping(allocID, ts.HealthCheck != nil, restartPolicy)
-	} else {
-		a.reconciler.Track(allocID, ts.HealthCheck != nil, restartPolicy)
-	}
-	tracked = true
-
 	ready := &Allocation{
 		ID:            allocID,
 		AllocationID:  schedulerID,
@@ -1132,6 +1180,14 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	a.mu.Lock()
 	a.allocations[allocID] = ready
 	a.mu.Unlock()
+	// Track only after the running record is stored, so a restart decision
+	// (including terminal exhaustion) is never overwritten by startup.
+	if draining {
+		a.reconciler.TrackStopping(allocID, ts.HealthCheck != nil, restartPolicy, 0, time.Time{}, false)
+	} else {
+		a.reconciler.Track(allocID, ts.HealthCheck != nil, restartPolicy)
+	}
+	tracked = true
 	if ts.HealthCheck != nil {
 		check := *ts.HealthCheck
 		a.health.RegisterTask(allocID, containerID, &check)
@@ -1142,11 +1198,33 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 			return fmt.Errorf("mark allocation healthy: %w", err)
 		}
 	}
-	if err := a.volumes.ReleaseStaging(allocID, ts.Volumes); err != nil {
-		a.log.Error("release volume staging after allocation start", "allocation", allocID, "error", err)
-	}
+	// Keep managed-volume staging mounts until the container is removed: they
+	// are its OCI mount sources, which every restarted task resolves again.
 	committed = true
 
+	return nil
+}
+
+// releaseOrphanedStaging ensures a start never stages volumes over staging
+// kept for an existing container. Staging whose container is gone was left
+// behind, for example when recovery could not list containers, and is released.
+func (a *Agent) releaseOrphanedStaging(ctx context.Context, allocID string) error {
+	inUse, err := a.volumes.StagingInUse(allocID)
+	if err != nil {
+		return fmt.Errorf("check volume staging: %w", err)
+	}
+	if !inUse {
+		return nil
+	}
+	if _, err := a.runtime.Inspect(ctx, allocID); !errdefs.IsNotFound(err) {
+		if err != nil {
+			return fmt.Errorf("verify container %s before releasing volume staging: %w", allocID, err)
+		}
+		return fmt.Errorf("%w: container %s still exists", errStagingInUse, allocID)
+	}
+	if err := a.volumes.ReleaseStaging(allocID); err != nil {
+		return fmt.Errorf("release orphaned volume staging: %w", err)
+	}
 	return nil
 }
 
@@ -1217,8 +1295,10 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string) error {
 	if err := a.network.Detach(ctx, alloc.Network); err != nil {
 		errs = append(errs, fmt.Errorf("detach allocation network: %w", err))
 	}
+	containerRemoved := true
 	if !containerMissing {
 		if err := a.runtime.Remove(ctx, containerID); err != nil {
+			containerRemoved = false
 			errs = append(errs, fmt.Errorf("remove container %s: %w", containerID, err))
 		}
 	}
@@ -1228,8 +1308,10 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string) error {
 		}
 	}
 
-	if alloc.Spec != nil {
-		if err := a.volumes.ReleaseStaging(allocID, alloc.Spec.Volumes); err != nil {
+	// Staging mounts remain the OCI mount sources of a container that still
+	// exists; a stop retry releases them after removal succeeds.
+	if containerRemoved {
+		if err := a.volumes.ReleaseStaging(allocID); err != nil {
 			errs = append(errs, fmt.Errorf("release volume staging: %w", err))
 		}
 	}
@@ -1259,7 +1341,7 @@ func (a *Agent) OnHealthy(ctx context.Context, allocID string) error {
 	if ctx.Err() != nil {
 		return nil
 	}
-	if allocation := a.allocations[allocID]; allocation != nil {
+	if allocation := a.allocations[allocID]; allocation != nil && allocation.Status != "failed" {
 		allocation.Health = "healthy"
 		return a.persistAllocation(allocation)
 	}
@@ -1273,7 +1355,7 @@ func (a *Agent) OnUnhealthy(ctx context.Context, allocID string) error {
 	if ctx.Err() != nil {
 		return nil
 	}
-	if allocation := a.allocations[allocID]; allocation != nil {
+	if allocation := a.allocations[allocID]; allocation != nil && allocation.Status != "failed" {
 		allocation.Health = "unhealthy"
 		return a.persistAllocation(allocation)
 	}
@@ -1284,6 +1366,11 @@ func (a *Agent) OnUnhealthy(ctx context.Context, allocID string) error {
 func (a *Agent) OnReconciledStatus(allocID, status string) {
 	a.mu.Lock()
 	if alloc := a.allocations[allocID]; alloc != nil {
+		if alloc.Status == "failed" && (status == "healthy" || status == "unhealthy") {
+			// A terminally failed task is not probed; ignore late health.
+			a.mu.Unlock()
+			return
+		}
 		if status == "healthy" || status == "unhealthy" {
 			alloc.Health = status
 		} else {
@@ -1300,16 +1387,28 @@ func (a *Agent) OnReconciledStatus(allocID, status string) {
 	a.mu.Unlock()
 }
 
-// OnRestartState records allocation restart state.
-func (a *Agent) OnRestartState(allocID string, attempts int, window time.Time) {
+// OnRestartState records allocation restart state. An exhausted budget also
+// records the terminal failed observation in the same write, so recovery
+// never sees exhaustion without the failure or the reverse.
+func (a *Agent) OnRestartState(allocID string, attempts int, window time.Time, exhausted bool) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if allocation := a.allocations[allocID]; allocation != nil {
-		allocation.RestartAttempts, allocation.RestartWindow = attempts, window
-		if err := a.persistAllocation(allocation); err != nil {
-			a.log.Error("persist restart tracking", "allocation", allocation.AllocationID, "error", err)
-		}
+	allocation := a.allocations[allocID]
+	if allocation == nil {
+		return nil
 	}
+	allocation.RestartAttempts, allocation.RestartWindow, allocation.RestartExhausted = attempts, window, exhausted
+	if exhausted {
+		// The container stopped and will not be restarted; stop probing it.
+		allocation.Status, allocation.Health = "failed", "unhealthy"
+		a.health.DeregisterTask(allocID)
+	}
+	if err := a.persistAllocation(allocation); err != nil {
+		// Keep reporting the accurate in-memory observation; the reconciler
+		// logs the error and retries persisting an exhaustion on its next pass.
+		return fmt.Errorf("persist restart tracking for %s: %w", allocID, err)
+	}
+	return nil
 }
 
 func (a *Agent) runHeartbeatLoop(ctx context.Context) {

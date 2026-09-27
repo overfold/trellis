@@ -1104,7 +1104,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 		if err := s.client.RunAllocation(ctx, alloc.Node.ID, address, request); err != nil {
 			if code := agentOperationCode(err); code == api.OperationStaleEpoch {
 				return err
-			} else if code == api.OperationStaleGeneration || code == api.OperationConflict {
+			} else if code == api.OperationStaleGeneration || code == api.OperationConflict || code == api.OperationRestartExhausted {
 				_ = alloc.Transition(lifecycle.PhaseFailed, now, string(code), err.Error())
 				alloc.NextRetryAt = nil
 				_ = s.state.PutAllocation(context.WithoutCancel(ctx), alloc)
