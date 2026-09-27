@@ -44,6 +44,26 @@ type Manager interface {
 	Detach(context.Context, *Attachment) error
 }
 
+// AttachmentIntent is what an allocation records before Attach, so an
+// attachment whose result was never recorded can still be found and removed.
+type AttachmentIntent struct {
+	AllocationID string
+	Namespace    string
+	Network      string
+}
+
+// AttachmentRecovery finds and removes attachments by allocation ID alone,
+// such as those left behind when the agent stopped during Attach.
+type AttachmentRecovery interface {
+	// DetachAllocation removes everything Attach created for the
+	// allocation. It succeeds when some or all of it is already gone.
+	DetachAllocation(context.Context, string) error
+	// Attachments lists the allocation IDs whose attachments may still
+	// exist on this node. It may return IDs alongside an error that
+	// describes records it could not read.
+	Attachments(context.Context) ([]string, error)
+}
+
 // PlanUpdater reconciles peers on an already attached namespace network.
 type PlanUpdater interface {
 	UpdatePlan(context.Context, string, Plan) error

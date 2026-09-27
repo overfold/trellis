@@ -13,6 +13,7 @@ import (
 	"github.com/clofour/trellis/internal/api"
 	"github.com/clofour/trellis/internal/auth"
 	"github.com/clofour/trellis/internal/catalog"
+	"github.com/clofour/trellis/internal/client"
 	"github.com/clofour/trellis/internal/plan"
 	secretstore "github.com/clofour/trellis/internal/secrets"
 	"github.com/clofour/trellis/internal/spec"
@@ -714,11 +715,8 @@ func (h *Handler) handleExecAllocation(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "command is required")
 	}
 	result, err := h.server.ExecAllocation(c.Request().Context(), requestNamespace(c), c.Param("id"), request.Task, request.Command)
-	if errors.Is(err, ErrTaskSelection) {
-		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-	}
 	if err != nil {
-		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+		return h.agentRequestError(err, noRunningTaskMessage(c.Param("id"), request.Task))
 	}
 	return c.JSON(http.StatusOK, result)
 }
@@ -744,11 +742,8 @@ func (h *Handler) handleCreateExecSession(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "terminal dimensions are too large")
 	}
 	result, err := h.server.CreateExecSession(c.Request().Context(), requestNamespace(c), c.Param("id"), &request)
-	if errors.Is(err, ErrTaskSelection) {
-		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-	}
 	if err != nil {
-		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+		return h.agentRequestError(err, noRunningTaskMessage(c.Param("id"), request.Task))
 	}
 	return c.JSON(http.StatusCreated, result)
 }
@@ -762,7 +757,7 @@ func (h *Handler) handleExecSessionInput(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 	}
 	if err := h.server.WriteExecSession(c.Request().Context(), requestNamespace(c), c.Param("id"), c.Param("session"), &request); err != nil {
-		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+		return h.agentRequestError(err, "")
 	}
 	return c.NoContent(http.StatusNoContent)
 }
@@ -780,7 +775,7 @@ func (h *Handler) handleExecSessionOutput(c *echo.Context) error {
 	}
 	result, err := h.server.ReadExecSession(c.Request().Context(), requestNamespace(c), c.Param("id"), c.Param("session"), offset)
 	if err != nil {
-		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+		return h.agentRequestError(err, "")
 	}
 	return c.JSON(http.StatusOK, result)
 }
@@ -797,7 +792,7 @@ func (h *Handler) handleExecSessionResize(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "terminal dimensions must be between 1 and 1000")
 	}
 	if err := h.server.ResizeExecSession(c.Request().Context(), requestNamespace(c), c.Param("id"), c.Param("session"), &request); err != nil {
-		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+		return h.agentRequestError(err, "")
 	}
 	return c.NoContent(http.StatusNoContent)
 }
@@ -807,7 +802,7 @@ func (h *Handler) handleExecSessionClose(c *echo.Context) error {
 		return err
 	}
 	if err := h.server.CloseExecSession(c.Request().Context(), requestNamespace(c), c.Param("id"), c.Param("session")); err != nil {
-		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+		return h.agentRequestError(err, "")
 	}
 	return c.NoContent(http.StatusNoContent)
 }
@@ -815,9 +810,51 @@ func (h *Handler) handleExecSessionClose(c *echo.Context) error {
 func (h *Handler) handleAllocationMetrics(c *echo.Context) error {
 	metrics, err := h.server.AllocationMetrics(c.Request().Context(), requestNamespace(c), c.Param("id"))
 	if err != nil {
-		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+		return h.agentRequestError(err, fmt.Sprintf("allocation %s is not running on its node", c.Param("id")))
 	}
 	return c.JSON(http.StatusOK, metrics)
+}
+
+// agentRequestError maps a failed exec, exec session, or allocation metrics
+// request to its public status. Control-plane lookup failures keep their
+// meaning, and the agent's rejections of the request itself pass through.
+// When notRunning is set, an agent 404 means the control plane knows the
+// allocation but its node has no running target, so it becomes a 409 with
+// that message; otherwise an agent 404 (an unknown exec session) passes
+// through. Transport failures and other agent failures are logged and
+// reported without their details.
+func (h *Handler) agentRequestError(err error, notRunning string) error {
+	var agentErr *client.HTTPError
+	switch {
+	case errors.Is(err, ErrAllocationNotFound):
+		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+	case errors.Is(err, ErrTaskSelection):
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	case errors.As(err, &agentErr):
+		switch agentErr.Status {
+		case http.StatusNotFound:
+			if notRunning != "" {
+				return echo.NewHTTPError(http.StatusConflict, notRunning)
+			}
+			return echo.NewHTTPError(http.StatusNotFound, agentErr.Message())
+		case http.StatusBadRequest, http.StatusConflict, http.StatusRequestEntityTooLarge:
+			return echo.NewHTTPError(agentErr.Status, agentErr.Message())
+		case http.StatusServiceUnavailable:
+			return echo.NewHTTPError(http.StatusServiceUnavailable, "node agent unavailable: "+agentErr.Message())
+		}
+		h.server.log.Warn("agent request failed", "error", err)
+		return echo.NewHTTPError(http.StatusBadGateway, "node agent failed to handle the request")
+	default:
+		h.server.log.Warn("agent request failed", "error", err)
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "node agent unavailable")
+	}
+}
+
+func noRunningTaskMessage(id, task string) string {
+	if task == "" {
+		return fmt.Sprintf("allocation %s has no running task", id)
+	}
+	return fmt.Sprintf("allocation %s task %q is not running", id, task)
 }
 
 func (h *Handler) handleEvents(c *echo.Context) error {
