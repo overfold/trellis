@@ -35,7 +35,9 @@ type Agent struct {
 	nodeID       uuid.UUID
 	allocations  map[string]*Allocation
 	execSessions map[string]*execSession
-	healthProbe  string
+	// execSessionsClosed refuses new exec sessions once the agent shuts down.
+	execSessionsClosed bool
+	healthProbe        string
 
 	log *slog.Logger
 
@@ -87,12 +89,6 @@ func (a *Agent) lockAllocationOperation(allocationID string) func() {
 		}
 		a.operationMu.Unlock()
 	}
-}
-
-type execSession struct {
-	AllocationID string
-	Task         string
-	Terminal     runtime.TerminalSession
 }
 
 // Allocation contains agent-local allocation state.
@@ -152,6 +148,10 @@ var (
 	ErrExecutionConflict = errors.New("allocation execution metadata conflict")
 	// ErrExecSessionNotFound indicates that an interactive exec session does not exist.
 	ErrExecSessionNotFound = errors.New("exec session not found")
+	// ErrAgentShuttingDown indicates that the agent refuses new work while it shuts down.
+	ErrAgentShuttingDown = errors.New("agent is shutting down")
+	// ErrExecTaskRequired indicates that an exec request must name one of several running tasks.
+	ErrExecTaskRequired = errors.New("exec task selection required")
 	// ErrRestartBudgetExhausted indicates that an allocation generation failed
 	// terminally after exhausting its restart policy.
 	ErrRestartBudgetExhausted = errors.New("restart budget exhausted")
@@ -307,6 +307,7 @@ func (a *Agent) Init(ctx context.Context) {
 
 	go a.runHeartbeatLoop(ctx)
 	go a.reconciler.Run(ctx)
+	go a.runExecSessionReaper(ctx)
 }
 
 func (a *Agent) recover(ctx context.Context) error {
@@ -1227,168 +1228,6 @@ func (a *Agent) releaseOrphanedStaging(ctx context.Context, allocID string) erro
 	return nil
 }
 
-// ExecAllocation runs a command in an allocation task container and returns its output.
-func (a *Agent) ExecAllocation(ctx context.Context, allocID, task string, command []string) (*api.AgentExecResponse, error) {
-	a.mu.RLock()
-	var containerID string
-	for k, alloc := range a.allocations {
-		if alloc.AllocationID == allocID && (task == "" || alloc.TaskName == task) {
-			containerID = alloc.ContainerID
-			_ = k
-			break
-		}
-	}
-	a.mu.RUnlock()
-	if containerID == "" {
-		return nil, fmt.Errorf("%w: %s", ErrAllocationNotFound, allocID)
-	}
-	stdout, stderr, exitCode, err := a.runtime.ExecOutput(ctx, containerID, command)
-	if err != nil {
-		return nil, fmt.Errorf("exec in container %s: %w", containerID, err)
-	}
-	return &api.AgentExecResponse{
-		Stdout:   string(stdout),
-		Stderr:   string(stderr),
-		ExitCode: exitCode,
-	}, nil
-}
-
-// CreateExecSession starts a persistent interactive terminal in an allocation task.
-func (a *Agent) CreateExecSession(ctx context.Context, allocID, task string, command []string, term string, cols, rows uint32) (*api.ExecSessionResponse, error) {
-	a.mu.RLock()
-	var containerID, taskName string
-	for _, alloc := range a.allocations {
-		if alloc.AllocationID == allocID && (task == "" || alloc.TaskName == task) {
-			containerID = alloc.ContainerID
-			taskName = alloc.TaskName
-			break
-		}
-	}
-	a.mu.RUnlock()
-	if containerID == "" {
-		return nil, fmt.Errorf("%w: %s", ErrAllocationNotFound, allocID)
-	}
-	terminal, err := a.runtime.StartTerminal(ctx, containerID, command, term, cols, rows)
-	if err != nil {
-		return nil, fmt.Errorf("start terminal in container %s: %w", containerID, err)
-	}
-	sessionID := uuid.NewString()
-	a.mu.Lock()
-	a.execSessions[sessionID] = &execSession{AllocationID: allocID, Task: taskName, Terminal: terminal}
-	a.mu.Unlock()
-	return &api.ExecSessionResponse{ID: sessionID}, nil
-}
-
-// WriteExecSession writes raw bytes to an interactive terminal.
-func (a *Agent) WriteExecSession(allocID, sessionID string, data []byte) error {
-	a.mu.RLock()
-	session := a.execSessions[sessionID]
-	a.mu.RUnlock()
-	if session == nil || session.AllocationID != allocID {
-		return fmt.Errorf("%w: %s", ErrExecSessionNotFound, sessionID)
-	}
-	if _, err := session.Terminal.Write(data); err != nil {
-		return fmt.Errorf("write exec session %s: %w", sessionID, err)
-	}
-	return nil
-}
-
-// ReadExecSession reads terminal bytes produced since offset.
-func (a *Agent) ReadExecSession(allocID, sessionID string, offset int64) (*api.ExecSessionOutputResponse, error) {
-	a.mu.RLock()
-	session := a.execSessions[sessionID]
-	a.mu.RUnlock()
-	if session == nil || session.AllocationID != allocID {
-		return nil, fmt.Errorf("%w: %s", ErrExecSessionNotFound, sessionID)
-	}
-	data, next, exited, exitCode, err := session.Terminal.Read(offset)
-	if err != nil {
-		return nil, fmt.Errorf("read exec session %s: %w", sessionID, err)
-	}
-	return &api.ExecSessionOutputResponse{
-		DataBase64: base64.StdEncoding.EncodeToString(data),
-		NextOffset: next,
-		Exited:     exited,
-		ExitCode:   exitCode,
-	}, nil
-}
-
-// ResizeExecSession updates the terminal dimensions.
-func (a *Agent) ResizeExecSession(ctx context.Context, allocID, sessionID string, cols, rows uint32) error {
-	a.mu.RLock()
-	session := a.execSessions[sessionID]
-	a.mu.RUnlock()
-	if session == nil || session.AllocationID != allocID {
-		return fmt.Errorf("%w: %s", ErrExecSessionNotFound, sessionID)
-	}
-	if err := session.Terminal.Resize(ctx, cols, rows); err != nil {
-		return fmt.Errorf("resize exec session %s: %w", sessionID, err)
-	}
-	return nil
-}
-
-// CloseExecSession terminates and forgets an interactive terminal.
-func (a *Agent) CloseExecSession(ctx context.Context, allocID, sessionID string) error {
-	a.mu.Lock()
-	session := a.execSessions[sessionID]
-	if session == nil || session.AllocationID != allocID {
-		a.mu.Unlock()
-		return fmt.Errorf("%w: %s", ErrExecSessionNotFound, sessionID)
-	}
-	delete(a.execSessions, sessionID)
-	a.mu.Unlock()
-	if err := session.Terminal.Close(ctx); err != nil {
-		return fmt.Errorf("close exec session %s: %w", sessionID, err)
-	}
-	return nil
-}
-
-func (a *Agent) closeExecSessionsForAllocation(ctx context.Context, allocID string) {
-	a.mu.Lock()
-	var sessions []runtime.TerminalSession
-	for id, session := range a.execSessions {
-		if session.AllocationID == allocID {
-			sessions = append(sessions, session.Terminal)
-			delete(a.execSessions, id)
-		}
-	}
-	a.mu.Unlock()
-	for _, session := range sessions {
-		if err := session.Close(ctx); err != nil {
-			a.log.Warn("close exec session", "allocation", allocID, "error", err)
-		}
-	}
-}
-
-// AllocationMetrics returns resource usage for all tasks in an allocation.
-func (a *Agent) AllocationMetrics(ctx context.Context, allocID string) ([]api.AgentTaskMetrics, error) {
-	a.mu.RLock()
-	var tasks []Allocation
-	for _, alloc := range a.allocations {
-		if alloc.AllocationID == allocID {
-			tasks = append(tasks, *alloc)
-		}
-	}
-	a.mu.RUnlock()
-	if len(tasks) == 0 {
-		return nil, fmt.Errorf("%w: %s", ErrAllocationNotFound, allocID)
-	}
-	result := make([]api.AgentTaskMetrics, 0, len(tasks))
-	for _, task := range tasks {
-		m, err := a.runtime.Metrics(ctx, task.ContainerID)
-		if err != nil {
-			a.log.Warn("metrics unavailable", "container", task.ContainerID, "error", err)
-			continue
-		}
-		result = append(result, api.AgentTaskMetrics{
-			Task:                task.TaskName,
-			CPUUsageNanoseconds: m.CPUUsageNanoseconds,
-			MemoryUsageBytes:    m.MemoryUsageBytes,
-		})
-	}
-	return result, nil
-}
-
 // Logs opens the log stream for an allocation.
 func (a *Agent) Logs(ctx context.Context, allocID string, follow bool, tail int) (io.ReadCloser, error) {
 	a.mu.RLock()
@@ -1440,6 +1279,7 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string) error {
 	}
 	a.reconciler.BeginStop(allocID)
 	persistStopErr := a.markAllocationStopping(allocID)
+	a.closeExecSessionsForTask(ctx, allocID, containerID)
 	if !containerMissing {
 		if err := a.runtime.Stop(ctx, containerID); err != nil {
 			return errors.Join(persistStopErr, fmt.Errorf("stop container %s: %w", containerID, err))
@@ -1447,7 +1287,6 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string) error {
 	}
 
 	var errs []error
-	a.closeExecSessionsForAllocation(ctx, alloc.AllocationID)
 	a.health.DeregisterTask(allocID)
 	if err := a.reconciler.Untrack(allocID); err != nil {
 		errs = append(errs, fmt.Errorf("untrack allocation %s: %w", allocID, err))
