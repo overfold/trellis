@@ -362,25 +362,38 @@ func TestRunAllocationObservesRecoveredAllocationOnDemand(t *testing.T) {
 	}
 }
 
-func TestRecoverRetryAdoptsOlderGenerationAsStopping(t *testing.T) {
-	rt := &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning}, listErr: errors.New("containerd unavailable")}
-	agent, _ := newRecoveryTestAgent(t, rt)
-	if err := agent.recover(context.Background()); err == nil {
-		t.Fatal("recover succeeded despite listing failure")
-	}
-	newer := recoveryTestAllocation(0)
-	newer.ID, newer.ContainerID, newer.Generation = "task-g2", "task-g2", 2
-	agent.allocations[newer.ID] = newer
+func TestRecoverRetryStopsOlderGenerationFoundLate(t *testing.T) {
+	for _, stopErr := range []error{nil, errors.New("stop failed")} {
+		rt := &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning}, listErr: errors.New("containerd unavailable"), stopErr: stopErr}
+		agent, local := newRecoveryTestAgent(t, rt)
+		if err := agent.recover(context.Background()); err == nil {
+			t.Fatal("recover succeeded despite listing failure")
+		}
+		newer := recoveryTestAllocation(0)
+		newer.ID, newer.ContainerID, newer.Generation = "task-g2", "task-g2", 2
+		agent.allocations[newer.ID] = newer
 
-	rt.listErr = nil
-	rt.containers = []runtime.ContainerInfo{{ID: "task", Status: runtime.StatusRunning, Labels: recoveryTestLabels(recoveryTestAllocation(0))}}
-	agent.retryRecovery(context.Background())
-	older := agent.allocations["task"]
-	if older == nil || older.Status != "stopping" {
-		t.Fatalf("older generation = %+v, want stopping", older)
-	}
-	if state := agent.reconciler.states["task"]; state == nil || !state.stopping {
-		t.Fatal("older generation regained local restarts")
+		rt.listErr = nil
+		rt.containers = []runtime.ContainerInfo{{ID: "task", Status: runtime.StatusRunning, Labels: recoveryTestLabels(recoveryTestAllocation(0))}}
+		agent.retryRecovery(context.Background())
+		if rt.stopCount != 1 {
+			t.Fatalf("stop calls for superseded generation = %d, want 1", rt.stopCount)
+		}
+		older := agent.allocations["task"]
+		var persisted Allocation
+		persistErr := local.Get(allocationRecordKey("task"), &persisted)
+		if stopErr == nil {
+			if older != nil || persistErr == nil {
+				t.Fatalf("superseded generation retained after stop: %+v", older)
+			}
+			continue
+		}
+		if older == nil || older.Status != "stopping" || persistErr != nil || persisted.Status != "stopping" {
+			t.Fatalf("superseded generation after failed stop = %+v (record %+v, %v), want retained stopping", older, persisted, persistErr)
+		}
+		if state := agent.reconciler.states["task"]; state == nil || !state.stopping {
+			t.Fatal("superseded generation regained local restarts")
+		}
 	}
 }
 
@@ -463,5 +476,25 @@ func TestRecoverRetryKeepsListingUntilUnrecordedContainerIsInspected(t *testing.
 	rt.inspectErr = errdefs.ErrNotFound
 	if agent.retryRecovery(context.Background()) {
 		t.Fatal("retry kept listing after the unrecorded container was confirmed gone")
+	}
+}
+
+func TestRecoverKeepsListingWhileUnreadableContainerIsUnaccounted(t *testing.T) {
+	rt := &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{}}
+	rt.containers = []runtime.ContainerInfo{{ID: "unreadable", Status: runtime.StatusUnknown}}
+	agent, _ := newRecoveryTestAgent(t, rt)
+	if err := agent.recover(context.Background()); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if !agent.recoveryPending() {
+		t.Fatal("recovery stopped listing while an unreadable container was unaccounted for")
+	}
+	rt.status = runtime.StatusRunning
+	rt.containers = []runtime.ContainerInfo{{ID: "unreadable", Status: runtime.StatusRunning, Labels: recoveryTestLabels(recoveryTestAllocation(0))}}
+	if agent.retryRecovery(context.Background()) {
+		t.Fatal("retry kept listing after the container became readable")
+	}
+	if agent.allocations["unreadable"] == nil {
+		t.Fatal("readable unrecorded container was not adopted")
 	}
 }

@@ -643,6 +643,11 @@ func (c *ContainerdRuntime) ListManaged(ctx context.Context, cluster string) ([]
 		observed.Labels = info.Labels
 		result = append(result, *observed)
 	}
+	// A cancelled context turns late lookups into unknown entries, so the
+	// listing is incomplete rather than authoritative.
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("list containers: %w", err)
+	}
 	return result, nil
 }
 

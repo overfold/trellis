@@ -137,6 +137,15 @@ const (
 	recoveryRetryMaxDelay = 30 * time.Second
 )
 
+// reportedHealth is the health an allocation reports; recovered allocations
+// whose container has not been observed report unknown.
+func reportedHealth(allocation *Allocation) string {
+	if allocation.unobserved {
+		return "unknown"
+	}
+	return allocation.Health
+}
+
 func allocationNetworkAddress(allocation *Allocation) string {
 	if allocation == nil || allocation.Network == nil {
 		return ""
@@ -351,6 +360,9 @@ func (a *Agent) recover(ctx context.Context) error {
 		seen[container.ID] = true
 		a.recoverContainer(container, stored[container.ID])
 	}
+	a.mu.Lock()
+	a.recoveryListPending = a.hasUnreadableUnknownLocked(containers)
+	a.mu.Unlock()
 	for containerID, allocation := range stored {
 		if containerID == "" || seen[containerID] {
 			continue
@@ -578,7 +590,7 @@ func (a *Agent) retryRecovery(ctx context.Context) bool {
 			}
 		}
 		a.mu.Lock()
-		a.recoveryListPending = stillPending
+		a.recoveryListPending = stillPending || a.hasUnreadableUnknownLocked(containers)
 		a.mu.Unlock()
 	}
 	return a.recoveryPending()
@@ -604,10 +616,16 @@ func (a *Agent) recoveryPending() bool {
 // avoid resurrecting an allocation stopped in the meantime. It reports false
 // when the container must be listed again.
 func (a *Agent) adoptUnrecorded(ctx context.Context, listed runtime.ContainerInfo) bool {
+	a.mu.RLock()
+	_, known := a.allocations[listed.ID]
+	a.mu.RUnlock()
+	if known {
+		return true
+	}
 	unlock := a.lockAllocationOperation(listed.Labels["trellis.allocation-id"])
 	defer unlock()
 	a.mu.RLock()
-	_, known := a.allocations[listed.ID]
+	_, known = a.allocations[listed.ID]
 	a.mu.RUnlock()
 	if known {
 		return true
@@ -630,11 +648,26 @@ func (a *Agent) adoptUnrecorded(ctx context.Context, listed runtime.ContainerInf
 		return true
 	}
 	if a.hasNewerGeneration(allocation) {
-		// Starts proceeded while this container was unlisted. Keep the older
-		// generation restart-suppressed until the control plane stops it.
+		// A newer generation started while this container was unlisted, so
+		// its start could not stop it and the control plane rejects stops for
+		// the older generation. Stop it here, as a start does for known older
+		// generations; a failed stop keeps it retained and restart-suppressed.
 		allocation.Status = "stopping"
+		a.adoptPorts(allocation)
+		a.mu.Lock()
+		a.allocations[allocation.ID] = allocation
+		persistErr := a.persistAllocation(allocation)
+		a.mu.Unlock()
+		if persistErr != nil {
+			a.log.Error("record superseded allocation", "allocation", allocation.AllocationID, "error", persistErr)
+		}
+		a.reconciler.TrackStopping(allocation.ID, false, nil)
+		if err := a.stopAllocation(context.WithoutCancel(ctx), allocation.ID); err != nil {
+			a.log.Error("stop superseded allocation", "allocation", allocation.AllocationID, "error", err)
+		}
+		return true
 	}
-	a.recoverContainer(container, allocation)
+	a.recoverContainer(container, nil)
 	return true
 }
 
@@ -649,6 +682,18 @@ func (a *Agent) hasNewerGeneration(allocation *Allocation) bool {
 	return false
 }
 
+// hasUnreadableUnknownLocked reports whether a listing contained a container
+// whose metadata could not be read and that no allocation accounts for. Such a
+// container may be an unrecorded Trellis container, so listing is retried.
+func (a *Agent) hasUnreadableUnknownLocked(containers []runtime.ContainerInfo) bool {
+	for _, container := range containers {
+		if _, known := a.allocations[container.ID]; !known && container.Labels == nil && !observedStatus(container.Status) {
+			return true
+		}
+	}
+	return false
+}
+
 func observedStatus(status runtime.ContainerStatus) bool {
 	return status == runtime.StatusRunning || status == runtime.StatusCreated || status == runtime.StatusStopped
 }
@@ -656,16 +701,9 @@ func observedStatus(status runtime.ContainerStatus) bool {
 func (a *Agent) reobserve(ctx context.Context, id, allocationID string, container runtime.ContainerInfo, found bool) {
 	unlock := a.lockAllocationOperation(allocationID)
 	defer unlock()
-	a.mu.RLock()
-	current := a.allocations[id]
-	var allocation Allocation
-	if current != nil {
-		allocation = *current
-		allocation.Ports = append([]*runtime.Port(nil), current.Ports...)
-	}
-	a.mu.RUnlock()
+	allocation, ok := a.snapshotAllocation(id)
 	// A start or stop may have replaced or removed the allocation meanwhile.
-	if current == nil || !allocation.unobserved {
+	if !ok || !allocation.unobserved {
 		return
 	}
 	if !found {
@@ -684,15 +722,8 @@ func (a *Agent) reobserve(ctx context.Context, id, allocationID string, containe
 // missing and removed the allocation. The caller holds the allocation
 // operation lock.
 func (a *Agent) observeRecovered(ctx context.Context, allocID string) (string, error) {
-	a.mu.RLock()
-	current := a.allocations[allocID]
-	var allocation Allocation
-	if current != nil {
-		allocation = *current
-		allocation.Ports = append([]*runtime.Port(nil), current.Ports...)
-	}
-	a.mu.RUnlock()
-	if current == nil {
+	allocation, ok := a.snapshotAllocation(allocID)
+	if !ok {
 		return "", fmt.Errorf("%w: %s", ErrAllocationNotFound, allocID)
 	}
 	if !allocation.unobserved {
@@ -706,12 +737,20 @@ func (a *Agent) observeRecovered(ctx context.Context, allocID string) (string, e
 			if listErr != nil {
 				return "", fmt.Errorf("observe recovered allocation %s: %w", allocID, listErr)
 			}
+			listed := false
 			for _, container := range containers {
-				if container.ID == allocation.ContainerID {
+				if container.ID != allocation.ContainerID {
+					continue
+				}
+				if !observedStatus(container.Status) {
 					return "", fmt.Errorf("observe recovered allocation %s: container state is %q", allocID, container.Status)
 				}
+				listed = true
+				a.recoverContainer(container, &allocation)
 			}
-			a.recoverMissing(ctx, &allocation)
+			if !listed {
+				a.recoverMissing(ctx, &allocation)
+			}
 		}
 	} else if err != nil {
 		return "", fmt.Errorf("observe recovered allocation %s: %w", allocID, err)
@@ -731,6 +770,21 @@ func (a *Agent) observeRecovered(ctx context.Context, allocID string) (string, e
 		return recovered.Status, nil
 	}
 	return "", nil
+}
+
+// snapshotAllocation copies an allocation so recovery can reclassify it
+// without mutating state that readers share.
+func (a *Agent) snapshotAllocation(id string) (Allocation, bool) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	current := a.allocations[id]
+	if current == nil {
+		return Allocation{}, false
+	}
+	allocation := *current
+	allocation.Ports = append([]*runtime.Port(nil), current.Ports...)
+	allocation.Mounts = append([]*runtime.Mount(nil), current.Mounts...)
+	return allocation, true
 }
 
 // runRecoveryRetry retries recovery until every recorded allocation has been
@@ -796,9 +850,7 @@ func (a *Agent) GetAllocations() []*Allocation {
 		allocationCopy := *alloc
 		allocationCopy.Ports = append([]*runtime.Port(nil), alloc.Ports...)
 		allocationCopy.Mounts = append([]*runtime.Mount(nil), alloc.Mounts...)
-		if alloc.unobserved {
-			allocationCopy.Health = "unknown"
-		}
+		allocationCopy.Health = reportedHealth(alloc)
 		result = append(result, &allocationCopy)
 	}
 
@@ -1825,11 +1877,7 @@ func (a *Agent) allocationStatuses() []api.AllocationStatus {
 		for _, p := range alloc.Ports {
 			ports = append(ports, api.PortMapping{HostPort: p.HostPort, ContainerPort: p.ContainerPort})
 		}
-		health := alloc.Health
-		if alloc.unobserved {
-			health = "unknown"
-		}
-		actual = append(actual, api.AllocationStatus{ID: alloc.AllocationID, Generation: alloc.Generation, Task: alloc.TaskName, Address: allocationNetworkAddress(alloc), Phase: lifecycle.Phase(alloc.Status), Health: lifecycle.Health(health), Ports: ports})
+		actual = append(actual, api.AllocationStatus{ID: alloc.AllocationID, Generation: alloc.Generation, Task: alloc.TaskName, Address: allocationNetworkAddress(alloc), Phase: lifecycle.Phase(alloc.Status), Health: lifecycle.Health(reportedHealth(alloc)), Ports: ports})
 	}
 	return actual
 }
