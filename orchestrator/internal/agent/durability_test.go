@@ -3,9 +3,13 @@ package agent
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/clofour/trellis/internal/api"
+	"github.com/clofour/trellis/internal/runtime"
 	"github.com/clofour/trellis/internal/storage"
 )
 
@@ -91,5 +95,144 @@ func TestAgentMutationsRequirePositiveFences(t *testing.T) {
 	}
 	if agent.allocations["task"] == nil {
 		t.Fatal("invalid stop removed allocation")
+	}
+}
+
+func TestRecoverAcceptsEmptyFirstBoot(t *testing.T) {
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	rt := &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{}}
+	agent := newOperationTestAgent(t, rt)
+	agent.ConfigureDurability(local, "test")
+
+	if err := agent.recover(context.Background()); err != nil {
+		t.Fatalf("recover empty first boot: %v", err)
+	}
+	var epoch uint64
+	if err := local.Get("agent/control-epoch", &epoch); err != nil || epoch != 0 {
+		t.Fatalf("initialized control epoch = %d, error = %v", epoch, err)
+	}
+}
+
+func TestInitRejectsIncompleteDurableFencingState(t *testing.T) {
+	validAllocation := Allocation{
+		ID: "task", ContainerID: "task", AllocationID: "allocation",
+		Generation: 1, JobRevision: 1, ExecutionHash: "hash",
+	}
+
+	tests := []struct {
+		name    string
+		prepare func(*testing.T, string, *storage.LocalStorage) runtime.ContainerRuntime
+		want    string
+	}{
+		{
+			name: "malformed control epoch",
+			prepare: func(t *testing.T, root string, _ *storage.LocalStorage) runtime.ContainerRuntime {
+				if err := os.MkdirAll(filepath.Join(root, "agent"), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(root, "agent", "control-epoch"), []byte("{"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{}}
+			},
+			want: "read control-plane epoch",
+		},
+		{
+			name: "missing control epoch with allocation record",
+			prepare: func(t *testing.T, _ string, local *storage.LocalStorage) runtime.ContainerRuntime {
+				if err := local.Put(allocationRecordKey(validAllocation.ID), &validAllocation); err != nil {
+					t.Fatal(err)
+				}
+				return &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{}}
+			},
+			want: "control-plane epoch is missing",
+		},
+		{
+			name: "malformed allocation record",
+			prepare: func(t *testing.T, root string, local *storage.LocalStorage) runtime.ContainerRuntime {
+				if err := local.Put("agent/control-epoch", uint64(1)); err != nil {
+					t.Fatal(err)
+				}
+				allocationDir := filepath.Join(root, "agent", "allocations")
+				if err := os.MkdirAll(allocationDir, 0o750); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(allocationDir, "broken"), []byte("{"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{}}
+			},
+			want: "decode allocation recovery record",
+		},
+		{
+			name: "unreadable allocation record",
+			prepare: func(t *testing.T, root string, local *storage.LocalStorage) runtime.ContainerRuntime {
+				if err := local.Put("agent/control-epoch", uint64(1)); err != nil {
+					t.Fatal(err)
+				}
+				allocationDir := filepath.Join(root, "agent", "allocations")
+				if err := os.MkdirAll(allocationDir, 0o750); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Join(root, "missing"), filepath.Join(allocationDir, "unreadable")); err != nil {
+					t.Fatal(err)
+				}
+				return &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{}}
+			},
+			want: "read allocation recovery records",
+		},
+		{
+			name: "runtime listing failure",
+			prepare: func(t *testing.T, _ string, local *storage.LocalStorage) runtime.ContainerRuntime {
+				if err := local.Put("agent/control-epoch", uint64(1)); err != nil {
+					t.Fatal(err)
+				}
+				return &listingRecoveryRuntime{
+					reconcilerRuntime: &reconcilerRuntime{},
+					listErr:           errors.New("runtime unavailable"),
+				}
+			},
+			want: "list managed containers",
+		},
+		{
+			name: "runtime container without durable record",
+			prepare: func(t *testing.T, _ string, local *storage.LocalStorage) runtime.ContainerRuntime {
+				if err := local.Put("agent/control-epoch", uint64(1)); err != nil {
+					t.Fatal(err)
+				}
+				return &listingRecoveryRuntime{
+					reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning},
+					containers: []runtime.ContainerInfo{{
+						ID: "task", Status: runtime.StatusRunning,
+						Labels: map[string]string{
+							"trellis.allocation-id":         "allocation",
+							"trellis.allocation-generation": "1",
+							"trellis.job-revision":          "1",
+							"trellis.execution-hash":        "hash",
+						},
+					}},
+				}
+			},
+			want: "has no durable allocation record",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			local := storage.NewLocalStorage(root)
+			if err := local.Init(); err != nil {
+				t.Fatal(err)
+			}
+			agent := newOperationTestAgent(t, tt.prepare(t, root, local))
+			agent.ConfigureDurability(local, "test")
+			err := agent.Init(context.Background())
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Init error = %v, want containing %q", err, tt.want)
+			}
+		})
 	}
 }

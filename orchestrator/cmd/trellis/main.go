@@ -409,7 +409,9 @@ func run(parent context.Context, cfg *config) error {
 		}
 		ag.SetLabels(labels)
 	}
-	ag.Init(ctx)
+	if err := ag.Init(ctx); err != nil {
+		return fmt.Errorf("initialize allocation agent: %w", err)
+	}
 	// Runs before the runtime client closes, so terminals can still be killed.
 	defer ag.CloseExecSessions(context.Background())
 

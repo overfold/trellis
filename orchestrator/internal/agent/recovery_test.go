@@ -70,6 +70,9 @@ func newRecoveryTestAgent(t *testing.T, rt runtime.ContainerRuntime, records ...
 	if err := local.Init(); err != nil {
 		t.Fatal(err)
 	}
+	if err := local.Put("agent/control-epoch", uint64(0)); err != nil {
+		t.Fatal(err)
+	}
 	writer := newOperationTestAgent(t, rt)
 	writer.ConfigureDurability(local, "test")
 	for _, record := range records {
@@ -250,21 +253,15 @@ func TestRecoverUnreadableContainerKeepsRecordAndResources(t *testing.T) {
 	rt := &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{}}
 	record := recoveryTestAllocation(18083)
 	record.Status = "stopping"
-	// An unreadable container is listed without labels; it must not be
-	// confused with an absent container.
-	rt.containers = []runtime.ContainerInfo{
-		{ID: "task", Status: runtime.StatusUnknown},
-		{ID: "foreign", Status: runtime.StatusUnknown},
-	}
+	// An unreadable recorded container is listed without labels; it must not
+	// be confused with an absent container.
+	rt.containers = []runtime.ContainerInfo{{ID: "task", Status: runtime.StatusUnknown}}
 	agent, _ := newRecoveryTestAgent(t, rt, record)
 
 	if err := agent.recover(context.Background()); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
 	assertUnobservedAllocation(t, agent, "task", "stopping", 18083)
-	if agent.allocations["foreign"] != nil {
-		t.Fatal("recovery adopted an unidentifiable container")
-	}
 
 	// Once readable, a stopping record stays stopping and restart-suppressed.
 	rt.containers = []runtime.ContainerInfo{{ID: "task", Status: runtime.StatusRunning, Labels: recoveryTestLabels(record)}}
@@ -518,23 +515,12 @@ func TestRecoverRetryAdoptsUninspectableUnrecordedContainerAsUnobserved(t *testi
 	}
 }
 
-func TestRecoverKeepsListingWhileUnreadableContainerIsUnaccounted(t *testing.T) {
+func TestRecoverRejectsUnreadableContainerWithoutRecord(t *testing.T) {
 	rt := &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{}}
 	rt.containers = []runtime.ContainerInfo{{ID: "unreadable", Status: runtime.StatusUnknown}}
 	agent, _ := newRecoveryTestAgent(t, rt)
-	if err := agent.recover(context.Background()); err != nil {
-		t.Fatalf("recover: %v", err)
-	}
-	if !agent.recoveryPending() {
-		t.Fatal("recovery stopped listing while an unreadable container was unaccounted for")
-	}
-	rt.status = runtime.StatusRunning
-	rt.containers = []runtime.ContainerInfo{{ID: "unreadable", Status: runtime.StatusRunning, Labels: recoveryTestLabels(recoveryTestAllocation(0))}}
-	if agent.retryRecovery(context.Background()) {
-		t.Fatal("retry kept listing after the container became readable")
-	}
-	if agent.allocations["unreadable"] == nil {
-		t.Fatal("readable unrecorded container was not adopted")
+	if err := agent.recover(context.Background()); err == nil {
+		t.Fatal("recover accepted an unreadable container without durable state")
 	}
 }
 
