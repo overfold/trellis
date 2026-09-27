@@ -97,6 +97,12 @@ type Server struct {
 	secrets            *secretstore.Store
 	events             *EventBus
 
+	// resumeMu guards the per-term record of acknowledged allocation
+	// resumes. It is a leaf lock: nothing else is acquired while it is held.
+	resumeMu    sync.Mutex
+	resumes     map[resumeDeliveryKey]uint64
+	resumeEpoch uint64
+
 	// replacementPolicy bounds failed-allocation replacement and terminal
 	// record retention; the zero value selects DefaultReplacementPolicy.
 	replacementPolicy ReplacementPolicy
@@ -1106,6 +1112,7 @@ func (s *Server) resumeNodeAllocations(ctx context.Context, id uuid.UUID) error 
 	}
 	allocations := append([]*Allocation(nil), s.allocations...)
 	s.mu.RUnlock()
+	var resumes []resumeDelivery
 	for _, allocation := range allocations {
 		s.mu.RLock()
 		allocation.mu.Lock()
@@ -1136,10 +1143,9 @@ func (s *Server) resumeNodeAllocations(ctx context.Context, id uuid.UUID) error 
 		address := fmt.Sprintf("%s:%d", node.Host, node.Port)
 		request := &api.DrainAllocationRequest{AllocationID: allocation.ID, Generation: allocation.Generation, Epoch: s.controlEpoch, Sequence: allocation.DrainSequence + 1}
 		s.mu.RUnlock()
-		if err := s.client.ResumeAllocation(ctx, id, address, request); err != nil {
-			allocation.mu.Unlock()
-			return fmt.Errorf("resume allocation %s: %w", allocation.ID, err)
-		}
+		// Persist the resume before any agent sees it. If a later save fails,
+		// the node stays draining and reconciliation re-drains at a higher
+		// sequence, so no agent is left ahead of durable state.
 		allocation.Draining = false
 		allocation.DrainReason = ""
 		allocation.DrainSequence = request.Sequence
@@ -1151,6 +1157,7 @@ func (s *Server) resumeNodeAllocations(ctx context.Context, id uuid.UUID) error 
 			return fmt.Errorf("persist resumed allocation %s: %w", allocation.ID, err)
 		}
 		allocation.mu.Unlock()
+		resumes = append(resumes, resumeDelivery{allocation: allocation, address: address, request: request})
 	}
 	s.mu.RLock()
 	summary := &NodeSummary{ID: node.ID, Host: node.Host, Port: node.Port, CPUCapacity: node.CPUCapacity, MemoryCapacity: node.MemoryCapacity, CPUAllocatable: node.CPUAllocatable, MemoryAllocatable: node.MemoryAllocatable, OS: node.OS, Arch: node.Arch, Labels: node.Labels, Volumes: node.Volumes, Capabilities: node.Capabilities, Status: NodeStatusHealthy, WireGuardPublicKey: node.WireGuardPublicKey, WireGuardEndpoint: node.WireGuardEndpoint, WireGuardPortBase: node.WireGuardPortBase, WireGuardPortCount: node.WireGuardPortCount, LastHeartbeat: node.LastHeartbeat, Version: node.Version}
@@ -1163,7 +1170,53 @@ func (s *Server) resumeNodeAllocations(ctx context.Context, id uuid.UUID) error 
 		node.Status = NodeStatusHealthy
 	}
 	s.mu.Unlock()
+	// The undrain is durable. A resume the agent does not acknowledge now is
+	// redelivered by reconciliation.
+	for _, resume := range resumes {
+		allocation := resume.allocation
+		allocation.mu.Lock()
+		if allocation.Draining || allocation.DrainSequence != resume.request.Sequence {
+			allocation.mu.Unlock()
+			continue
+		}
+		if err := s.client.ResumeAllocation(ctx, id, resume.address, resume.request); err != nil {
+			s.log.Warn("deliver allocation resume; reconciliation will retry", "allocation", allocation.ID, "node", id, "error", err)
+		} else {
+			s.recordResumeDelivered(resume.request)
+		}
+		allocation.mu.Unlock()
+	}
 	return nil
+}
+
+type resumeDelivery struct {
+	allocation *Allocation
+	address    string
+	request    *api.DrainAllocationRequest
+}
+
+type resumeDeliveryKey struct {
+	allocation string
+	generation uint64
+}
+
+// resumeDelivered reports whether an agent acknowledged the resume at sequence
+// during the current leadership term. The record is renewable delivery state,
+// not desired state: a new term starts empty and redelivers each resume once.
+func (s *Server) resumeDelivered(epoch uint64, allocation string, generation, sequence uint64) bool {
+	s.resumeMu.Lock()
+	defer s.resumeMu.Unlock()
+	return s.resumeEpoch == epoch && s.resumes[resumeDeliveryKey{allocation: allocation, generation: generation}] == sequence
+}
+
+func (s *Server) recordResumeDelivered(request *api.DrainAllocationRequest) {
+	s.resumeMu.Lock()
+	defer s.resumeMu.Unlock()
+	if s.resumes == nil || s.resumeEpoch != request.Epoch {
+		s.resumes = make(map[resumeDeliveryKey]uint64)
+		s.resumeEpoch = request.Epoch
+	}
+	s.resumes[resumeDeliveryKey{allocation: request.AllocationID, generation: request.Generation}] = request.Sequence
 }
 
 // ListJobs returns jobs in a namespace.

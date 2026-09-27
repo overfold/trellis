@@ -509,13 +509,19 @@ func (a *Agent) recoverContainer(container runtime.ContainerInfo, allocation *Al
 		_ = a.reconciler.Untrack(allocation.ID)
 		allocation.unobserved = false
 	}
-	if hadRecord && allocation.ContainerOwnershipUnverified && !a.containerMatchesAllocation(container, allocation) {
-		allocation.Status = "stopping"
-		a.adoptPorts(allocation)
-		a.mu.Lock()
-		a.allocations[allocation.ID] = allocation
-		a.mu.Unlock()
-		return
+	if hadRecord && allocation.ContainerOwnershipUnverified {
+		if !a.containerMatchesAllocation(container, allocation) {
+			allocation.Status = "stopping"
+			a.adoptPorts(allocation)
+			a.mu.Lock()
+			a.allocations[allocation.ID] = allocation
+			a.mu.Unlock()
+			return
+		}
+		// The runtime reports this record's own container with matching
+		// identity labels, so the ambiguous create is resolved. The record
+		// is saved verified below.
+		allocation.ContainerOwnershipUnverified = false
 	}
 	stopping := hadRecord && allocation.Status == "stopping"
 	restartSuppressed := stopping || allocation.Draining
