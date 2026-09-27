@@ -31,12 +31,18 @@ func TestEpochFenceSurvivesRestart(t *testing.T) {
 
 func TestPrepareStartRejectsObsoleteGenerationAndConflict(t *testing.T) {
 	agent := &Agent{allocations: map[string]*Allocation{
-		"task": {ID: "task", AllocationID: "alloc", Generation: 3, ExecutionHash: "same"},
+		"task": {ID: "task", AllocationID: "alloc", Generation: 3, JobRevision: 7, ExecutionHash: "same"},
 	}}
 	if err := agent.PrepareStart(context.Background(), &api.AllocationRequest{AllocationID: "alloc", Generation: 2}); !errors.Is(err, ErrStaleGeneration) {
 		t.Fatalf("expected stale generation, got %v", err)
 	}
-	if err := agent.PrepareStart(context.Background(), &api.AllocationRequest{AllocationID: "alloc", Generation: 3, ExecutionHash: "different"}); !errors.Is(err, ErrExecutionConflict) {
+	if err := agent.PrepareStart(context.Background(), &api.AllocationRequest{AllocationID: "alloc", Generation: 3, JobRevision: 7, ExecutionHash: "different"}); !errors.Is(err, ErrExecutionConflict) {
 		t.Fatalf("expected metadata conflict, got %v", err)
+	}
+	if err := agent.PrepareStart(context.Background(), &api.AllocationRequest{AllocationID: "alloc", Generation: 3, JobRevision: 8, ExecutionHash: "same"}); !errors.Is(err, ErrExecutionConflict) {
+		t.Fatalf("expected revision conflict, got %v", err)
+	}
+	if err := agent.PrepareStart(context.Background(), &api.AllocationRequest{AllocationID: "alloc", Generation: 3, JobRevision: 7, ExecutionHash: "same"}); err != nil {
+		t.Fatalf("expected matching retry to succeed, got %v", err)
 	}
 }
