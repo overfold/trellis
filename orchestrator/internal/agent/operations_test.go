@@ -1310,6 +1310,134 @@ func TestRecoverCreatedAllocationCanBeRetriedByControlPlane(t *testing.T) {
 	}
 }
 
+// recoverCreatedAllocationForRetry persists one non-running allocation record,
+// restarts the agent over it, and returns the recovered agent.
+func recoverCreatedAllocationForRetry(t *testing.T, rt *createdRecoveryRuntime, local *storage.LocalStorage, request *api.AllocationRequest, drainSequence uint64) *Agent {
+	t.Helper()
+	id := rt.managedID
+	first := newOperationTestAgent(t, rt)
+	first.ConfigureDurability(local, "test")
+	first.allocations[id] = &Allocation{
+		ID: id, AllocationID: request.AllocationID, ContainerID: id,
+		Generation: request.Generation, JobRevision: request.JobRevision, ExecutionHash: request.ExecutionHash,
+		Spec: &request.Tasks[0], Status: "starting", Health: "unknown",
+	}
+	if drainSequence != 0 {
+		drain := &api.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Sequence: drainSequence}
+		if err := first.DrainGroup(drain); err != nil {
+			t.Fatalf("drain before agent restart: %v", err)
+		}
+	} else if err := first.persistAllocation(first.allocations[id]); err != nil {
+		t.Fatal(err)
+	}
+
+	second := newOperationTestAgent(t, rt)
+	second.ConfigureDurability(local, "test")
+	if err := second.recover(context.Background()); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if got := second.allocations[id]; got == nil || got.Status != "starting" {
+		t.Fatalf("recovered allocation = %+v, want starting", got)
+	}
+	return second
+}
+
+func assertDrainingAfterStartRetry(t *testing.T, agent *Agent, rt *createdRecoveryRuntime, local *storage.LocalStorage, sequence uint64) {
+	t.Helper()
+	id := rt.managedID
+	got := agent.allocations[id]
+	if got == nil || got.Status != "running" || !got.Draining || got.DrainSequence != sequence {
+		t.Fatalf("allocation after start retry = %+v, want running draining sequence %d", got, sequence)
+	}
+	var persisted Allocation
+	if err := local.Get(allocationRecordKey(id), &persisted); err != nil {
+		t.Fatalf("read persisted allocation: %v", err)
+	}
+	if !persisted.Draining || persisted.DrainSequence != sequence {
+		t.Fatalf("persisted draining=%t sequence=%d, want true/%d", persisted.Draining, persisted.DrainSequence, sequence)
+	}
+	if state := agent.reconciler.states[id]; state == nil || !state.stopping {
+		t.Fatal("draining allocation is not restart-suppressed after start retry")
+	}
+	rt.status = runtime.StatusStopped
+	if err := agent.reconciler.Reconcile(context.Background(), id); err != nil {
+		t.Fatalf("reconcile stopped draining allocation: %v", err)
+	}
+	if rt.restartCount != 0 {
+		t.Fatalf("draining allocation restarted %d times after start retry", rt.restartCount)
+	}
+}
+
+func TestDrainSurvivesAgentRestartAndStartRetry(t *testing.T) {
+	rt := &createdRecoveryRuntime{
+		reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusCreated},
+		managedID:         "allocation-g2-first",
+	}
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	request := operationTestRequest()
+	request.Tasks = request.Tasks[:1]
+	agent := recoverCreatedAllocationForRetry(t, rt, local, request, 7)
+	if state := agent.reconciler.states[rt.managedID]; state == nil || !state.stopping {
+		t.Fatal("recovered draining allocation is not restart-suppressed")
+	}
+
+	if err := agent.RunGroup(context.Background(), request); err != nil {
+		t.Fatalf("control-plane start retry: %v", err)
+	}
+	if rt.startCount != 1 {
+		t.Fatalf("start count = %d, want 1", rt.startCount)
+	}
+	assertDrainingAfterStartRetry(t, agent, rt, local, 7)
+}
+
+func TestStaleResumeAfterStartRetryKeepsDrain(t *testing.T) {
+	rt := &createdRecoveryRuntime{
+		reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusCreated},
+		managedID:         "allocation-g2-first",
+	}
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	request := operationTestRequest()
+	request.Tasks = request.Tasks[:1]
+	// The drain reaches the recovered task before it has reconciler state.
+	agent := recoverCreatedAllocationForRetry(t, rt, local, request, 0)
+	if state := agent.reconciler.states[rt.managedID]; state != nil {
+		t.Fatal("recovered non-running allocation was tracked before start retry")
+	}
+	drain := &api.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Sequence: 5}
+	if err := agent.DrainGroup(drain); err != nil {
+		t.Fatalf("drain recovered allocation: %v", err)
+	}
+
+	if err := agent.RunGroup(context.Background(), request); err != nil {
+		t.Fatalf("control-plane start retry: %v", err)
+	}
+	stale := &api.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Sequence: 3}
+	if err := agent.ResumeGroup(stale); err != nil {
+		t.Fatalf("stale resume: %v", err)
+	}
+	assertDrainingAfterStartRetry(t, agent, rt, local, 5)
+
+	resume := &api.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Sequence: 5}
+	if err := agent.ResumeGroup(resume); err != nil {
+		t.Fatalf("current resume: %v", err)
+	}
+	if agent.allocations[rt.managedID].Draining {
+		t.Fatal("allocation remains draining after current resume")
+	}
+	if err := agent.reconciler.Reconcile(context.Background(), rt.managedID); err != nil {
+		t.Fatalf("reconcile resumed allocation: %v", err)
+	}
+	if rt.restartCount != 1 {
+		t.Fatalf("restart count after resume = %d, want 1", rt.restartCount)
+	}
+}
+
 func TestRecoverNonRunningAllocationDefersRestartToServer(t *testing.T) {
 	for _, durableStatus := range []string{"running", "starting"} {
 		t.Run(durableStatus, func(t *testing.T) {

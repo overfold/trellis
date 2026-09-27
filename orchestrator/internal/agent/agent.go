@@ -736,9 +736,14 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	}
 	a.mu.Lock()
 	existing := a.allocations[allocID]
+	var draining bool
+	var drainSequence uint64
 	if existing != nil {
 		matching := existing.AllocationID == schedulerID && existing.Generation == generation && existing.JobRevision == jobRevision && existing.ExecutionHash == executionHash
 		status := existing.Status
+		// A retried start belongs to the same allocation generation, so it must
+		// not forget a drain or accept an older drain/resume sequence.
+		draining, drainSequence = existing.Draining, existing.DrainSequence
 		a.mu.Unlock()
 		if !matching {
 			return fmt.Errorf("%w: %s", ErrAllocationExists, allocID)
@@ -755,7 +760,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		}
 		a.mu.Lock()
 	}
-	alloc := &Allocation{ID: allocID, ContainerID: allocID, AllocationID: schedulerID, Generation: generation, JobRevision: jobRevision, ExecutionHash: executionHash, Restart: restartPolicy, Namespace: namespace, JobName: jobName, GroupName: groupName, TaskName: taskName, Spec: ts, Status: "starting", Health: "unknown"}
+	alloc := &Allocation{ID: allocID, ContainerID: allocID, AllocationID: schedulerID, Generation: generation, JobRevision: jobRevision, ExecutionHash: executionHash, Restart: restartPolicy, Namespace: namespace, JobName: jobName, GroupName: groupName, TaskName: taskName, Spec: ts, Status: "starting", Health: "unknown", Draining: draining, DrainSequence: drainSequence}
 	starting := *alloc
 	a.allocations[allocID] = &starting
 	a.mu.Unlock()
@@ -1011,7 +1016,11 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 			return fmt.Errorf("start container %s: %w", containerID, err)
 		}
 	}
-	a.reconciler.Track(allocID, ts.HealthCheck != nil, restartPolicy)
+	if draining {
+		a.reconciler.TrackStopping(allocID, ts.HealthCheck != nil, restartPolicy)
+	} else {
+		a.reconciler.Track(allocID, ts.HealthCheck != nil, restartPolicy)
+	}
 	tracked = true
 
 	ready := &Allocation{
@@ -1035,6 +1044,9 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		Network:     netAttachment,
 		Status:      "running",
 		Health:      "unknown",
+
+		Draining:      draining,
+		DrainSequence: drainSequence,
 	}
 	if ts.HealthCheck == nil {
 		ready.Health = "healthy"
