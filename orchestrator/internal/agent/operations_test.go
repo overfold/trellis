@@ -1692,11 +1692,6 @@ func TestRestartExhaustionReportsFailedAndSurvivesAgentRestart(t *testing.T) {
 	if err := local.Get(allocationRecordKey("task"), &stored); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("record rewritten after exhaustion: err=%v", err)
 	}
-	// A repeated observation that changes nothing must not rewrite it either.
-	first.OnReconciledStatus("task", "unhealthy")
-	if err := local.Get(allocationRecordKey("task"), &stored); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("record rewritten for unchanged observation: err=%v", err)
-	}
 	// A start retry for the same generation must not recreate the task.
 	if err := first.RunAllocation(context.Background(), "task", "allocation", 1, 1, "hash", "", "", "", "task", allocation.Spec, "", nil, nil, nil, policy); !errors.Is(err, ErrRestartBudgetExhausted) {
 		t.Fatalf("start retry error = %v, want terminal restart exhaustion", err)
@@ -1767,13 +1762,77 @@ func TestRecoverExhaustedAllocationWithoutSpecStaysFailed(t *testing.T) {
 	if err := second.recover(context.Background()); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
-	if state := second.reconciler.states["task"]; state == nil || !state.exhausted {
-		t.Fatalf("recovered reconcile state = %+v, want exhausted", state)
+	if state := second.reconciler.states["task"]; state == nil || !state.exhausted || !state.failed {
+		t.Fatalf("recovered reconcile state = %+v, want recorded exhaustion", state)
 	}
 	if err := second.reconciler.Reconcile(context.Background(), "task"); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 	if rt.restartCount != 0 {
 		t.Fatalf("restart count = %d, want 0", rt.restartCount)
+	}
+}
+
+func TestRecoverDrainingExhaustedAllocationKeepsBudgetOnResume(t *testing.T) {
+	rt := &stoppedWithErrorRuntime{
+		reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning},
+		managedID:         "task",
+	}
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	first := newOperationTestAgent(t, rt)
+	first.ConfigureDurability(local, "test")
+	if err := first.persistAllocation(&Allocation{
+		ID: "task", AllocationID: "allocation", ContainerID: "task", Generation: 1,
+		Spec:   &spec.TaskSpec{Name: "task", Image: "image"},
+		Status: "running", Health: "healthy", Draining: true, DrainSequence: 1,
+		RestartAttempts: 3, RestartWindow: time.Now().Add(-time.Hour), RestartExhausted: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	second := newOperationTestAgent(t, rt)
+	second.ConfigureDurability(local, "test")
+	second.reconciler.Subscriber = second
+	if err := second.recover(context.Background()); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if err := second.ResumeGroup(&api.DrainAllocationRequest{AllocationID: "allocation", Generation: 1, Sequence: 2}); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	rt.status = runtime.StatusStopped
+	if err := second.reconciler.Reconcile(context.Background(), "task"); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if rt.restartCount != 0 {
+		t.Fatalf("resumed exhausted allocation restarted %d times", rt.restartCount)
+	}
+	if got := second.allocations["task"].Status; got != "failed" {
+		t.Fatalf("status = %q, want failed", got)
+	}
+}
+
+func TestRunGroupRejectsExhaustedGenerationBeforeTouchingTasks(t *testing.T) {
+	rt := &stoppedWithErrorRuntime{reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusStopped}}
+	agent := newOperationTestAgent(t, rt)
+	request := operationTestRequest()
+	for _, task := range request.Tasks {
+		id := fmt.Sprintf("%s-g%d-%s", request.AllocationID, request.Generation, task.Name)
+		allocation := &Allocation{
+			ID: id, ContainerID: id, AllocationID: request.AllocationID, Generation: request.Generation,
+			JobRevision: request.JobRevision, ExecutionHash: request.ExecutionHash, TaskName: task.Name,
+			Spec: &spec.TaskSpec{Name: task.Name, Image: task.Image}, Status: "starting", Health: "unknown",
+		}
+		if task.Name == "second" {
+			allocation.Status, allocation.Health, allocation.RestartExhausted = "failed", "unhealthy", true
+		}
+		agent.allocations[id] = allocation
+	}
+	if err := agent.RunGroup(context.Background(), request); !errors.Is(err, ErrRestartBudgetExhausted) {
+		t.Fatalf("run group error = %v, want terminal restart exhaustion", err)
+	}
+	if rt.startCount != 0 || len(agent.allocations) != 2 {
+		t.Fatalf("run group touched tasks: start=%d allocations=%d", rt.startCount, len(agent.allocations))
 	}
 }

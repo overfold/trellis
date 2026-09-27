@@ -462,3 +462,22 @@ func TestAllocationReconcilerRetriesUnrecordedExhaustion(t *testing.T) {
 		t.Fatalf("statuses = %v, want exhaustion recorded on retry", subscriber.statuses)
 	}
 }
+
+func TestResumeRestartsAfterExhaustedStoppingTrackDoesNotRestart(t *testing.T) {
+	rt := &reconcilerRuntime{status: runtime.StatusStopped}
+	subscriber := &statusRecorder{}
+	r := NewAllocationReconciler(rt, subscriber)
+	policy := &spec.RestartPolicySpec{MaxRestarts: 1, Window: time.Second}
+	r.TrackStopping("alloc-1", false, policy, 1, time.Now().Add(-time.Hour), true)
+	r.ResumeRestarts("alloc-1", false, policy, 1, time.Now().Add(-time.Hour), true)
+
+	if err := r.Reconcile(context.Background(), "alloc-1"); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if rt.restartCount != 0 {
+		t.Fatalf("restart count = %d, want 0 after resuming an exhausted allocation", rt.restartCount)
+	}
+	if len(subscriber.statuses) != 1 || subscriber.statuses[0] != "failed" {
+		t.Fatalf("statuses = %v, want one failed observation", subscriber.statuses)
+	}
+}

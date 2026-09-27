@@ -59,6 +59,9 @@ const (
 	OperationStaleGeneration OperationCode = "stale_generation"
 	// OperationConflict indicates a conflicting allocation execution.
 	OperationConflict OperationCode = "execution_conflict"
+	// OperationRestartExhausted indicates that the allocation generation failed
+	// terminally after exhausting its restart policy.
+	OperationRestartExhausted OperationCode = "restart_budget_exhausted"
 	// OperationFailed indicates that an agent operation failed.
 	OperationFailed OperationCode = "operation_failed"
 )

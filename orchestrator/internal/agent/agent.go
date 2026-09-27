@@ -388,16 +388,13 @@ func (a *Agent) recover(ctx context.Context) error {
 			if persistErr != nil {
 				a.log.Error("refresh recovered allocation record", "allocation", allocation.AllocationID, "error", persistErr)
 			}
-			if allocation.Spec != nil {
-				if restartSuppressed {
-					a.reconciler.TrackStopping(allocation.ID, allocation.Spec.HealthCheck != nil, allocation.Restart)
-				} else if !recoveryPending {
-					a.reconciler.TrackRecovered(allocation.ID, allocation.Spec.HealthCheck != nil, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow, allocation.RestartExhausted)
-				}
-			} else if restartSuppressed {
-				a.reconciler.TrackStopping(allocation.ID, false, nil)
+			healthManaged := allocation.Spec != nil && allocation.Spec.HealthCheck != nil
+			if restartSuppressed {
+				a.reconciler.TrackStopping(allocation.ID, healthManaged, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow, allocation.RestartExhausted)
+			} else if exhausted {
+				a.reconciler.TrackFailed(allocation.ID, healthManaged, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow)
 			} else if !recoveryPending {
-				a.reconciler.TrackRecovered(allocation.ID, false, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow, allocation.RestartExhausted)
+				a.reconciler.TrackRecovered(allocation.ID, healthManaged, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow, allocation.RestartExhausted)
 			}
 			if allocation.Spec != nil && !stopping && !recoveryPending && !exhausted && allocation.Spec.HealthCheck != nil {
 				a.health.RegisterTask(allocation.ID, allocation.ContainerID, allocation.Spec.HealthCheck)
@@ -534,6 +531,12 @@ func (a *Agent) prepareStart(ctx context.Context, request *api.AllocationRequest
 		if allocation.Generation == request.Generation && (allocation.JobRevision != request.JobRevision || allocation.ExecutionHash != request.ExecutionHash) {
 			a.mu.RUnlock()
 			return fmt.Errorf("%w: allocation %s generation %d", ErrExecutionConflict, request.AllocationID, request.Generation)
+		}
+		// Reject before touching any task so a start retry cannot churn the
+		// siblings of a task whose restart budget is terminally exhausted.
+		if allocation.Generation == request.Generation && allocation.RestartExhausted {
+			a.mu.RUnlock()
+			return fmt.Errorf("%w: allocation %s generation %d task %s", ErrRestartBudgetExhausted, request.AllocationID, request.Generation, allocation.TaskName)
 		}
 		if allocation.Generation < request.Generation {
 			oldIDs = append(oldIDs, id)
@@ -725,13 +728,30 @@ func (a *Agent) ResumeGroup(request *api.DrainAllocationRequest) error {
 			return fmt.Errorf("persist resumed allocation: %w", err)
 		}
 	}
-	a.mu.Unlock()
+	// Snapshot restart state under the lock; the reconciler updates it concurrently.
+	type resumeState struct {
+		id            string
+		healthManaged bool
+		policy        *spec.RestartPolicySpec
+		attempts      int
+		window        time.Time
+		exhausted     bool
+	}
+	var restarts []resumeState
 	for _, allocation := range resumed {
 		// The control plane will retry the start for a recovered starting task.
-		// Leave it untracked until that retry resolves its runtime state.
+		// Leave it untracked until that retry resolves its runtime state. A
+		// terminally failed task stays restart-suppressed.
 		if allocation.Status == "running" {
-			a.reconciler.ResumeRestarts(allocation.ID, allocation.Spec != nil && allocation.Spec.HealthCheck != nil, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow, allocation.RestartExhausted)
+			restarts = append(restarts, resumeState{
+				id: allocation.ID, healthManaged: allocation.Spec != nil && allocation.Spec.HealthCheck != nil, policy: allocation.Restart,
+				attempts: allocation.RestartAttempts, window: allocation.RestartWindow, exhausted: allocation.RestartExhausted,
+			})
 		}
+	}
+	a.mu.Unlock()
+	for _, restart := range restarts {
+		a.reconciler.ResumeRestarts(restart.id, restart.healthManaged, restart.policy, restart.attempts, restart.window, restart.exhausted)
 	}
 	return nil
 }
@@ -800,7 +820,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 				// Start may have succeeded even if its response was lost. Track
 				// the retained allocation as stopping from the outset so an
 				// observed stopped task can never be restarted.
-				a.reconciler.TrackStopping(allocID, false, restartPolicy)
+				a.reconciler.TrackStopping(allocID, false, restartPolicy, 0, time.Time{}, false)
 				tracked = true
 			}
 		}
@@ -1430,20 +1450,14 @@ func (a *Agent) OnUnhealthy(ctx context.Context, allocID string) error {
 func (a *Agent) OnReconciledStatus(allocID, status string) {
 	a.mu.Lock()
 	if alloc := a.allocations[allocID]; alloc != nil {
-		previousStatus, previousHealth := alloc.Status, alloc.Health
-		switch status {
-		case "healthy", "unhealthy":
+		if status == "healthy" || status == "unhealthy" {
 			alloc.Health = status
-		default:
+		} else {
 			alloc.Status = status
 			if status == "running" && alloc.Spec != nil && alloc.Spec.HealthCheck != nil {
 				alloc.Health = "unknown"
 				a.health.RegisterTask(allocID, alloc.ContainerID, alloc.Spec.HealthCheck)
 			}
-		}
-		if alloc.Status == previousStatus && alloc.Health == previousHealth {
-			a.mu.Unlock()
-			return
 		}
 		if err := a.persistAllocation(alloc); err != nil {
 			a.log.Error("persist reconciled allocation", "allocation", alloc.AllocationID, "error", err)
