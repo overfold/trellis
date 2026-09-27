@@ -125,10 +125,9 @@ type Allocation struct {
 	DrainSequence uint64
 
 	// unobserved marks a recovered allocation whose container state has not
-	// been read since the agent restarted. recordedHealth keeps the durable
-	// health reported before recovery replaced it with "unknown".
-	unobserved     bool
-	recordedHealth string
+	// been read since the agent restarted. Its health is reported as unknown
+	// while the recorded value is kept for the next observation.
+	unobserved bool
 }
 
 const heartbeatInterval = 10 * time.Second
@@ -352,9 +351,6 @@ func (a *Agent) recover(ctx context.Context) error {
 		seen[container.ID] = true
 		a.recoverContainer(container, stored[container.ID])
 	}
-	a.mu.Lock()
-	a.recoveryListPending = a.hasUnidentifiedContainerLocked(containers)
-	a.mu.Unlock()
 	for containerID, allocation := range stored {
 		if containerID == "" || seen[containerID] {
 			continue
@@ -383,7 +379,6 @@ func (a *Agent) recoverContainer(container runtime.ContainerInfo, allocation *Al
 		// Replace the restart suppression applied while state was unknown.
 		_ = a.reconciler.Untrack(allocation.ID)
 		allocation.unobserved = false
-		allocation.Health = allocation.recordedHealth
 	}
 	if hadRecord && allocation.ContainerOwnershipUnverified && !a.containerMatchesAllocation(container, allocation) {
 		allocation.Status = "stopping"
@@ -436,13 +431,11 @@ func (a *Agent) recoverContainer(container runtime.ContainerInfo, allocation *Al
 
 // recoverUnobserved keeps an allocation whose container state could not be
 // read. Unverified state preserves the record, its resources, and its last
-// recorded phase with unknown health; local restarts stay suppressed until a
+// recorded phase, reported with unknown health; local restarts stay suppressed until a
 // later observation classifies the container. An existing record is left
 // unchanged; persist records an allocation known only from runtime labels.
 func (a *Agent) recoverUnobserved(allocation *Allocation, persist bool) {
 	allocation.unobserved = true
-	allocation.recordedHealth = allocation.Health
-	allocation.Health = "unknown"
 	a.adoptPorts(allocation)
 	a.mu.Lock()
 	a.allocations[allocation.ID] = allocation
@@ -509,9 +502,28 @@ func (a *Agent) recoverMissing(ctx context.Context, allocation *Allocation) {
 	a.mu.Unlock()
 	if adopted {
 		for _, port := range allocation.Ports {
-			_ = a.ports.Release(port)
+			if !a.hostPortInUse(port) {
+				_ = a.ports.Release(port)
+			}
 		}
 	}
+}
+
+// hostPortInUse reports whether a remaining allocation also holds the port.
+func (a *Agent) hostPortInUse(port *runtime.Port) bool {
+	if port == nil {
+		return false
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	for _, allocation := range a.allocations {
+		for _, held := range allocation.Ports {
+			if held != nil && held.HostPort == port.HostPort {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (a *Agent) adoptPorts(allocation *Allocation) {
@@ -563,9 +575,14 @@ func (a *Agent) retryRecovery(ctx context.Context) bool {
 			a.adoptUnrecorded(ctx, container)
 		}
 		a.mu.Lock()
-		a.recoveryListPending = a.hasUnidentifiedContainerLocked(containers)
+		a.recoveryListPending = false
 		a.mu.Unlock()
 	}
+	return a.recoveryPending()
+}
+
+// recoveryPending reports whether recovery still has containers to observe.
+func (a *Agent) recoveryPending() bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	if a.recoveryListPending {
@@ -601,14 +618,23 @@ func (a *Agent) adoptUnrecorded(ctx context.Context, listed runtime.ContainerInf
 	if container.Labels == nil {
 		container.Labels = listed.Labels
 	}
-	a.recoverContainer(container, nil)
+	allocation := allocationFromRuntime(container)
+	if allocation == nil {
+		return
+	}
+	if a.hasNewerGeneration(allocation) {
+		// Starts proceeded while this container was unlisted. Keep the older
+		// generation restart-suppressed until the control plane stops it.
+		allocation.Status = "stopping"
+	}
+	a.recoverContainer(container, allocation)
 }
 
-// hasUnidentifiedContainerLocked reports whether a listing contained an
-// unreadable container that recovery could not attribute to an allocation.
-func (a *Agent) hasUnidentifiedContainerLocked(containers []runtime.ContainerInfo) bool {
-	for _, container := range containers {
-		if _, known := a.allocations[container.ID]; !known && !observedStatus(container.Status) {
+func (a *Agent) hasNewerGeneration(allocation *Allocation) bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	for _, known := range a.allocations {
+		if known.AllocationID == allocation.AllocationID && known.Generation > allocation.Generation {
 			return true
 		}
 	}
@@ -644,11 +670,47 @@ func (a *Agent) reobserve(ctx context.Context, id, allocationID string, containe
 	a.recoverContainer(container, &allocation)
 }
 
+// observeRecovered inspects an unobserved allocation on demand, so a start
+// retry neither acknowledges nor replaces a container of unknown state. The
+// caller holds the allocation operation lock.
+func (a *Agent) observeRecovered(ctx context.Context, allocID string) (string, error) {
+	a.mu.RLock()
+	current := a.allocations[allocID]
+	var allocation Allocation
+	if current != nil {
+		allocation = *current
+		allocation.Ports = append([]*runtime.Port(nil), current.Ports...)
+	}
+	a.mu.RUnlock()
+	if current == nil {
+		return "", fmt.Errorf("%w: %s", ErrAllocationNotFound, allocID)
+	}
+	if !allocation.unobserved {
+		return allocation.Status, nil
+	}
+	observed, err := a.runtime.Inspect(ctx, allocation.ContainerID)
+	if err != nil {
+		return "", fmt.Errorf("observe recovered allocation %s: %w", allocID, err)
+	}
+	if !observedStatus(observed.Status) {
+		return "", fmt.Errorf("observe recovered allocation %s: container state is %q", allocID, observed.Status)
+	}
+	container := *observed
+	container.ID = allocation.ContainerID
+	a.recoverContainer(container, &allocation)
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if recovered := a.allocations[allocID]; recovered != nil {
+		return recovered.Status, nil
+	}
+	return "", fmt.Errorf("%w: %s", ErrAllocationNotFound, allocID)
+}
+
 // runRecoveryRetry retries recovery until every recorded allocation has been
 // observed.
 func (a *Agent) runRecoveryRetry(ctx context.Context) {
 	delay := recoveryRetryMinDelay
-	for a.retryRecovery(ctx) {
+	for a.recoveryPending() {
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
@@ -656,6 +718,7 @@ func (a *Agent) runRecoveryRetry(ctx context.Context) {
 			return
 		case <-timer.C:
 		}
+		a.retryRecovery(ctx)
 		delay = min(delay*2, recoveryRetryMaxDelay)
 	}
 }
@@ -706,6 +769,9 @@ func (a *Agent) GetAllocations() []*Allocation {
 		allocationCopy := *alloc
 		allocationCopy.Ports = append([]*runtime.Port(nil), alloc.Ports...)
 		allocationCopy.Mounts = append([]*runtime.Mount(nil), alloc.Mounts...)
+		if alloc.unobserved {
+			allocationCopy.Health = "unknown"
+		}
 		result = append(result, &allocationCopy)
 	}
 
@@ -958,7 +1024,11 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 			return fmt.Errorf("%w: %s", ErrAllocationExists, allocID)
 		}
 		if unobserved {
-			return fmt.Errorf("allocation %s container state is not yet observed after agent restart", allocID)
+			observed, err := a.observeRecovered(ctx, allocID)
+			if err != nil {
+				return err
+			}
+			status = observed
 		}
 		if status == "running" {
 			return nil
@@ -1725,7 +1795,11 @@ func (a *Agent) allocationStatuses() []api.AllocationStatus {
 		for _, p := range alloc.Ports {
 			ports = append(ports, api.PortMapping{HostPort: p.HostPort, ContainerPort: p.ContainerPort})
 		}
-		actual = append(actual, api.AllocationStatus{ID: alloc.AllocationID, Generation: alloc.Generation, Task: alloc.TaskName, Address: allocationNetworkAddress(alloc), Phase: lifecycle.Phase(alloc.Status), Health: lifecycle.Health(alloc.Health), Ports: ports})
+		health := alloc.Health
+		if alloc.unobserved {
+			health = "unknown"
+		}
+		actual = append(actual, api.AllocationStatus{ID: alloc.AllocationID, Generation: alloc.Generation, Task: alloc.TaskName, Address: allocationNetworkAddress(alloc), Phase: lifecycle.Phase(alloc.Status), Health: lifecycle.Health(health), Ports: ports})
 	}
 	return actual
 }

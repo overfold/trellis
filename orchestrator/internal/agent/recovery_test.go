@@ -86,8 +86,8 @@ func assertUnobservedAllocation(t *testing.T, agent *Agent, id, status string, h
 	if allocation == nil {
 		t.Fatalf("allocation %s was not recovered", id)
 	}
-	if !allocation.unobserved || allocation.Status != status || allocation.Health != "unknown" {
-		t.Fatalf("recovered allocation = %+v, want unobserved %s with unknown health", allocation, status)
+	if !allocation.unobserved || allocation.Status != status {
+		t.Fatalf("recovered allocation = %+v, want unobserved %s", allocation, status)
 	}
 	if !portClaimed(agent, hostPort) {
 		t.Fatalf("port %d was not adopted", hostPort)
@@ -96,8 +96,13 @@ func assertUnobservedAllocation(t *testing.T, agent *Agent, id, status string, h
 		t.Fatal("unobserved allocation is not restart-suppressed")
 	}
 	reported := false
-	for _, status := range agent.allocationStatuses() {
-		reported = reported || status.ID == allocation.AllocationID
+	for _, reportedStatus := range agent.allocationStatuses() {
+		if reportedStatus.ID == allocation.AllocationID {
+			reported = true
+			if reportedStatus.Health != "unknown" {
+				t.Fatalf("heartbeat health = %q, want unknown", reportedStatus.Health)
+			}
+		}
 	}
 	if !reported {
 		t.Fatal("unobserved allocation is not reported in heartbeats")
@@ -330,5 +335,72 @@ func TestRecoverRetryKeepsUnknownContainerWithoutRewritingRecord(t *testing.T) {
 	}
 	if agent.allocations["task"] != before {
 		t.Fatal("retry replaced an allocation whose container is still unknown")
+	}
+}
+
+func TestRunAllocationObservesRecoveredAllocationOnDemand(t *testing.T) {
+	rt := &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{}, listErr: errors.New("containerd unavailable")}
+	record := recoveryTestAllocation(18085)
+	agent, _ := newRecoveryTestAgent(t, rt, record)
+	if err := agent.recover(context.Background()); err == nil {
+		t.Fatal("recover succeeded despite listing failure")
+	}
+
+	rt.status = runtime.StatusRunning
+	task := &spec.TaskSpec{Name: "task", Image: "image"}
+	if err := agent.RunAllocation(context.Background(), "task", "allocation", 1, 1, "hash", "default", "job", "group", "task", task, "", nil, nil, nil, nil); err != nil {
+		t.Fatalf("start retry for observed running allocation: %v", err)
+	}
+	recovered := agent.allocations["task"]
+	if recovered == nil || recovered.unobserved || recovered.Status != "running" || recovered.Health != "healthy" {
+		t.Fatalf("allocation after on-demand observation = %+v, want observed running", recovered)
+	}
+	if rt.stopCount != 0 {
+		t.Fatalf("start retry stopped a running allocation %d times", rt.stopCount)
+	}
+}
+
+func TestRecoverRetryAdoptsOlderGenerationAsStopping(t *testing.T) {
+	rt := &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning}, listErr: errors.New("containerd unavailable")}
+	agent, _ := newRecoveryTestAgent(t, rt)
+	if err := agent.recover(context.Background()); err == nil {
+		t.Fatal("recover succeeded despite listing failure")
+	}
+	newer := recoveryTestAllocation(0)
+	newer.ID, newer.ContainerID, newer.Generation = "task-g2", "task-g2", 2
+	agent.allocations[newer.ID] = newer
+
+	rt.listErr = nil
+	rt.containers = []runtime.ContainerInfo{{ID: "task", Status: runtime.StatusRunning, Labels: recoveryTestLabels(recoveryTestAllocation(0))}}
+	agent.retryRecovery(context.Background())
+	older := agent.allocations["task"]
+	if older == nil || older.Status != "stopping" {
+		t.Fatalf("older generation = %+v, want stopping", older)
+	}
+	if state := agent.reconciler.states["task"]; state == nil || !state.stopping {
+		t.Fatal("older generation regained local restarts")
+	}
+}
+
+func TestRecoverMissingKeepsPortClaimSharedWithLiveAllocation(t *testing.T) {
+	rt := &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{}, listErr: errors.New("containerd unavailable")}
+	stale := recoveryTestAllocation(18086)
+	stale.Status = "stopping"
+	live := recoveryTestAllocation(18086)
+	live.ID, live.ContainerID, live.AllocationID = "live", "live", "other"
+	agent, _ := newRecoveryTestAgent(t, rt, stale, live)
+	if err := agent.recover(context.Background()); err == nil {
+		t.Fatal("recover succeeded despite listing failure")
+	}
+
+	rt.listErr = nil
+	labels := recoveryTestLabels(live)
+	rt.containers = []runtime.ContainerInfo{{ID: "live", Status: runtime.StatusRunning, Labels: labels}}
+	agent.retryRecovery(context.Background())
+	if agent.allocations["task"] != nil || agent.allocations["live"] == nil {
+		t.Fatal("retry did not resolve the stale and live allocations")
+	}
+	if !portClaimed(agent, 18086) {
+		t.Fatal("cleanup of a missing allocation released a live allocation's port")
 	}
 }
