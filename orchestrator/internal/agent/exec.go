@@ -218,12 +218,13 @@ func (a *Agent) CreateExecSession(ctx context.Context, allocID, task string, com
 	return &api.ExecSessionResponse{ID: sessionID}, nil
 }
 
-// useExecSession returns a session addressed through allocID and records activity on it.
-func (a *Agent) useExecSession(allocID, sessionID string) (*execSession, error) {
+// useExecSession returns a session addressed through allocID and records
+// activity on it. A session whose close failed only allows reads.
+func (a *Agent) useExecSession(allocID, sessionID string, mutate bool) (*execSession, error) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	session := a.execSessions[sessionID]
-	if session == nil || session.AllocationID != allocID {
+	if session == nil || session.AllocationID != allocID || (mutate && session.closeFailed.Load()) {
 		return nil, fmt.Errorf("%w: %s", ErrExecSessionNotFound, sessionID)
 	}
 	session.lastActive.Store(time.Now().UnixNano())
@@ -232,7 +233,7 @@ func (a *Agent) useExecSession(allocID, sessionID string) (*execSession, error) 
 
 // WriteExecSession writes raw bytes to an interactive terminal.
 func (a *Agent) WriteExecSession(allocID, sessionID string, data []byte) error {
-	session, err := a.useExecSession(allocID, sessionID)
+	session, err := a.useExecSession(allocID, sessionID, true)
 	if err != nil {
 		return err
 	}
@@ -244,7 +245,7 @@ func (a *Agent) WriteExecSession(allocID, sessionID string, data []byte) error {
 
 // ReadExecSession reads terminal bytes produced since offset.
 func (a *Agent) ReadExecSession(allocID, sessionID string, offset int64) (*api.ExecSessionOutputResponse, error) {
-	session, err := a.useExecSession(allocID, sessionID)
+	session, err := a.useExecSession(allocID, sessionID, false)
 	if err != nil {
 		return nil, err
 	}
@@ -262,7 +263,7 @@ func (a *Agent) ReadExecSession(allocID, sessionID string, offset int64) (*api.E
 
 // ResizeExecSession updates the terminal dimensions.
 func (a *Agent) ResizeExecSession(ctx context.Context, allocID, sessionID string, cols, rows uint32) error {
-	session, err := a.useExecSession(allocID, sessionID)
+	session, err := a.useExecSession(allocID, sessionID, true)
 	if err != nil {
 		return err
 	}
@@ -335,7 +336,8 @@ func (a *Agent) closeTerminal(ctx context.Context, sessionID string, session *ex
 	if err != nil {
 		session.closeFailed.Store(true)
 		a.mu.Lock()
-		if _, exists := a.execSessions[sessionID]; !exists {
+		// Nothing retries after shutdown, so the failure is only reported.
+		if _, exists := a.execSessions[sessionID]; !exists && !a.execSessionsClosed {
 			a.execSessions[sessionID] = session
 		}
 		a.mu.Unlock()

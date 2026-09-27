@@ -697,6 +697,9 @@ func (c *ContainerdRuntime) ExecOutput(ctx context.Context, containerID string, 
 	process := execProcessSpec(containerSpec, command, false)
 
 	var outBuf, errBuf lockedBuffer
+	// Output a background child writes after this returns is not collected.
+	defer outBuf.take()
+	defer errBuf.take()
 	creator := cio.NewCreator(cio.WithStreams(nil, &outBuf, &errBuf))
 	taskExec, err := task.Exec(ctx, execID, process, creator)
 	if err != nil {
@@ -715,13 +718,13 @@ func (c *ContainerdRuntime) ExecOutput(ctx context.Context, containerID string, 
 		return nil, nil, 1, fmt.Errorf("extracting exec status for %s: %w", containerID, err)
 	}
 
-	return outBuf.Bytes(), errBuf.Bytes(), int(code), nil
+	return outBuf.take(), errBuf.take(), int(code), nil
 }
 
-const (
-	execCleanupTimeout    = 5 * time.Second
-	execKillRetryInterval = time.Second
-)
+const execCleanupTimeout = 5 * time.Second
+
+// execKillRetryInterval is a variable so tests can shorten it.
+var execKillRetryInterval = time.Second
 
 // execProcess is the part of a containerd exec process used to run it to completion.
 type execProcess interface {
@@ -835,8 +838,8 @@ func (b *lockedBuffer) Write(p []byte) (int, error) {
 	return b.buf.Write(p)
 }
 
-// Bytes returns the collected output and discards later writes.
-func (b *lockedBuffer) Bytes() []byte {
+// take returns the collected output and discards later writes.
+func (b *lockedBuffer) take() []byte {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.detached = true

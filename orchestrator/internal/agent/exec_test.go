@@ -386,6 +386,9 @@ func TestFailedExecSessionCloseStaysTrackedForRetry(t *testing.T) {
 	if _, err := agent.ReadExecSession("allocation", response.ID, 0); err != nil {
 		t.Fatal(err)
 	}
+	if err := agent.WriteExecSession("allocation", response.ID, []byte("ls\n")); !errors.Is(err, ErrExecSessionNotFound) {
+		t.Fatalf("write to closing session error = %v, want not found", err)
+	}
 
 	terminal.mu.Lock()
 	terminal.closeErr = nil
@@ -393,5 +396,23 @@ func TestFailedExecSessionCloseStaysTrackedForRetry(t *testing.T) {
 	agent.reapExecSessions(context.Background(), time.Now())
 	if agent.execSessions[response.ID] != nil || terminal.closeCount() != 2 {
 		t.Fatalf("reaper did not retry the failed close (closes = %d)", terminal.closeCount())
+	}
+}
+
+func TestFailedCloseAtShutdownIsNotTrackedAgain(t *testing.T) {
+	rt := newExecTestRuntime()
+	agent := newOperationTestAgent(t, rt)
+	addExecTestTask(agent, "allocation-g1-web", "web", 1, "running")
+	if _, err := agent.CreateExecSession(context.Background(), "allocation", "web", []string{"sh"}, "", 80, 24); err != nil {
+		t.Fatal(err)
+	}
+	terminal := rt.terminal("allocation-g1-web")
+	terminal.mu.Lock()
+	terminal.closeErr = errors.New("kill failed")
+	terminal.mu.Unlock()
+
+	agent.CloseExecSessions(context.Background())
+	if len(agent.execSessions) != 0 {
+		t.Fatal("session re-tracked after shutdown")
 	}
 }

@@ -187,6 +187,9 @@ func (p *flakyKillProcess) Kill(ctx context.Context, signal syscall.Signal, opts
 }
 
 func TestKillExecProcessRetriesFailedKill(t *testing.T) {
+	previous := execKillRetryInterval
+	execKillRetryInterval = time.Millisecond
+	defer func() { execKillRetryInterval = previous }()
 	process := &flakyKillProcess{fakeExecProcess: newFakeExecProcess(), failures: 1}
 	process.running = true
 
@@ -207,13 +210,13 @@ func TestKillExecProcessRetriesFailedKill(t *testing.T) {
 func TestLockedBufferDiscardsWritesAfterSnapshot(t *testing.T) {
 	var buffer lockedBuffer
 	_, _ = buffer.Write([]byte("before"))
-	if got := string(buffer.Bytes()); got != "before" {
+	if got := string(buffer.take()); got != "before" {
 		t.Fatalf("snapshot = %q", got)
 	}
 	if n, err := buffer.Write([]byte("after")); n != 5 || err != nil {
 		t.Fatalf("detached write = %d, %v", n, err)
 	}
-	if got := len(buffer.Bytes()); got != 0 {
+	if got := len(buffer.take()); got != 0 {
 		t.Fatalf("detached buffer kept %d bytes", got)
 	}
 }
