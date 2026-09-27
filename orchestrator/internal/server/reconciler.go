@@ -32,6 +32,8 @@ const (
 	ActionStart ActionType = "start"
 	// ActionDrain suppresses local restarts before a later stop.
 	ActionDrain ActionType = "drain"
+	// ActionResume redelivers a persisted resume the agent has not acknowledged.
+	ActionResume ActionType = "resume"
 	// ActionStop stops an allocation.
 	ActionStop ActionType = "stop"
 	// ActionStopObserved removes a node-observed allocation generation that is
@@ -426,6 +428,12 @@ func (s *Server) Reconcile(ctx context.Context) {
 			}
 			allocation.mu.Unlock()
 			continue
+		}
+		// A start request carries the drain state itself, so only a running
+		// allocation needs a separate resume redelivery.
+		if allocation.Phase == lifecycle.PhaseRunning && !allocation.Draining && allocation.DrainSequence > 0 &&
+			!s.resumeDelivered(s.controlEpoch, allocation.ID, allocation.Generation, allocation.DrainSequence) {
+			actions = append(actions, Action{Type: ActionResume, Allocation: allocation})
 		}
 		if allocation.Phase == lifecycle.PhasePlaced || allocation.Phase == lifecycle.PhaseStarting || allocation.Phase == lifecycle.PhaseStopping {
 			actionType := ActionStart
@@ -1133,6 +1141,19 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 			return fmt.Errorf("node %s is unavailable for allocation drain", alloc.Node.ID)
 		}
 		return s.client.DrainAllocation(ctx, alloc.Node.ID, address, &api.DrainAllocationRequest{AllocationID: alloc.ID, Generation: alloc.Generation, Epoch: epoch, Sequence: alloc.DrainSequence})
+	case ActionResume:
+		unlockServer()
+		if nodeStatus != NodeStatusHealthy {
+			return fmt.Errorf("node %s is unavailable for allocation resume", alloc.Node.ID)
+		}
+		if alloc.Draining {
+			return nil
+		}
+		request := &api.DrainAllocationRequest{AllocationID: alloc.ID, Generation: alloc.Generation, Epoch: epoch, Sequence: alloc.DrainSequence}
+		if err := s.client.ResumeAllocation(ctx, alloc.Node.ID, address, request); err != nil {
+			return err
+		}
+		s.recordResumeDelivered(request)
 	case ActionStop:
 		unlockServer()
 
