@@ -22,6 +22,11 @@ type AllocationRequest struct {
 	EnvOverrides  map[string]string       `json:"env_overrides,omitempty"`
 	Restart       *spec.RestartPolicySpec `json:"restart,omitempty"`
 	Secrets       []DeliveredSecret       `json:"secrets,omitempty"`
+	// Draining and DrainSequence carry the control plane's drain state for this
+	// generation so a started task honors a drain the agent never recorded.
+	// They are excluded from the execution hash.
+	Draining      bool   `json:"draining,omitempty"`
+	DrainSequence uint64 `json:"drain_sequence,omitempty"`
 }
 
 // StopAllocationRequest identifies an allocation generation to stop.
