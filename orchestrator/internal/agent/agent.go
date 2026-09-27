@@ -58,9 +58,13 @@ type Agent struct {
 	operations  map[string]*allocationOperation
 
 	recoveryListPending bool
-	// supersededStops holds older generations adopted by recovery whose stop
-	// failed. The control plane rejects stops for them as stale.
+	// supersededStops holds retained generations that recovery must stop
+	// itself: the control plane rejects stops for an older generation as
+	// stale, or already stopped it while the listing was incomplete.
 	supersededStops map[string]string
+	// recoveryStopped records, per scheduler allocation, the highest
+	// generation stopped while recovery could not list containers.
+	recoveryStopped map[string]uint64
 }
 
 type allocationOperation struct {
@@ -376,26 +380,39 @@ func (a *Agent) recover(ctx context.Context) error {
 	return nil
 }
 
-// queueSupersededStops schedules stops for retained older generations. A
-// superseded stop that failed before a restart survives only as its stopping
-// record, and the control plane rejects stops for that generation as stale.
+// queueSupersededStops schedules stops for retained stopping records that
+// recovery must finish itself. A failed stop survives a restart only as its
+// stopping record.
 func (a *Agent) queueSupersededStops() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for id, allocation := range a.allocations {
-		if allocation.Status != "stopping" || allocation.unobserved {
+		// Unverified ownership keeps its existing retained-record handling.
+		if allocation.Status != "stopping" || allocation.unobserved || allocation.ContainerOwnershipUnverified {
 			continue
 		}
-		for _, known := range a.allocations {
-			if known.AllocationID == allocation.AllocationID && known.Generation > allocation.Generation {
-				if a.supersededStops == nil {
-					a.supersededStops = make(map[string]string)
-				}
-				a.supersededStops[id] = allocation.AllocationID
-				break
+		if a.supersededLocked(allocation) {
+			if a.supersededStops == nil {
+				a.supersededStops = make(map[string]string)
 			}
+			a.supersededStops[id] = allocation.AllocationID
 		}
 	}
+}
+
+// supersededLocked reports whether a newer generation of the allocation is
+// known, or the control plane stopped its generation while recovery could not
+// list containers.
+func (a *Agent) supersededLocked(allocation *Allocation) bool {
+	if stopped, ok := a.recoveryStopped[allocation.AllocationID]; ok && allocation.Generation <= stopped {
+		return true
+	}
+	for _, known := range a.allocations {
+		if known.AllocationID == allocation.AllocationID && known.Generation > allocation.Generation {
+			return true
+		}
+	}
+	return false
 }
 
 // recoverContainer restores one observed container. allocation is its durable
@@ -588,21 +605,35 @@ func (a *Agent) retryRecovery(ctx context.Context) bool {
 			pending[id] = &Allocation{AllocationID: allocation.AllocationID, ContainerID: allocation.ContainerID}
 		}
 	}
+	a.mu.RUnlock()
+	if listPending || len(pending) > 0 {
+		a.relistRecovery(ctx, managed, listPending, pending)
+	}
+	a.queueSupersededStops()
+	a.mu.Lock()
+	if !a.recoveryListPending {
+		// Every listed container has been adopted and queued, so stops
+		// recorded while listing was incomplete have served their purpose.
+		a.recoveryStopped = nil
+	}
 	superseded := make(map[string]string, len(a.supersededStops))
 	for id, allocationID := range a.supersededStops {
 		superseded[id] = allocationID
 	}
-	a.mu.RUnlock()
+	a.mu.Unlock()
 	for id, allocationID := range superseded {
 		a.stopSuperseded(ctx, id, allocationID)
 	}
-	if !listPending && len(pending) == 0 {
-		return a.recoveryPending()
-	}
+	return a.recoveryPending()
+}
+
+// relistRecovery lists containers again to classify unobserved allocations
+// and, while listing is incomplete, adopt unrecorded containers.
+func (a *Agent) relistRecovery(ctx context.Context, managed runtime.ManagedRuntime, listPending bool, pending map[string]*Allocation) {
 	containers, err := managed.ListManaged(ctx, a.cluster)
 	if err != nil {
 		a.log.Warn("retry allocation recovery", "error", err)
-		return true
+		return
 	}
 	listed := make(map[string]runtime.ContainerInfo, len(containers))
 	for _, container := range containers {
@@ -626,7 +657,6 @@ func (a *Agent) retryRecovery(ctx context.Context) bool {
 		a.recoveryListPending = stillPending || a.hasUnreadableUnknownLocked(containers)
 		a.mu.Unlock()
 	}
-	return a.recoveryPending()
 }
 
 // recoveryPending reports whether recovery still has containers to observe.
@@ -680,11 +710,13 @@ func (a *Agent) adoptUnrecorded(ctx context.Context, listed runtime.ContainerInf
 	if allocation == nil {
 		return true
 	}
-	if a.hasNewerGeneration(allocation) {
-		// A newer generation started while this container was unlisted, so
-		// its start could not stop it and the control plane rejects stops for
-		// the older generation. Stop it here, as a start does for known older
-		// generations; a failed stop keeps it retained and restart-suppressed.
+	a.mu.RLock()
+	superseded := a.supersededLocked(allocation)
+	a.mu.RUnlock()
+	if superseded {
+		// A newer generation started, or the control plane stopped this
+		// generation, while the container was unlisted. Retain it as stopping;
+		// queueSupersededStops schedules the stop.
 		allocation.Status = "stopping"
 		a.adoptPorts(allocation)
 		a.mu.Lock()
@@ -695,15 +727,6 @@ func (a *Agent) adoptUnrecorded(ctx context.Context, listed runtime.ContainerInf
 			a.log.Error("record superseded allocation", "allocation", allocation.AllocationID, "error", persistErr)
 		}
 		a.reconciler.TrackStopping(allocation.ID, false, nil)
-		if err := a.stopAllocation(context.WithoutCancel(ctx), allocation.ID); err != nil {
-			a.log.Error("stop superseded allocation", "allocation", allocation.AllocationID, "error", err)
-			a.mu.Lock()
-			if a.supersededStops == nil {
-				a.supersededStops = make(map[string]string)
-			}
-			a.supersededStops[allocation.ID] = allocation.AllocationID
-			a.mu.Unlock()
-		}
 		return true
 	}
 	a.recoverContainer(container, nil)
@@ -720,23 +743,16 @@ func (a *Agent) stopSuperseded(ctx context.Context, id, allocationID string) {
 	if present {
 		if err := a.stopAllocation(context.WithoutCancel(ctx), id); err != nil {
 			a.log.Error("stop superseded allocation", "allocation", allocationID, "error", err)
-			return
+			// A container with different execution metadata is not this
+			// allocation's; keep the retained record without retrying.
+			if !errors.Is(err, ErrExecutionConflict) {
+				return
+			}
 		}
 	}
 	a.mu.Lock()
 	delete(a.supersededStops, id)
 	a.mu.Unlock()
-}
-
-func (a *Agent) hasNewerGeneration(allocation *Allocation) bool {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	for _, known := range a.allocations {
-		if known.AllocationID == allocation.AllocationID && known.Generation > allocation.Generation {
-			return true
-		}
-	}
-	return false
 }
 
 // hasUnreadableUnknownLocked reports whether a listing contained a container
@@ -848,7 +864,7 @@ func (a *Agent) snapshotAllocation(id string) (Allocation, bool) {
 // observed.
 func (a *Agent) runRecoveryRetry(ctx context.Context) {
 	delay := recoveryRetryMinDelay
-	for a.recoveryPending() {
+	for pending := a.recoveryPending(); pending; pending = a.retryRecovery(ctx) {
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
@@ -856,7 +872,6 @@ func (a *Agent) runRecoveryRetry(ctx context.Context) {
 			return
 		case <-timer.C:
 		}
-		a.retryRecovery(ctx)
 		delay = min(delay*2, recoveryRetryMaxDelay)
 	}
 }
@@ -1024,21 +1039,29 @@ func (a *Agent) StopGroup(ctx context.Context, request *api.StopAllocationReques
 	if err := a.AcceptEpoch(request.Epoch); err != nil {
 		return err
 	}
-	a.mu.RLock()
+	a.mu.Lock()
 	var ids []string
 	for id, allocation := range a.allocations {
 		if allocation.AllocationID != request.AllocationID {
 			continue
 		}
 		if allocation.Generation > request.Generation {
-			a.mu.RUnlock()
+			a.mu.Unlock()
 			return fmt.Errorf("%w: current %d, requested %d", ErrStaleGeneration, allocation.Generation, request.Generation)
 		}
 		if allocation.Generation == request.Generation {
 			ids = append(ids, id)
 		}
 	}
-	a.mu.RUnlock()
+	if a.recoveryListPending {
+		// A container of this generation may not be listed yet; recovery
+		// stops it instead of adopting it once it is found.
+		if a.recoveryStopped == nil {
+			a.recoveryStopped = make(map[string]uint64)
+		}
+		a.recoveryStopped[request.AllocationID] = max(a.recoveryStopped[request.AllocationID], request.Generation)
+	}
+	a.mu.Unlock()
 	var errs []error
 	for _, id := range ids {
 		if err := a.stopAllocation(ctx, id); err != nil {

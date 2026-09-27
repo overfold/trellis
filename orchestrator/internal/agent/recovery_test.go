@@ -553,3 +553,52 @@ func TestRecoverRetriesSupersededStopAfterRestart(t *testing.T) {
 		t.Fatalf("stop calls = %d, older = %+v, newer present = %v; want only the older generation stopped", rt.stopCount, agent.allocations["task"], agent.allocations["task-g2"] != nil)
 	}
 }
+
+func TestRecoverRetryQueuesSupersededStopAfterFailedListing(t *testing.T) {
+	rt := &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning}, listErr: errors.New("containerd unavailable")}
+	older := recoveryTestAllocation(0)
+	older.Status = "stopping"
+	newer := recoveryTestAllocation(0)
+	newer.ID, newer.ContainerID, newer.Generation = "task-g2", "task-g2", 2
+	newerLabels := recoveryTestLabels(newer)
+	newerLabels["trellis.allocation-generation"] = "2"
+	agent, _ := newRecoveryTestAgent(t, rt, older, newer)
+	if err := agent.recover(context.Background()); err == nil {
+		t.Fatal("recover succeeded despite listing failure")
+	}
+
+	rt.listErr = nil
+	rt.containers = []runtime.ContainerInfo{
+		{ID: "task", Status: runtime.StatusRunning, Labels: recoveryTestLabels(older)},
+		{ID: "task-g2", Status: runtime.StatusRunning, Labels: newerLabels},
+	}
+	if agent.retryRecovery(context.Background()) {
+		t.Fatal("retry left recovery work pending")
+	}
+	if rt.stopCount != 1 || agent.allocations["task"] != nil || agent.allocations["task-g2"] == nil {
+		t.Fatalf("stop calls = %d, older = %+v; want only the superseded generation stopped", rt.stopCount, agent.allocations["task"])
+	}
+}
+
+func TestRecoverRetryStopsContainerStoppedWhileUnlisted(t *testing.T) {
+	rt := &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning}, listErr: errors.New("containerd unavailable")}
+	agent, _ := newRecoveryTestAgent(t, rt)
+	if err := agent.recover(context.Background()); err == nil {
+		t.Fatal("recover succeeded despite listing failure")
+	}
+	if err := agent.StopGroup(context.Background(), &api.StopAllocationRequest{AllocationID: "allocation", Generation: 1}); err != nil {
+		t.Fatalf("stop unlisted allocation: %v", err)
+	}
+
+	rt.listErr = nil
+	rt.containers = []runtime.ContainerInfo{{ID: "task", Status: runtime.StatusRunning, Labels: recoveryTestLabels(recoveryTestAllocation(0))}}
+	if agent.retryRecovery(context.Background()) {
+		t.Fatal("retry left recovery work pending")
+	}
+	if rt.stopCount != 1 || agent.allocations["task"] != nil {
+		t.Fatalf("stop calls = %d, allocation = %+v; want the stopped generation stopped, not adopted", rt.stopCount, agent.allocations["task"])
+	}
+	if agent.recoveryStopped != nil {
+		t.Fatal("recovery kept stop records after listing completed")
+	}
+}
