@@ -747,6 +747,17 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	if allocID == "" {
 		return fmt.Errorf("allocation ID is required")
 	}
+	a.mu.RLock()
+	known := a.allocations[allocID] != nil
+	a.mu.RUnlock()
+	if !known {
+		// Checked before any start state exists, so a refused start never
+		// reaches cleanup that would release staging it does not own. A tracked
+		// allocation's staging is released by its own stop below.
+		if err := a.releaseOrphanedStaging(ctx, allocID); err != nil {
+			return err
+		}
+	}
 	a.mu.Lock()
 	existing := a.allocations[allocID]
 	if existing != nil {
@@ -783,7 +794,6 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	startAttempted := false
 	tracked := false
 	healthRegistered := false
-	stagingInUse := false
 	var netAttachment *network.Attachment
 	var ports []*runtime.Port
 	var secretDir string
@@ -845,9 +855,8 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 			}
 		}
 		// A container that still exists keeps its staging mounts as OCI mount
-		// sources; a cleanup retry releases them after removal succeeds. Staging
-		// found in use belongs to such a container, and this start staged none.
-		if containerRemoved && !stagingInUse {
+		// sources; a cleanup retry releases them after removal succeeds.
+		if containerRemoved {
 			if err := a.volumes.ReleaseStaging(allocID); err != nil {
 				cleanupErrs = append(cleanupErrs, fmt.Errorf("release volume staging: %w", err))
 			}
@@ -887,10 +896,6 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		}
 	}
 
-	if err := a.releaseOrphanedStaging(ctx, allocID); err != nil {
-		stagingInUse = errors.Is(err, errStagingInUse)
-		return err
-	}
 	var mounts []*runtime.Mount
 	for _, v := range ts.Volumes {
 		mount, err := a.volumes.Create(namespace, jobName, allocID, v)
@@ -1093,7 +1098,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 func (a *Agent) releaseOrphanedStaging(ctx context.Context, allocID string) error {
 	inUse, err := a.volumes.StagingInUse(allocID)
 	if err != nil {
-		return fmt.Errorf("check volume staging: %w", err)
+		return fmt.Errorf("%w: check volume staging: %w", errStagingInUse, err)
 	}
 	if !inUse {
 		return nil

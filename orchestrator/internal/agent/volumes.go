@@ -286,18 +286,11 @@ func (vm *VolumeManager) CleanupStaging(liveAllocationIDs []string) error {
 }
 
 func (vm *VolumeManager) cleanupStaging(keep map[string]bool) error {
-	// mountinfo reports absolute paths with symlinks resolved.
-	root, err := filepath.Abs(filepath.Join(vm.dataRootPath, "volume-staging"))
-	if err != nil {
+	root, err := resolveMountPath(filepath.Join(vm.dataRootPath, "volume-staging"))
+	if err != nil || root == "" {
 		return err
 	}
-	if root, err = filepath.EvalSymlinks(root); err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	var mounts []string
+	var mounts, previous []string
 	for {
 		mounts, err = stagingMounts(root)
 		if err != nil {
@@ -314,6 +307,10 @@ func (vm *VolumeManager) cleanupStaging(keep map[string]bool) error {
 		if len(orphaned) == 0 {
 			break
 		}
+		if slices.Equal(orphaned, previous) {
+			return fmt.Errorf("orphaned staging mounts remain after unmount: %v", orphaned)
+		}
+		previous = orphaned
 		for _, mount := range orphaned {
 			if err := unix.Unmount(mount, unix.MNT_DETACH); err != nil && err != unix.EINVAL && err != unix.ENOENT {
 				return fmt.Errorf("unstaging orphaned mount %s: %w", mount, err)
@@ -378,14 +375,8 @@ func stagingMountKey(root, mount string) string {
 }
 
 func hasMounts(dir string) (bool, error) {
-	dir, err := filepath.Abs(dir)
-	if err != nil {
-		return false, err
-	}
-	if dir, err = filepath.EvalSymlinks(dir); err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
+	dir, err := resolveMountPath(dir)
+	if err != nil || dir == "" {
 		return false, err
 	}
 	mounts, err := stagingMounts(dir)
@@ -396,6 +387,20 @@ func hasMounts(dir string) (bool, error) {
 		return false, err
 	}
 	return len(mounts) > 0, nil
+}
+
+// resolveMountPath returns path as mountinfo reports it (absolute, with
+// symlinks resolved), or "" when it does not exist.
+func resolveMountPath(path string) (string, error) {
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	path, err = filepath.EvalSymlinks(path)
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	return path, err
 }
 
 func stagingMounts(root string) ([]string, error) {

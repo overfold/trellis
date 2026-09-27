@@ -1072,10 +1072,12 @@ func TestStartReleasesStagingOnlyWhenItsContainerIsGone(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		rt           runtime.ContainerRuntime
+		checkErr     error
 		wantInUse    bool
 		wantUnstaged int
 	}{
 		{name: "container exists", rt: &reconcilerRuntime{}, wantInUse: true},
+		{name: "mount check fails", rt: &missingContainerRuntime{&reconcilerRuntime{}}, checkErr: errors.New("mountinfo unavailable"), wantInUse: true},
 		{name: "container missing", rt: &missingContainerRuntime{&reconcilerRuntime{}}, wantUnstaged: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1099,7 +1101,7 @@ func TestStartReleasesStagingOnlyWhenItsContainerIsGone(t *testing.T) {
 			}
 			agent.volumes.hasMounts = func(dir string) (bool, error) {
 				_, err := os.Stat(filepath.Join(dir, "logs"))
-				return err == nil, nil
+				return err == nil, tc.checkErr
 			}
 			agent.volumes.stage = func(int, string) error { return nil }
 			unstaged := 0
