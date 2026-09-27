@@ -33,6 +33,63 @@ func (r *failingRunner) Run(_ context.Context, name string, args ...string) erro
 	return nil
 }
 
+type cleanupRunner struct {
+	links         map[string]bool
+	namespaces    map[string]bool
+	firewallRules map[string]bool
+	failCommand   string
+	failed        bool
+}
+
+func (r *cleanupRunner) Run(_ context.Context, name string, args ...string) error {
+	command := name + " " + strings.Join(args, " ")
+	if command == r.failCommand && !r.failed {
+		r.failed = true
+		return errors.New("injected cleanup failure")
+	}
+	if name == "ip" && len(args) >= 3 && args[0] == "link" {
+		switch args[1] {
+		case "del":
+			if !r.links[args[2]] {
+				return errors.New("device does not exist")
+			}
+			delete(r.links, args[2])
+		case "show":
+			if len(args) < 4 || !r.links[args[3]] {
+				return errors.New("device does not exist")
+			}
+		}
+	}
+	if name == "ip" && len(args) >= 3 && args[0] == "netns" {
+		switch args[1] {
+		case "del":
+			if !r.namespaces[args[2]] {
+				return errors.New("No such file or directory")
+			}
+			delete(r.namespaces, args[2])
+		case "pids":
+			if !r.namespaces[args[2]] {
+				return errors.New("No such file or directory")
+			}
+		}
+	}
+	if name == "iptables" && len(args) >= 2 {
+		rule := strings.Join(args[1:], " ")
+		switch args[0] {
+		case "-D":
+			if !r.firewallRules[rule] {
+				return errors.New("Bad rule")
+			}
+			delete(r.firewallRules, rule)
+		case "-C":
+			if !r.firewallRules[rule] {
+				return errors.New("Bad rule")
+			}
+		}
+	}
+	return nil
+}
+
 type blockingRunner struct {
 	blockCommand string
 	entered      chan struct{}
@@ -248,6 +305,131 @@ func TestWireGuardDetachRemovesNamespacePathAfterLastAllocation(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(manager.stateDir, "acme")); !os.IsNotExist(err) {
 		t.Fatalf("namespace lease directory still exists after last detach: %v", err)
 	}
+}
+
+func TestWireGuardDetachPreservesLeaseAndConvergesAfterCleanupFailure(t *testing.T) {
+	tests := []struct {
+		name        string
+		failCommand func(*Attachment) string
+		wantError   string
+	}{
+		{
+			name:        "host veth",
+			failCommand: func(a *Attachment) string { return "ip link del " + a.HostVeth },
+			wantError:   "delete allocation veth",
+		},
+		{
+			name:        "network namespace",
+			failCommand: func(a *Attachment) string { return "ip netns del " + a.AllocationID },
+			wantError:   "remove allocation network namespace",
+		},
+		{
+			name: "firewall rule",
+			failCommand: func(a *Attachment) string {
+				return "iptables -D FORWARD -i " + a.Bridge + " ! -o " + a.WireGuardInterface + " -j DROP"
+			},
+			wantError: "delete firewall rule",
+		},
+		{
+			name:        "WireGuard interface",
+			failCommand: func(a *Attachment) string { return "ip link del " + a.WireGuardInterface },
+			wantError:   "delete WireGuard interface",
+		},
+		{
+			name:        "bridge",
+			failCommand: func(a *Attachment) string { return "ip link del " + a.Bridge },
+			wantError:   "delete bridge",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager, err := NewAutomatedWireGuardManager(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			manager.netnsDir = t.TempDir()
+			manager.run = &recordingRunner{}
+			attachment, err := manager.Attach(context.Background(), AttachRequest{
+				Namespace: "acme", Network: "acme", AllocationID: "alloc-one", Plan: Plan{
+					CIDR: "10.42.1.0/24", Gateway: "10.42.1.1", WireGuardAddress: "169.254.1.1/32", ListenPort: 51917,
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner := &cleanupRunner{
+				links: map[string]bool{
+					attachment.HostVeth:           true,
+					attachment.WireGuardInterface: true,
+					attachment.Bridge:             true,
+				},
+				namespaces: map[string]bool{attachment.AllocationID: true},
+				firewallRules: map[string]bool{
+					"FORWARD -i " + attachment.Bridge + " ! -o " + attachment.WireGuardInterface + " -j DROP": true,
+					"FORWARD -o " + attachment.Bridge + " ! -i " + attachment.WireGuardInterface + " -j DROP": true,
+					"INPUT -i " + attachment.Bridge + " -j DROP":                                              true,
+				},
+				failCommand: tt.failCommand(attachment),
+			}
+			manager.run = runner
+			if tt.name == "network namespace" {
+				if err := os.WriteFile(manager.netnsPath(attachment.AllocationID), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			err = manager.Detach(context.Background(), attachment)
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("Detach() error = %v, want context %q", err, tt.wantError)
+			}
+			if _, err := os.Stat(attachment.LeasePath); err != nil {
+				t.Fatalf("address lease was not preserved after cleanup failure: %v", err)
+			}
+			assertAttachments(t, manager, attachment.AllocationID)
+
+			if tt.name == "network namespace" {
+				if err := os.Remove(manager.netnsPath(attachment.AllocationID)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := manager.Detach(context.Background(), attachment); err != nil {
+				t.Fatalf("Detach() retry error = %v", err)
+			}
+			if _, err := os.Stat(attachment.LeasePath); !os.IsNotExist(err) {
+				t.Fatalf("address lease still exists after successful retry: %v", err)
+			}
+			assertAttachments(t, manager)
+			if len(runner.links) != 0 || len(runner.namespaces) != 0 || len(runner.firewallRules) != 0 {
+				t.Fatalf("kernel resources remain after successful retry: links=%v namespaces=%v firewall=%v", runner.links, runner.namespaces, runner.firewallRules)
+			}
+		})
+	}
+}
+
+func TestWireGuardDetachDoesNotTreatInspectionFailureAsAbsence(t *testing.T) {
+	manager, err := NewAutomatedWireGuardManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.run = &recordingRunner{}
+	attachment, err := manager.Attach(context.Background(), AttachRequest{
+		Namespace: "acme", Network: "acme", AllocationID: "alloc-one", Plan: Plan{
+			CIDR: "10.42.1.0/24", Gateway: "10.42.1.1", WireGuardAddress: "169.254.1.1/32", ListenPort: 51917,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.run = &failingRunner{failCommand: "ip link"}
+
+	err = manager.Detach(context.Background(), attachment)
+	if err == nil || !strings.Contains(err.Error(), "verify absence") {
+		t.Fatalf("Detach() error = %v, want failed absence verification", err)
+	}
+	if _, err := os.Stat(attachment.LeasePath); err != nil {
+		t.Fatalf("address lease was not preserved after ambiguous cleanup failure: %v", err)
+	}
+	assertAttachments(t, manager, attachment.AllocationID)
 }
 
 func TestReserveAddressResolvesCollisionAndPersistsChoice(t *testing.T) {

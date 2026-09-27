@@ -27,6 +27,12 @@ func (r *absentRunner) Run(_ context.Context, name string, args ...string) error
 	}
 	for _, fail := range r.fail {
 		if strings.Contains(command, fail) {
+			if strings.Contains(command, "ip link show") {
+				return errors.New("device does not exist")
+			}
+			if strings.Contains(command, "iptables -D") || strings.Contains(command, "iptables -C") {
+				return errors.New("Bad rule")
+			}
 			return errors.New("command failed")
 		}
 	}
