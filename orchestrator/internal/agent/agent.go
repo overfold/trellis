@@ -63,9 +63,6 @@ type Agent struct {
 	// supersededStops holds retained older generations that recovery must
 	// stop itself because the control plane rejects their stops as stale.
 	supersededStops map[string]string
-	// recoverySweepPending defers the orphaned secret sweep that a failed
-	// initial listing skipped until a later listing completes recovery.
-	recoverySweepPending bool
 	// newestListed holds the newest generation per scheduler allocation seen
 	// by the latest recovery relist, so an older generation counts as
 	// superseded even when the newer one could not be adopted yet.
@@ -332,7 +329,7 @@ func (a *Agent) Init(ctx context.Context) {
 	a.reconciler.Subscriber = a
 	if err := a.recover(ctx); err != nil {
 		a.log.Error("recover allocations", "error", err)
-	} else if !a.recoverySweepPending {
+	} else if !a.recoveryListPending {
 		// Ownership is only known once recovery has adopted every allocation;
 		// otherwise the recovery retry runs the sweep when it completes.
 		a.removeOrphanedSecretDirs()
@@ -377,7 +374,6 @@ func (a *Agent) recover(ctx context.Context) error {
 		// record and its resources until the runtime can be observed again.
 		a.mu.Lock()
 		a.recoveryListPending = true
-		a.recoverySweepPending = true
 		a.mu.Unlock()
 		for containerID, allocation := range stored {
 			if containerID != "" {
@@ -400,7 +396,6 @@ func (a *Agent) recover(ctx context.Context) error {
 	}
 	a.mu.Lock()
 	a.recoveryListPending = a.hasUnreadableUnknownLocked(containers)
-	a.recoverySweepPending = a.recoveryListPending
 	a.mu.Unlock()
 	for containerID, allocation := range stored {
 		if containerID == "" || seen[containerID] {
@@ -706,10 +701,9 @@ func (a *Agent) relistRecovery(ctx context.Context, managed runtime.ManagedRunti
 		}
 		a.mu.Lock()
 		a.recoveryListPending = stillPending || a.hasUnreadableUnknownLocked(containers)
-		sweep := !a.recoveryListPending && a.recoverySweepPending
-		if sweep {
-			a.recoverySweepPending = false
-		}
+		// Listing completes at most once, and Init skipped the orphaned
+		// secret sweep while it was incomplete.
+		sweep := !a.recoveryListPending
 		a.mu.Unlock()
 		if sweep {
 			// Every listed container is now recorded or retained, so secret
@@ -1165,6 +1159,17 @@ func (a *Agent) StopGroup(ctx context.Context, request *api.StopAllocationReques
 	}
 	listPending := a.recoveryListPending
 	a.mu.RUnlock()
+	var containers []runtime.ContainerInfo
+	var listErr error
+	if listPending {
+		// Recovery has not listed every container, so tasks of this
+		// generation may run without a record. Fence against a newer listed
+		// generation before stopping anything.
+		containers, listErr = a.listUnrecorded(ctx, request)
+		if errors.Is(listErr, ErrStaleGeneration) {
+			return listErr
+		}
+	}
 	var errs []error
 	for _, id := range ids {
 		if err := a.stopAllocation(ctx, id); err != nil {
@@ -1172,30 +1177,38 @@ func (a *Agent) StopGroup(ctx context.Context, request *api.StopAllocationReques
 		}
 	}
 	if listPending {
-		// Recovery has not listed every container, so tasks of this
-		// generation may run without a record.
-		errs = append(errs, a.stopUnrecorded(ctx, request))
+		if listErr != nil {
+			errs = append(errs, listErr)
+		} else {
+			errs = append(errs, a.stopUnrecorded(ctx, request, containers))
+		}
 	}
 	return errors.Join(errs...)
 }
 
-// stopUnrecorded stops unrecorded containers of an allocation generation, and
-// of its older generations, while recovery has not completed a listing. The caller holds the
-// allocation operation lock.
-func (a *Agent) stopUnrecorded(ctx context.Context, request *api.StopAllocationRequest) error {
+// listUnrecorded lists containers for stopUnrecorded and rejects a stop for a
+// generation older than a listed unrecorded one.
+func (a *Agent) listUnrecorded(ctx context.Context, request *api.StopAllocationRequest) ([]runtime.ContainerInfo, error) {
 	managed, ok := a.runtime.(runtime.ManagedRuntime)
 	if !ok {
-		return nil
+		return nil, nil
 	}
 	containers, err := managed.ListManaged(ctx, a.cluster)
 	if err != nil {
-		return fmt.Errorf("list containers for unrecorded allocation %s: %w", request.AllocationID, err)
+		return nil, fmt.Errorf("list containers for unrecorded allocation %s: %w", request.AllocationID, err)
 	}
 	for _, container := range containers {
 		if allocation := allocationFromRuntime(container); allocation != nil && allocation.AllocationID == request.AllocationID && allocation.Generation > request.Generation {
-			return fmt.Errorf("%w: listed %d, requested %d", ErrStaleGeneration, allocation.Generation, request.Generation)
+			return nil, fmt.Errorf("%w: listed %d, requested %d", ErrStaleGeneration, allocation.Generation, request.Generation)
 		}
 	}
+	return containers, nil
+}
+
+// stopUnrecorded stops listed unrecorded containers of an allocation
+// generation, and of its older generations, while recovery has not completed a
+// listing. The caller holds the allocation operation lock.
+func (a *Agent) stopUnrecorded(ctx context.Context, request *api.StopAllocationRequest, containers []runtime.ContainerInfo) error {
 	var errs []error
 	a.mu.RLock()
 	unidentified := a.hasUnreadableUnknownLocked(containers)

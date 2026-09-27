@@ -240,10 +240,6 @@ func materializeSecrets(dir, taskName string, delivered []api.DeliveredSecret) (
 	return env, mounts, nil
 }
 
-// removeOrphanedSecretDirs deletes secret directories that no allocation
-// record or in-memory allocation owns. They are left behind when the agent
-// stops after writing secrets but before the allocation record is durable.
-// It runs after recovery and before the agent accepts allocation requests.
 // recoveredSecretDir returns where an allocation known only from runtime
 // labels would keep its secret files, so stopping it removes them.
 func (a *Agent) recoveredSecretDir(allocID string) string {
@@ -254,6 +250,12 @@ func (a *Agent) recoveredSecretDir(allocID string) string {
 	return filepath.Join(root, allocationFileName(allocID))
 }
 
+// removeOrphanedSecretDirs deletes secret directories that no allocation
+// record or in-memory allocation owns. They are left behind when the agent
+// stops after writing secrets but before the allocation record is durable.
+// It runs once recovery has accounted for every container: at startup, or
+// from the recovery retry after an incomplete listing. Starts register their
+// allocation before writing secrets, so a concurrent start is never swept.
 func (a *Agent) removeOrphanedSecretDirs() {
 	root, reuse, err := a.recordedSecretRoot()
 	if err != nil {
