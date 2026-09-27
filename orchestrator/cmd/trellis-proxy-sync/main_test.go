@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -14,6 +15,102 @@ import (
 	"github.com/clofour/trellis/internal/lifecycle"
 	"golang.org/x/sys/unix"
 )
+
+func TestWriteConfigUmaskAndShortWrite(t *testing.T) {
+	if dir := os.Getenv("TRELLIS_CONFIG_WRITE_TEST_DIR"); dir != "" {
+		unix.Umask(0077)
+		path := filepath.Join(dir, "proxy.conf")
+		if err := writeConfig(path, []byte("old")); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0600 {
+			t.Fatalf("mode = %04o; want 0600 under umask 0077", info.Mode().Perm())
+		}
+		var limit unix.Rlimit
+		if err := unix.Getrlimit(unix.RLIMIT_FSIZE, &limit); err != nil {
+			t.Fatal(err)
+		}
+		limit.Cur = 3
+		if err := unix.Setrlimit(unix.RLIMIT_FSIZE, &limit); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeConfig(path, []byte("replacement")); !errors.Is(err, unix.EFBIG) {
+			t.Fatalf("write error = %v; want EFBIG", err)
+		}
+		if got, err := os.ReadFile(path); err != nil || string(got) != "old" {
+			t.Fatalf("config after short write = %q, %v; want old", got, err)
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil || len(entries) != 1 {
+			t.Fatalf("entries after short write = %v, %v; want only config", entries, err)
+		}
+		return
+	}
+	// Isolate process-wide umask and file size limits from other tests.
+	cmd := exec.Command(os.Args[0], "-test.run=^TestWriteConfigUmaskAndShortWrite$")
+	cmd.Env = append(os.Environ(), "TRELLIS_CONFIG_WRITE_TEST_DIR="+t.TempDir())
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("subprocess: %v\n%s", err, out)
+	}
+}
+
+func TestWriteConfigRejectsFIFO(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "proxy.conf")
+	if err := unix.Mkfifo(path, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeConfig(path, []byte("new")); err == nil {
+		t.Fatal("expected non-regular output error")
+	}
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeNamedPipe == 0 {
+		t.Fatalf("FIFO replaced: %v, %v", info, err)
+	}
+}
+
+func TestWriteConfigSymlinkParent(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "real", "nested"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real/nested", filepath.Join(dir, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../proxy.conf", filepath.Join(dir, "real", "nested", "output")); err != nil {
+		t.Fatal(err)
+	}
+	wrong := filepath.Join(dir, "proxy.conf")
+	if err := os.WriteFile(wrong, []byte("untouched"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeConfig(filepath.Join(dir, "alias", "output"), []byte("new")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, "real", "proxy.conf")); err != nil || string(got) != "new" {
+		t.Fatalf("resolved target = %q, %v; want new", got, err)
+	}
+	if got, err := os.ReadFile(wrong); err != nil || string(got) != "untouched" {
+		t.Fatalf("lexical target = %q, %v; want untouched", got, err)
+	}
+}
+
+func TestListXattrNamesGrowthFromEmpty(t *testing.T) {
+	calls := 0
+	_, err := listXattrNames(func([]byte) (int, error) {
+		calls++
+		if calls == 1 {
+			return 0, nil
+		}
+		return len("user.test\x00"), nil
+	})
+	if !errors.Is(err, unix.ERANGE) {
+		t.Fatalf("error = %v; want ERANGE", err)
+	}
+}
 
 func TestWriteConfig(t *testing.T) {
 	dir := t.TempDir()
@@ -33,7 +130,7 @@ func TestWriteConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := writeConfig(blocked, []byte("partial")); err == nil {
-		t.Fatal("expected rename to fail")
+		t.Fatal("expected non-regular output error")
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
