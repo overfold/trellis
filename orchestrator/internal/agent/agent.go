@@ -432,9 +432,7 @@ func (a *Agent) recover(ctx context.Context) error {
 				cleanupErr = fmt.Errorf("remove secret files for missing allocation container: %w", err)
 			}
 		}
-		if allocation.Spec != nil {
-			cleanupErr = errors.Join(cleanupErr, a.volumes.ReleaseStaging(allocation.ID, allocation.Spec.Volumes))
-		}
+		cleanupErr = errors.Join(cleanupErr, a.volumes.ReleaseStaging(allocation.ID))
 		if cleanupErr == nil {
 			if err := a.deleteAllocationRecord(allocation.ID); err != nil {
 				cleanupErr = fmt.Errorf("delete missing allocation record: %w", err)
@@ -848,7 +846,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		// A container that still exists keeps its staging mounts as OCI mount
 		// sources; a cleanup retry releases them after removal succeeds.
 		if containerRemoved {
-			if err := a.volumes.ReleaseStaging(allocID, ts.Volumes); err != nil {
+			if err := a.volumes.ReleaseStaging(allocID); err != nil {
 				cleanupErrs = append(cleanupErrs, fmt.Errorf("release volume staging: %w", err))
 			}
 		}
@@ -1327,8 +1325,8 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string) error {
 
 	// Staging mounts remain the OCI mount sources of a container that still
 	// exists; a stop retry releases them after removal succeeds.
-	if alloc.Spec != nil && containerRemoved {
-		if err := a.volumes.ReleaseStaging(allocID, alloc.Spec.Volumes); err != nil {
+	if containerRemoved {
+		if err := a.volumes.ReleaseStaging(allocID); err != nil {
 			errs = append(errs, fmt.Errorf("release volume staging: %w", err))
 		}
 	}

@@ -205,7 +205,7 @@ func TestContainerdRestartsTaskWithManagedVolume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = volumes.ReleaseStaging(id, []spec.VolumeSpec{volume}) }()
+	defer func() { _ = volumes.ReleaseStaging(id) }()
 	created, err := r.Create(ctx, runtime.CreateOptions{ID: id, Image: image, Runtime: "runc", Mounts: []*runtime.Mount{mount}})
 	if err != nil {
 		t.Fatal(err)

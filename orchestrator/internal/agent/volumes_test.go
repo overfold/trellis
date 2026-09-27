@@ -151,7 +151,7 @@ func TestCleanupStagingKeepsMountsOfExistingContainers(t *testing.T) {
 			t.Fatal(err)
 		}
 		// Unmount before TempDir removal can recurse into the volume.
-		t.Cleanup(func() { _ = manager.ReleaseStaging(id, []spec.VolumeSpec{volume}) })
+		t.Cleanup(func() { _ = manager.ReleaseStaging(id) })
 	}
 
 	restarted := NewVolumeManager(root)
@@ -173,7 +173,10 @@ func TestCleanupStagingKeepsMountsOfExistingContainers(t *testing.T) {
 	if _, err := os.Stat(filepath.Dir(restarted.stagingPath("orphan", "data"))); !os.IsNotExist(err) {
 		t.Fatalf("orphaned staging directory: %v, want not found", err)
 	}
-	if err := restarted.ReleaseStaging("live", []spec.VolumeSpec{volume}); err != nil {
+	if _, err := restarted.Create("ns", "job", "live", volume); err == nil {
+		t.Fatal("Create stacked a mount over staging kept for an existing container")
+	}
+	if err := restarted.ReleaseStaging("live"); err != nil {
 		t.Fatalf("release live staging: %v", err)
 	}
 }

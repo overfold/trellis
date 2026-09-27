@@ -155,6 +155,12 @@ func (vm *VolumeManager) prepareManagedDirectory(namespace, allocationID, volume
 	if err := os.MkdirAll(target, 0o700); err != nil {
 		return "", fmt.Errorf("creating managed volume staging directory: %w", err)
 	}
+	// Kept staging belongs to an existing container; never stack over it.
+	if mounted, err := mountedAt(target); err != nil {
+		return "", fmt.Errorf("checking managed volume staging directory: %w", err)
+	} else if mounted {
+		return "", fmt.Errorf("managed volume staging directory %s is already in use", target)
+	}
 	if err := vm.stage(fd, target); err != nil {
 		return "", fmt.Errorf("staging managed volume: %w", err)
 	}
@@ -218,22 +224,28 @@ func stageDirectory(sourceFD int, target string) error {
 
 // ReleaseStaging removes an allocation's staging bind mounts. Call it only once
 // the allocation's container has been removed or never existed: containerd
-// re-resolves the OCI mount source whenever it creates a new task.
-func (vm *VolumeManager) ReleaseStaging(allocationID string, volumes []spec.VolumeSpec) error {
-	var errs []error
-	for _, volume := range volumes {
-		if !strings.HasPrefix(volume.HostPath, "@/") || !spec.ValidIdentifier(volume.Name) {
-			continue
+// re-resolves the OCI mount source whenever it creates a new task. It needs no
+// task spec, so allocations recovered only from runtime labels are released too.
+func (vm *VolumeManager) ReleaseStaging(allocationID string) error {
+	dir := vm.stagingAllocationDir(allocationID)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
 		}
-		target := vm.stagingPath(allocationID, volume.Name)
+		return fmt.Errorf("reading allocation staging directory: %w", err)
+	}
+	var errs []error
+	for _, entry := range entries {
+		target := filepath.Join(dir, entry.Name())
 		if err := vm.unstage(target); err != nil && err != unix.EINVAL && err != unix.ENOENT {
-			errs = append(errs, fmt.Errorf("unstaging volume %s: %w", volume.Name, err))
+			errs = append(errs, fmt.Errorf("unstaging volume %s: %w", entry.Name(), err))
 		}
 		if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
-			errs = append(errs, fmt.Errorf("removing volume staging directory %s: %w", volume.Name, err))
+			errs = append(errs, fmt.Errorf("removing volume staging directory %s: %w", entry.Name(), err))
 		}
 	}
-	if err := os.Remove(vm.stagingAllocationDir(allocationID)); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(dir); err != nil && !os.IsNotExist(err) {
 		errs = append(errs, fmt.Errorf("removing allocation staging directory: %w", err))
 	}
 	return errors.Join(errs...)
@@ -358,6 +370,24 @@ func stagingMountKey(root, mount string) string {
 	}
 	key, _, _ := strings.Cut(rel, string(filepath.Separator))
 	return key
+}
+
+func mountedAt(path string) (bool, error) {
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return false, err
+	}
+	if path, err = filepath.EvalSymlinks(path); err != nil {
+		return false, err
+	}
+	mounts, err := stagingMounts(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return slices.Contains(mounts, path), nil
 }
 
 func stagingMounts(root string) ([]string, error) {

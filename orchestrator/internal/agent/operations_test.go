@@ -1020,6 +1020,48 @@ func TestManagedVolumeStagingOutlivesStartUntilStop(t *testing.T) {
 	}
 }
 
+func TestStopReleasesStagingOfAllocationRecoveredFromLabels(t *testing.T) {
+	rt := &createdRecoveryRuntime{
+		reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning},
+		managedID:         "task",
+		labels: map[string]string{
+			"trellis.allocation-id": "allocation", "trellis.allocation-generation": "1",
+			"trellis.job-revision": "1", "trellis.execution-hash": "hash",
+		},
+	}
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	agent := newOperationTestAgent(t, rt)
+	agent.ConfigureDurability(local, "test")
+	if err := agent.recover(context.Background()); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if recovered := agent.allocations["task"]; recovered == nil || recovered.Spec != nil {
+		t.Fatalf("recovered allocation = %+v, want one without a task spec", recovered)
+	}
+	staging := agent.volumes.stagingPath("task", "data")
+	if err := os.MkdirAll(staging, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	unstaged := 0
+	agent.volumes.unstage = func(string) error {
+		unstaged++
+		return nil
+	}
+
+	if err := agent.StopAllocation(context.Background(), "task"); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if unstaged != 1 {
+		t.Fatalf("unstage calls = %d, want 1", unstaged)
+	}
+	if _, err := os.Stat(filepath.Dir(staging)); !os.IsNotExist(err) {
+		t.Fatalf("staging after stop: %v, want not found", err)
+	}
+}
+
 func TestRecoverKeepsVolumeStagingForExistingContainers(t *testing.T) {
 	rt := &createdRecoveryRuntime{
 		reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning},
