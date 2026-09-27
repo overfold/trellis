@@ -1839,25 +1839,16 @@ func TestRunGroupRejectsExhaustedGenerationBeforeTouchingTasks(t *testing.T) {
 	}
 }
 
-func TestRestartExhaustionWaitsForCommittedStart(t *testing.T) {
+func TestFailedAllocationIgnoresLateHealthObservations(t *testing.T) {
 	rt := &reconcilerRuntime{status: runtime.StatusStopped}
 	agent := newOperationTestAgent(t, rt)
-	agent.reconciler.Subscriber = agent
-	policy := &spec.RestartPolicySpec{MaxRestarts: 0, Window: time.Minute}
-	// RunAllocation tracks the task while its record is still "starting".
-	agent.allocations["task"] = &Allocation{ID: "task", AllocationID: "allocation", Generation: 1, Status: "starting", Health: "unknown"}
-	agent.reconciler.Track("task", false, policy)
+	agent.allocations["task"] = &Allocation{ID: "task", AllocationID: "allocation", Generation: 1, Status: "failed", Health: "unhealthy", RestartExhausted: true}
 
-	if err := agent.reconciler.Reconcile(context.Background(), "task"); err == nil {
-		t.Fatal("exhaustion recorded on an uncommitted start")
+	agent.OnReconciledStatus("task", "healthy")
+	if err := agent.OnHealthy(context.Background(), "task"); err != nil {
+		t.Fatal(err)
 	}
-	// RunAllocation commits the running record, replacing the starting one.
-	committed := &Allocation{ID: "task", AllocationID: "allocation", Generation: 1, Status: "running", Health: "healthy"}
-	agent.allocations["task"] = committed
-	if err := agent.reconciler.Reconcile(context.Background(), "task"); err != nil {
-		t.Fatalf("reconcile after commit: %v", err)
-	}
-	if committed.Status != "failed" || !committed.RestartExhausted || rt.restartCount != 0 {
-		t.Fatalf("committed allocation = %+v restarts=%d, want recorded exhaustion without restart", committed, rt.restartCount)
+	if got := agent.allocations["task"]; got.Status != "failed" || got.Health != "unhealthy" {
+		t.Fatalf("allocation = %s/%s, want failed/unhealthy after late health", got.Status, got.Health)
 	}
 }

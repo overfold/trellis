@@ -64,27 +64,27 @@ func NewAllocationReconciler(runtime runtime.ContainerRuntime, subscriber Alloca
 
 // Track begins reconciliation for an allocation.
 func (r *AllocationReconciler) Track(allocID string, healthManaged bool, policy *spec.RestartPolicySpec) {
-	r.trackRecovered(allocID, healthManaged, policy, 0, time.Time{}, false, false, false)
+	r.track(allocID, policy, &allocationReconcileState{healthManaged: healthManaged})
 }
 
 // TrackStopping observes an allocation while suppressing automatic restarts
 // until ResumeRestarts. The persisted restart state is kept so a resumed
 // allocation does not receive a fresh budget.
 func (r *AllocationReconciler) TrackStopping(allocID string, healthManaged bool, policy *spec.RestartPolicySpec, attempts int, window time.Time, exhausted bool) {
-	r.trackRecovered(allocID, healthManaged, policy, attempts, window, exhausted, false, true)
+	r.track(allocID, policy, &allocationReconcileState{healthManaged: healthManaged, attempts: attempts, window: window, exhausted: exhausted, stopping: true})
 }
 
 // TrackFailed observes an allocation whose exhausted restart budget and
 // failed observation are already recorded. It is never restarted locally.
 func (r *AllocationReconciler) TrackFailed(allocID string, healthManaged bool, policy *spec.RestartPolicySpec, attempts int, window time.Time) {
-	r.trackRecovered(allocID, healthManaged, policy, attempts, window, true, true, false)
+	r.track(allocID, policy, &allocationReconcileState{healthManaged: healthManaged, attempts: attempts, window: window, exhausted: true, failed: true})
 }
 
 // TrackRecovered restores reconciliation state for an allocation. An
 // allocation whose restart budget was exhausted stays failed: it is never
 // restarted locally again for the same allocation generation.
 func (r *AllocationReconciler) TrackRecovered(allocID string, healthManaged bool, policy *spec.RestartPolicySpec, attempts int, window time.Time, exhausted bool) {
-	r.trackRecovered(allocID, healthManaged, policy, attempts, window, exhausted, false, false)
+	r.track(allocID, policy, &allocationReconcileState{healthManaged: healthManaged, attempts: attempts, window: window, exhausted: exhausted})
 }
 
 func restartPolicyLimits(policy *spec.RestartPolicySpec) (int, time.Duration) {
@@ -108,24 +108,15 @@ func advanceRestartState(attempts int, window time.Time, maxRestarts int, restar
 	return attempts + 1, window, true
 }
 
-func (r *AllocationReconciler) trackRecovered(allocID string, healthManaged bool, policy *spec.RestartPolicySpec, attempts int, window time.Time, exhausted, failed, stopping bool) {
+func (r *AllocationReconciler) track(allocID string, policy *spec.RestartPolicySpec, state *allocationReconcileState) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	maxRestarts, restartWindow := restartPolicyLimits(policy)
-	if window.IsZero() {
-		window = time.Now()
+	state.maxRestarts, state.restartWindow = restartPolicyLimits(policy)
+	if state.window.IsZero() {
+		state.window = time.Now()
 	}
-	r.states[allocID] = &allocationReconcileState{
-		stopping:      stopping,
-		healthManaged: healthManaged,
-		exhausted:     exhausted,
-		failed:        failed,
-		attempts:      attempts,
-		window:        window,
-		maxRestarts:   maxRestarts,
-		restartWindow: restartWindow,
-	}
+	r.states[allocID] = state
 }
 
 // Untrack stops reconciliation for an allocation.

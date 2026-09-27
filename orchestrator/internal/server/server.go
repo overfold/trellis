@@ -831,7 +831,7 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 				break
 			}
 		}
-		if info.Phase.Valid() && observationCanTransition(a.Phase, info.Phase) {
+		if info.Phase.Valid() && lifecycle.CanObserve(a.Phase, info.Phase) {
 			_ = a.Transition(info.Phase, time.Now().UTC(), "", "")
 		}
 		_ = a.SetHealth(info.Health)
@@ -852,18 +852,6 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 
 	s.refreshCatalog()
 	return nil
-}
-
-// observationCanTransition reports whether a heartbeat observation may move an
-// allocation between phases. A failed allocation is terminal: cleanup of its
-// observed tasks (reported as stopping) must not make it count toward the
-// group again. A server-initiated stop owns the allocation until it completes,
-// so a task that failed meanwhile does not override the stop.
-func observationCanTransition(from, to lifecycle.Phase) bool {
-	if from == lifecycle.PhaseFailed || (from == lifecycle.PhaseStopping && to == lifecycle.PhaseFailed) {
-		return false
-	}
-	return lifecycle.CanTransition(from, to)
 }
 
 func jobKey(namespace, name string) string {
