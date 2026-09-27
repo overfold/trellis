@@ -103,7 +103,10 @@ func TestDetachAllocationRemovesLeftoverAttachmentByID(t *testing.T) {
 	for _, want := range []string{
 		"ip link del " + attachment.HostVeth,
 		"ip netns del alloc-one",
+		"iptables -D FORWARD -i " + attachment.Bridge + " ! -s 10.42.1.0/24 -j DROP",
+		"iptables -D INPUT -i " + attachment.Bridge + " -s 10.42.1.0/24 -d 10.42.1.1 -p tcp --dport 8126 -j ACCEPT",
 		"iptables -D INPUT -i " + attachment.Bridge + " -d 10.42.1.1 -p tcp --dport 8126 -j ACCEPT",
+		"iptables -D INPUT -i " + attachment.Bridge + " -s 10.42.1.0/24 -d " + WorkloadDNSAddress + " -p udp --dport 53 -j ACCEPT",
 		"iptables -D INPUT -i " + attachment.Bridge + " -d " + WorkloadDNSAddress + " -p udp --dport 53 -j ACCEPT",
 		"ip link del " + attachment.WireGuardInterface,
 		"ip link del " + attachment.Bridge,

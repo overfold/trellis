@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,6 +27,7 @@ type attachmentRecord struct {
 	AllocationID string `json:"allocation_id"`
 	Namespace    string `json:"namespace"`
 	Network      string `json:"network"`
+	CIDR         string `json:"cidr,omitempty"`
 	Gateway      string `json:"gateway"`
 	APIPort      int    `json:"api_port"`
 }
@@ -102,6 +104,7 @@ func (m *WireGuardManager) DetachAllocation(ctx context.Context, allocationID st
 		AllocationID: record.AllocationID,
 		Namespace:    record.Namespace,
 		Network:      record.Network,
+		Address:      record.CIDR,
 		Gateway:      record.Gateway,
 		APIPort:      record.APIPort,
 	})
@@ -256,6 +259,15 @@ func (m *WireGuardManager) removeNamespacePathLocked(ctx context.Context, a Atta
 	if wg == "" {
 		wg = short("tw", a.Namespace+"\x00"+a.Network)
 	}
+	cidr := ""
+	if address, err := netip.ParsePrefix(a.Address); err == nil {
+		cidr = address.Masked().String()
+	}
+	if cidr != "" {
+		if err := m.deleteFirewallRule(ctx, "FORWARD", "-i", bridge, "!", "-s", cidr, "-j", "DROP"); err != nil {
+			return err
+		}
+	}
 	if err := m.deleteFirewallRule(ctx, "FORWARD", "-i", bridge, "!", "-o", wg, "-j", "DROP"); err != nil {
 		return err
 	}
@@ -264,12 +276,22 @@ func (m *WireGuardManager) removeNamespacePathLocked(ctx context.Context, a Atta
 	}
 	if m.dnsAddress != "" {
 		for _, protocol := range []string{"udp", "tcp"} {
+			if cidr != "" {
+				if err := m.deleteFirewallRule(ctx, "INPUT", "-i", bridge, "-s", cidr, "-d", m.dnsAddress, "-p", protocol, "--dport", "53", "-j", "ACCEPT"); err != nil {
+					return err
+				}
+			}
 			if err := m.deleteFirewallRule(ctx, "INPUT", "-i", bridge, "-d", m.dnsAddress, "-p", protocol, "--dport", "53", "-j", "ACCEPT"); err != nil {
 				return err
 			}
 		}
 	}
 	if a.APIPort > 0 {
+		if cidr != "" {
+			if err := m.deleteFirewallRule(ctx, "INPUT", "-i", bridge, "-s", cidr, "-d", a.Gateway, "-p", "tcp", "--dport", fmt.Sprint(a.APIPort), "-j", "ACCEPT"); err != nil {
+				return err
+			}
+		}
 		if err := m.deleteFirewallRule(ctx, "INPUT", "-i", bridge, "-d", a.Gateway, "-p", "tcp", "--dport", fmt.Sprint(a.APIPort), "-j", "ACCEPT"); err != nil {
 			return err
 		}

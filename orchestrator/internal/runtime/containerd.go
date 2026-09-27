@@ -49,6 +49,14 @@ type Mount struct {
 	ReadOnly      bool
 }
 
+func withoutRawSocketCapability() oci.SpecOpts {
+	return oci.WithDroppedCapabilities([]string{"CAP_NET_RAW"})
+}
+
+func shouldDropRawSocketCapability(networkNamespace string) bool {
+	return networkNamespace != "" && networkNamespace != "/proc/1/ns/net"
+}
+
 // NewContainerdRuntime connects to containerd at socketPath.
 func NewContainerdRuntime(socketPath string) (*ContainerdRuntime, error) {
 	client, err := containerd.New(socketPath)
@@ -154,6 +162,9 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 		ociSpecOpts = append(ociSpecOpts, oci.WithLinuxNamespace(specs.LinuxNamespace{
 			Type: specs.NetworkNamespace, Path: options.NetworkNamespace,
 		}))
+		if shouldDropRawSocketCapability(options.NetworkNamespace) {
+			ociSpecOpts = append(ociSpecOpts, withoutRawSocketCapability())
+		}
 	}
 	if options.CPU > 0 {
 		cpuQuota := int64(options.CPU) * 100

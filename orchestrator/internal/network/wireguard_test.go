@@ -181,6 +181,50 @@ func TestWireGuardAttachBuildsIsolatedNamespace(t *testing.T) {
 	}
 }
 
+func TestNamespaceFirewallAcceptsDNSOnlyFromNamespaceCIDR(t *testing.T) {
+	runner := &recordingRunner{}
+	manager := NewWireGuardManager(t.TempDir())
+	manager.run = runner
+	manager.dnsAddress = WorkloadDNSAddress
+
+	if err := manager.reconcileFirewall(context.Background(), "tb-acme", "tw-acme", "10.42.1.0/24", "10.42.1.1", 8128); err != nil {
+		t.Fatal(err)
+	}
+
+	commands := strings.Join(runner.commands, "\n")
+	for _, protocol := range []string{"udp", "tcp"} {
+		valid := "iptables -C INPUT -i tb-acme -s 10.42.1.0/24 -d 198.18.0.53 -p " + protocol + " --dport 53 -j ACCEPT"
+		if !strings.Contains(commands, valid) {
+			t.Errorf("namespace-source DNS traffic is not accepted for %s:\n%s", protocol, commands)
+		}
+	}
+	if want := "iptables -C FORWARD -i tb-acme ! -s 10.42.1.0/24 -j DROP"; !strings.Contains(commands, want) {
+		t.Errorf("spoofed forwarded traffic is not dropped:\n%s", commands)
+	}
+	if want := "iptables -C INPUT -i tb-acme -s 10.42.1.0/24 -d 10.42.1.1 -p tcp --dport 8128 -j ACCEPT"; !strings.Contains(commands, want) {
+		t.Errorf("namespace-source API traffic is not accepted:\n%s", commands)
+	}
+}
+
+func TestNamespaceFirewallRemovesLegacyUnrestrictedDNSRules(t *testing.T) {
+	runner := &recordingRunner{}
+	manager := NewWireGuardManager(t.TempDir())
+	manager.run = runner
+	manager.dnsAddress = WorkloadDNSAddress
+
+	if err := manager.reconcileFirewall(context.Background(), "tb-acme", "tw-acme", "10.42.1.0/24", "10.42.1.1", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	commands := strings.Join(runner.commands, "\n")
+	for _, protocol := range []string{"udp", "tcp"} {
+		want := "iptables -D INPUT -i tb-acme -d 198.18.0.53 -p " + protocol + " --dport 53 -j ACCEPT"
+		if !strings.Contains(commands, want) {
+			t.Errorf("legacy %s DNS rule is not removed during reconciliation:\n%s", protocol, commands)
+		}
+	}
+}
+
 func TestWireGuardRejectsUntrustedNetworkName(t *testing.T) {
 	m := NewWireGuardManager(t.TempDir())
 	if _, err := m.Attach(context.Background(), AttachRequest{Namespace: "namespace", Network: "../escape", AllocationID: "alloc"}); err == nil {

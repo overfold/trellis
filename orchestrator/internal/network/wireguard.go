@@ -470,6 +470,76 @@ func (m *WireGuardManager) removeStaleRoutes(ctx context.Context, wg string, rou
 	return nil
 }
 
+func (m *WireGuardManager) reconcileFirewall(ctx context.Context, bridge, wg, cidr, gateway string, apiPort int) error {
+	prefix, err := netip.ParsePrefix(cidr)
+	if err != nil || !prefix.Addr().Is4() {
+		return fmt.Errorf("namespace firewall CIDR must be IPv4: %q", cidr)
+	}
+	prefix = prefix.Masked()
+	gatewayAddress, err := netip.ParseAddr(gateway)
+	if err != nil || !prefix.Contains(gatewayAddress) {
+		return fmt.Errorf("namespace firewall gateway %q must be within %s", gateway, prefix)
+	}
+	cidr = prefix.String()
+	// Reject packets that claim to come from outside this node's namespace
+	// subnet before they can reach WireGuard or a host-local service.
+	sourceDrop := []string{"FORWARD", "-i", bridge, "!", "-s", cidr, "-j", "DROP"}
+	if m.run.Run(ctx, "iptables", append([]string{"-C"}, sourceDrop...)...) != nil {
+		if err := m.run.Run(ctx, "iptables", append([]string{"-I"}, sourceDrop...)...); err != nil {
+			return err
+		}
+	}
+	if m.run.Run(ctx, "iptables", "-C", "FORWARD", "-i", bridge, "!", "-o", wg, "-j", "DROP") != nil {
+		if err := m.run.Run(ctx, "iptables", "-A", "FORWARD", "-i", bridge, "!", "-o", wg, "-j", "DROP"); err != nil {
+			return err
+		}
+	}
+	if m.run.Run(ctx, "iptables", "-C", "FORWARD", "-o", bridge, "!", "-i", wg, "-j", "DROP") != nil {
+		if err := m.run.Run(ctx, "iptables", "-A", "FORWARD", "-o", bridge, "!", "-i", wg, "-j", "DROP"); err != nil {
+			return err
+		}
+	}
+	if m.dnsAddress != "" {
+		for _, protocol := range []string{"udp", "tcp"} {
+			// Remove the old source-unrestricted rule during upgrades before
+			// installing the namespace-scoped replacement.
+			legacy := []string{"INPUT", "-i", bridge, "-d", m.dnsAddress, "-p", protocol, "--dport", "53", "-j", "ACCEPT"}
+			if m.run.Run(ctx, "iptables", append([]string{"-C"}, legacy...)...) == nil {
+				if err := m.run.Run(ctx, "iptables", append([]string{"-D"}, legacy...)...); err != nil {
+					return err
+				}
+			}
+			args := []string{"INPUT", "-i", bridge, "-s", cidr, "-d", m.dnsAddress, "-p", protocol, "--dport", "53", "-j", "ACCEPT"}
+			if m.run.Run(ctx, "iptables", append([]string{"-C"}, args...)...) != nil {
+				if err := m.run.Run(ctx, "iptables", append([]string{"-I"}, args...)...); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	if apiPort > 0 {
+		legacy := []string{"INPUT", "-i", bridge, "-d", gateway, "-p", "tcp", "--dport", fmt.Sprint(apiPort), "-j", "ACCEPT"}
+		if m.run.Run(ctx, "iptables", append([]string{"-C"}, legacy...)...) == nil {
+			if err := m.run.Run(ctx, "iptables", append([]string{"-D"}, legacy...)...); err != nil {
+				return err
+			}
+		}
+		args := []string{"INPUT", "-i", bridge, "-s", cidr, "-d", gateway, "-p", "tcp", "--dport", fmt.Sprint(apiPort), "-j", "ACCEPT"}
+		if m.run.Run(ctx, "iptables", append([]string{"-C"}, args...)...) != nil {
+			if err := m.run.Run(ctx, "iptables", append([]string{"-I"}, args...)...); err != nil {
+				return err
+			}
+		}
+	}
+	_ = m.run.Run(ctx, "iptables", "-D", "INPUT", "-i", bridge, "!", "-d", gateway, "-j", "DROP")
+	if m.run.Run(ctx, "iptables", "-C", "INPUT", "-i", bridge, "-j", "DROP") != nil {
+		if err := m.run.Run(ctx, "iptables", "-A", "INPUT", "-i", bridge, "-j", "DROP"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (m *WireGuardManager) planPath(namespace, networkName string) string {
 	return filepath.Join(m.stateDir, "plans", short("", namespace+"\x00"+networkName)+".json")
 }
@@ -503,6 +573,9 @@ func (m *WireGuardManager) UpdatePlan(ctx context.Context, namespace string, pla
 	}
 	if err := m.run.Run(ctx, "ip", "addr", "replace", plan.WireGuardAddress, "dev", wg); err != nil {
 		return fmt.Errorf("configure WireGuard address: %w", err)
+	}
+	if err := m.reconcileFirewall(ctx, short("tb", namespace+"\x00"+namespace), wg, plan.CIDR, plan.Gateway, plan.APIPort); err != nil {
+		return fmt.Errorf("reconcile namespace firewall: %w", err)
 	}
 	peers := make([]Peer, len(plan.Peers))
 	for i, peer := range plan.Peers {
@@ -564,7 +637,7 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 	ns := m.netnsPath(allocation)
 	// Journal the attachment before creating anything, so an agent that
 	// crashes before it learns the result can still detach by allocation ID.
-	if err := m.recordAttachment(attachmentRecord{AllocationID: allocation, Namespace: namespace, Network: networkName, Gateway: cfg.Gateway, APIPort: request.Plan.APIPort}); err != nil {
+	if err := m.recordAttachment(attachmentRecord{AllocationID: allocation, Namespace: namespace, Network: networkName, CIDR: cfg.CIDR, Gateway: cfg.Gateway, APIPort: request.Plan.APIPort}); err != nil {
 		return nil, err
 	}
 	var lease string
@@ -575,7 +648,7 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 		// Roll back with the same idempotent detach a restarted agent uses.
 		// If that fails, the record stays so a later detach can finish.
 		rollback := Attachment{AllocationID: allocation, Namespace: namespace, Network: networkName, HostVeth: hostVeth,
-			Bridge: bridge, WireGuardInterface: wg, Gateway: cfg.Gateway, APIPort: request.Plan.APIPort, LeasePath: lease}
+			Bridge: bridge, WireGuardInterface: wg, Gateway: cfg.Gateway, APIPort: request.Plan.APIPort, Address: cfg.CIDR, LeasePath: lease}
 		if err := m.detachLocked(context.WithoutCancel(ctx), rollback); err != nil {
 			retErr = errors.Join(retErr, fmt.Errorf("roll back network attachment: %w", err))
 		}
@@ -639,39 +712,8 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 	if err = m.run.Run(ctx, "sysctl", "-w", "net.ipv4.ip_forward=1"); err != nil {
 		return nil, err
 	}
-	if m.run.Run(ctx, "iptables", "-C", "FORWARD", "-i", bridge, "!", "-o", wg, "-j", "DROP") != nil {
-		if err = m.run.Run(ctx, "iptables", "-A", "FORWARD", "-i", bridge, "!", "-o", wg, "-j", "DROP"); err != nil {
-			return nil, err
-		}
-	}
-	if m.run.Run(ctx, "iptables", "-C", "FORWARD", "-o", bridge, "!", "-i", wg, "-j", "DROP") != nil {
-		if err = m.run.Run(ctx, "iptables", "-A", "FORWARD", "-o", bridge, "!", "-i", wg, "-j", "DROP"); err != nil {
-			return nil, err
-		}
-	}
-	if m.dnsAddress != "" {
-		for _, protocol := range []string{"udp", "tcp"} {
-			args := []string{"INPUT", "-i", bridge, "-d", m.dnsAddress, "-p", protocol, "--dport", "53", "-j", "ACCEPT"}
-			if m.run.Run(ctx, "iptables", append([]string{"-C"}, args...)...) != nil {
-				if err = m.run.Run(ctx, "iptables", append([]string{"-I"}, args...)...); err != nil {
-					return nil, err
-				}
-			}
-		}
-	}
-	if request.Plan.APIPort > 0 {
-		args := []string{"INPUT", "-i", bridge, "-d", cfg.Gateway, "-p", "tcp", "--dport", fmt.Sprint(request.Plan.APIPort), "-j", "ACCEPT"}
-		if m.run.Run(ctx, "iptables", append([]string{"-C"}, args...)...) != nil {
-			if err = m.run.Run(ctx, "iptables", append([]string{"-I"}, args...)...); err != nil {
-				return nil, err
-			}
-		}
-	}
-	_ = m.run.Run(ctx, "iptables", "-D", "INPUT", "-i", bridge, "!", "-d", cfg.Gateway, "-j", "DROP")
-	if m.run.Run(ctx, "iptables", "-C", "INPUT", "-i", bridge, "-j", "DROP") != nil {
-		if err = m.run.Run(ctx, "iptables", "-A", "INPUT", "-i", bridge, "-j", "DROP"); err != nil {
-			return nil, err
-		}
+	if err = m.reconcileFirewall(ctx, bridge, wg, cfg.CIDR, cfg.Gateway, request.Plan.APIPort); err != nil {
+		return nil, fmt.Errorf("reconcile namespace firewall: %w", err)
 	}
 	if err = m.run.Run(ctx, "ip", "netns", "add", allocation); err != nil {
 		return nil, err
