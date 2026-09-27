@@ -499,7 +499,7 @@ func (c *ContainerdRuntime) Exec(ctx context.Context, containerID string, comman
 	if err != nil {
 		return 1, fmt.Errorf("executing command %s: %w", command, err)
 	}
-	deleteExecProcess(ctx, taskExec)
+	_ = deleteExecProcess(ctx, taskExec)
 	code, _, err := status.Result()
 	if err != nil {
 		return 1, fmt.Errorf("extracting status %s: %w", command, err)
@@ -707,7 +707,9 @@ func (c *ContainerdRuntime) ExecOutput(ctx context.Context, containerID string, 
 		return nil, nil, 1, fmt.Errorf("exec in %s: %w", containerID, err)
 	}
 	// Deleting the process waits for its output copy to finish.
-	deleteExecProcess(ctx, taskExec)
+	if err := deleteExecProcess(ctx, taskExec); err != nil {
+		return nil, nil, 1, fmt.Errorf("collecting exec output for %s: %w", containerID, err)
+	}
 	code, _, err := status.Result()
 	if err != nil {
 		return nil, nil, 1, fmt.Errorf("extracting exec status for %s: %w", containerID, err)
@@ -729,7 +731,7 @@ type execProcess interface {
 // runExecProcess starts a created exec process and waits for it to exit. If
 // ctx ends first, the process is killed and deleted in the background so it
 // does not outlive the request, and ctx's error is returned. On any other
-// error the process has been deleted; after a successful exit the caller
+// error the process has been cleaned up; after a successful exit the caller
 // deletes it.
 func runExecProcess(ctx context.Context, process execProcess) (containerd.ExitStatus, error) {
 	// Waiting must survive cancellation so cleanup can observe the kill.
@@ -737,12 +739,14 @@ func runExecProcess(ctx context.Context, process execProcess) (containerd.ExitSt
 	exitCh, err := process.Wait(waitCtx)
 	if err != nil {
 		cancelWait()
-		deleteExecProcess(ctx, process)
+		_ = deleteExecProcess(ctx, process)
 		return containerd.ExitStatus{}, fmt.Errorf("waiting on exec: %w", err)
 	}
-	if err := process.Start(ctx); err != nil {
+	// A cancelled Start can still launch the process, so let it finish and
+	// handle cancellation once the process state is known.
+	if err := process.Start(context.WithoutCancel(ctx)); err != nil {
+		killExecProcess(ctx, process, exitCh)
 		cancelWait()
-		deleteExecProcess(ctx, process)
 		return containerd.ExitStatus{}, fmt.Errorf("starting exec: %w", err)
 	}
 	select {
@@ -752,26 +756,38 @@ func runExecProcess(ctx context.Context, process execProcess) (containerd.ExitSt
 	case <-ctx.Done():
 		go func() {
 			defer cancelWait()
-			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), execCleanupTimeout)
-			defer cleanupCancel()
-			if err := process.Kill(cleanupCtx, syscall.SIGKILL); err != nil && !errdefs.IsNotFound(err) {
-				return
-			}
-			select {
-			case <-exitCh:
-			case <-cleanupCtx.Done():
-				return
-			}
-			_, _ = process.Delete(cleanupCtx)
+			killExecProcess(ctx, process, exitCh)
 		}()
 		return containerd.ExitStatus{}, ctx.Err()
 	}
 }
 
-func deleteExecProcess(ctx context.Context, process execProcess) {
+// killExecProcess kills an exec process that may be running and deletes it
+// once it has exited, within a bounded time that survives ctx's cancellation.
+func killExecProcess(ctx context.Context, process execProcess, exitCh <-chan containerd.ExitStatus) {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), execCleanupTimeout)
 	defer cancel()
+	// Kill fails when the process already exited or never started; Delete
+	// below reports whether it is still running.
+	_ = process.Kill(cleanupCtx, syscall.SIGKILL)
+	if _, err := process.Delete(cleanupCtx); err == nil || !errdefs.IsFailedPrecondition(err) {
+		return
+	}
+	select {
+	case <-exitCh:
+	case <-cleanupCtx.Done():
+		return
+	}
 	_, _ = process.Delete(cleanupCtx)
+}
+
+// deleteExecProcess deletes an exited exec process, waiting for its output
+// copy to finish, within a bounded time that survives ctx's cancellation.
+func deleteExecProcess(ctx context.Context, process execProcess) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), execCleanupTimeout)
+	defer cancel()
+	_, err := process.Delete(cleanupCtx)
+	return err
 }
 
 // lockedBuffer collects exec output written by containerd's IO copy goroutines.
@@ -929,21 +945,20 @@ func (c *ContainerdRuntime) StartTerminal(ctx context.Context, containerID strin
 	if err != nil {
 		_ = stdinReader.Close()
 		_ = stdinWriter.Close()
-		_, _ = process.Delete(ctx)
+		_ = deleteExecProcess(ctx, process)
 		return nil, fmt.Errorf("waiting on terminal exec for %s: %w", containerID, err)
 	}
 	if err := process.Start(ctx); err != nil {
 		_ = stdinReader.Close()
 		_ = stdinWriter.Close()
-		_, _ = process.Delete(ctx)
+		killExecProcess(ctx, process, exitCh)
 		return nil, fmt.Errorf("starting terminal exec for %s: %w", containerID, err)
 	}
 	if cols > 0 && rows > 0 {
 		if err := process.Resize(ctx, cols, rows); err != nil {
-			_ = process.Kill(ctx, syscall.SIGKILL)
 			_ = stdinReader.Close()
 			_ = stdinWriter.Close()
-			_, _ = process.Delete(ctx)
+			killExecProcess(ctx, process, exitCh)
 			return nil, fmt.Errorf("resize terminal exec for %s: %w", containerID, err)
 		}
 	}
@@ -963,7 +978,7 @@ func (c *ContainerdRuntime) StartTerminal(ctx context.Context, containerID strin
 		session.mu.Unlock()
 		_ = stdinWriter.Close()
 		_ = stdinReader.Close()
-		_, _ = process.Delete(ctx)
+		_ = deleteExecProcess(ctx, process)
 	}()
 
 	return session, nil

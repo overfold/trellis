@@ -7,10 +7,12 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/clofour/trellis/internal/api"
 	"github.com/clofour/trellis/internal/runtime"
+	"github.com/containerd/errdefs"
 	"github.com/google/uuid"
 )
 
@@ -33,7 +35,8 @@ type execSession struct {
 	Task         string
 	Terminal     runtime.TerminalSession
 
-	lastActive time.Time
+	// lastActive holds Unix nanoseconds so session use needs only a read lock.
+	lastActive atomic.Int64
 	exitedAt   time.Time
 }
 
@@ -49,7 +52,7 @@ func (s *execSession) expired(now time.Time) bool {
 	if !s.exitedAt.IsZero() {
 		return now.Sub(s.exitedAt) >= execSessionExitRetention
 	}
-	return now.Sub(s.lastActive) >= execSessionIdleTimeout
+	return now.Sub(time.Unix(0, s.lastActive.Load())) >= execSessionIdleTimeout
 }
 
 // execTarget identifies the task record and container an exec request addresses.
@@ -68,16 +71,15 @@ func execTargetable(alloc *Allocation) bool {
 // address for a scheduler allocation: running, ownership-verified records of
 // the newest generation this agent holds, sorted by task name. Records of an
 // older generation may still be stopping and are never targets. It must be
-// called with the agent lock held.
-func (a *Agent) execTargetsLocked(allocID string) []execTarget {
+// called with the agent lock held. known reports whether the agent holds any
+// record for the allocation.
+func (a *Agent) execTargetsLocked(allocID string) (targets []execTarget, known bool) {
 	var generation uint64
-	found := false
 	for _, alloc := range a.allocations {
-		if alloc.AllocationID == allocID && (!found || alloc.Generation > generation) {
-			generation, found = alloc.Generation, true
+		if alloc.AllocationID == allocID && (!known || alloc.Generation > generation) {
+			generation, known = alloc.Generation, true
 		}
 	}
-	var targets []execTarget
 	for _, alloc := range a.allocations {
 		if alloc.AllocationID == allocID && alloc.Generation == generation && execTargetable(alloc) {
 			targets = append(targets, execTarget{ID: alloc.ID, ContainerID: alloc.ContainerID, TaskName: alloc.TaskName, Generation: alloc.Generation})
@@ -89,14 +91,14 @@ func (a *Agent) execTargetsLocked(allocID string) []execTarget {
 		}
 		return targets[i].ID < targets[j].ID
 	})
-	return targets
+	return targets, known
 }
 
 // selectExecTarget resolves the single task an exec request addresses. An
 // empty task selects the only running task and is rejected when several run.
 func (a *Agent) selectExecTarget(allocID, task string) (execTarget, error) {
 	a.mu.RLock()
-	targets := a.execTargetsLocked(allocID)
+	targets, _ := a.execTargetsLocked(allocID)
 	a.mu.RUnlock()
 	var matched []execTarget
 	var names []string
@@ -122,9 +124,27 @@ func (a *Agent) selectExecTarget(allocID, task string) (execTarget, error) {
 	return matched[0], nil
 }
 
+// selectRunningExecTarget resolves an exec target and confirms its container
+// is running. A record stays running after its container exits when restarts
+// are exhausted, so the record status alone is not enough.
+func (a *Agent) selectRunningExecTarget(ctx context.Context, allocID, task string) (execTarget, error) {
+	target, err := a.selectExecTarget(allocID, task)
+	if err != nil {
+		return execTarget{}, err
+	}
+	observed, err := a.runtime.Inspect(ctx, target.ContainerID)
+	if errdefs.IsNotFound(err) || (err == nil && observed.Status != runtime.StatusRunning) {
+		return execTarget{}, fmt.Errorf("%w: allocation %s task %s container is not running", ErrAllocationNotFound, allocID, target.TaskName)
+	}
+	if err != nil {
+		return execTarget{}, fmt.Errorf("inspect container %s: %w", target.ContainerID, err)
+	}
+	return target, nil
+}
+
 // ExecAllocation runs a command in an allocation task container and returns its output.
 func (a *Agent) ExecAllocation(ctx context.Context, allocID, task string, command []string) (*api.AgentExecResponse, error) {
-	target, err := a.selectExecTarget(allocID, task)
+	target, err := a.selectRunningExecTarget(ctx, allocID, task)
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +161,7 @@ func (a *Agent) ExecAllocation(ctx context.Context, allocID, task string, comman
 
 // CreateExecSession starts a persistent interactive terminal in an allocation task.
 func (a *Agent) CreateExecSession(ctx context.Context, allocID, task string, command []string, term string, cols, rows uint32) (*api.ExecSessionResponse, error) {
-	target, err := a.selectExecTarget(allocID, task)
+	target, err := a.selectRunningExecTarget(ctx, allocID, task)
 	if err != nil {
 		return nil, err
 	}
@@ -151,6 +171,11 @@ func (a *Agent) CreateExecSession(ctx context.Context, allocID, task string, com
 	}
 	sessionID := uuid.NewString()
 	a.mu.Lock()
+	if a.execSessionsClosed {
+		a.mu.Unlock()
+		a.closeTerminal(ctx, allocID, terminal)
+		return nil, fmt.Errorf("%w: agent is shutting down", ErrAllocationNotFound)
+	}
 	// A stop marks the record stopping before it closes the record's sessions,
 	// so a session registered here is either closed by that stop or refused.
 	current := a.allocations[target.ID]
@@ -159,23 +184,25 @@ func (a *Agent) CreateExecSession(ctx context.Context, allocID, task string, com
 		a.closeTerminal(ctx, allocID, terminal)
 		return nil, fmt.Errorf("%w: allocation %s task %s stopped while starting exec session", ErrAllocationNotFound, allocID, target.TaskName)
 	}
-	a.execSessions[sessionID] = &execSession{
+	session := &execSession{
 		AllocationID: allocID, TaskID: target.ID, ContainerID: target.ContainerID, Task: target.TaskName,
-		Terminal: terminal, lastActive: time.Now(),
+		Terminal: terminal,
 	}
+	session.lastActive.Store(time.Now().UnixNano())
+	a.execSessions[sessionID] = session
 	a.mu.Unlock()
 	return &api.ExecSessionResponse{ID: sessionID}, nil
 }
 
 // useExecSession returns a session addressed through allocID and records activity on it.
 func (a *Agent) useExecSession(allocID, sessionID string) (*execSession, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	session := a.execSessions[sessionID]
 	if session == nil || session.AllocationID != allocID {
 		return nil, fmt.Errorf("%w: %s", ErrExecSessionNotFound, sessionID)
 	}
-	session.lastActive = time.Now()
+	session.lastActive.Store(time.Now().UnixNano())
 	return session, nil
 }
 
@@ -275,15 +302,23 @@ func (a *Agent) reapExecSessions(ctx context.Context, now time.Time) {
 	a.closeExecSessions(ctx, func(session *execSession) bool { return session.expired(now) })
 }
 
-// runExecSessionReaper bounds session lifetimes and terminates every session
-// when the agent shuts down, since sessions are not recovered after a restart.
+// CloseExecSessions terminates every interactive session and refuses new
+// ones. Sessions are not recovered after a restart, so the agent calls this
+// on shutdown while its runtime is still available.
+func (a *Agent) CloseExecSessions(ctx context.Context) {
+	a.mu.Lock()
+	a.execSessionsClosed = true
+	a.mu.Unlock()
+	a.closeExecSessions(ctx, func(*execSession) bool { return true })
+}
+
+// runExecSessionReaper bounds session lifetimes until ctx ends.
 func (a *Agent) runExecSessionReaper(ctx context.Context) {
 	ticker := time.NewTicker(execSessionReapInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			a.closeExecSessions(ctx, func(*execSession) bool { return true })
 			return
 		case now := <-ticker.C:
 			a.reapExecSessions(ctx, now)
@@ -291,12 +326,13 @@ func (a *Agent) runExecSessionReaper(ctx context.Context) {
 	}
 }
 
-// AllocationMetrics returns resource usage for the running tasks of an allocation.
+// AllocationMetrics returns resource usage for the running tasks of an
+// allocation; it is empty while none of the current generation's tasks run.
 func (a *Agent) AllocationMetrics(ctx context.Context, allocID string) ([]api.AgentTaskMetrics, error) {
 	a.mu.RLock()
-	tasks := a.execTargetsLocked(allocID)
+	tasks, known := a.execTargetsLocked(allocID)
 	a.mu.RUnlock()
-	if len(tasks) == 0 {
+	if !known {
 		return nil, fmt.Errorf("%w: %s", ErrAllocationNotFound, allocID)
 	}
 	result := make([]api.AgentTaskMetrics, 0, len(tasks))

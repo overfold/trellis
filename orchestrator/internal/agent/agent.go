@@ -36,7 +36,9 @@ type Agent struct {
 	nodeID       uuid.UUID
 	allocations  map[string]*Allocation
 	execSessions map[string]*execSession
-	healthProbe  string
+	// execSessionsClosed refuses new exec sessions once the agent shuts down.
+	execSessionsClosed bool
+	healthProbe        string
 
 	log *slog.Logger
 

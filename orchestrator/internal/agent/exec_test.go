@@ -261,7 +261,7 @@ func TestReapExecSessionsReleasesExitedAndIdleSessions(t *testing.T) {
 	}
 
 	later := start.Add(execSessionIdleTimeout)
-	agent.execSessions[ids["active"]].lastActive = later.Add(-time.Minute)
+	agent.execSessions[ids["active"]].lastActive.Store(later.Add(-time.Minute).UnixNano())
 	agent.reapExecSessions(context.Background(), later)
 	if len(agent.execSessions) != 1 || agent.execSessions[ids["active"]] == nil {
 		t.Fatalf("sessions after reap = %v, want only the active session", agent.execSessions)
@@ -275,22 +275,57 @@ func TestReapExecSessionsReleasesExitedAndIdleSessions(t *testing.T) {
 	}
 }
 
-func TestExecSessionReaperClosesSessionsOnShutdown(t *testing.T) {
+func TestCloseExecSessionsTerminatesAndRefusesSessions(t *testing.T) {
 	rt := newExecTestRuntime()
 	agent := newOperationTestAgent(t, rt)
 	addExecTestTask(agent, "allocation-g1-web", "web", 1, "running")
 	if _, err := agent.CreateExecSession(context.Background(), "allocation", "web", []string{"sh"}, "", 80, 24); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		agent.runExecSessionReaper(ctx)
-		close(done)
-	}()
-	cancel()
-	<-done
+
+	agent.CloseExecSessions(context.Background())
 	if rt.terminal("allocation-g1-web").closeCount() != 1 || len(agent.execSessions) != 0 {
-		t.Fatal("agent shutdown left exec sessions running")
+		t.Fatal("shutdown left exec sessions running")
+	}
+	if _, err := agent.CreateExecSession(context.Background(), "allocation", "web", []string{"sh"}, "", 80, 24); !errors.Is(err, ErrAllocationNotFound) {
+		t.Fatalf("session after shutdown error = %v, want refusal", err)
+	}
+	if rt.terminal("allocation-g1-web").closeCount() != 1 || len(agent.execSessions) != 0 {
+		t.Fatal("session started during shutdown was not closed")
+	}
+}
+
+func TestExecRejectsRecordWhoseContainerStopped(t *testing.T) {
+	rt := newExecTestRuntime()
+	rt.status = runtime.StatusStopped
+	agent := newOperationTestAgent(t, rt)
+	addExecTestTask(agent, "allocation-g1-web", "web", 1, "running")
+
+	if _, err := agent.ExecAllocation(context.Background(), "allocation", "web", []string{"true"}); !errors.Is(err, ErrAllocationNotFound) {
+		t.Fatalf("exec error = %v, want not found", err)
+	}
+	if _, err := agent.CreateExecSession(context.Background(), "allocation", "web", []string{"sh"}, "", 80, 24); !errors.Is(err, ErrAllocationNotFound) {
+		t.Fatalf("session error = %v, want not found", err)
+	}
+	if len(rt.execTargets) != 0 || len(rt.terminals) != 0 {
+		t.Fatal("exec reached a stopped container")
+	}
+}
+
+func TestAllocationMetricsEmptyWhileCurrentGenerationStarts(t *testing.T) {
+	rt := newExecTestRuntime()
+	agent := newOperationTestAgent(t, rt)
+	addExecTestTask(agent, "allocation-g1-web", "web", 1, "stopping")
+	addExecTestTask(agent, "allocation-g2-web", "web", 2, "starting")
+
+	metrics, err := agent.AllocationMetrics(context.Background(), "allocation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metrics) != 0 || len(rt.metricIDs) != 0 {
+		t.Fatalf("metrics = %#v from %v, want none", metrics, rt.metricIDs)
+	}
+	if _, err := agent.AllocationMetrics(context.Background(), "missing"); !errors.Is(err, ErrAllocationNotFound) {
+		t.Fatalf("unknown allocation metrics error = %v, want not found", err)
 	}
 }

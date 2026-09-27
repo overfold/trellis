@@ -410,6 +410,8 @@ func run(parent context.Context, cfg *config) error {
 		ag.SetLabels(labels)
 	}
 	ag.Init(ctx)
+	// Runs before the runtime client closes, so terminals can still be killed.
+	defer ag.CloseExecSessions(context.Background())
 
 	upstreams, upstreamErr := trellisdns.SystemResolvers("/etc/resolv.conf")
 	if upstreamErr != nil {
