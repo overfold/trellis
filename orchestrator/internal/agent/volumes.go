@@ -26,7 +26,7 @@ type VolumeManager struct {
 	registrations map[string]string
 	stage         func(sourceFD int, target string) error
 	unstage       func(target string) error
-	mounted       func(target string) (bool, error)
+	hasMounts     func(dir string) (bool, error)
 	stagingErr    error
 }
 
@@ -39,7 +39,7 @@ func NewVolumeManager(dataRoot ...string) *VolumeManager {
 	vm := &VolumeManager{dataRootPath: root, registrations: make(map[string]string)}
 	vm.stage = stageDirectory
 	vm.unstage = func(target string) error { return unix.Unmount(target, unix.MNT_DETACH) }
-	vm.mounted = mountedAt
+	vm.hasMounts = hasMounts
 	_ = vm.loadRegistrations()
 	return vm
 }
@@ -136,9 +136,6 @@ func (vm *VolumeManager) resolveHostPath(namespace, hostPath string) (string, bo
 	return filepath.Join(vm.dataRootPath, "volumes", "namespaces", namespace, filepath.FromSlash(rel)), true, nil
 }
 
-// errStagingInUse reports staging kept for a container that still exists.
-var errStagingInUse = errors.New("managed volume staging directory is already in use")
-
 // prepareManagedDirectory creates each managed-volume component through a
 // descriptor rooted at the namespace directory, then bind-mounts the resolved
 // inode at a Trellis-controlled staging path. This preserves the resolved inode
@@ -159,12 +156,6 @@ func (vm *VolumeManager) prepareManagedDirectory(namespace, allocationID, volume
 	target := vm.stagingPath(allocationID, volumeName)
 	if err := os.MkdirAll(target, 0o700); err != nil {
 		return "", fmt.Errorf("creating managed volume staging directory: %w", err)
-	}
-	// Kept staging belongs to an existing container; never stack over it.
-	if mounted, err := vm.mounted(target); err != nil {
-		return "", fmt.Errorf("checking managed volume staging directory: %w", err)
-	} else if mounted {
-		return "", fmt.Errorf("%w: %s", errStagingInUse, target)
 	}
 	if err := vm.stage(fd, target); err != nil {
 		return "", fmt.Errorf("staging managed volume: %w", err)
@@ -254,6 +245,15 @@ func (vm *VolumeManager) ReleaseStaging(allocationID string) error {
 		errs = append(errs, fmt.Errorf("removing allocation staging directory: %w", err))
 	}
 	return errors.Join(errs...)
+}
+
+// errStagingInUse reports staging kept for a container that still exists.
+var errStagingInUse = errors.New("managed volume staging is already in use")
+
+// StagingInUse reports whether staging mounts exist for an allocation, which
+// recovery keeps for containers that still exist.
+func (vm *VolumeManager) StagingInUse(allocationID string) (bool, error) {
+	return vm.hasMounts(vm.stagingAllocationDir(allocationID))
 }
 
 func (vm *VolumeManager) stagingPath(allocationID, volumeName string) string {
@@ -377,22 +377,25 @@ func stagingMountKey(root, mount string) string {
 	return key
 }
 
-func mountedAt(path string) (bool, error) {
-	path, err := filepath.Abs(path)
+func hasMounts(dir string) (bool, error) {
+	dir, err := filepath.Abs(dir)
 	if err != nil {
 		return false, err
 	}
-	if path, err = filepath.EvalSymlinks(path); err != nil {
+	if dir, err = filepath.EvalSymlinks(dir); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
 		return false, err
 	}
-	mounts, err := stagingMounts(path)
+	mounts, err := stagingMounts(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, nil
 		}
 		return false, err
 	}
-	return slices.Contains(mounts, path), nil
+	return len(mounts) > 0, nil
 }
 
 func stagingMounts(root string) ([]string, error) {

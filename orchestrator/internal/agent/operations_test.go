@@ -1062,36 +1062,67 @@ func TestStopReleasesStagingOfAllocationRecoveredFromLabels(t *testing.T) {
 	}
 }
 
-func TestFailedStartKeepsStagingInUseByExistingContainer(t *testing.T) {
-	agent := newOperationTestAgent(t, &reconcilerRuntime{})
-	local := storage.NewLocalStorage(t.TempDir())
-	if err := local.Init(); err != nil {
-		t.Fatal(err)
-	}
-	agent.ConfigureDurability(local, "test")
-	request := operationTestRequest()
-	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image", Volumes: []spec.VolumeSpec{{Name: "data", HostPath: "@/data", ContainerPath: "/data"}}}}
-	id := "allocation-g2-first"
-	// Recovery kept this staging for a container the agent did not adopt.
-	staging := agent.volumes.stagingPath(id, "data")
-	if err := os.MkdirAll(staging, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	agent.volumes.mounted = func(target string) (bool, error) { return target == staging, nil }
-	unstaged := 0
-	agent.volumes.unstage = func(string) error {
-		unstaged++
-		return nil
-	}
+type missingContainerRuntime struct{ *reconcilerRuntime }
 
-	if err := agent.RunGroup(context.Background(), request); !errors.Is(err, errStagingInUse) {
-		t.Fatalf("run allocation = %v, want staging in use", err)
-	}
-	if unstaged != 0 {
-		t.Fatalf("unstage calls = %d, want none", unstaged)
-	}
-	if _, err := os.Stat(staging); err != nil {
-		t.Fatalf("staging in use after failed start: %v", err)
+func (*missingContainerRuntime) Inspect(_ context.Context, id string) (*runtime.ContainerInfo, error) {
+	return nil, fmt.Errorf("inspect %s: %w", id, errdefs.ErrNotFound)
+}
+
+func TestStartReleasesStagingOnlyWhenItsContainerIsGone(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		rt           runtime.ContainerRuntime
+		wantInUse    bool
+		wantUnstaged int
+	}{
+		{name: "container exists", rt: &reconcilerRuntime{}, wantInUse: true},
+		{name: "container missing", rt: &missingContainerRuntime{&reconcilerRuntime{}}, wantUnstaged: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := newOperationTestAgent(t, tc.rt)
+			local := storage.NewLocalStorage(t.TempDir())
+			if err := local.Init(); err != nil {
+				t.Fatal(err)
+			}
+			agent.ConfigureDurability(local, "test")
+			request := operationTestRequest()
+			request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image", Volumes: []spec.VolumeSpec{
+				{Name: "data", HostPath: "@/data", ContainerPath: "/data"},
+				{Name: "logs", HostPath: "@/logs", ContainerPath: "/logs"},
+			}}}
+			id := "allocation-g2-first"
+			// Staging kept by recovery, or left behind when it could not list
+			// containers.
+			kept := agent.volumes.stagingPath(id, "logs")
+			if err := os.MkdirAll(kept, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			agent.volumes.hasMounts = func(dir string) (bool, error) {
+				_, err := os.Stat(filepath.Join(dir, "logs"))
+				return err == nil, nil
+			}
+			agent.volumes.stage = func(int, string) error { return nil }
+			unstaged := 0
+			agent.volumes.unstage = func(string) error {
+				unstaged++
+				return nil
+			}
+
+			err := agent.RunGroup(context.Background(), request)
+			if tc.wantInUse != errors.Is(err, errStagingInUse) || !tc.wantInUse && err != nil {
+				t.Fatalf("run allocation = %v, want staging in use %t", err, tc.wantInUse)
+			}
+			if unstaged != tc.wantUnstaged {
+				t.Fatalf("unstage calls = %d, want %d", unstaged, tc.wantUnstaged)
+			}
+			// Kept staging survives; released orphaned staging is staged anew.
+			if _, err := os.Stat(kept); err != nil {
+				t.Fatalf("staging after start: %v", err)
+			}
+			if _, err := os.Stat(agent.volumes.stagingPath(id, "data")); (err == nil) == tc.wantInUse {
+				t.Fatalf("new staging after start: %v, want present %t", err, !tc.wantInUse)
+			}
+		})
 	}
 }
 

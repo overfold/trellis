@@ -173,8 +173,10 @@ func TestCleanupStagingKeepsMountsOfExistingContainers(t *testing.T) {
 	if _, err := os.Stat(filepath.Dir(restarted.stagingPath("orphan", "data"))); !os.IsNotExist(err) {
 		t.Fatalf("orphaned staging directory: %v, want not found", err)
 	}
-	if _, err := restarted.Create("ns", "job", "live", volume); err == nil {
-		t.Fatal("Create stacked a mount over staging kept for an existing container")
+	for id, want := range map[string]bool{"live": true, "orphan": false} {
+		if inUse, err := restarted.StagingInUse(id); err != nil || inUse != want {
+			t.Fatalf("StagingInUse(%q) = %t, %v, want %t", id, inUse, err, want)
+		}
 	}
 	if err := restarted.ReleaseStaging("live"); err != nil {
 		t.Fatalf("release live staging: %v", err)
