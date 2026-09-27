@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -10,7 +11,6 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -126,36 +126,14 @@ func maxParallel(job *Job, groupName string) int {
 	return 1
 }
 
-func cloneAllocationForReconcile(allocation *Allocation) *Allocation {
-	var node *Node
-	if allocation.Node != nil {
-		node = new(Node)
-		*node = *allocation.Node
-		node.Labels = make(map[string]string, len(allocation.Node.Labels))
-		for key, value := range allocation.Node.Labels {
-			node.Labels[key] = value
-		}
-		node.Volumes = append([]string(nil), allocation.Node.Volumes...)
-		node.Capabilities = append([]spec.NodeCapability(nil), allocation.Node.Capabilities...)
-		node.observedAllocations = append([]observedAllocation(nil), allocation.Node.observedAllocations...)
+func cloneAllocationForReconcile(allocation *Allocation) (*Allocation, error) {
+	raw, err := json.Marshal(allocation)
+	if err != nil {
+		return nil, err
 	}
-	clone := &Allocation{
-		Namespace:     allocation.Namespace,
-		JobName:       allocation.JobName,
-		TaskGroupName: allocation.TaskGroupName,
-		ID:            allocation.ID,
-		Generation:    allocation.Generation,
-		JobRevision:   allocation.JobRevision,
-		Tasks:         allocation.Tasks,
-		Phase:         allocation.Phase,
-		Health:        allocation.Health,
-		Diagnostic:    allocation.Diagnostic,
-		Node:          node,
-		Endpoints:     allocation.Endpoints,
-		Ports:         allocation.Ports,
-		Draining:      allocation.Draining,
-		DrainSequence: allocation.DrainSequence,
-		DrainReason:   allocation.DrainReason,
+	var clone Allocation
+	if err := json.Unmarshal(raw, &clone); err != nil {
+		return nil, err
 	}
 	if allocation.Events != nil {
 		clone.Events = &lifecycle.RingBuffer{}
@@ -163,46 +141,29 @@ func cloneAllocationForReconcile(allocation *Allocation) *Allocation {
 			clone.Events.Append(event)
 		}
 	}
-	return clone
+	return &clone, nil
 }
 
 func applyReconciledAllocation(allocation, update *Allocation, node *Node) {
-	allocation.Namespace = update.Namespace
-	allocation.JobName = update.JobName
-	allocation.TaskGroupName = update.TaskGroupName
-	allocation.ID = update.ID
-	allocation.Generation = update.Generation
-	allocation.JobRevision = update.JobRevision
-	allocation.Tasks = update.Tasks
 	allocation.Phase = update.Phase
-	allocation.Health = update.Health
 	allocation.Diagnostic = update.Diagnostic
 	allocation.Node = node
-	allocation.Endpoints = update.Endpoints
-	allocation.Ports = update.Ports
 	allocation.Draining = update.Draining
 	allocation.DrainSequence = update.DrainSequence
 	allocation.DrainReason = update.DrainReason
 	allocation.Events = update.Events
 }
 
-func sameAllocationState(a, b *Allocation) bool {
-	return a.Namespace == b.Namespace &&
-		a.JobName == b.JobName &&
-		a.TaskGroupName == b.TaskGroupName &&
-		a.ID == b.ID &&
-		a.Generation == b.Generation &&
-		a.JobRevision == b.JobRevision &&
-		reflect.DeepEqual(a.Tasks, b.Tasks) &&
-		a.Phase == b.Phase &&
-		a.Health == b.Health &&
-		reflect.DeepEqual(a.Diagnostic, b.Diagnostic) &&
-		((a.Node == nil && b.Node == nil) || (a.Node != nil && b.Node != nil && a.Node.ID == b.Node.ID)) &&
-		reflect.DeepEqual(a.Endpoints, b.Endpoints) &&
-		reflect.DeepEqual(a.Ports, b.Ports) &&
-		a.Draining == b.Draining &&
-		a.DrainSequence == b.DrainSequence &&
-		a.DrainReason == b.DrainReason
+func sameAllocationState(a, b *Allocation) (bool, error) {
+	aRaw, err := json.Marshal(a)
+	if err != nil {
+		return false, err
+	}
+	bRaw, err := json.Marshal(b)
+	if err != nil {
+		return false, err
+	}
+	return bytes.Equal(aRaw, bRaw), nil
 }
 
 // Reconcile converges the in-memory allocation set on the latest job specs.
@@ -263,22 +224,6 @@ func (s *Server) Reconcile(ctx context.Context) {
 	var newAllocations []*Allocation
 	s.mu.Lock()
 	s.networkPorts = networkPorts
-	allocations := make([]*Allocation, len(s.allocations))
-	originalByPlan := make(map[*Allocation]*Allocation, len(s.allocations))
-	baseByPlan := make(map[*Allocation]*Allocation, len(s.allocations))
-	for i, allocation := range s.allocations {
-		allocation.mu.Lock()
-		base := cloneAllocationForReconcile(allocation)
-		allocation.mu.Unlock()
-		planned := cloneAllocationForReconcile(base)
-		allocations[i] = planned
-		originalByPlan[planned] = allocation
-		baseByPlan[planned] = base
-	}
-	plannedUpdates := make(map[*Allocation]bool)
-	markUpdated := func(allocation *Allocation) {
-		plannedUpdates[allocation] = true
-	}
 	for _, node := range s.nodes {
 		if node.Status == NodeStatusHealthy && now.Sub(node.LastHeartbeat) > 3*heartbeatInterval {
 			node.Status = NodeStatusUnhealthy
@@ -309,6 +254,32 @@ func (s *Server) Reconcile(ctx context.Context) {
 		}
 		namespaceDesired[namespace] += desired
 		admittedJobs[key] = true
+	}
+	allocations := make([]*Allocation, len(s.allocations))
+	originalByPlan := make(map[*Allocation]*Allocation, len(s.allocations))
+	baseByPlan := make(map[*Allocation]*Allocation, len(s.allocations))
+	for i, allocation := range s.allocations {
+		allocation.mu.Lock()
+		base, err := cloneAllocationForReconcile(allocation)
+		allocation.mu.Unlock()
+		if err != nil {
+			s.mu.Unlock()
+			s.log.Error("snapshot allocation for reconciliation", "allocation", allocation.ID, "error", err)
+			return
+		}
+		planned, err := cloneAllocationForReconcile(base)
+		if err != nil {
+			s.mu.Unlock()
+			s.log.Error("copy allocation reconciliation snapshot", "allocation", allocation.ID, "error", err)
+			return
+		}
+		allocations[i] = planned
+		originalByPlan[planned] = allocation
+		baseByPlan[planned] = base
+	}
+	plannedUpdates := make(map[*Allocation]bool)
+	markUpdated := func(allocation *Allocation) {
+		plannedUpdates[allocation] = true
 	}
 	var actions []Action
 	if !s.leaderSince.IsZero() && now.Sub(s.leaderSince) >= leaderRecoveryGrace {
@@ -573,12 +544,16 @@ func (s *Server) Reconcile(ctx context.Context) {
 		}
 		original := originalByPlan[allocation]
 		original.mu.Lock()
-		if !sameAllocationState(original, baseByPlan[allocation]) {
+		same, err := sameAllocationState(original, baseByPlan[allocation])
+		if err != nil || !same {
 			original.mu.Unlock()
 			for _, locked := range lockedUpdates {
 				locked.mu.Unlock()
 			}
 			s.mu.Unlock()
+			if err != nil {
+				s.log.Error("compare allocation reconciliation snapshot", "allocation", allocation.ID, "error", err)
+			}
 			return
 		}
 		if allocation.Node != nil {
@@ -596,7 +571,16 @@ func (s *Server) Reconcile(ctx context.Context) {
 	}
 	persistedNewAllocations := make([]*Allocation, len(newAllocations))
 	for i, allocation := range newAllocations {
-		persistedNewAllocations[i] = cloneAllocationForReconcile(allocation)
+		persisted, err := cloneAllocationForReconcile(allocation)
+		if err != nil {
+			for _, locked := range lockedUpdates {
+				locked.mu.Unlock()
+			}
+			s.mu.Unlock()
+			s.log.Error("snapshot new allocation for persistence", "allocation", allocation.ID, "error", err)
+			return
+		}
+		persistedNewAllocations[i] = persisted
 	}
 	s.mu.Unlock()
 	unlockUpdates := func() {
