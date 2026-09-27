@@ -754,10 +754,15 @@ func (a *Agent) adoptUnrecorded(ctx context.Context, listed runtime.ContainerInf
 		return true
 	}
 	observed, err := a.runtime.Inspect(ctx, listed.ID)
-	if err != nil {
-		// Inspect can report a missing task for an existing container, so
-		// the next listing decides whether the container still exists.
+	if errdefs.IsNotFound(err) {
+		// The container may have been removed after the listing, or only
+		// its task may be missing; the next listing decides.
 		return false
+	}
+	if err != nil {
+		// Keep it as unobserved, as initial recovery does, until a later
+		// observation classifies it.
+		observed = &runtime.ContainerInfo{Status: runtime.StatusUnknown}
 	}
 	container := *observed
 	container.ID = listed.ID
@@ -1185,6 +1190,11 @@ func (a *Agent) stopUnrecorded(ctx context.Context, request *api.StopAllocationR
 	containers, err := managed.ListManaged(ctx, a.cluster)
 	if err != nil {
 		return fmt.Errorf("list containers for unrecorded allocation %s: %w", request.AllocationID, err)
+	}
+	for _, container := range containers {
+		if allocation := allocationFromRuntime(container); allocation != nil && allocation.AllocationID == request.AllocationID && allocation.Generation > request.Generation {
+			return fmt.Errorf("%w: listed %d, requested %d", ErrStaleGeneration, allocation.Generation, request.Generation)
+		}
 	}
 	var errs []error
 	a.mu.RLock()

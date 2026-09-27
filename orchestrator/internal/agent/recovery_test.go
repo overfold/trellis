@@ -298,7 +298,7 @@ func (r *staleListingRuntime) Inspect(context.Context, string) (*runtime.Contain
 func TestRecoverRetryDoesNotResurrectContainerRemovedAfterListing(t *testing.T) {
 	rt := &staleListingRuntime{
 		listingRecoveryRuntime: &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{}, listErr: errors.New("containerd unavailable")},
-		inspectErr:             errors.New("container task not found"),
+		inspectErr:             fmt.Errorf("loading container: %w", errdefs.ErrNotFound),
 	}
 	agent, local := newRecoveryTestAgent(t, rt)
 	if err := agent.recover(context.Background()); err == nil {
@@ -488,7 +488,7 @@ func TestRunAllocationReplacesRecoveredAllocationConfirmedMissing(t *testing.T) 
 	}
 }
 
-func TestRecoverRetryKeepsListingUntilUnrecordedContainerIsInspected(t *testing.T) {
+func TestRecoverRetryAdoptsUninspectableUnrecordedContainerAsUnobserved(t *testing.T) {
 	rt := &staleListingRuntime{
 		listingRecoveryRuntime: &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{}, listErr: errors.New("containerd unavailable")},
 		inspectErr:             errors.New("shim unresponsive"),
@@ -500,17 +500,21 @@ func TestRecoverRetryKeepsListingUntilUnrecordedContainerIsInspected(t *testing.
 	rt.listErr = nil
 	rt.containers = []runtime.ContainerInfo{{ID: "task", Status: runtime.StatusRunning, Labels: recoveryTestLabels(recoveryTestAllocation(0))}}
 	if !agent.retryRecovery(context.Background()) {
-		t.Fatal("retry stopped listing while an unrecorded container was uninspected")
+		t.Fatal("retry reported no pending work for an uninspectable container")
 	}
-	// Inspect NotFound alone may describe a missing task, so only a listing
-	// without the container ends the retries.
-	rt.inspectErr = errdefs.ErrNotFound
-	if !agent.retryRecovery(context.Background()) {
-		t.Fatal("retry treated Inspect NotFound as proof of absence")
+	if got := agent.allocations["task"]; got == nil || !got.unobserved {
+		t.Fatalf("uninspectable container = %+v, want adopted as unobserved", got)
 	}
-	rt.containers = nil
+	if agent.recoveryListPending {
+		t.Fatal("listing stayed incomplete after the container was adopted")
+	}
+
+	// The next relist observes it and applies normal recovery.
 	if agent.retryRecovery(context.Background()) {
-		t.Fatal("retry kept listing after the container left the listing")
+		t.Fatal("retry left recovery work pending after observing the container")
+	}
+	if got := agent.allocations["task"]; got == nil || got.unobserved || got.Status != "running" {
+		t.Fatalf("allocation after observation = %+v, want running", got)
 	}
 }
 
@@ -740,5 +744,24 @@ func TestStopGroupStopsOlderUnrecordedGenerationsWhileListingIncomplete(t *testi
 	}
 	if rt.stopCount != 2 || agent.allocations["task"] != nil || agent.allocations["task-g2"] != nil {
 		t.Fatalf("stop calls = %d; want both unrecorded generations stopped", rt.stopCount)
+	}
+}
+
+func TestStopGroupRejectsStaleGenerationWhenNewerUnrecordedIsListed(t *testing.T) {
+	rt := &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning}, listErr: errors.New("containerd unavailable")}
+	agent, _ := newRecoveryTestAgent(t, rt)
+	if err := agent.recover(context.Background()); err == nil {
+		t.Fatal("recover succeeded despite listing failure")
+	}
+	labels := recoveryTestLabels(recoveryTestAllocation(0))
+	labels["trellis.allocation-generation"] = "2"
+	rt.listErr = nil
+	rt.containers = []runtime.ContainerInfo{{ID: "task-g2", Status: runtime.StatusRunning, Labels: labels}}
+	err := agent.StopGroup(context.Background(), &api.StopAllocationRequest{AllocationID: "allocation", Generation: 1})
+	if !errors.Is(err, ErrStaleGeneration) {
+		t.Fatalf("stop error = %v, want stale generation", err)
+	}
+	if rt.stopCount != 0 {
+		t.Fatalf("stale stop stopped %d containers", rt.stopCount)
 	}
 }
