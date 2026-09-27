@@ -1062,6 +1062,39 @@ func TestStopReleasesStagingOfAllocationRecoveredFromLabels(t *testing.T) {
 	}
 }
 
+func TestFailedStartKeepsStagingInUseByExistingContainer(t *testing.T) {
+	agent := newOperationTestAgent(t, &reconcilerRuntime{})
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	agent.ConfigureDurability(local, "test")
+	request := operationTestRequest()
+	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image", Volumes: []spec.VolumeSpec{{Name: "data", HostPath: "@/data", ContainerPath: "/data"}}}}
+	id := "allocation-g2-first"
+	// Recovery kept this staging for a container the agent did not adopt.
+	staging := agent.volumes.stagingPath(id, "data")
+	if err := os.MkdirAll(staging, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	agent.volumes.mounted = func(target string) (bool, error) { return target == staging, nil }
+	unstaged := 0
+	agent.volumes.unstage = func(string) error {
+		unstaged++
+		return nil
+	}
+
+	if err := agent.RunGroup(context.Background(), request); !errors.Is(err, errStagingInUse) {
+		t.Fatalf("run allocation = %v, want staging in use", err)
+	}
+	if unstaged != 0 {
+		t.Fatalf("unstage calls = %d, want none", unstaged)
+	}
+	if _, err := os.Stat(staging); err != nil {
+		t.Fatalf("staging in use after failed start: %v", err)
+	}
+}
+
 func TestRecoverKeepsVolumeStagingForExistingContainers(t *testing.T) {
 	rt := &createdRecoveryRuntime{
 		reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning},

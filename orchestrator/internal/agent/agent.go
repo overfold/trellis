@@ -783,6 +783,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	startAttempted := false
 	tracked := false
 	healthRegistered := false
+	stagingInUse := false
 	var netAttachment *network.Attachment
 	var ports []*runtime.Port
 	var secretDir string
@@ -844,8 +845,9 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 			}
 		}
 		// A container that still exists keeps its staging mounts as OCI mount
-		// sources; a cleanup retry releases them after removal succeeds.
-		if containerRemoved {
+		// sources; a cleanup retry releases them after removal succeeds. Staging
+		// found in use belongs to such a container rather than to this start.
+		if containerRemoved && !stagingInUse {
 			if err := a.volumes.ReleaseStaging(allocID); err != nil {
 				cleanupErrs = append(cleanupErrs, fmt.Errorf("release volume staging: %w", err))
 			}
@@ -889,6 +891,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	for _, v := range ts.Volumes {
 		mount, err := a.volumes.Create(namespace, jobName, allocID, v)
 		if err != nil {
+			stagingInUse = errors.Is(err, errStagingInUse)
 			return fmt.Errorf("create volume %s: %w", v.Name, err)
 		}
 
