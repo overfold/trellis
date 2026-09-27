@@ -125,6 +125,43 @@ type blockingAttachNetworkManager struct {
 	release chan struct{}
 }
 
+type crashBoundaryNetworkManager struct {
+	network.DisabledManager
+	created     chan struct{}
+	release     chan struct{}
+	attachCalls int
+	detachCalls int
+	attached    bool
+}
+
+func (m *crashBoundaryNetworkManager) AttachRecorded(_ context.Context, request network.AttachRequest, record func(*network.Attachment) error) (*network.Attachment, error) {
+	m.attachCalls++
+	attachment := &network.Attachment{
+		AllocationID:     request.AllocationID,
+		Namespace:        request.Namespace,
+		Network:          request.Network,
+		NetworkNamespace: "/var/run/netns/" + request.AllocationID,
+		Address:          "10.42.0.2/24",
+		LeasePath:        "/var/lib/trellis/network/default/10.42.0.2_24",
+	}
+	if err := record(attachment); err != nil {
+		return nil, err
+	}
+	m.attached = true
+	if m.attachCalls == 1 {
+		close(m.created)
+		<-m.release
+		return nil, errors.New("simulated process crash")
+	}
+	return attachment, nil
+}
+
+func (m *crashBoundaryNetworkManager) Detach(context.Context, *network.Attachment) error {
+	m.detachCalls++
+	m.attached = false
+	return nil
+}
+
 func (m *blockingAttachNetworkManager) Attach(_ context.Context, request network.AttachRequest) (*network.Attachment, error) {
 	close(m.entered)
 	<-m.release
@@ -554,6 +591,68 @@ func TestRunAllocationPublishesStableSnapshotDuringStartup(t *testing.T) {
 	statuses := agent.allocationStatuses()
 	if len(statuses) != 1 || statuses[0].Phase != lifecycle.PhaseRunning || statuses[0].Address != "10.42.0.2" || len(statuses[0].Ports) != 1 {
 		t.Fatalf("running heartbeat snapshot = %+v", statuses)
+	}
+}
+
+func TestRecoverCleansAttachmentRecordedBeforeAttachReturnsAndRetryConverges(t *testing.T) {
+	rt := &ambiguousCreateRuntime{reconcilerRuntime: &reconcilerRuntime{}}
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	manager := &crashBoundaryNetworkManager{created: make(chan struct{}), release: make(chan struct{})}
+	request := operationTestRequest()
+	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard}}}
+	request.NetworkPlan = &network.Plan{}
+	id := "allocation-g2-first"
+
+	first := newOperationTestAgent(t, rt)
+	first.SetNetworkManager(manager)
+	first.ConfigureDurability(local, "test")
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- first.RunGroup(context.Background(), request) }()
+	select {
+	case <-manager.created:
+	case err := <-firstDone:
+		t.Fatalf("start returned before crash boundary: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("start did not create the network namespace")
+	}
+
+	var recorded Allocation
+	if err := local.Get(allocationRecordKey(id), &recorded); err != nil || recorded.Network == nil {
+		t.Fatalf("attachment at crash boundary = %+v, error = %v, want durable network metadata", recorded.Network, err)
+	}
+	if !manager.attached {
+		t.Fatal("network namespace was not created")
+	}
+
+	restarted := newOperationTestAgent(t, rt)
+	restarted.SetNetworkManager(manager)
+	restarted.ConfigureDurability(local, "test")
+	persistTestRecoveryEpoch(t, local)
+	if err := restarted.recover(context.Background()); err != nil {
+		t.Fatalf("recover crash-boundary attachment: %v", err)
+	}
+	if manager.attached || manager.detachCalls != 1 {
+		t.Fatalf("recovery cleanup: attached=%t detaches=%d, want false/1", manager.attached, manager.detachCalls)
+	}
+	if err := local.Get(allocationRecordKey(id), &recorded); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("record after recovery = %v, want not found", err)
+	}
+
+	close(manager.release)
+	if err := <-firstDone; err == nil || !strings.Contains(err.Error(), "simulated process crash") {
+		t.Fatalf("interrupted start error = %v", err)
+	}
+	if err := restarted.RunGroup(context.Background(), request); err != nil {
+		t.Fatalf("retry start: %v", err)
+	}
+	if !manager.attached || manager.attachCalls != 2 {
+		t.Fatalf("retry convergence: attached=%t attaches=%d, want true/2", manager.attached, manager.attachCalls)
+	}
+	if allocation := restarted.allocations[id]; allocation == nil || allocation.Status != "running" || allocation.Network == nil {
+		t.Fatalf("retried allocation = %+v, want running with network", allocation)
 	}
 }
 

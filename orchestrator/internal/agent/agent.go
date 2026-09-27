@@ -1612,13 +1612,24 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		if networkPlan == nil {
 			return fmt.Errorf("automatic WireGuard network plan is required")
 		}
-		netAttachment, err = a.network.Attach(ctx, network.AttachRequest{AllocationID: allocID, Namespace: namespace, Network: namespace, Plan: *networkPlan})
+		attachRequest := network.AttachRequest{AllocationID: allocID, Namespace: namespace, Network: namespace, Plan: *networkPlan}
+		if durable, ok := a.network.(network.DurableAttacher); ok {
+			netAttachment, err = durable.AttachRecorded(ctx, attachRequest, func(attachment *network.Attachment) error {
+				netAttachment = attachment
+				alloc.Network = attachment
+				return a.persistAllocation(alloc)
+			})
+		} else {
+			netAttachment, err = a.network.Attach(ctx, attachRequest)
+		}
 		if err != nil {
 			return fmt.Errorf("attach WireGuard network: %w", err)
 		}
-		alloc.Network = netAttachment
-		if err := a.persistAllocation(alloc); err != nil {
-			return fmt.Errorf("persist network attachment: %w", err)
+		if alloc.Network == nil {
+			alloc.Network = netAttachment
+			if err := a.persistAllocation(alloc); err != nil {
+				return fmt.Errorf("persist network attachment: %w", err)
+			}
 		}
 	}
 	env := make(map[string]string, len(ts.Env)+len(envOverrides))

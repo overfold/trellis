@@ -44,6 +44,14 @@ type Manager interface {
 	Detach(context.Context, *Attachment) error
 }
 
+// DurableAttacher records an attachment before creating allocation-specific
+// network resources. The recorder must durably persist the attachment before
+// returning so recovery can clean up an interrupted attach.
+type DurableAttacher interface {
+	Manager
+	AttachRecorded(context.Context, AttachRequest, func(*Attachment) error) (*Attachment, error)
+}
+
 // PlanUpdater reconciles peers on an already attached namespace network.
 type PlanUpdater interface {
 	UpdatePlan(context.Context, string, Plan) error

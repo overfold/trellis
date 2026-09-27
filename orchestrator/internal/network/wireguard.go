@@ -200,19 +200,19 @@ func allocationAddressAt(cidr, allocation string, probe uint32) (string, error) 
 	return fmt.Sprintf("%d.%d.%d.%d/%d", byte(b>>24), byte(b>>16), byte(b>>8), byte(b), p.Bits()), nil
 }
 
-func reserveAddress(leaseDir, cidr, allocation string) (address, lease string, err error) {
+func reserveAddress(leaseDir, cidr, allocation string) (address, lease string, created bool, err error) {
 	prefix, err := netip.ParsePrefix(cidr)
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
 	if !prefix.Addr().Is4() || prefix.Bits() > 29 {
-		return "", "", fmt.Errorf("CIDR %s has no IPv4 allocation space", cidr)
+		return "", "", false, fmt.Errorf("CIDR %s has no IPv4 allocation space", cidr)
 	}
 	capacity := uint32((uint64(1) << uint(32-prefix.Bits())) - 3)
 	for probe := uint32(0); probe < capacity; probe++ {
 		address, err = allocationAddressAt(cidr, allocation, probe)
 		if err != nil {
-			return "", "", err
+			return "", "", false, err
 		}
 		lease = filepath.Join(leaseDir, strings.ReplaceAll(address, "/", "_"))
 		f, openErr := os.OpenFile(lease, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
@@ -224,22 +224,22 @@ func reserveAddress(leaseDir, cidr, allocation string) (address, lease string, e
 			}
 			if err != nil {
 				_ = os.Remove(lease)
-				return "", "", fmt.Errorf("persist address lease: %w", err)
+				return "", "", false, fmt.Errorf("persist address lease: %w", err)
 			}
-			return address, lease, nil
+			return address, lease, true, nil
 		}
 		if !os.IsExist(openErr) {
-			return "", "", fmt.Errorf("reserve address %s: %w", address, openErr)
+			return "", "", false, fmt.Errorf("reserve address %s: %w", address, openErr)
 		}
 		owner, readErr := os.ReadFile(lease)
 		if readErr != nil {
-			return "", "", fmt.Errorf("read address lease %s: %w", address, readErr)
+			return "", "", false, fmt.Errorf("read address lease %s: %w", address, readErr)
 		}
 		if string(owner) == allocation {
-			return address, lease, nil
+			return address, lease, false, nil
 		}
 	}
-	return "", "", fmt.Errorf("network %s has no free allocation addresses", cidr)
+	return "", "", false, fmt.Errorf("network %s has no free allocation addresses", cidr)
 }
 
 func (m *WireGuardManager) ensureLink(ctx context.Context, name string, args ...string) error {
@@ -534,6 +534,16 @@ func (m *WireGuardManager) UpdatePlan(ctx context.Context, namespace string, pla
 
 // Attach configures networking for an allocation.
 func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_ *Attachment, retErr error) {
+	return m.attach(ctx, request, nil)
+}
+
+// AttachRecorded records the complete attachment before creating resources
+// that require it for cleanup after a crash.
+func (m *WireGuardManager) AttachRecorded(ctx context.Context, request AttachRequest, record func(*Attachment) error) (_ *Attachment, retErr error) {
+	return m.attach(ctx, request, record)
+}
+
+func (m *WireGuardManager) attach(ctx context.Context, request AttachRequest, record func(*Attachment) error) (_ *Attachment, retErr error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	namespace, networkName, allocation := request.Namespace, request.Network, request.AllocationID
@@ -560,15 +570,33 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 	if err := os.MkdirAll(leaseDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create IPAM state: %w", err)
 	}
-	address, lease, err := reserveAddress(leaseDir, cfg.CIDR, allocation)
+	address, lease, leaseCreated, err := reserveAddress(leaseDir, cfg.CIDR, allocation)
 	if err != nil {
 		return nil, err
 	}
 	defer func() {
-		if retErr != nil {
+		if retErr != nil && leaseCreated {
 			_ = os.Remove(lease)
 		}
 	}()
+	attachment := &Attachment{
+		AllocationID:       allocation,
+		Namespace:          namespace,
+		Network:            networkName,
+		NetworkNamespace:   ns,
+		HostVeth:           hostVeth,
+		Bridge:             bridge,
+		WireGuardInterface: wg,
+		Gateway:            cfg.Gateway,
+		APIPort:            request.Plan.APIPort,
+		Address:            address,
+		LeasePath:          lease,
+	}
+	if record != nil {
+		if err = record(attachment); err != nil {
+			return nil, fmt.Errorf("record network attachment: %w", err)
+		}
+	}
 	// Every command is idempotently reconciled; "replace" is used for routes.
 	if err = m.ensureLink(ctx, bridge, "type", "bridge"); err != nil {
 		return nil, fmt.Errorf("create bridge: %w", err)
@@ -691,19 +719,7 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 	if err = m.run.Run(ctx, "ip", "-n", allocation, "route", "replace", "default", "via", cfg.Gateway); err != nil {
 		return nil, err
 	}
-	return &Attachment{
-		AllocationID:       allocation,
-		Namespace:          namespace,
-		Network:            networkName,
-		NetworkNamespace:   ns,
-		HostVeth:           hostVeth,
-		Bridge:             bridge,
-		WireGuardInterface: wg,
-		Gateway:            cfg.Gateway,
-		APIPort:            request.Plan.APIPort,
-		Address:            address,
-		LeasePath:          lease,
-	}, nil
+	return attachment, nil
 }
 
 // Detach removes networking resources for an allocation.

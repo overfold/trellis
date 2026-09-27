@@ -109,9 +109,22 @@ func TestWireGuardAttachBuildsIsolatedNamespace(t *testing.T) {
 	if err := manager.ConfigureWorkloadDNS(context.Background(), WorkloadDNSAddress); err != nil {
 		t.Fatal(err)
 	}
-	a, err := manager.Attach(context.Background(), AttachRequest{Namespace: "acme", Network: "blue", AllocationID: "alloc-1"})
+	recorded := false
+	a, err := manager.AttachRecorded(context.Background(), AttachRequest{Namespace: "acme", Network: "blue", AllocationID: "alloc-1"}, func(attachment *Attachment) error {
+		recorded = true
+		if attachment.NetworkNamespace != "/var/run/netns/alloc-1" || attachment.LeasePath == "" {
+			t.Fatalf("recorded incomplete attachment: %#v", attachment)
+		}
+		if joined := strings.Join(runner.commands, "\n"); strings.Contains(joined, "ip netns add alloc-1") {
+			t.Fatalf("network namespace created before attachment was recorded:\n%s", joined)
+		}
+		return nil
+	})
 	if err != nil {
 		t.Fatalf("Attach() error = %v", err)
+	}
+	if !recorded {
+		t.Fatal("attachment was not recorded")
 	}
 	if a.Namespace != "acme" || a.NetworkNamespace != "/var/run/netns/alloc-1" || !strings.HasPrefix(a.Address, "10.42.1.") {
 		t.Fatalf("unexpected attachment: %#v", a)
@@ -266,23 +279,29 @@ func TestReserveAddressResolvesCollisionAndPersistsChoice(t *testing.T) {
 		}
 		addresses[address] = candidate
 	}
-	firstAddress, _, err := reserveAddress(dir, "10.42.1.0/29", first)
+	firstAddress, _, _, err := reserveAddress(dir, "10.42.1.0/29", first)
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondAddress, secondLease, err := reserveAddress(dir, "10.42.1.0/29", second)
+	secondAddress, secondLease, created, err := reserveAddress(dir, "10.42.1.0/29", second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if secondAddress == firstAddress {
 		t.Fatalf("colliding allocations both received %s", firstAddress)
 	}
-	again, lease, err := reserveAddress(dir, "10.42.1.0/29", second)
+	if !created {
+		t.Fatal("new lease was not reported as created")
+	}
+	again, lease, created, err := reserveAddress(dir, "10.42.1.0/29", second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if again != secondAddress || lease != secondLease {
 		t.Fatalf("persisted lease changed: (%s, %s) != (%s, %s)", again, lease, secondAddress, secondLease)
+	}
+	if created {
+		t.Fatal("reused lease was reported as created")
 	}
 }
 
