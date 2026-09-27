@@ -1180,7 +1180,7 @@ func (a *Agent) StopGroup(ctx context.Context, request *api.StopAllocationReques
 		if listErr != nil {
 			errs = append(errs, listErr)
 		} else {
-			errs = append(errs, a.stopUnrecorded(ctx, request, containers))
+			errs = append(errs, a.stopUnrecorded(ctx, request, containers, ids))
 		}
 	}
 	return errors.Join(errs...)
@@ -1207,8 +1207,13 @@ func (a *Agent) listUnrecorded(ctx context.Context, request *api.StopAllocationR
 
 // stopUnrecorded stops listed unrecorded containers of an allocation
 // generation, and of its older generations, while recovery has not completed a
-// listing. The caller holds the allocation operation lock.
-func (a *Agent) stopUnrecorded(ctx context.Context, request *api.StopAllocationRequest, containers []runtime.ContainerInfo) error {
+// listing. handled names the recorded tasks the caller already stopped; the
+// listing predates those stops. The caller holds the allocation operation lock.
+func (a *Agent) stopUnrecorded(ctx context.Context, request *api.StopAllocationRequest, containers []runtime.ContainerInfo, handled []string) error {
+	skip := make(map[string]bool, len(handled))
+	for _, id := range handled {
+		skip[id] = true
+	}
 	var errs []error
 	a.mu.RLock()
 	unidentified := a.hasUnreadableUnknownLocked(containers)
@@ -1220,7 +1225,7 @@ func (a *Agent) stopUnrecorded(ctx context.Context, request *api.StopAllocationR
 		allocation := allocationFromRuntime(container)
 		// Older unrecorded generations are stopped too, as a start stops
 		// known older generations; otherwise they would be adopted later.
-		if allocation == nil || allocation.AllocationID != request.AllocationID || allocation.Generation > request.Generation {
+		if allocation == nil || allocation.AllocationID != request.AllocationID || allocation.Generation > request.Generation || skip[allocation.ID] {
 			continue
 		}
 		a.mu.RLock()

@@ -765,3 +765,24 @@ func TestStopGroupRejectsStaleGenerationWhenNewerUnrecordedIsListed(t *testing.T
 		t.Fatalf("stale stop stopped %d containers", rt.stopCount)
 	}
 }
+
+func TestStopGroupDoesNotReStopRecordedTasksWhileListingIncomplete(t *testing.T) {
+	rt := &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning}, listErr: errors.New("containerd unavailable")}
+	record := recoveryTestAllocation(0)
+	agent, local := newRecoveryTestAgent(t, rt, record)
+	if err := agent.recover(context.Background()); err == nil {
+		t.Fatal("recover succeeded despite listing failure")
+	}
+	rt.listErr = nil
+	rt.containers = []runtime.ContainerInfo{{ID: "task", Status: runtime.StatusRunning, Labels: recoveryTestLabels(record)}}
+	if err := agent.StopGroup(context.Background(), &api.StopAllocationRequest{AllocationID: "allocation", Generation: 1}); err != nil {
+		t.Fatalf("stop recorded allocation: %v", err)
+	}
+	if rt.stopCount != 1 || agent.allocations["task"] != nil {
+		t.Fatalf("stop calls = %d, allocation = %+v; want one stop and no retained record", rt.stopCount, agent.allocations["task"])
+	}
+	var persisted Allocation
+	if err := local.Get(allocationRecordKey("task"), &persisted); err == nil {
+		t.Fatal("stop rewrote a record for the stopped task")
+	}
+}
