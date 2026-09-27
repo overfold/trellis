@@ -568,14 +568,17 @@ func (a *Agent) retryRecovery(ctx context.Context) bool {
 		a.reobserve(ctx, id, allocationID, container, found)
 	}
 	if listPending {
+		stillPending := false
 		for _, container := range containers {
 			if allocationFromRuntime(container) == nil {
 				continue
 			}
-			a.adoptUnrecorded(ctx, container)
+			if !a.adoptUnrecorded(ctx, container) {
+				stillPending = true
+			}
 		}
 		a.mu.Lock()
-		a.recoveryListPending = false
+		a.recoveryListPending = stillPending
 		a.mu.Unlock()
 	}
 	return a.recoveryPending()
@@ -598,20 +601,24 @@ func (a *Agent) recoveryPending() bool {
 
 // adoptUnrecorded recovers a labelled container that has no allocation record.
 // The listing predates the operation lock, so the container is re-inspected to
-// avoid resurrecting an allocation stopped in the meantime.
-func (a *Agent) adoptUnrecorded(ctx context.Context, listed runtime.ContainerInfo) {
+// avoid resurrecting an allocation stopped in the meantime. It reports false
+// when the container must be listed again.
+func (a *Agent) adoptUnrecorded(ctx context.Context, listed runtime.ContainerInfo) bool {
 	unlock := a.lockAllocationOperation(listed.Labels["trellis.allocation-id"])
 	defer unlock()
 	a.mu.RLock()
 	_, known := a.allocations[listed.ID]
 	a.mu.RUnlock()
 	if known {
-		return
+		return true
 	}
 	observed, err := a.runtime.Inspect(ctx, listed.ID)
+	if errdefs.IsNotFound(err) {
+		return true
+	}
 	if err != nil {
 		// The next listing decides whether the container still exists.
-		return
+		return false
 	}
 	container := *observed
 	container.ID = listed.ID
@@ -620,7 +627,7 @@ func (a *Agent) adoptUnrecorded(ctx context.Context, listed runtime.ContainerInf
 	}
 	allocation := allocationFromRuntime(container)
 	if allocation == nil {
-		return
+		return true
 	}
 	if a.hasNewerGeneration(allocation) {
 		// Starts proceeded while this container was unlisted. Keep the older
@@ -628,6 +635,7 @@ func (a *Agent) adoptUnrecorded(ctx context.Context, listed runtime.ContainerInf
 		allocation.Status = "stopping"
 	}
 	a.recoverContainer(container, allocation)
+	return true
 }
 
 func (a *Agent) hasNewerGeneration(allocation *Allocation) bool {
@@ -671,8 +679,10 @@ func (a *Agent) reobserve(ctx context.Context, id, allocationID string, containe
 }
 
 // observeRecovered inspects an unobserved allocation on demand, so a start
-// retry neither acknowledges nor replaces a container of unknown state. The
-// caller holds the allocation operation lock.
+// retry neither acknowledges nor replaces a container of unknown state. It
+// returns the observed status, or "" when cleanup confirmed the container
+// missing and removed the allocation. The caller holds the allocation
+// operation lock.
 func (a *Agent) observeRecovered(ctx context.Context, allocID string) (string, error) {
 	a.mu.RLock()
 	current := a.allocations[allocID]
@@ -689,21 +699,38 @@ func (a *Agent) observeRecovered(ctx context.Context, allocID string) (string, e
 		return allocation.Status, nil
 	}
 	observed, err := a.runtime.Inspect(ctx, allocation.ContainerID)
-	if err != nil {
+	if errdefs.IsNotFound(err) {
+		// Confirm absence with a successful listing, as recovery does.
+		if managed, ok := a.runtime.(runtime.ManagedRuntime); ok {
+			containers, listErr := managed.ListManaged(ctx, a.cluster)
+			if listErr != nil {
+				return "", fmt.Errorf("observe recovered allocation %s: %w", allocID, listErr)
+			}
+			for _, container := range containers {
+				if container.ID == allocation.ContainerID {
+					return "", fmt.Errorf("observe recovered allocation %s: container state is %q", allocID, container.Status)
+				}
+			}
+			a.recoverMissing(ctx, &allocation)
+		}
+	} else if err != nil {
 		return "", fmt.Errorf("observe recovered allocation %s: %w", allocID, err)
-	}
-	if !observedStatus(observed.Status) {
+	} else if !observedStatus(observed.Status) {
 		return "", fmt.Errorf("observe recovered allocation %s: container state is %q", allocID, observed.Status)
+	} else {
+		container := *observed
+		container.ID = allocation.ContainerID
+		a.recoverContainer(container, &allocation)
 	}
-	container := *observed
-	container.ID = allocation.ContainerID
-	a.recoverContainer(container, &allocation)
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	if recovered := a.allocations[allocID]; recovered != nil {
+		if recovered.unobserved {
+			return "", fmt.Errorf("observe recovered allocation %s: container state is unavailable", allocID)
+		}
 		return recovered.Status, nil
 	}
-	return "", fmt.Errorf("%w: %s", ErrAllocationNotFound, allocID)
+	return "", nil
 }
 
 // runRecoveryRetry retries recovery until every recorded allocation has been
@@ -1036,9 +1063,12 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		// A previous start may have reached the runtime but failed before it
 		// could be committed. Preserve its resources while Stop is uncertain,
 		// then finish that cleanup on a later retry instead of converting the
-		// retry into a terminal execution conflict.
-		if err := a.stopAllocation(context.WithoutCancel(ctx), allocID); err != nil {
-			return fmt.Errorf("clean up incomplete allocation %s before retry: %w", allocID, err)
+		// retry into a terminal execution conflict. An empty status means
+		// recovery already confirmed the container missing and cleaned it up.
+		if status != "" {
+			if err := a.stopAllocation(context.WithoutCancel(ctx), allocID); err != nil {
+				return fmt.Errorf("clean up incomplete allocation %s before retry: %w", allocID, err)
+			}
 		}
 		a.mu.Lock()
 	}

@@ -3,12 +3,14 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/clofour/trellis/internal/api"
 	"github.com/clofour/trellis/internal/runtime"
 	"github.com/clofour/trellis/internal/spec"
 	"github.com/clofour/trellis/internal/storage"
+	"github.com/containerd/errdefs"
 )
 
 type listingRecoveryRuntime struct {
@@ -402,5 +404,64 @@ func TestRecoverMissingKeepsPortClaimSharedWithLiveAllocation(t *testing.T) {
 	}
 	if !portClaimed(agent, 18086) {
 		t.Fatal("cleanup of a missing allocation released a live allocation's port")
+	}
+}
+
+type missingInspectRuntime struct {
+	*listingRecoveryRuntime
+	created int
+}
+
+func (r *missingInspectRuntime) Inspect(context.Context, string) (*runtime.ContainerInfo, error) {
+	if r.created > 0 {
+		return &runtime.ContainerInfo{Status: runtime.StatusRunning}, nil
+	}
+	return nil, fmt.Errorf("loading container: %w", errdefs.ErrNotFound)
+}
+
+func (r *missingInspectRuntime) Create(_ context.Context, options runtime.CreateOptions) (string, error) {
+	r.created++
+	return options.ID, nil
+}
+
+func TestRunAllocationReplacesRecoveredAllocationConfirmedMissing(t *testing.T) {
+	rt := &missingInspectRuntime{listingRecoveryRuntime: &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{}, listErr: errors.New("containerd unavailable")}}
+	record := recoveryTestAllocation(18087)
+	record.Status = "starting"
+	agent, _ := newRecoveryTestAgent(t, rt, record)
+	if err := agent.recover(context.Background()); err == nil {
+		t.Fatal("recover succeeded despite listing failure")
+	}
+
+	rt.listErr = nil
+	task := &spec.TaskSpec{Name: "task", Image: "image"}
+	if err := agent.RunAllocation(context.Background(), "task", "allocation", 1, 1, "hash", "default", "job", "group", "task", task, "", nil, nil, nil, nil); err != nil {
+		t.Fatalf("start retry after confirmed missing container: %v", err)
+	}
+	if rt.created != 1 || rt.stopCount != 0 {
+		t.Fatalf("create=%d stop=%d, want 1/0", rt.created, rt.stopCount)
+	}
+	if got := agent.allocations["task"]; got == nil || got.unobserved || got.Status != "running" {
+		t.Fatalf("allocation after start retry = %+v, want running", got)
+	}
+}
+
+func TestRecoverRetryKeepsListingUntilUnrecordedContainerIsInspected(t *testing.T) {
+	rt := &staleListingRuntime{
+		listingRecoveryRuntime: &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{}, listErr: errors.New("containerd unavailable")},
+		inspectErr:             errors.New("shim unresponsive"),
+	}
+	agent, _ := newRecoveryTestAgent(t, rt)
+	if err := agent.recover(context.Background()); err == nil {
+		t.Fatal("recover succeeded despite listing failure")
+	}
+	rt.listErr = nil
+	rt.containers = []runtime.ContainerInfo{{ID: "task", Status: runtime.StatusRunning, Labels: recoveryTestLabels(recoveryTestAllocation(0))}}
+	if !agent.retryRecovery(context.Background()) {
+		t.Fatal("retry stopped listing while an unrecorded container was uninspected")
+	}
+	rt.inspectErr = errdefs.ErrNotFound
+	if agent.retryRecovery(context.Background()) {
+		t.Fatal("retry kept listing after the unrecorded container was confirmed gone")
 	}
 }
