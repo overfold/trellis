@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -141,12 +142,12 @@ func (m *WireGuardManager) Attachments(context.Context) ([]string, error) {
 	return ids, errors.Join(errs...)
 }
 
-// detachLocked removes an allocation's veth, network namespace, and address
-// lease, then the namespace path when no other lease remains, and finally
-// the attachment record. Each step tolerates a resource that is already
-// gone, so a retry after a partial attach, detach, or crash converges. Every
-// name is derived from the Trellis allocation, namespace, and network, so
-// state Trellis does not own is never touched.
+// detachLocked removes an allocation's veth and network namespace. When its
+// lease is the last one, it removes the shared namespace path before releasing
+// that lease, then removes the attachment record. Each step tolerates a
+// resource that is already gone, so a retry after a partial attach, detach, or
+// crash converges. Every name is derived from the Trellis allocation,
+// namespace, and network, so state Trellis does not own is never touched.
 func (m *WireGuardManager) detachLocked(ctx context.Context, a Attachment) error {
 	if !safeAllocation.MatchString(a.AllocationID) || !safeName.MatchString(a.Namespace) || !safeName.MatchString(a.Network) {
 		return fmt.Errorf("network attachment has unsafe identifiers")
@@ -156,10 +157,8 @@ func (m *WireGuardManager) detachLocked(ctx context.Context, a Attachment) error
 		hostVeth = short("vh", a.AllocationID)
 	}
 	// Deleting the host end also deletes its peer, wherever the peer is.
-	if err := m.run.Run(ctx, "ip", "link", "del", hostVeth); err != nil {
-		if m.run.Run(ctx, "ip", "link", "show", "dev", hostVeth) == nil {
-			return fmt.Errorf("remove allocation veth: %w", err)
-		}
+	if err := m.deleteLink(ctx, hostVeth, "allocation veth"); err != nil {
+		return err
 	}
 	if err := m.run.Run(ctx, "ip", "netns", "del", a.AllocationID); err != nil {
 		if _, statErr := os.Lstat(m.netnsPath(a.AllocationID)); !errors.Is(statErr, fs.ErrNotExist) {
@@ -167,27 +166,50 @@ func (m *WireGuardManager) detachLocked(ctx context.Context, a Attachment) error
 		}
 	}
 	leaseDir := filepath.Join(m.stateDir, a.Network)
-	if a.LeasePath != "" {
-		if err := os.Remove(a.LeasePath); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-	} else if err := removeAllocationLeases(leaseDir, a.AllocationID); err != nil {
+	otherLeases, err := hasOtherAllocationLeases(leaseDir, a.AllocationID)
+	if err != nil {
 		return err
 	}
-
-	entries, err := os.ReadDir(leaseDir)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("read network leases: %w", err)
-	}
-	if len(entries) == 0 {
-		if err := m.removeNamespacePathLocked(ctx, a, leaseDir); err != nil {
+	if !otherLeases {
+		if err := m.removeNamespacePathLocked(ctx, a); err != nil {
 			return err
+		}
+	}
+	if err := removeAllocationLeases(leaseDir, a.AllocationID); err != nil {
+		return err
+	}
+	if !otherLeases {
+		if err := os.Remove(leaseDir); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove empty network lease directory: %w", err)
 		}
 	}
 	if err := os.Remove(m.journalPath(a.AllocationID)); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove network attachment record: %w", err)
 	}
 	return nil
+}
+
+func hasOtherAllocationLeases(leaseDir, allocationID string) (bool, error) {
+	entries, err := os.ReadDir(leaseDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read network leases: %w", err)
+	}
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() {
+			return false, fmt.Errorf("unexpected address lease entry %s", entry.Name())
+		}
+		owner, err := os.ReadFile(filepath.Join(leaseDir, entry.Name()))
+		if err != nil {
+			return false, fmt.Errorf("read address lease %s: %w", entry.Name(), err)
+		}
+		if string(owner) != allocationID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // removeAllocationLeases removes the address leases an allocation holds. A
@@ -225,7 +247,7 @@ func removeAllocationLeases(leaseDir, allocationID string) error {
 // removeNamespacePathLocked tears down a namespace's bridge, WireGuard
 // interface, firewall rules, applied plan, and lease directory once its last
 // local allocation is gone.
-func (m *WireGuardManager) removeNamespacePathLocked(ctx context.Context, a Attachment, leaseDir string) error {
+func (m *WireGuardManager) removeNamespacePathLocked(ctx context.Context, a Attachment) error {
 	bridge := a.Bridge
 	if bridge == "" {
 		bridge = short("tb", a.Namespace+"\x00"+a.Network)
@@ -234,24 +256,81 @@ func (m *WireGuardManager) removeNamespacePathLocked(ctx context.Context, a Atta
 	if wg == "" {
 		wg = short("tw", a.Namespace+"\x00"+a.Network)
 	}
-	_ = m.run.Run(ctx, "iptables", "-D", "FORWARD", "-i", bridge, "!", "-o", wg, "-j", "DROP")
-	_ = m.run.Run(ctx, "iptables", "-D", "FORWARD", "-o", bridge, "!", "-i", wg, "-j", "DROP")
+	if err := m.deleteFirewallRule(ctx, "FORWARD", "-i", bridge, "!", "-o", wg, "-j", "DROP"); err != nil {
+		return err
+	}
+	if err := m.deleteFirewallRule(ctx, "FORWARD", "-o", bridge, "!", "-i", wg, "-j", "DROP"); err != nil {
+		return err
+	}
 	if m.dnsAddress != "" {
 		for _, protocol := range []string{"udp", "tcp"} {
-			_ = m.run.Run(ctx, "iptables", "-D", "INPUT", "-i", bridge, "-d", m.dnsAddress, "-p", protocol, "--dport", "53", "-j", "ACCEPT")
+			if err := m.deleteFirewallRule(ctx, "INPUT", "-i", bridge, "-d", m.dnsAddress, "-p", protocol, "--dport", "53", "-j", "ACCEPT"); err != nil {
+				return err
+			}
 		}
 	}
 	if a.APIPort > 0 {
-		_ = m.run.Run(ctx, "iptables", "-D", "INPUT", "-i", bridge, "-d", a.Gateway, "-p", "tcp", "--dport", fmt.Sprint(a.APIPort), "-j", "ACCEPT")
+		if err := m.deleteFirewallRule(ctx, "INPUT", "-i", bridge, "-d", a.Gateway, "-p", "tcp", "--dport", fmt.Sprint(a.APIPort), "-j", "ACCEPT"); err != nil {
+			return err
+		}
 	}
-	_ = m.run.Run(ctx, "iptables", "-D", "INPUT", "-i", bridge, "-j", "DROP")
-	_ = m.run.Run(ctx, "ip", "link", "del", wg)
-	_ = m.run.Run(ctx, "ip", "link", "del", bridge)
+	if err := m.deleteFirewallRule(ctx, "INPUT", "-i", bridge, "-j", "DROP"); err != nil {
+		return err
+	}
+	if err := m.deleteLink(ctx, wg, "WireGuard interface"); err != nil {
+		return err
+	}
+	if err := m.deleteLink(ctx, bridge, "bridge"); err != nil {
+		return err
+	}
 	if err := os.Remove(m.planPath(a.Namespace, a.Network)); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove applied network plan: %w", err)
 	}
-	if err := os.Remove(leaseDir); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove empty network lease directory: %w", err)
+	return nil
+}
+
+func explicitAbsence(err error, messages ...string) bool {
+	if err == nil {
+		return false
+	}
+	for _, message := range messages {
+		if strings.Contains(err.Error(), message) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *WireGuardManager) deleteLink(ctx context.Context, name, resource string) error {
+	if err := m.run.Run(ctx, "ip", "link", "del", name); err != nil {
+		inspectErr := m.run.Run(ctx, "ip", "link", "show", "dev", name)
+		absent := explicitAbsence(err, "does not exist", "Cannot find device") ||
+			explicitAbsence(inspectErr, "does not exist", "Cannot find device")
+		if ctx.Err() == nil && absent {
+			return nil
+		}
+		if inspectErr != nil {
+			return fmt.Errorf("delete %s %s: %w (verify absence: %v)", resource, name, err, inspectErr)
+		}
+		return fmt.Errorf("delete %s %s: %w", resource, name, err)
+	}
+	return nil
+}
+
+func (m *WireGuardManager) deleteFirewallRule(ctx context.Context, args ...string) error {
+	if err := m.run.Run(ctx, "iptables", append([]string{"-D"}, args...)...); err != nil {
+		inspectErr := m.run.Run(ctx, "iptables", append([]string{"-C"}, args...)...)
+		var exitErr *exec.ExitError
+		absent := explicitAbsence(err, "Bad rule", "does a matching rule exist") ||
+			explicitAbsence(inspectErr, "Bad rule", "does a matching rule exist") ||
+			errors.As(inspectErr, &exitErr) && exitErr.ExitCode() == 1
+		if ctx.Err() == nil && absent {
+			return nil
+		}
+		if inspectErr != nil {
+			return fmt.Errorf("delete firewall rule %s: %w (verify absence: %v)", strings.Join(args, " "), err, inspectErr)
+		}
+		return fmt.Errorf("delete firewall rule %s: %w", strings.Join(args, " "), err)
 	}
 	return nil
 }
