@@ -117,7 +117,10 @@ type AllocationStatus struct {
 	Address    string           `json:"address,omitempty"`
 	Phase      lifecycle.Phase  `json:"phase"`
 	Health     lifecycle.Health `json:"health"`
-	Ports      []PortMapping    `json:"ports,omitempty"`
+	// Reason identifies why a task reported phase failed. It is empty for
+	// every other phase.
+	Reason OperationCode `json:"reason,omitempty"`
+	Ports  []PortMapping `json:"ports,omitempty"`
 }
 
 // PortMapping maps a host port to a container port.
