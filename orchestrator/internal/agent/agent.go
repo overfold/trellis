@@ -66,9 +66,13 @@ type Agent struct {
 	// recoverySweepPending defers the orphaned secret sweep that a failed
 	// initial listing skipped until a later listing completes recovery.
 	recoverySweepPending bool
-	secretMu             sync.Mutex
-	secretBase           string
-	secretRoot           string
+	// newestListed holds the newest generation per scheduler allocation seen
+	// by the latest recovery relist, so an older generation counts as
+	// superseded even when the newer one could not be adopted yet.
+	newestListed map[string]uint64
+	secretMu     sync.Mutex
+	secretBase   string
+	secretRoot   string
 }
 
 type allocationOperation struct {
@@ -432,8 +436,11 @@ func (a *Agent) pendingSupersededStopLocked(allocation *Allocation) bool {
 }
 
 // supersededLocked reports whether a newer generation of the allocation is
-// known.
+// known or was listed by recovery.
 func (a *Agent) supersededLocked(allocation *Allocation) bool {
+	if a.newestListed[allocation.AllocationID] > allocation.Generation {
+		return true
+	}
 	for _, known := range a.allocations {
 		if known.AllocationID == allocation.AllocationID && known.Generation > allocation.Generation {
 			return true
@@ -677,12 +684,17 @@ func (a *Agent) relistRecovery(ctx context.Context, managed runtime.ManagedRunti
 		// superseded whatever order the runtime lists them in.
 		adoptable := make([]runtime.ContainerInfo, 0, len(containers))
 		generations := make(map[string]uint64, len(containers))
+		newestListed := make(map[string]uint64)
 		for _, container := range containers {
 			if allocation := allocationFromRuntime(container); allocation != nil {
 				adoptable = append(adoptable, container)
 				generations[container.ID] = allocation.Generation
+				newestListed[allocation.AllocationID] = max(newestListed[allocation.AllocationID], allocation.Generation)
 			}
 		}
+		a.mu.Lock()
+		a.newestListed = newestListed
+		a.mu.Unlock()
 		sort.SliceStable(adoptable, func(i, j int) bool {
 			return generations[adoptable[i].ID] > generations[adoptable[j].ID]
 		})
@@ -1162,8 +1174,8 @@ func (a *Agent) StopGroup(ctx context.Context, request *api.StopAllocationReques
 	return errors.Join(errs...)
 }
 
-// stopUnrecorded stops containers of an allocation generation that has no
-// record while recovery has not completed a listing. The caller holds the
+// stopUnrecorded stops unrecorded containers of an allocation generation, and
+// of its older generations, while recovery has not completed a listing. The caller holds the
 // allocation operation lock.
 func (a *Agent) stopUnrecorded(ctx context.Context, request *api.StopAllocationRequest) error {
 	managed, ok := a.runtime.(runtime.ManagedRuntime)
@@ -1183,7 +1195,9 @@ func (a *Agent) stopUnrecorded(ctx context.Context, request *api.StopAllocationR
 	}
 	for _, container := range containers {
 		allocation := allocationFromRuntime(container)
-		if allocation == nil || allocation.AllocationID != request.AllocationID || allocation.Generation != request.Generation {
+		// Older unrecorded generations are stopped too, as a start stops
+		// known older generations; otherwise they would be adopted later.
+		if allocation == nil || allocation.AllocationID != request.AllocationID || allocation.Generation > request.Generation {
 			continue
 		}
 		a.mu.RLock()

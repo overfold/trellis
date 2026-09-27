@@ -685,3 +685,60 @@ func TestRecoverRetryAdoptsNewerGenerationFirst(t *testing.T) {
 		t.Fatalf("stop calls = %d, older = %+v; want the older generation stopped regardless of listing order", rt.stopCount, agent.allocations["task"])
 	}
 }
+
+type selectiveInspectRuntime struct {
+	*listingRecoveryRuntime
+	failInspect map[string]bool
+}
+
+func (r *selectiveInspectRuntime) Inspect(_ context.Context, id string) (*runtime.ContainerInfo, error) {
+	if r.failInspect[id] {
+		return nil, errors.New("task status unavailable")
+	}
+	return &runtime.ContainerInfo{Status: r.status}, nil
+}
+
+func TestRecoverRetryTreatsListedNewerGenerationAsSuperseding(t *testing.T) {
+	rt := &selectiveInspectRuntime{
+		listingRecoveryRuntime: &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning}, listErr: errors.New("containerd unavailable")},
+		failInspect:            map[string]bool{"task-g2": true},
+	}
+	agent, _ := newRecoveryTestAgent(t, rt)
+	if err := agent.recover(context.Background()); err == nil {
+		t.Fatal("recover succeeded despite listing failure")
+	}
+	older := recoveryTestAllocation(0)
+	newerLabels := recoveryTestLabels(older)
+	newerLabels["trellis.allocation-generation"] = "2"
+	rt.listErr = nil
+	rt.containers = []runtime.ContainerInfo{
+		{ID: "task", Status: runtime.StatusRunning, Labels: recoveryTestLabels(older)},
+		{ID: "task-g2", Status: runtime.StatusRunning, Labels: newerLabels},
+	}
+	agent.retryRecovery(context.Background())
+	if rt.stopCount != 1 || agent.allocations["task"] != nil {
+		t.Fatalf("stop calls = %d, older = %+v; want the older generation stopped while the newer one is uninspected", rt.stopCount, agent.allocations["task"])
+	}
+}
+
+func TestStopGroupStopsOlderUnrecordedGenerationsWhileListingIncomplete(t *testing.T) {
+	rt := &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning}, listErr: errors.New("containerd unavailable")}
+	agent, _ := newRecoveryTestAgent(t, rt)
+	if err := agent.recover(context.Background()); err == nil {
+		t.Fatal("recover succeeded despite listing failure")
+	}
+	older := recoveryTestAllocation(0)
+	newerLabels := recoveryTestLabels(older)
+	newerLabels["trellis.allocation-generation"] = "2"
+	rt.listErr = nil
+	rt.containers = []runtime.ContainerInfo{
+		{ID: "task", Status: runtime.StatusRunning, Labels: recoveryTestLabels(older)},
+		{ID: "task-g2", Status: runtime.StatusRunning, Labels: newerLabels},
+	}
+	if err := agent.StopGroup(context.Background(), &api.StopAllocationRequest{AllocationID: "allocation", Generation: 2}); err != nil {
+		t.Fatalf("stop newer generation: %v", err)
+	}
+	if rt.stopCount != 2 || agent.allocations["task"] != nil || agent.allocations["task-g2"] != nil {
+		t.Fatalf("stop calls = %d; want both unrecorded generations stopped", rt.stopCount)
+	}
+}
