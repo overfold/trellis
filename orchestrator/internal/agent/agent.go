@@ -1476,6 +1476,12 @@ func (a *Agent) OnRestartState(allocID string, attempts int, window time.Time, e
 	if allocation == nil {
 		return nil
 	}
+	if exhausted && allocation.Status == "starting" {
+		// RunAllocation tracks a task before committing its running record,
+		// which would overwrite this one. Let the reconciler retry once the
+		// start has been committed.
+		return fmt.Errorf("allocation %s start is not yet committed", allocID)
+	}
 	allocation.RestartAttempts, allocation.RestartWindow, allocation.RestartExhausted = attempts, window, exhausted
 	if exhausted {
 		// The container stopped and will not be restarted; stop probing it.
@@ -1484,8 +1490,10 @@ func (a *Agent) OnRestartState(allocID string, attempts int, window time.Time, e
 	}
 	if err := a.persistAllocation(allocation); err != nil {
 		// Keep reporting the accurate in-memory observation; the reconciler
-		// retries persisting an exhaustion on its next pass.
-		a.log.Error("persist restart tracking", "allocation", allocation.AllocationID, "error", err)
+		// retries persisting an exhaustion on its next pass and logs it.
+		if !exhausted {
+			a.log.Error("persist restart tracking", "allocation", allocation.AllocationID, "error", err)
+		}
 		return fmt.Errorf("persist restart tracking for %s: %w", allocID, err)
 	}
 	return nil
