@@ -132,7 +132,7 @@ Enabled API access injects `TRELLIS_ADDR`, `TRELLIS_TOKEN`, and `TRELLIS_NAMESPA
 
 `api_access` is a task-group privilege boundary: every task in the group can read the credential. Do not colocate untrusted sidecars with an API-enabled controller. Request the narrowest scope and access level the workload needs.
 
-`restart.max_restarts` is zero or greater and `restart.window` is a positive Go-style duration such as `5m`. Once the allowed failures in that window are exhausted, the allocation remains failed for operator diagnosis.
+`restart.max_restarts` is zero or greater and `restart.window` is a positive Go-style duration such as `5m`. The agent restarts a stopped task in place while the budget allows; failures older than the window no longer count against it. Once a task stops after the allowed restarts in the window are used up, the allocation becomes `failed` and is not restarted again, even after the window elapses. The failed allocation record keeps its reason, attempts, and events for operator diagnosis; to keep the group at `count`, the control plane schedules a new allocation in its place.
 
 `update.strategy` is `recreate` (the default) or `rolling`. For rolling updates, `max_parallel` limits how many not-yet-healthy replacements may be in flight; zero uses the effective default of one.
 
