@@ -269,20 +269,35 @@ func (vm *VolumeManager) CleanupStaging(liveAllocationIDs []string) error {
 }
 
 func (vm *VolumeManager) cleanupStaging(keep map[string]bool) error {
-	root := filepath.Join(vm.dataRootPath, "volume-staging")
+	// mountinfo reports absolute paths with symlinks resolved.
+	root, err := filepath.Abs(filepath.Join(vm.dataRootPath, "volume-staging"))
+	if err != nil {
+		return err
+	}
+	if root, err = filepath.EvalSymlinks(root); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var mounts []string
 	for {
-		mounts, err := stagingMounts(root)
+		mounts, err = stagingMounts(root)
 		if err != nil {
 			if os.IsNotExist(err) {
 				return nil
 			}
 			return err
 		}
-		mounts = slices.DeleteFunc(mounts, func(mount string) bool { return keep[stagingMountKey(root, mount)] })
-		if len(mounts) == 0 {
+		orphaned := slices.DeleteFunc(slices.Clone(mounts), func(mount string) bool {
+			key := stagingMountKey(root, mount)
+			// Detaching a mounted staging root would also detach kept mounts.
+			return keep[key] || key == "" && len(keep) > 0
+		})
+		if len(orphaned) == 0 {
 			break
 		}
-		for _, mount := range mounts {
+		for _, mount := range orphaned {
 			if err := unix.Unmount(mount, unix.MNT_DETACH); err != nil && err != unix.EINVAL && err != unix.ENOENT {
 				return fmt.Errorf("unstaging orphaned mount %s: %w", mount, err)
 			}
@@ -298,10 +313,6 @@ func (vm *VolumeManager) cleanupStaging(keep map[string]bool) error {
 	// No orphaned mount remains, so each orphaned staging directory holds only
 	// empty mount points. Remove rather than RemoveAll so an unexpected mount
 	// can never expose volume data to recursive deletion.
-	mounts, err := stagingMounts(root)
-	if err != nil {
-		return err
-	}
 	mounted := make(map[string]bool, len(mounts))
 	for _, mount := range mounts {
 		mounted[mount] = true

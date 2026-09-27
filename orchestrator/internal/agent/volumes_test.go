@@ -136,7 +136,11 @@ func TestCleanupStagingKeepsMountsOfExistingContainers(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("staging bind mounts require root")
 	}
-	root := t.TempDir()
+	// mountinfo reports resolved paths; the data directory may be a symlink.
+	root := filepath.Join(t.TempDir(), "data")
+	if err := os.Symlink(t.TempDir(), root); err != nil {
+		t.Fatal(err)
+	}
 	manager := NewVolumeManager(root)
 	volume := spec.VolumeSpec{Name: "data", HostPath: "@/data", ContainerPath: "/data"}
 	for _, id := range []string{"live", "orphan"} {
@@ -154,11 +158,16 @@ func TestCleanupStagingKeepsMountsOfExistingContainers(t *testing.T) {
 	if err := restarted.CleanupStaging([]string{"live"}); err != nil {
 		t.Fatalf("cleanup staging: %v", err)
 	}
-	mounts, err := stagingMounts(filepath.Join(root, "volume-staging"))
+	resolvedRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{restarted.stagingPath("live", "data")}; !slices.Equal(mounts, want) {
+	mounts, err := stagingMounts(filepath.Join(resolvedRoot, "volume-staging"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved := &VolumeManager{dataRootPath: resolvedRoot}
+	if want := []string{resolved.stagingPath("live", "data")}; !slices.Equal(mounts, want) {
 		t.Fatalf("staging mounts after cleanup = %v, want %v", mounts, want)
 	}
 	if _, err := os.Stat(filepath.Dir(restarted.stagingPath("orphan", "data"))); !os.IsNotExist(err) {
