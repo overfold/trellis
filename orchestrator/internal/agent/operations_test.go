@@ -1698,8 +1698,8 @@ func TestRestartExhaustionReportsFailedAndSurvivesAgentRestart(t *testing.T) {
 		t.Fatalf("record rewritten for unchanged observation: err=%v", err)
 	}
 	// A start retry for the same generation must not recreate the task.
-	if err := first.RunAllocation(context.Background(), "task", "allocation", 1, 1, "hash", "", "", "", "task", allocation.Spec, "", nil, nil, nil, policy); err != nil {
-		t.Fatalf("start retry: %v", err)
+	if err := first.RunAllocation(context.Background(), "task", "allocation", 1, 1, "hash", "", "", "", "task", allocation.Spec, "", nil, nil, nil, policy); !errors.Is(err, ErrRestartBudgetExhausted) {
+		t.Fatalf("start retry error = %v, want terminal restart exhaustion", err)
 	}
 	if rt.startCount != 0 || allocation.Status != "failed" || first.allocations["task"] != allocation {
 		t.Fatalf("start retry resurrected exhausted allocation: start=%d status=%q", rt.startCount, allocation.Status)

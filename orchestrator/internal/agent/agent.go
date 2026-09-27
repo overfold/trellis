@@ -150,6 +150,9 @@ var (
 	ErrExecutionConflict = errors.New("allocation execution metadata conflict")
 	// ErrExecSessionNotFound indicates that an interactive exec session does not exist.
 	ErrExecSessionNotFound = errors.New("exec session not found")
+	// ErrRestartBudgetExhausted indicates that an allocation generation failed
+	// terminally after exhausting its restart policy.
+	ErrRestartBudgetExhausted = errors.New("restart budget exhausted")
 )
 
 // ConfigureDurability enables persistent agent state.
@@ -394,7 +397,7 @@ func (a *Agent) recover(ctx context.Context) error {
 			} else if restartSuppressed {
 				a.reconciler.TrackStopping(allocation.ID, false, nil)
 			} else if !recoveryPending {
-				a.reconciler.TrackRecovered(allocation.ID, false, nil, allocation.RestartAttempts, allocation.RestartWindow, allocation.RestartExhausted)
+				a.reconciler.TrackRecovered(allocation.ID, false, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow, allocation.RestartExhausted)
 			}
 			if allocation.Spec != nil && !stopping && !recoveryPending && !exhausted && allocation.Spec.HealthCheck != nil {
 				a.health.RegisterTask(allocation.ID, allocation.ContainerID, allocation.Spec.HealthCheck)
@@ -753,7 +756,10 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		}
 		// An exhausted restart budget is terminal for this generation; a
 		// start retry must not recreate the task with a fresh budget.
-		if status == "running" || exhausted {
+		if exhausted {
+			return fmt.Errorf("%w: allocation %s", ErrRestartBudgetExhausted, allocID)
+		}
+		if status == "running" {
 			return nil
 		}
 		// A previous start may have reached the runtime but failed before it
@@ -1456,7 +1462,6 @@ func (a *Agent) OnRestartState(allocID string, attempts int, window time.Time, e
 	if allocation == nil {
 		return nil
 	}
-	previous := *allocation
 	allocation.RestartAttempts, allocation.RestartWindow, allocation.RestartExhausted = attempts, window, exhausted
 	if exhausted {
 		// The container stopped and will not be restarted; stop probing it.
@@ -1464,10 +1469,8 @@ func (a *Agent) OnRestartState(allocID string, attempts int, window time.Time, e
 		a.health.DeregisterTask(allocID)
 	}
 	if err := a.persistAllocation(allocation); err != nil {
-		if exhausted {
-			// Keep memory consistent with disk so the reconciler retries.
-			*allocation = previous
-		}
+		// Keep reporting the accurate in-memory observation; the reconciler
+		// retries persisting an exhaustion on its next pass.
 		a.log.Error("persist restart tracking", "allocation", allocation.AllocationID, "error", err)
 		return fmt.Errorf("persist restart tracking for %s: %w", allocID, err)
 	}

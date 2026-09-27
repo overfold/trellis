@@ -306,7 +306,7 @@ func operationError(err error) error {
 		status, code = http.StatusConflict, api.OperationStaleEpoch
 	case errors.Is(err, ErrStaleGeneration):
 		status, code = http.StatusConflict, api.OperationStaleGeneration
-	case errors.Is(err, ErrExecutionConflict), errors.Is(err, ErrAllocationExists):
+	case errors.Is(err, ErrExecutionConflict), errors.Is(err, ErrAllocationExists), errors.Is(err, ErrRestartBudgetExhausted):
 		status, code = http.StatusConflict, api.OperationConflict
 	}
 	raw, _ := json.Marshal(api.OperationResponse{Code: code, Message: err.Error()})

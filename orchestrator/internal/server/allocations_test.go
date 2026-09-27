@@ -385,6 +385,31 @@ func TestHeartbeatRequiresEveryTaskForRunningHealth(t *testing.T) {
 	}
 }
 
+func TestHeartbeatFailedTaskFailsGroupInAnyOrder(t *testing.T) {
+	nodeID := uuid.MustParse("99999999-9999-9999-9999-999999999999")
+	failed := api.AllocationStatus{ID: "demo-web-1", Generation: 1, Task: "app", Phase: lifecycle.PhaseFailed, Health: lifecycle.HealthUnhealthy}
+	starting := api.AllocationStatus{ID: "demo-web-1", Generation: 1, Task: "sidecar", Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown}
+	for _, actual := range [][]api.AllocationStatus{{failed, starting}, {starting, failed}} {
+		node := &Node{ID: nodeID, Host: "node-a", Status: NodeStatusHealthy}
+		allocation := &Allocation{
+			ID: "demo-web-1", Node: node, Generation: 1,
+			Tasks: []spec.TaskSpec{{Name: "app"}, {Name: "sidecar"}},
+			Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy,
+		}
+		s := &Server{
+			state: NewStateController(memoryStore{}, "test"),
+			nodes: map[uuid.UUID]*Node{nodeID: node}, allocations: []*Allocation{allocation},
+			catalog: catalog.New(),
+		}
+		if err := s.Heartbeat(context.Background(), nodeID, actual, "test", nil, nil, nodeResourceObservation{}); err != nil {
+			t.Fatal(err)
+		}
+		if allocation.Phase != lifecycle.PhaseFailed || allocation.Health != lifecycle.HealthUnhealthy {
+			t.Fatalf("heartbeat %v: phase=%s health=%s, want failed/unhealthy", actual, allocation.Phase, allocation.Health)
+		}
+	}
+}
+
 func TestHeartbeatMissingTaskRetriesRunningAllocation(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()

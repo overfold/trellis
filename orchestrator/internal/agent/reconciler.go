@@ -44,7 +44,8 @@ type allocationReconcileState struct {
 	stopping      bool
 	healthManaged bool
 	restarting    bool
-	exhausted     bool
+	exhausted     bool // the restart budget is terminally used up
+	failed        bool // exhaustion has been recorded for a stopped container
 	attempts      int
 	window        time.Time
 	maxRestarts   int
@@ -228,7 +229,7 @@ func (r *AllocationReconciler) Reconcile(ctx context.Context, allocID string) er
 	state.operation.Lock()
 	defer state.operation.Unlock()
 	r.mu.Lock()
-	active := r.states[allocID] == state && !state.stopping && !state.exhausted
+	active := r.states[allocID] == state && !state.stopping && !state.failed
 	r.mu.Unlock()
 	if !active {
 		return nil
@@ -259,21 +260,24 @@ func (r *AllocationReconciler) restart(ctx context.Context, allocID string) erro
 	state.restarting = true
 
 	now := time.Now()
-	attempts, window, allowed := advanceRestartState(state.attempts, state.window, state.maxRestarts, state.restartWindow, now)
+	attempts, window, allowed := state.attempts, state.window, false
+	if !state.exhausted {
+		attempts, window, allowed = advanceRestartState(state.attempts, state.window, state.maxRestarts, state.restartWindow, now)
+	}
 	if !allowed {
-		// Exhaustion is terminal for this allocation generation. Record it
-		// before publishing the failed observation so a crash in between
-		// still recovers as failed instead of restarting again.
+		// Exhaustion is terminal for this allocation generation, including
+		// after the window elapses. The subscriber records it together with
+		// the failed observation; until that succeeds, later passes retry.
 		state.restarting = false
 		state.exhausted = true
 		state.attempts, state.window = attempts, window
 		r.mu.Unlock()
 		if err := r.publishRestartState(allocID, attempts, window, true); err != nil {
-			r.mu.Lock()
-			state.exhausted = false
-			r.mu.Unlock()
 			return fmt.Errorf("record exhausted restart budget for alloc %s: %w", allocID, err)
 		}
+		r.mu.Lock()
+		state.failed = true
+		r.mu.Unlock()
 		return nil
 	}
 	state.attempts, state.window = attempts, window
