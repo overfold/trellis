@@ -67,16 +67,26 @@ func execTargetable(alloc *Allocation) bool {
 
 // execTargetsLocked returns the task records exec and metrics requests may
 // address for a scheduler allocation: running, ownership-verified records of
-// the newest generation this agent holds, sorted by task name. Records of an
-// older generation may still be stopping and are never targets. It must be
+// the newest generation this agent holds that is not stopping, sorted by task
+// name. Records of other generations are never targets. It must be
 // called with the agent lock held. known reports whether the agent holds any
 // record for the allocation.
 func (a *Agent) execTargetsLocked(allocID string) (targets []execTarget, known bool) {
 	var generation uint64
+	current := false
 	for _, alloc := range a.allocations {
-		if alloc.AllocationID == allocID && (!known || alloc.Generation > generation) {
-			generation, known = alloc.Generation, true
+		if alloc.AllocationID != allocID {
+			continue
 		}
+		known = true
+		// A stopping record, such as one left by a failed start of a newer
+		// generation, does not replace the generation that still runs.
+		if alloc.Status != "stopping" && (!current || alloc.Generation > generation) {
+			generation, current = alloc.Generation, true
+		}
+	}
+	if !current {
+		return nil, known
 	}
 	for _, alloc := range a.allocations {
 		if alloc.AllocationID == allocID && alloc.Generation == generation && execTargetable(alloc) {
@@ -159,6 +169,12 @@ func (a *Agent) ExecAllocation(ctx context.Context, allocID, task string, comman
 
 // CreateExecSession starts a persistent interactive terminal in an allocation task.
 func (a *Agent) CreateExecSession(ctx context.Context, allocID, task string, command []string, term string, cols, rows uint32) (*api.ExecSessionResponse, error) {
+	a.mu.RLock()
+	closed := a.execSessionsClosed
+	a.mu.RUnlock()
+	if closed {
+		return nil, ErrAgentShuttingDown
+	}
 	target, err := a.selectRunningExecTarget(ctx, allocID, task)
 	if err != nil {
 		return nil, err
@@ -166,6 +182,12 @@ func (a *Agent) CreateExecSession(ctx context.Context, allocID, task string, com
 	terminal, err := a.runtime.StartTerminal(ctx, target.ContainerID, command, term, cols, rows)
 	if err != nil {
 		return nil, fmt.Errorf("start terminal in container %s: %w", target.ContainerID, err)
+	}
+	// StartTerminal outlives the request; a caller that gave up never learns
+	// the session ID, so the terminal must not be kept.
+	if err := ctx.Err(); err != nil {
+		a.closeTerminal(ctx, allocID, terminal)
+		return nil, err
 	}
 	sessionID := uuid.NewString()
 	a.mu.Lock()
@@ -256,7 +278,10 @@ func (a *Agent) CloseExecSession(ctx context.Context, allocID, sessionID string)
 	}
 	delete(a.execSessions, sessionID)
 	a.mu.Unlock()
-	if err := session.Terminal.Close(ctx); err != nil {
+	// The session is no longer tracked, so its close must not be cut short.
+	closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), execSessionCloseTimeout)
+	defer cancel()
+	if err := session.Terminal.Close(closeCtx); err != nil {
 		return fmt.Errorf("close exec session %s: %w", sessionID, err)
 	}
 	return nil

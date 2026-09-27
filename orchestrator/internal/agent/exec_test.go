@@ -329,3 +329,33 @@ func TestAllocationMetricsEmptyWhileCurrentGenerationStarts(t *testing.T) {
 		t.Fatalf("unknown allocation metrics error = %v, want not found", err)
 	}
 }
+
+func TestStoppingNewerGenerationDoesNotHideRunningGeneration(t *testing.T) {
+	rt := newExecTestRuntime()
+	agent := newOperationTestAgent(t, rt)
+	addExecTestTask(agent, "allocation-g1-web", "web", 1, "running")
+	addExecTestTask(agent, "allocation-g2-web", "web", 2, "stopping")
+
+	result, err := agent.ExecAllocation(context.Background(), "allocation", "", []string{"true"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Stdout != "allocation-g1-web" {
+		t.Fatalf("exec target = %q, want running generation", result.Stdout)
+	}
+}
+
+func TestCancelledExecSessionCreateClosesTerminal(t *testing.T) {
+	rt := newExecTestRuntime()
+	agent := newOperationTestAgent(t, rt)
+	addExecTestTask(agent, "allocation-g1-web", "web", 1, "running")
+	ctx, cancel := context.WithCancel(context.Background())
+	rt.onTerminal = func(string) { cancel() }
+
+	if _, err := agent.CreateExecSession(ctx, "allocation", "web", []string{"sh"}, "", 80, 24); !errors.Is(err, context.Canceled) {
+		t.Fatalf("session error = %v, want cancellation", err)
+	}
+	if rt.terminal("allocation-g1-web").closeCount() != 1 || len(agent.execSessions) != 0 {
+		t.Fatal("abandoned session create kept its terminal")
+	}
+}

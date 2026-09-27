@@ -770,7 +770,7 @@ func killExecProcess(ctx context.Context, process execProcess, exitCh <-chan con
 	// Kill fails when the process already exited or never started; Delete
 	// below reports whether it is still running.
 	_ = process.Kill(cleanupCtx, syscall.SIGKILL)
-	if _, err := process.Delete(cleanupCtx); err == nil || !errdefs.IsFailedPrecondition(err) {
+	if err := deleteWithin(cleanupCtx, process); err == nil || !errdefs.IsFailedPrecondition(err) {
 		return
 	}
 	select {
@@ -778,7 +778,7 @@ func killExecProcess(ctx context.Context, process execProcess, exitCh <-chan con
 	case <-cleanupCtx.Done():
 		return
 	}
-	_, _ = process.Delete(cleanupCtx)
+	_ = deleteWithin(cleanupCtx, process)
 }
 
 // deleteExecProcess deletes an exited exec process, waiting for its output
@@ -786,8 +786,24 @@ func killExecProcess(ctx context.Context, process execProcess, exitCh <-chan con
 func deleteExecProcess(ctx context.Context, process execProcess) error {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), execCleanupTimeout)
 	defer cancel()
-	_, err := process.Delete(cleanupCtx)
-	return err
+	return deleteWithin(cleanupCtx, process)
+}
+
+// deleteWithin deletes an exec process, giving up when ctx ends. containerd's
+// Delete waits for the output copy without honouring its context, so the
+// delete runs in the background.
+func deleteWithin(ctx context.Context, process execProcess) error {
+	done := make(chan error, 1)
+	go func() {
+		_, err := process.Delete(ctx)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // lockedBuffer collects exec output written by containerd's IO copy goroutines.
@@ -971,8 +987,8 @@ func (c *ContainerdRuntime) StartTerminal(ctx context.Context, containerID strin
 		code, _, resultErr := status.Result()
 		_ = stdinWriter.Close()
 		_ = stdinReader.Close()
-		// Deleting waits for the output copy, so readers never see the exit
-		// before the final output.
+		// Deleting waits (boundedly) for the output copy, so readers do not
+		// see the exit before the final output.
 		_ = deleteExecProcess(ctx, process)
 		session.mu.Lock()
 		session.exited = true

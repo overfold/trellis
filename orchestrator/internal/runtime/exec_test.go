@@ -147,3 +147,24 @@ func TestRunExecProcessCleansUpAfterStartFailure(t *testing.T) {
 		}
 	}
 }
+
+type hangingDeleteProcess struct {
+	*fakeExecProcess
+	release chan struct{}
+}
+
+func (p *hangingDeleteProcess) Delete(context.Context, ...containerd.ProcessDeleteOpts) (*containerd.ExitStatus, error) {
+	<-p.release // containerd's output wait ignores the context.
+	return nil, nil
+}
+
+func TestDeleteWithinGivesUpWhenContextEnds(t *testing.T) {
+	process := &hangingDeleteProcess{fakeExecProcess: newFakeExecProcess(), release: make(chan struct{})}
+	defer close(process.release)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	if err := deleteWithin(ctx, process); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("delete error = %v, want deadline exceeded", err)
+	}
+}
