@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"os"
 	"path/filepath"
@@ -50,20 +49,26 @@ func TestMaterializeSecretsDeliversEnvAndMemoryBackedFile(t *testing.T) {
 	}
 }
 
-func TestMaterializeSecretsReplacesStaleDirectory(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "alloc")
+func TestSecretDirForRefusesExistingDirectory(t *testing.T) {
+	agent := newOperationTestAgent(t, &reconcilerRuntime{})
+	dir, err := agent.secretDirFor("allocation")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "stale"), []byte("old"), 0o400); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "live"), []byte("secret"), 0o400); err != nil {
 		t.Fatal(err)
 	}
-	delivered := []api.DeliveredSecret{{Task: "api", Name: "key", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Value: []byte("new")}}
-	if _, _, err := materializeSecrets(dir, "api", delivered); err != nil {
-		t.Fatal(err)
+	if _, err := agent.secretDirFor("allocation"); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("existing secret directory error = %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "stale")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("stale secret file survived: %v", err)
+	if _, _, err := materializeSecrets(dir, "api", []api.DeliveredSecret{{Task: "api", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Value: []byte("new")}}); err == nil {
+		t.Fatal("materialized secrets into an existing directory")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "live")); err != nil {
+		t.Fatalf("existing secret file removed: %v", err)
 	}
 }
 
@@ -90,7 +95,7 @@ func TestSecretDirForIsRecordedAndDeterministicAcrossRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	root := filepath.Dir(dir)
-	if filepath.Base(dir) != base64.RawURLEncoding.EncodeToString([]byte("allocation-g2-first")) {
+	if filepath.Base(dir) != allocationFileName("allocation-g2-first") {
 		t.Fatalf("secret dir = %q", dir)
 	}
 	if info, err := os.Lstat(root); err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
@@ -109,7 +114,23 @@ func TestSecretDirForIsRecordedAndDeterministicAcrossRestart(t *testing.T) {
 	}
 }
 
-func TestSecretDirForReplacesUntrustworthyRecordedRoot(t *testing.T) {
+func newRecordedRootAgent(t *testing.T, prepare func(t *testing.T, path string)) (*Agent, *storage.LocalStorage, string) {
+	t.Helper()
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	agent := newOperationTestAgent(t, &reconcilerRuntime{})
+	agent.ConfigureDurability(local, "test")
+	recorded := filepath.Join(agent.secretBase, "trellis-secrets-recorded")
+	prepare(t, recorded)
+	if err := local.Put(secretRootKey, recorded); err != nil {
+		t.Fatal(err)
+	}
+	return agent, local, recorded
+}
+
+func TestSecretDirForReplacesRecordedRootItCannotOwn(t *testing.T) {
 	for name, prepare := range map[string]func(t *testing.T, path string){
 		"missing": func(*testing.T, string) {},
 		"symlink": func(t *testing.T, path string) {
@@ -117,39 +138,39 @@ func TestSecretDirForReplacesUntrustworthyRecordedRoot(t *testing.T) {
 				t.Fatal(err)
 			}
 		},
-		"shared": func(t *testing.T, path string) {
-			if err := os.Mkdir(path, 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Chmod(path, 0o755); err != nil {
-				t.Fatal(err)
-			}
-		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			local := storage.NewLocalStorage(t.TempDir())
-			if err := local.Init(); err != nil {
-				t.Fatal(err)
-			}
-			agent := newOperationTestAgent(t, &reconcilerRuntime{})
-			agent.ConfigureDurability(local, "test")
-			untrusted := filepath.Join(agent.secretBase, "trellis-secrets-untrusted")
-			prepare(t, untrusted)
-			if err := local.Put(secretRootKey, untrusted); err != nil {
-				t.Fatal(err)
-			}
+			agent, local, recorded := newRecordedRootAgent(t, prepare)
 			dir, err := agent.secretDirFor("allocation")
 			if err != nil {
 				t.Fatal(err)
 			}
-			if root := filepath.Dir(dir); root == untrusted {
-				t.Fatalf("reused untrustworthy secret root %q", root)
+			if root := filepath.Dir(dir); root == recorded {
+				t.Fatalf("reused unownable secret root %q", root)
 			}
-			var recorded string
-			if err := local.Get(secretRootKey, &recorded); err != nil || recorded != filepath.Dir(dir) {
-				t.Fatalf("recorded secret root = %q, %v", recorded, err)
+			var stored string
+			if err := local.Get(secretRootKey, &stored); err != nil || stored != filepath.Dir(dir) {
+				t.Fatalf("recorded secret root = %q, %v", stored, err)
 			}
 		})
+	}
+}
+
+func TestSecretDirForKeepsOwnRecordedRootWithLoosenedMode(t *testing.T) {
+	agent, local, recorded := newRecordedRootAgent(t, func(t *testing.T, path string) {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if _, err := agent.secretDirFor("allocation"); err == nil || !strings.Contains(err.Error(), "accessible to other users") {
+		t.Fatalf("loosened secret root error = %v", err)
+	}
+	var stored string
+	if err := local.Get(secretRootKey, &stored); err != nil || stored != recorded {
+		t.Fatalf("recorded secret root = %q, %v, want it kept as %q", stored, err, recorded)
 	}
 }
 
@@ -209,7 +230,7 @@ func TestRunAllocationUsesRecoverableSecretDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	id := "allocation-g2-first"
-	want := filepath.Join(agent.secretRoot, base64.RawURLEncoding.EncodeToString([]byte(id)))
+	want := filepath.Join(agent.secretRoot, allocationFileName(id))
 	var recorded Allocation
 	if err := local.Get(allocationRecordKey(id), &recorded); err != nil || recorded.SecretDir != want {
 		t.Fatalf("record = %+v, error = %v, want secret dir %q", recorded, err, want)

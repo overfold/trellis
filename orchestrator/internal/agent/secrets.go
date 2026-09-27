@@ -1,9 +1,9 @@
 package agent
 
 import (
-	"encoding/base64"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -32,29 +32,39 @@ func taskHasFileSecrets(taskName string, delivered []api.DeliveredSecret) bool {
 }
 
 // secretDirFor returns the deterministic secret directory for an allocation
-// below this agent's secret root. It does not create the allocation directory.
+// below this agent's secret root. It refuses a path that already exists so a
+// start never replaces or later removes files it did not write.
 func (a *Agent) secretDirFor(allocID string) (string, error) {
 	root, err := a.secretRootDir()
 	if err != nil {
 		return "", err
 	}
-	name := base64.RawURLEncoding.EncodeToString([]byte(allocID))
+	name := allocationFileName(allocID)
 	if len(name) > 255 {
 		return "", fmt.Errorf("allocation ID is too long for a secret directory name")
 	}
-	return filepath.Join(root, name), nil
+	dir := filepath.Join(root, name)
+	if _, err := os.Lstat(dir); err == nil {
+		return "", fmt.Errorf("secret directory for %s already exists", allocID)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return "", fmt.Errorf("inspect secret directory: %w", err)
+	}
+	return dir, nil
 }
 
 // secretRootDir returns this agent's private secret root, reusing the
-// recorded root when it is still trustworthy and otherwise creating and
-// recording a new one before it is used.
+// recorded root and otherwise creating and recording a new one before use.
 func (a *Agent) secretRootDir() (string, error) {
 	a.secretMu.Lock()
 	defer a.secretMu.Unlock()
 	if a.secretRoot != "" && checkSecretRoot(a.secretRoot) == nil {
 		return a.secretRoot, nil
 	}
-	if root, ok := a.storedSecretRoot(); ok {
+	root, reuse, err := a.recordedSecretRoot()
+	if err != nil {
+		return "", err
+	}
+	if reuse {
 		a.secretRoot = root
 		return root, nil
 	}
@@ -62,7 +72,7 @@ func (a *Agent) secretRootDir() (string, error) {
 	if base == "" {
 		base = defaultSecretBase
 	}
-	root, err := os.MkdirTemp(base, "trellis-secrets-")
+	root, err = os.MkdirTemp(base, "trellis-secrets-")
 	if err != nil {
 		return "", fmt.Errorf("create memory-backed secret root: %w", err)
 	}
@@ -80,21 +90,42 @@ func (a *Agent) secretRootDir() (string, error) {
 	return root, nil
 }
 
-// storedSecretRoot returns the recorded secret root if it still exists and
-// is a private directory owned by the agent user. A root lost to a reboot, or
-// replaced by another user, is never reused.
-func (a *Agent) storedSecretRoot() (string, bool) {
+// recordedSecretRoot returns the recorded secret root and whether it is this
+// agent's private root. A root that is gone (for example after a reboot) or
+// was planted by another user holds none of this agent's secrets and may be
+// replaced. Any other doubt is an error, so a root that may still hold
+// secrets is never abandoned.
+func (a *Agent) recordedSecretRoot() (root string, reuse bool, err error) {
 	if a.local == nil {
-		return "", false
+		return "", false, nil
 	}
-	var root string
-	if err := a.local.Get(secretRootKey, &root); err != nil || root == "" {
-		return "", false
+	if err := a.local.Get(secretRootKey, &root); errors.Is(err, fs.ErrNotExist) {
+		return "", false, nil
+	} else if err != nil {
+		return "", false, fmt.Errorf("read recorded secret root: %w", err)
+	}
+	if root == "" {
+		return "", false, nil
+	}
+	info, err := os.Lstat(root)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("inspect secret root: %w", err)
+	}
+	if !info.IsDir() || !ownedByAgent(info) {
+		return "", false, nil
 	}
 	if err := checkSecretRoot(root); err != nil {
-		return "", false
+		return "", false, err
 	}
-	return root, true
+	return root, true, nil
+}
+
+func ownedByAgent(info fs.FileInfo) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return !ok || int(stat.Uid) == os.Geteuid()
 }
 
 // checkSecretRoot rejects a secret root that another user could have
@@ -110,7 +141,7 @@ func checkSecretRoot(root string) error {
 	if info.Mode().Perm()&0o077 != 0 {
 		return fmt.Errorf("secret root %s is accessible to other users", root)
 	}
-	if stat, ok := info.Sys().(*syscall.Stat_t); ok && int(stat.Uid) != os.Geteuid() {
+	if !ownedByAgent(info) {
 		return fmt.Errorf("secret root %s is not owned by the agent user", root)
 	}
 	return nil
@@ -118,7 +149,6 @@ func checkSecretRoot(root string) error {
 
 // materializeSecrets returns the task's environment secrets and writes its
 // file secrets below dir, which must be set when the task has file secrets.
-// Any stale directory at dir is replaced.
 func materializeSecrets(dir, taskName string, delivered []api.DeliveredSecret) (map[string]string, []*runtime.Mount, error) {
 	env := map[string]string{}
 	var taskSecrets []api.DeliveredSecret
@@ -128,9 +158,6 @@ func materializeSecrets(dir, taskName string, delivered []api.DeliveredSecret) (
 		}
 	}
 	if dir != "" {
-		if err := os.RemoveAll(dir); err != nil {
-			return nil, nil, fmt.Errorf("remove stale secret directory: %w", err)
-		}
 		if err := os.Mkdir(dir, 0o700); err != nil {
 			return nil, nil, fmt.Errorf("create memory-backed secret directory: %w", err)
 		}
@@ -185,8 +212,12 @@ func materializeSecrets(dir, taskName string, delivered []api.DeliveredSecret) (
 // stops after writing secrets but before the allocation record is durable.
 // It runs after recovery and before the agent accepts allocation requests.
 func (a *Agent) removeOrphanedSecretDirs() {
-	root, ok := a.storedSecretRoot()
-	if !ok {
+	root, reuse, err := a.recordedSecretRoot()
+	if err != nil {
+		a.log.Error("skip orphaned secret sweep", "error", err)
+		return
+	}
+	if !reuse {
 		return
 	}
 	entries, err := os.ReadDir(root)
@@ -207,7 +238,7 @@ func (a *Agent) removeOrphanedSecretDirs() {
 	}
 	a.mu.RLock()
 	for id := range a.allocations {
-		owned[base64.RawURLEncoding.EncodeToString([]byte(id))] = true
+		owned[allocationFileName(id)] = true
 	}
 	a.mu.RUnlock()
 	for _, entry := range entries {

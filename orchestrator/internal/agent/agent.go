@@ -177,8 +177,14 @@ func (a *Agent) AcceptEpoch(epoch uint64) error {
 	return nil
 }
 
+// allocationFileName encodes an allocation ID as one safe path element. Record
+// and secret directory names share it so the startup sweep can match them.
+func allocationFileName(id string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(id))
+}
+
 func allocationRecordKey(id string) string {
-	return "agent/allocations/" + base64.RawURLEncoding.EncodeToString([]byte(id))
+	return "agent/allocations/" + allocationFileName(id)
 }
 
 func (a *Agent) persistAllocation(allocation *Allocation) error {
