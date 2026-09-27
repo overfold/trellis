@@ -108,6 +108,7 @@ func TestSecretDirForIsRecordedAndDeterministicAcrossRestart(t *testing.T) {
 
 	restarted := newOperationTestAgent(t, &reconcilerRuntime{})
 	restarted.ConfigureDurability(local, "test")
+	restarted.secretBase = agent.secretBase
 	again, err := restarted.secretDirFor("allocation-g2-first")
 	if err != nil || again != dir {
 		t.Fatalf("secret dir after restart = %q, %v, want %q", again, err, dir)
@@ -319,5 +320,83 @@ func TestRemoveOrphanedSecretDirsSkipsWithoutVerifiableOwnership(t *testing.T) {
 	agent.removeOrphanedSecretDirs()
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("secret directory removed with unreadable records: %v", err)
+	}
+}
+
+func TestSecretDirForIgnoresRecordedRootOutsideBase(t *testing.T) {
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	agent := newOperationTestAgent(t, &reconcilerRuntime{})
+	agent.ConfigureDurability(local, "test")
+	elsewhere := t.TempDir()
+	keep := filepath.Join(elsewhere, "keep")
+	if err := os.WriteFile(keep, []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := local.Put(secretRootKey, elsewhere); err != nil {
+		t.Fatal(err)
+	}
+	agent.removeOrphanedSecretDirs()
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("sweep removed an entry outside the secret base: %v", err)
+	}
+	dir, err := agent.secretDirFor("allocation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(filepath.Dir(dir)) != agent.secretBase {
+		t.Fatalf("secret dir %q is not below the secret base %q", dir, agent.secretBase)
+	}
+}
+
+func TestRemoveSecretDirRefusesRedirectedRoot(t *testing.T) {
+	target := t.TempDir()
+	victim := filepath.Join(target, "victim")
+	if err := os.Mkdir(victim, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "trellis-secrets-root")
+	if err := os.Symlink(target, root); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeSecretDir(filepath.Join(root, "victim")); err == nil {
+		t.Fatal("removed a secret directory through a symlinked root")
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Fatalf("redirected removal deleted %s: %v", victim, err)
+	}
+	if err := removeSecretDir(filepath.Join(t.TempDir(), "gone", "dir")); err != nil {
+		t.Fatalf("missing root: %v", err)
+	}
+}
+
+func TestRunAllocationKeepsSecretDirectoryItDidNotCreate(t *testing.T) {
+	agent := newOperationTestAgent(t, &reconcilerRuntime{})
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	agent.ConfigureDurability(local, "test")
+	existing, err := agent.secretDirFor("allocation-g2-first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(existing, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(existing, "live"), []byte("secret"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	request := operationTestRequest()
+	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image"}}
+	request.Secrets = []api.DeliveredSecret{{Task: "first", Name: "key", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Value: []byte("secret")}}
+	err = agent.RunGroup(context.Background(), request)
+	if err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("run error = %v, want existing secret directory refusal", err)
+	}
+	if _, err := os.Stat(filepath.Join(existing, "live")); err != nil {
+		t.Fatalf("failed start removed a secret directory it did not create: %v", err)
 	}
 }

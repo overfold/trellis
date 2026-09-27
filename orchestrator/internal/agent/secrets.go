@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/clofour/trellis/internal/api"
@@ -16,10 +17,14 @@ import (
 // defaultSecretBase is the memory-backed filesystem holding secret roots.
 const defaultSecretBase = "/dev/shm"
 
+const secretRootPrefix = "trellis-secrets-"
+
 // secretRootKey durably records this agent's secret root. The root name is
-// random so no other local user can pre-create or share it; recording it
-// before first use lets a restarted agent find files written before a crash
-// even when the allocation record never learned about them.
+// random so other local users cannot predict it before first use and agents
+// sharing a host never share a root. Recording it before first use lets a
+// restarted agent find files written before a crash even when the allocation
+// record never learned about them. A reboot empties /dev/shm, after which the
+// recorded path is untrusted until checked again.
 const secretRootKey = "agent/secret-root"
 
 func taskHasFileSecrets(taskName string, delivered []api.DeliveredSecret) bool {
@@ -39,11 +44,7 @@ func (a *Agent) secretDirFor(allocID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	name := allocationFileName(allocID)
-	if len(name) > 255 {
-		return "", fmt.Errorf("allocation ID is too long for a secret directory name")
-	}
-	dir := filepath.Join(root, name)
+	dir := filepath.Join(root, allocationFileName(allocID))
 	if _, err := os.Lstat(dir); err == nil {
 		return "", fmt.Errorf("secret directory for %s already exists", allocID)
 	} else if !errors.Is(err, fs.ErrNotExist) {
@@ -72,7 +73,7 @@ func (a *Agent) secretRootDir() (string, error) {
 	if base == "" {
 		base = defaultSecretBase
 	}
-	root, err = os.MkdirTemp(base, "trellis-secrets-")
+	root, err = os.MkdirTemp(base, secretRootPrefix)
 	if err != nil {
 		return "", fmt.Errorf("create memory-backed secret root: %w", err)
 	}
@@ -104,7 +105,11 @@ func (a *Agent) recordedSecretRoot() (root string, reuse bool, err error) {
 	} else if err != nil {
 		return "", false, fmt.Errorf("read recorded secret root: %w", err)
 	}
-	if root == "" {
+	base := a.secretBase
+	if base == "" {
+		base = defaultSecretBase
+	}
+	if filepath.Dir(root) != filepath.Clean(base) || !strings.HasPrefix(filepath.Base(root), secretRootPrefix) {
 		return "", false, nil
 	}
 	info, err := os.Lstat(root)
@@ -117,10 +122,32 @@ func (a *Agent) recordedSecretRoot() (root string, reuse bool, err error) {
 	if !info.IsDir() || !ownedByAgent(info) {
 		return "", false, nil
 	}
-	if err := checkSecretRoot(root); err != nil {
-		return "", false, err
+	if info.Mode().Perm()&0o077 != 0 {
+		return "", false, fmt.Errorf("secret root %s is accessible to other users", root)
 	}
 	return root, true, nil
+}
+
+// removeSecretDir removes a recorded secret directory. After a reboot empties
+// /dev/shm another user may recreate the root path, for example as a symlink
+// that would redirect the removal, so the parent must still be a directory the
+// agent owns. A missing parent means there is nothing left to remove.
+func removeSecretDir(dir string) error {
+	if dir == "" {
+		return nil
+	}
+	parent := filepath.Dir(dir)
+	info, err := os.Lstat(parent)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect secret root: %w", err)
+	}
+	if !info.IsDir() || !ownedByAgent(info) {
+		return fmt.Errorf("refuse to remove %s: %s is not an agent-owned directory", dir, parent)
+	}
+	return os.RemoveAll(dir)
 }
 
 func ownedByAgent(info fs.FileInfo) bool {
@@ -163,7 +190,7 @@ func materializeSecrets(dir, taskName string, delivered []api.DeliveredSecret) (
 		}
 		if err := os.Chmod(dir, 0o700); err != nil {
 			_ = os.RemoveAll(dir)
-			return nil, nil, err
+			return nil, nil, fmt.Errorf("restrict secret directory: %w", err)
 		}
 	}
 	var mounts []*runtime.Mount
@@ -201,7 +228,7 @@ func materializeSecrets(dir, taskName string, delivered []api.DeliveredSecret) (
 			if dir != "" {
 				_ = os.RemoveAll(dir)
 			}
-			return nil, nil, fmt.Errorf("unsupported secret target")
+			return nil, nil, fmt.Errorf("unsupported secret target %q", secret.Target)
 		}
 	}
 	return env, mounts, nil

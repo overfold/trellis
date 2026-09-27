@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/netip"
 	"os"
@@ -296,8 +297,10 @@ func (a *Agent) Init(ctx context.Context) {
 	a.reconciler.Subscriber = a
 	if err := a.recover(ctx); err != nil {
 		a.log.Error("recover allocations", "error", err)
+	} else {
+		// Ownership is only known once recovery has adopted every allocation.
+		a.removeOrphanedSecretDirs()
 	}
-	a.removeOrphanedSecretDirs()
 
 	go a.runHeartbeatLoop(ctx)
 	go a.reconciler.Run(ctx)
@@ -428,7 +431,7 @@ func (a *Agent) recover(ctx context.Context) error {
 		if err := a.network.Detach(context.WithoutCancel(ctx), allocation.Network); err != nil {
 			cleanupErr = fmt.Errorf("detach network for missing allocation container: %w", err)
 		} else if allocation.SecretDir != "" {
-			if err := os.RemoveAll(allocation.SecretDir); err != nil {
+			if err := removeSecretDir(allocation.SecretDir); err != nil {
 				cleanupErr = fmt.Errorf("remove secret files for missing allocation container: %w", err)
 			}
 		}
@@ -833,7 +836,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 			cleanupErrs = append(cleanupErrs, fmt.Errorf("detach allocation network: %w", err))
 		}
 		if secretDir != "" {
-			if err := os.RemoveAll(secretDir); err != nil {
+			if err := removeSecretDir(secretDir); err != nil {
 				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove secret files: %w", err))
 			}
 		}
@@ -936,6 +939,10 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	}
 	secretEnv, secretMounts, err := materializeSecrets(secretDir, taskName, delivered)
 	if err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			// Never clean up a directory this start did not create.
+			secretDir, alloc.SecretDir = "", ""
+		}
 		return err
 	}
 	for k, v := range secretEnv {
@@ -1315,7 +1322,7 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string) error {
 		}
 	}
 	if alloc.SecretDir != "" {
-		if err := os.RemoveAll(alloc.SecretDir); err != nil {
+		if err := removeSecretDir(alloc.SecretDir); err != nil {
 			errs = append(errs, fmt.Errorf("remove secret files: %w", err))
 		}
 	}
