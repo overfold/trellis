@@ -33,6 +33,10 @@ type AllocationReconciler struct {
 // AllocationReconcileSubscriber receives reconciliation state changes.
 type AllocationReconcileSubscriber interface {
 	OnReconciledStatus(allocID, status string)
+	// OnRestartState records restart accounting. When exhausted is true the
+	// allocation has failed terminally; an error means the exhaustion was
+	// not recorded and the reconciler will retry on its next pass.
+	OnRestartState(allocID string, attempts int, window time.Time, exhausted bool) error
 }
 
 type allocationReconcileState struct {
@@ -40,6 +44,8 @@ type allocationReconcileState struct {
 	stopping      bool
 	healthManaged bool
 	restarting    bool
+	exhausted     bool // the restart budget is terminally used up
+	failed        bool // exhaustion has been recorded for a stopped container
 	attempts      int
 	window        time.Time
 	maxRestarts   int
@@ -58,17 +64,27 @@ func NewAllocationReconciler(runtime runtime.ContainerRuntime, subscriber Alloca
 
 // Track begins reconciliation for an allocation.
 func (r *AllocationReconciler) Track(allocID string, healthManaged bool, policy *spec.RestartPolicySpec) {
-	r.trackRecovered(allocID, healthManaged, policy, 0, time.Time{}, false)
+	r.track(allocID, policy, &allocationReconcileState{healthManaged: healthManaged})
 }
 
-// TrackStopping observes an allocation while permanently suppressing automatic restarts.
-func (r *AllocationReconciler) TrackStopping(allocID string, healthManaged bool, policy *spec.RestartPolicySpec) {
-	r.trackRecovered(allocID, healthManaged, policy, 0, time.Time{}, true)
+// TrackStopping observes an allocation while suppressing automatic restarts
+// until ResumeRestarts. The persisted restart state is kept so a resumed
+// allocation does not receive a fresh budget.
+func (r *AllocationReconciler) TrackStopping(allocID string, healthManaged bool, policy *spec.RestartPolicySpec, attempts int, window time.Time, exhausted bool) {
+	r.track(allocID, policy, &allocationReconcileState{healthManaged: healthManaged, attempts: attempts, window: window, exhausted: exhausted, stopping: true})
 }
 
-// TrackRecovered restores reconciliation state for an allocation.
-func (r *AllocationReconciler) TrackRecovered(allocID string, healthManaged bool, policy *spec.RestartPolicySpec, attempts int, window time.Time) {
-	r.trackRecovered(allocID, healthManaged, policy, attempts, window, false)
+// TrackFailed observes an allocation whose exhausted restart budget and
+// failed observation are already recorded. It is never restarted locally.
+func (r *AllocationReconciler) TrackFailed(allocID string, healthManaged bool, policy *spec.RestartPolicySpec, attempts int, window time.Time) {
+	r.track(allocID, policy, &allocationReconcileState{healthManaged: healthManaged, attempts: attempts, window: window, exhausted: true, failed: true})
+}
+
+// TrackRecovered restores reconciliation state for an allocation. An
+// allocation whose restart budget was exhausted stays failed: it is never
+// restarted locally again for the same allocation generation.
+func (r *AllocationReconciler) TrackRecovered(allocID string, healthManaged bool, policy *spec.RestartPolicySpec, attempts int, window time.Time, exhausted bool) {
+	r.track(allocID, policy, &allocationReconcileState{healthManaged: healthManaged, attempts: attempts, window: window, exhausted: exhausted})
 }
 
 func restartPolicyLimits(policy *spec.RestartPolicySpec) (int, time.Duration) {
@@ -92,22 +108,15 @@ func advanceRestartState(attempts int, window time.Time, maxRestarts int, restar
 	return attempts + 1, window, true
 }
 
-func (r *AllocationReconciler) trackRecovered(allocID string, healthManaged bool, policy *spec.RestartPolicySpec, attempts int, window time.Time, stopping bool) {
+func (r *AllocationReconciler) track(allocID string, policy *spec.RestartPolicySpec, state *allocationReconcileState) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	maxRestarts, restartWindow := restartPolicyLimits(policy)
-	if window.IsZero() {
-		window = time.Now()
+	state.maxRestarts, state.restartWindow = restartPolicyLimits(policy)
+	if state.window.IsZero() {
+		state.window = time.Now()
 	}
-	r.states[allocID] = &allocationReconcileState{
-		stopping:      stopping,
-		healthManaged: healthManaged,
-		attempts:      attempts,
-		window:        window,
-		maxRestarts:   maxRestarts,
-		restartWindow: restartWindow,
-	}
+	r.states[allocID] = state
 }
 
 // Untrack stops reconciliation for an allocation.
@@ -138,12 +147,12 @@ func (r *AllocationReconciler) SuppressRestarts(allocID string) {
 }
 
 // ResumeRestarts restores reconciliation after a drain is cancelled.
-func (r *AllocationReconciler) ResumeRestarts(allocID string, healthManaged bool, policy *spec.RestartPolicySpec, attempts int, window time.Time) {
+func (r *AllocationReconciler) ResumeRestarts(allocID string, healthManaged bool, policy *spec.RestartPolicySpec, attempts int, window time.Time, exhausted bool) {
 	r.mu.Lock()
 	state := r.states[allocID]
 	r.mu.Unlock()
 	if state == nil {
-		r.TrackRecovered(allocID, healthManaged, policy, attempts, window)
+		r.TrackRecovered(allocID, healthManaged, policy, attempts, window, exhausted)
 		return
 	}
 	state.operation.Lock()
@@ -220,7 +229,7 @@ func (r *AllocationReconciler) Reconcile(ctx context.Context, allocID string) er
 	state.operation.Lock()
 	defer state.operation.Unlock()
 	r.mu.Lock()
-	active := r.states[allocID] == state && !state.stopping
+	active := r.states[allocID] == state && !state.stopping && !state.failed
 	r.mu.Unlock()
 	if !active {
 		return nil
@@ -251,19 +260,32 @@ func (r *AllocationReconciler) restart(ctx context.Context, allocID string) erro
 	state.restarting = true
 
 	now := time.Now()
-	attempts, window, allowed := advanceRestartState(state.attempts, state.window, state.maxRestarts, state.restartWindow, now)
+	attempts, window, allowed := state.attempts, state.window, false
+	if !state.exhausted {
+		attempts, window, allowed = advanceRestartState(state.attempts, state.window, state.maxRestarts, state.restartWindow, now)
+	}
 	if !allowed {
+		// Exhaustion is terminal for this allocation generation, including
+		// after the window elapses. The subscriber records it together with
+		// the failed observation; until that succeeds, later passes retry.
 		state.restarting = false
-		state.window = window
+		state.exhausted = true
+		state.attempts, state.window = attempts, window
 		r.mu.Unlock()
-		r.publishStatus(allocID, "unhealthy")
+		if err := r.publishRestartState(allocID, attempts, window, true); err != nil {
+			return fmt.Errorf("record exhausted restart budget for alloc %s: %w", allocID, err)
+		}
+		r.mu.Lock()
+		state.failed = true
+		r.mu.Unlock()
 		return nil
 	}
 	state.attempts, state.window = attempts, window
 	healthManaged := state.healthManaged
 	r.mu.Unlock()
-	if subscriber, ok := r.Subscriber.(interface{ OnRestartState(string, int, time.Time) }); ok {
-		subscriber.OnRestartState(allocID, attempts, window)
+	// Restart accounting is best effort; the restart itself must proceed.
+	if err := r.publishRestartState(allocID, attempts, window, false); err != nil {
+		r.log.Error("record restart attempt", "alloc", allocID, "error", err)
 	}
 
 	if err := r.runtime.Restart(ctx, allocID); err != nil {
@@ -287,6 +309,13 @@ func (r *AllocationReconciler) restart(ctx context.Context, allocID string) erro
 		r.publishStatus(allocID, "healthy")
 	}
 	return nil
+}
+
+func (r *AllocationReconciler) publishRestartState(allocID string, attempts int, window time.Time, exhausted bool) error {
+	if r.Subscriber == nil {
+		return nil
+	}
+	return r.Subscriber.OnRestartState(allocID, attempts, window, exhausted)
 }
 
 func (r *AllocationReconciler) publishStatus(allocID, status string) {

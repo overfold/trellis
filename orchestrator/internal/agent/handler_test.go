@@ -3,6 +3,8 @@ package agent
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -50,5 +52,19 @@ func TestHandleRunRequiresPositiveJobRevision(t *testing.T) {
 				t.Fatalf("body = %q, want revision validation error", recorder.Body.String())
 			}
 		})
+	}
+}
+
+func TestOperationErrorReportsRestartExhaustion(t *testing.T) {
+	var httpErr *echo.HTTPError
+	if !errors.As(operationError(fmt.Errorf("%w: allocation x", ErrRestartBudgetExhausted)), &httpErr) {
+		t.Fatal("operation error is not an HTTP error")
+	}
+	var response api.OperationResponse
+	if err := json.Unmarshal([]byte(httpErr.Message), &response); err != nil {
+		t.Fatal(err)
+	}
+	if httpErr.Code != http.StatusConflict || response.Code != api.OperationRestartExhausted {
+		t.Fatalf("operation error = %d/%q, want %d/%q", httpErr.Code, response.Code, http.StatusConflict, api.OperationRestartExhausted)
 	}
 }
