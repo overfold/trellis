@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -130,6 +131,36 @@ func TestServerClientExecSessionLifecycle(t *testing.T) {
 	for _, name := range []string{"exec", "create", "input", "output", "resize", "close"} {
 		if !called[name] {
 			t.Fatalf("%s request was not sent", name)
+		}
+	}
+}
+
+func TestServerClientExecErrorExposesStatusAndMessage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"message":"node agent unavailable: agent is shutting down"}` + "\n"))
+	}))
+	defer server.Close()
+
+	_, err := NewNamespaceServerClient("token", server.URL, "default", nil).ExecAllocation(context.Background(), "alloc-1", "", []string{"true"})
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("exec error = %v, want *HTTPError", err)
+	}
+	if httpErr.Status != http.StatusServiceUnavailable || httpErr.Message() != "node agent unavailable: agent is shutting down" {
+		t.Fatalf("status = %d, message = %q", httpErr.Status, httpErr.Message())
+	}
+}
+
+func TestHTTPErrorMessageFallsBackToBody(t *testing.T) {
+	for body, want := range map[string]string{
+		"plain failure\n":      "plain failure",
+		`{"code":"x"}`:         `{"code":"x"}`,
+		`{"message":"reason"}`: "reason",
+	} {
+		if got := (&HTTPError{Status: http.StatusBadGateway, Body: []byte(body)}).Message(); got != want {
+			t.Fatalf("Message() for %q = %q, want %q", body, got, want)
 		}
 	}
 }

@@ -62,6 +62,17 @@ Both non-interactive exec and interactive exec sessions create the command with 
 
 Interactive exec sessions use the same task-selection rule. Create a session with `POST /v1/allocations/{id}/exec/sessions` and a body such as `{"task":"web","command":["/bin/sh"],"term":"xterm-256color","cols":120,"rows":32}`. `command` is required; Trellis does not choose a shell for the client. `term` is optional and, when present, is carried into the OCI process as `TERM`; Trellis does not assume a terminal type. The response is `{"id":"..."}`. Terminal bytes are transported as base64: send `{"data_base64":"..."}` to `.../{session}/input`, poll `.../{session}/output?offset=N` for `data_base64`, `next_offset`, `exited`, and optional `exit_code`, send `{"cols":120,"rows":32}` to `.../{session}/resize`, and `DELETE` the session when finished. Sessions are node-local, ephemeral diagnostics state: they are not persisted in Raft and end when the process, the task, or explicit session closes. An exited session's output remains readable for about two minutes, and a session with no input, output reads, or resizes for 30 minutes is closed. Exec, sessions, and allocation metrics address only the current generation's running tasks.
 
+Exec, exec-session, and allocation-metrics errors return a JSON `{"message":"..."}` body with these statuses:
+
+| Status | Meaning |
+|---|---|
+| `400` | The request is invalid, or it must name one task: the allocation has several tasks, or the named task is not in its task group. |
+| `404` | The allocation is not placed in the caller's namespace, or the exec session is unknown or has already been closed. |
+| `409` | The allocation exists but its node has no running target for the request, such as a task that has not started or has exited. It also covers conflicting execution records for the task on the node. Retry after the allocation is running again. |
+| `413` | Terminal input chunk exceeds 64 KiB. |
+| `502` | The node agent failed while it was handling the request. Details are logged by the control plane, not returned. |
+| `503` | The node agent is unreachable or shutting down. Retry later or target a replacement allocation. |
+
 
 Secret write body: `{"value_base64":"...","expected_version":1}`; omit `expected_version` for unconditional update. Lists are JSON arrays. Non-2xx responses are errors; clients must tolerate reconciliation-driven changes between reads.
 

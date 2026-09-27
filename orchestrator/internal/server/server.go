@@ -237,7 +237,7 @@ func (s *Server) AllocationLogsForNamespace(ctx context.Context, namespace, id s
 	}
 	if found == nil || found.Node == nil {
 		s.mu.RUnlock()
-		return nil, fmt.Errorf("allocation not found")
+		return nil, ErrAllocationNotFound
 	}
 	nodeID := found.Node.ID
 	address := fmt.Sprintf("%s:%d", found.Node.Host, found.Node.Port)
@@ -1330,18 +1330,22 @@ func (s *Server) ListJobRevisions(ctx context.Context, namespace, name string) (
 	return result, nil
 }
 
+// ErrAllocationNotFound indicates that the control plane has no placed
+// allocation with the requested ID in the caller's namespace.
+var ErrAllocationNotFound = errors.New("allocation not found")
+
 func (s *Server) allocationAgentAddress(namespace, id string) (uuid.UUID, string, []spec.TaskSpec, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, alloc := range s.allocations {
 		if alloc.ID == id && alloc.Namespace == namespace {
 			if alloc.Node == nil {
-				return uuid.Nil, "", nil, fmt.Errorf("allocation not found")
+				return uuid.Nil, "", nil, ErrAllocationNotFound
 			}
 			return alloc.Node.ID, fmt.Sprintf("%s:%d", alloc.Node.Host, alloc.Node.Port), append([]spec.TaskSpec(nil), alloc.Tasks...), nil
 		}
 	}
-	return uuid.Nil, "", nil, fmt.Errorf("allocation not found")
+	return uuid.Nil, "", nil, ErrAllocationNotFound
 }
 
 func resolveExecTask(id, task string, tasks []spec.TaskSpec) (string, error) {
@@ -1440,7 +1444,7 @@ func (s *Server) AllocationMetrics(ctx context.Context, namespace, id string) (a
 	}
 	if found == nil || found.Node == nil {
 		s.mu.RUnlock()
-		return nil, fmt.Errorf("allocation not found")
+		return nil, ErrAllocationNotFound
 	}
 	nodeID := found.Node.ID
 	address := fmt.Sprintf("%s:%d", found.Node.Host, found.Node.Port)
