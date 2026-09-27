@@ -725,6 +725,23 @@ func (a *Agent) ResumeGroup(request *api.DrainAllocationRequest) error {
 	return nil
 }
 
+// generationDrainStateLocked returns the newest drain state recorded for any
+// task of one allocation generation. Equal sequences prefer draining so an
+// ambiguous record never enables restarts. The caller must hold a.mu.
+func (a *Agent) generationDrainStateLocked(allocationID string, generation uint64) (bool, uint64) {
+	var draining bool
+	var sequence uint64
+	for _, allocation := range a.allocations {
+		if allocation.AllocationID != allocationID || allocation.Generation != generation {
+			continue
+		}
+		if allocation.DrainSequence > sequence || (allocation.DrainSequence == sequence && allocation.Draining) {
+			draining, sequence = allocation.Draining, allocation.DrainSequence
+		}
+	}
+	return draining, sequence
+}
+
 // RunAllocation creates and starts one allocation task.
 func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, generation uint64, jobRevision int, executionHash, namespace, jobName, groupName, taskName string, taskSpec *spec.TaskSpec, groupRuntime string, networkPlan *network.Plan, envOverrides map[string]string, delivered []api.DeliveredSecret, restartPolicy *spec.RestartPolicySpec) (runErr error) {
 	ts := taskSpec
@@ -735,15 +752,14 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		return fmt.Errorf("allocation ID is required")
 	}
 	a.mu.Lock()
+	// Drain is group-scoped: a start retry, or a task whose record did not
+	// exist when the drain arrived, inherits the newest drain state of its
+	// allocation generation instead of resetting it.
+	draining, drainSequence := a.generationDrainStateLocked(schedulerID, generation)
 	existing := a.allocations[allocID]
-	var draining bool
-	var drainSequence uint64
 	if existing != nil {
 		matching := existing.AllocationID == schedulerID && existing.Generation == generation && existing.JobRevision == jobRevision && existing.ExecutionHash == executionHash
 		status := existing.Status
-		// A retried start belongs to the same allocation generation, so it must
-		// not forget a drain or accept an older drain/resume sequence.
-		draining, drainSequence = existing.Draining, existing.DrainSequence
 		a.mu.Unlock()
 		if !matching {
 			return fmt.Errorf("%w: %s", ErrAllocationExists, allocID)

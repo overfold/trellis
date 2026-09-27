@@ -1438,6 +1438,60 @@ func TestStaleResumeAfterStartRetryKeepsDrain(t *testing.T) {
 	}
 }
 
+type pullFailOnceRuntime struct {
+	*reconcilerRuntime
+	failImage string
+}
+
+func (r *pullFailOnceRuntime) Pull(_ context.Context, image string) error {
+	if image == r.failImage {
+		r.failImage = ""
+		return errors.New("pull failed")
+	}
+	return nil
+}
+
+func TestTaskStartedAfterDrainInheritsGenerationDrain(t *testing.T) {
+	rt := &pullFailOnceRuntime{reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning}, failImage: "second-image"}
+	agent := newOperationTestAgent(t, rt)
+	request := operationTestRequest()
+	request.Tasks[1].Image = "second-image"
+	if err := agent.RunGroup(context.Background(), request); err == nil {
+		t.Fatal("first start succeeded despite failed pull")
+	}
+	secondID := "allocation-g2-second"
+	if agent.allocations[secondID] != nil {
+		t.Fatal("failed task record was retained after successful cleanup")
+	}
+	// The drain reaches only the task that exists on the node.
+	drain := &api.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Sequence: 4}
+	if err := agent.DrainGroup(drain); err != nil {
+		t.Fatalf("drain partially started allocation: %v", err)
+	}
+
+	if err := agent.RunGroup(context.Background(), request); err != nil {
+		t.Fatalf("control-plane start retry: %v", err)
+	}
+	stale := &api.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Sequence: 2}
+	if err := agent.ResumeGroup(stale); err != nil {
+		t.Fatalf("stale resume: %v", err)
+	}
+	got := agent.allocations[secondID]
+	if got == nil || got.Status != "running" || !got.Draining || got.DrainSequence != 4 {
+		t.Fatalf("task started after drain = %+v, want running draining sequence 4", got)
+	}
+	if state := agent.reconciler.states[secondID]; state == nil || !state.stopping {
+		t.Fatal("task started after drain is not restart-suppressed")
+	}
+	rt.status = runtime.StatusStopped
+	if err := agent.reconciler.Reconcile(context.Background(), secondID); err != nil {
+		t.Fatalf("reconcile stopped draining task: %v", err)
+	}
+	if rt.restartCount != 0 {
+		t.Fatalf("task started after drain restarted %d times", rt.restartCount)
+	}
+}
+
 func TestRecoverNonRunningAllocationDefersRestartToServer(t *testing.T) {
 	for _, durableStatus := range []string{"running", "starting"} {
 		t.Run(durableStatus, func(t *testing.T) {
