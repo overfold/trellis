@@ -145,9 +145,6 @@ func (h *Handler) handleRun(c *echo.Context) error {
 	if request.ExecutionHash == "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "execution_hash is required")
 	}
-	if request.Draining && request.DrainSequence == 0 {
-		return echo.NewHTTPError(http.StatusBadRequest, "drain_sequence must be greater than zero when draining")
-	}
 	defer func() {
 		for i := range request.Secrets {
 			clear(request.Secrets[i].Value)

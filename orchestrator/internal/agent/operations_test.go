@@ -1520,6 +1520,21 @@ func TestDrainingStartSuppressesAlreadyRunningTask(t *testing.T) {
 	if rt.restartCount != 0 {
 		t.Fatalf("running task restarted %d times after draining start", rt.restartCount)
 	}
+
+	// A later start carries the control plane's newer resume.
+	request.Draining, request.DrainSequence = false, 5
+	if err := agent.RunGroup(context.Background(), request); err != nil {
+		t.Fatalf("resumed start retry: %v", err)
+	}
+	if got := agent.allocations[firstID]; got.Draining || got.DrainSequence != 5 {
+		t.Fatalf("running task = %+v, want resumed sequence 5", got)
+	}
+	if err := agent.reconciler.Reconcile(context.Background(), firstID); err != nil {
+		t.Fatalf("reconcile stopped resumed task: %v", err)
+	}
+	if rt.restartCount != 1 {
+		t.Fatalf("restart count after resumed start = %d, want 1", rt.restartCount)
+	}
 }
 
 func TestRecoverNonRunningAllocationDefersRestartToServer(t *testing.T) {
