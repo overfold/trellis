@@ -25,6 +25,7 @@ type VolumeManager struct {
 	mu            sync.RWMutex
 	registrations map[string]string
 	stage         func(sourceFD int, target string) error
+	unstage       func(target string) error
 	stagingErr    error
 }
 
@@ -36,6 +37,7 @@ func NewVolumeManager(dataRoot ...string) *VolumeManager {
 	}
 	vm := &VolumeManager{dataRootPath: root, registrations: make(map[string]string)}
 	vm.stage = stageDirectory
+	vm.unstage = func(target string) error { return unix.Unmount(target, unix.MNT_DETACH) }
 	vm.stagingErr = vm.cleanupStaging()
 	_ = vm.loadRegistrations()
 	return vm
@@ -219,7 +221,7 @@ func (vm *VolumeManager) ReleaseStaging(allocationID string, volumes []spec.Volu
 			continue
 		}
 		target := vm.stagingPath(allocationID, volume.Name)
-		if err := unix.Unmount(target, unix.MNT_DETACH); err != nil && err != unix.EINVAL && err != unix.ENOENT {
+		if err := vm.unstage(target); err != nil && err != unix.EINVAL && err != unix.ENOENT {
 			errs = append(errs, fmt.Errorf("unstaging volume %s: %w", volume.Name, err))
 		}
 		if err := os.Remove(target); err != nil && !os.IsNotExist(err) {

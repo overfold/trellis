@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"github.com/clofour/trellis/internal/runtime"
 	"github.com/clofour/trellis/internal/spec"
 	"github.com/clofour/trellis/internal/storage"
+	"github.com/containerd/errdefs"
 	"github.com/google/uuid"
 )
 
@@ -33,6 +35,40 @@ type failingStopRuntime struct {
 	stopErr     error
 	stopCount   int
 	removeCount int
+}
+
+type failingRemoveRuntime struct {
+	*ambiguousStartRuntime
+	removeErr error
+}
+
+func (r *failingRemoveRuntime) Remove(context.Context, string) error { return r.removeErr }
+
+type removedStartRuntime struct {
+	*ambiguousStartRuntime
+	removeCount int
+}
+
+func (r *removedStartRuntime) Remove(context.Context, string) error {
+	r.removeCount++
+	return nil
+}
+
+func (r *removedStartRuntime) ListManaged(context.Context, string) ([]runtime.ContainerInfo, error) {
+	return nil, nil
+}
+
+type failingDetachNetworkManager struct {
+	countingNetworkManager
+	detachErr error
+}
+
+func (m *failingDetachNetworkManager) Attach(ctx context.Context, request network.AttachRequest) (*network.Attachment, error) {
+	return staticNetworkManager{}.Attach(ctx, request)
+}
+
+func (m *failingDetachNetworkManager) Detach(ctx context.Context, attachment *network.Attachment) error {
+	return errors.Join(m.countingNetworkManager.Detach(ctx, attachment), m.detachErr)
 }
 
 type stoppedWithErrorRuntime struct {
@@ -164,6 +200,55 @@ type ambiguousStartRuntime struct {
 	stopCount int
 	stopErr   error
 	onStop    func()
+}
+
+type ambiguousCreateRuntime struct {
+	*reconcilerRuntime
+	createErr        error
+	removeErr        error
+	removeCount      int
+	startCount       int
+	inspectAvailable bool
+	createMissing    bool
+	inspectMissing   bool
+	labels           map[string]string
+}
+
+func (r *ambiguousCreateRuntime) ListManaged(context.Context, string) ([]runtime.ContainerInfo, error) {
+	return nil, nil
+}
+
+func (r *ambiguousCreateRuntime) Create(_ context.Context, options runtime.CreateOptions) (string, error) {
+	if r.createMissing && r.createErr != nil {
+		return options.ID, r.createErr
+	}
+	r.status = runtime.StatusCreated
+	r.labels = options.Labels
+	return options.ID, r.createErr
+}
+
+func (r *ambiguousCreateRuntime) Inspect(_ context.Context, id string) (*runtime.ContainerInfo, error) {
+	if !r.inspectAvailable {
+		return nil, errors.New("inspect unavailable")
+	}
+	if r.inspectMissing {
+		return nil, fmt.Errorf("inspect %s: %w", id, errdefs.ErrNotFound)
+	}
+	return &runtime.ContainerInfo{ID: id, Labels: r.labels, Status: r.status}, nil
+}
+
+func (r *ambiguousCreateRuntime) Start(context.Context, string) error {
+	r.startCount++
+	return nil
+}
+
+func (r *ambiguousCreateRuntime) Remove(context.Context, string) error {
+	r.removeCount++
+	if r.removeErr != nil {
+		return r.removeErr
+	}
+	r.status = ""
+	return nil
 }
 
 func (r *ambiguousStartRuntime) Start(context.Context, string) error {
@@ -601,6 +686,188 @@ func TestFailedRunStopPreservesStartedAllocationResources(t *testing.T) {
 	}
 }
 
+func TestAmbiguousCreateRetainsRecordUntilOwnershipVerified(t *testing.T) {
+	createErr := errors.New("create response lost")
+	rt := &ambiguousCreateRuntime{
+		reconcilerRuntime: &reconcilerRuntime{},
+		createErr:         createErr,
+	}
+	agent := newOperationTestAgent(t, rt)
+	manager := &failingDetachNetworkManager{}
+	agent.SetNetworkManager(manager)
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	agent.ConfigureDurability(local, "test")
+	request := operationTestRequest()
+	request.Tasks = request.Tasks[:1]
+	request.Tasks[0].Networking = &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard}
+	request.NetworkPlan = &network.Plan{}
+	id := "allocation-g2-first"
+
+	err := agent.RunGroup(context.Background(), request)
+	if !errors.Is(err, createErr) {
+		t.Fatalf("run error = %v, want create error", err)
+	}
+	if rt.removeCount != 0 || rt.startCount != 0 {
+		t.Fatalf("remove attempts = %d, start attempts = %d, want 0 and 0", rt.removeCount, rt.startCount)
+	}
+	if manager.detachCount != 0 {
+		t.Fatal("network cleanup attempted before verifying container ownership")
+	}
+	if allocation := agent.allocations[id]; allocation == nil || allocation.Status != "stopping" {
+		t.Fatalf("retained allocation = %+v, want stopping", allocation)
+	}
+	var recorded Allocation
+	if err := local.Get(allocationRecordKey(id), &recorded); err != nil || recorded.Status != "stopping" || !recorded.ContainerOwnershipUnverified {
+		t.Fatalf("recorded allocation = %+v, error = %v, want stopping", recorded, err)
+	}
+	// Cluster-filtered listing can omit a colliding container. Recovery must
+	// inspect its ID rather than treating it as absent and forgetting the record.
+	recovered := newOperationTestAgent(t, rt)
+	recovered.SetNetworkManager(manager)
+	recovered.ConfigureDurability(local, "test")
+	if err := recovered.recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if recovered.allocations[id] == nil || manager.detachCount != 0 {
+		t.Fatal("recovery discarded unverified ownership or released resources")
+	}
+	if err := local.Get(allocationRecordKey(id), &recorded); err != nil {
+		t.Fatalf("recovery removed unverified record: %v", err)
+	}
+	agent = recovered
+
+	if err := agent.StopAllocation(context.Background(), id); err == nil || rt.removeCount != 0 {
+		t.Fatalf("cleanup without inspection: error = %v, removals = %d", err, rt.removeCount)
+	}
+	rt.inspectAvailable = true
+	rt.labels["trellis.execution-hash"] = "other-execution"
+	if err := agent.StopAllocation(context.Background(), id); !errors.Is(err, ErrExecutionConflict) || rt.removeCount != 0 {
+		t.Fatalf("cleanup of foreign container: error = %v, removals = %d", err, rt.removeCount)
+	}
+	rt.labels["trellis.execution-hash"] = request.ExecutionHash
+	if err := agent.StopAllocation(context.Background(), id); err != nil {
+		t.Fatalf("retry cleanup: %v", err)
+	}
+	if rt.removeCount != 1 || agent.allocations[id] != nil {
+		t.Fatalf("remove attempts = %d, allocation = %+v, want 1 and nil", rt.removeCount, agent.allocations[id])
+	}
+	if err := local.Get(allocationRecordKey(id), &recorded); err == nil {
+		t.Fatal("allocation record retained after successful removal")
+	}
+}
+
+func TestFailedCreateMissingContainerCanBeCleanedUpOnRetry(t *testing.T) {
+	for _, retry := range []string{"RunGroup", "StopGroup", "Recovery"} {
+		t.Run(retry, func(t *testing.T) {
+			createErr := errors.New("create failed before container creation")
+			rt := &ambiguousCreateRuntime{
+				reconcilerRuntime: &reconcilerRuntime{},
+				createErr:         createErr,
+				createMissing:     true,
+			}
+			agent := newOperationTestAgent(t, rt)
+			local := storage.NewLocalStorage(t.TempDir())
+			if err := local.Init(); err != nil {
+				t.Fatal(err)
+			}
+			agent.ConfigureDurability(local, "test")
+			request := operationTestRequest()
+			request.Tasks = request.Tasks[:1]
+			id := "allocation-g2-first"
+
+			if err := agent.RunGroup(context.Background(), request); !errors.Is(err, createErr) {
+				t.Fatalf("initial run error = %v, want create error", err)
+			}
+			var recorded Allocation
+			if err := local.Get(allocationRecordKey(id), &recorded); err != nil || !recorded.ContainerOwnershipUnverified {
+				t.Fatalf("retained record = %+v, error = %v, want unverified ownership", recorded, err)
+			}
+
+			rt.inspectAvailable = true
+			rt.inspectMissing = true
+			switch retry {
+			case "RunGroup":
+				rt.createErr = nil
+				if err := agent.RunGroup(context.Background(), request); err != nil {
+					t.Fatalf("retry run: %v", err)
+				}
+				if current := agent.allocations[id]; current == nil || current.Status != "running" || current.ContainerOwnershipUnverified {
+					t.Fatalf("allocation after retry = %+v, want verified running allocation", current)
+				}
+			case "StopGroup", "Recovery":
+				if retry == "Recovery" {
+					agent = newOperationTestAgent(t, rt)
+					agent.ConfigureDurability(local, "test")
+					if err := agent.recover(context.Background()); err != nil {
+						t.Fatalf("retry recovery: %v", err)
+					}
+				} else if err := agent.StopGroup(context.Background(), &api.StopAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation}); err != nil {
+					t.Fatalf("retry stop: %v", err)
+				}
+				if agent.allocations[id] != nil {
+					t.Fatal("allocation retained after stop")
+				}
+				if err := local.Get(allocationRecordKey(id), &recorded); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("record after stop: %v, want not found", err)
+				}
+			}
+			if rt.removeCount != 0 {
+				t.Fatalf("remove attempts = %d, want none for missing container", rt.removeCount)
+			}
+		})
+	}
+}
+
+func TestStagingReleaseFailureKeepsRunningAllocationUntilStop(t *testing.T) {
+	rt := &failingStopRuntime{reconcilerRuntime: &reconcilerRuntime{}}
+	agent := newOperationTestAgent(t, rt)
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	agent.ConfigureDurability(local, "test")
+	request := operationTestRequest()
+	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image", Volumes: []spec.VolumeSpec{{Name: "data", HostPath: "@/data", ContainerPath: "/data"}}}}
+	id := "allocation-g2-first"
+	stagingPath := agent.volumes.stagingPath(id, "data")
+	agent.volumes.stage = func(_ int, target string) error {
+		return os.WriteFile(filepath.Join(target, "block"), []byte("block"), 0o600)
+	}
+	agent.volumes.unstage = func(string) error { return nil }
+
+	if err := agent.RunGroup(context.Background(), request); err != nil {
+		t.Fatalf("run allocation: %v", err)
+	}
+	var recorded Allocation
+	if err := local.Get(allocationRecordKey(id), &recorded); err != nil || recorded.Status != "running" {
+		t.Fatalf("recorded allocation = %+v, error = %v, want running", recorded, err)
+	}
+	if current := agent.allocations[id]; current == nil || current.Status != "running" {
+		t.Fatalf("live allocation = %+v, want running", current)
+	}
+	if rt.stopCount != 0 || rt.removeCount != 0 {
+		t.Fatalf("cleanup after start: stops = %d, removes = %d, want none", rt.stopCount, rt.removeCount)
+	}
+	if err := agent.RunGroup(context.Background(), request); err != nil {
+		t.Fatalf("retry running allocation: %v", err)
+	}
+	if rt.stopCount != 0 || rt.removeCount != 0 {
+		t.Fatalf("cleanup after retry: stops = %d, removes = %d, want none", rt.stopCount, rt.removeCount)
+	}
+	if err := os.Remove(filepath.Join(stagingPath, "block")); err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.StopAllocation(context.Background(), id); err != nil {
+		t.Fatalf("retry staging cleanup: %v", err)
+	}
+	if err := local.Get(allocationRecordKey(id), &recorded); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("record after retry: %v, want not found", err)
+	}
+}
+
 func TestAmbiguousStartStopsBeforeReleasingResources(t *testing.T) {
 	rt := &ambiguousStartRuntime{reconcilerRuntime: &reconcilerRuntime{}}
 	agent := newOperationTestAgent(t, rt)
@@ -664,6 +931,175 @@ func TestAmbiguousStartFailedStopRemainsTracked(t *testing.T) {
 	}
 	if _, ok := agent.reconciler.states[id]; ok {
 		t.Fatal("allocation remained tracked after successful retry stop")
+	}
+}
+
+func TestFailedStartCleanupRetainsAllocationForRetry(t *testing.T) {
+	removeErr := errors.New("remove failed")
+	detachErr := errors.New("detach failed")
+	rt := &failingRemoveRuntime{ambiguousStartRuntime: &ambiguousStartRuntime{reconcilerRuntime: &reconcilerRuntime{}}, removeErr: removeErr}
+	agent := newOperationTestAgent(t, rt)
+	manager := &failingDetachNetworkManager{detachErr: detachErr}
+	agent.SetNetworkManager(manager)
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	agent.ConfigureDurability(local, "test")
+	request := operationTestRequest()
+	request.Tasks = request.Tasks[:1]
+	request.Tasks[0].Networking = &spec.TaskNetworkingSpec{Ports: []spec.PortSpec{{}}}
+	id := "allocation-g2-first"
+
+	err := agent.RunGroup(context.Background(), request)
+	if !errors.Is(err, removeErr) || !errors.Is(err, detachErr) {
+		t.Fatalf("run error = %v, want removal and detach errors", err)
+	}
+	if allocation := agent.allocations[id]; allocation == nil || allocation.Status != "stopping" {
+		t.Fatalf("retained allocation = %+v, want stopping", allocation)
+	}
+	var recorded Allocation
+	if err := local.Get(allocationRecordKey(id), &recorded); err != nil || recorded.Status != "stopping" {
+		t.Fatalf("recorded allocation = %+v, error = %v, want stopping", recorded, err)
+	}
+	port := recorded.Ports[0].HostPort
+	if _, err := agent.ports.Claim(spec.PortSpec{Port: port}); err == nil {
+		t.Fatal("failed start released its port before cleanup completed")
+	}
+	if err := agent.StopAllocation(context.Background(), id); !errors.Is(err, detachErr) {
+		t.Fatalf("failed stop retry = %v, want detach error", err)
+	}
+	if _, err := agent.ports.Claim(spec.PortSpec{Port: port}); err == nil {
+		t.Fatal("failed stop retry released its port before cleanup completed")
+	}
+
+	rt.removeErr = nil
+	manager.detachErr = nil
+	if err := agent.StopAllocation(context.Background(), id); err != nil {
+		t.Fatalf("retry cleanup: %v", err)
+	}
+	if agent.allocations[id] != nil {
+		t.Fatal("allocation retained after successful cleanup")
+	}
+	if err := local.Get(allocationRecordKey(id), &recorded); err == nil {
+		t.Fatal("allocation record retained after successful cleanup")
+	}
+	if _, err := agent.ports.Claim(spec.PortSpec{Port: port}); err != nil {
+		t.Fatalf("port unavailable after successful cleanup: %v", err)
+	}
+}
+
+func TestRecoverRetainsFailedStartRecordUntilNetworkDetachSucceeds(t *testing.T) {
+	detachErr := errors.New("detach failed")
+	rt := &removedStartRuntime{ambiguousStartRuntime: &ambiguousStartRuntime{reconcilerRuntime: &reconcilerRuntime{}}}
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	manager := &failingDetachNetworkManager{detachErr: detachErr}
+	first := newOperationTestAgent(t, rt)
+	first.SetNetworkManager(manager)
+	first.ConfigureDurability(local, "test")
+	request := operationTestRequest()
+	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard, Ports: []spec.PortSpec{{}}}}}
+	request.NetworkPlan = &network.Plan{}
+	id := "allocation-g2-first"
+
+	if err := first.RunGroup(context.Background(), request); !errors.Is(err, detachErr) {
+		t.Fatalf("failed start error = %v, want detach failure", err)
+	}
+	if rt.removeCount != 1 {
+		t.Fatalf("container removals = %d, want 1", rt.removeCount)
+	}
+	var recorded Allocation
+	if err := local.Get(allocationRecordKey(id), &recorded); err != nil || recorded.Network == nil {
+		t.Fatalf("failed start record = %+v, error = %v, want network attachment", recorded, err)
+	}
+
+	second := newOperationTestAgent(t, rt)
+	second.SetNetworkManager(manager)
+	second.ConfigureDurability(local, "test")
+	if err := second.recover(context.Background()); err != nil {
+		t.Fatalf("recover with failed detach: %v", err)
+	}
+	if err := local.Get(allocationRecordKey(id), &recorded); err != nil {
+		t.Fatalf("record removed after failed recovery detach: %v", err)
+	}
+	if recovered := second.allocations[id]; recovered == nil || recovered.Status != "stopping" {
+		t.Fatalf("failed cleanup is not reachable after recovery: %+v", recovered)
+	}
+	port := recorded.Ports[0].HostPort
+	if _, err := second.ports.Claim(spec.PortSpec{Port: port}); err == nil {
+		t.Fatal("recovery released the port of an allocation awaiting cleanup")
+	}
+	if err := second.RunGroup(context.Background(), request); !errors.Is(err, detachErr) {
+		t.Fatalf("retry start error = %v, want cleanup failure", err)
+	}
+	if err := local.Get(allocationRecordKey(id), &recorded); err != nil || recorded.Network == nil {
+		t.Fatalf("retry start overwrote cleanup record: %+v, error = %v", recorded, err)
+	}
+
+	manager.detachErr = nil
+	if err := second.StopGroup(context.Background(), &api.StopAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation}); err != nil {
+		t.Fatalf("retry stop after recovery: %v", err)
+	}
+	if err := local.Get(allocationRecordKey(id), &recorded); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("record after successful retry stop: %v, want not found", err)
+	}
+	if manager.detachCount != 4 {
+		t.Fatalf("network detaches = %d, want initial cleanup, recovery, retry start, and retry stop", manager.detachCount)
+	}
+}
+
+func TestRecoverMissingContainerRemovesSecretDirectoryBeforeRecord(t *testing.T) {
+	rt := &removedStartRuntime{ambiguousStartRuntime: &ambiguousStartRuntime{reconcilerRuntime: &reconcilerRuntime{}}}
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	secretDir := filepath.Join(t.TempDir(), "blocked", "secrets")
+	if err := os.WriteFile(filepath.Dir(secretDir), []byte("blocked"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	id := "allocation-g2-first"
+	allocation := &Allocation{ID: id, ContainerID: id, AllocationID: "allocation", Generation: 2, Status: "stopping", SecretDir: secretDir}
+	first := newOperationTestAgent(t, rt)
+	first.ConfigureDurability(local, "test")
+	if err := first.persistAllocation(allocation); err != nil {
+		t.Fatal(err)
+	}
+
+	second := newOperationTestAgent(t, rt)
+	second.ConfigureDurability(local, "test")
+	if err := second.recover(context.Background()); err != nil {
+		t.Fatalf("recover with failed secret removal: %v", err)
+	}
+	var recorded Allocation
+	if err := local.Get(allocationRecordKey(id), &recorded); err != nil || recorded.SecretDir != secretDir {
+		t.Fatalf("record after failed secret removal = %+v, error = %v", recorded, err)
+	}
+	if second.allocations[id] == nil {
+		t.Fatal("failed secret cleanup is not reachable after recovery")
+	}
+	if err := os.Remove(filepath.Dir(secretDir)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(secretDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(secretDir, "key"), []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	third := newOperationTestAgent(t, rt)
+	third.ConfigureDurability(local, "test")
+	if err := third.recover(context.Background()); err != nil {
+		t.Fatalf("recover after secret removal became possible: %v", err)
+	}
+	if _, err := os.Stat(secretDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("secret directory after recovery retry: %v", err)
+	}
+	if err := local.Get(allocationRecordKey(id), &recorded); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("record after recovery retry: %v", err)
 	}
 }
 
@@ -773,7 +1209,7 @@ func TestRecoverNonRunningAllocationDefersRestartToServer(t *testing.T) {
 			stale := &Allocation{
 				ID: "task", AllocationID: "allocation", ContainerID: "task",
 				Generation: 1, JobRevision: 1, ExecutionHash: "hash",
-				Spec: &spec.TaskSpec{Name: "task", Image: "image"},
+				Spec:   &spec.TaskSpec{Name: "task", Image: "image"},
 				Status: durableStatus, Health: "healthy",
 			}
 			first := newOperationTestAgent(t, rt)
@@ -829,7 +1265,7 @@ func TestRecoverRunningAllocationResetsHealthUntilProbe(t *testing.T) {
 	first.ConfigureDurability(local, "test")
 	if err := first.persistAllocation(&Allocation{
 		ID: "task", AllocationID: "allocation", ContainerID: "task",
-		Spec: &spec.TaskSpec{Name: "task", HealthCheck: check},
+		Spec:   &spec.TaskSpec{Name: "task", HealthCheck: check},
 		Status: "running", Health: "healthy",
 	}); err != nil {
 		t.Fatal(err)
@@ -986,8 +1422,8 @@ func TestResumeGroupRecoveredAllocationWithoutSpec(t *testing.T) {
 		labels: map[string]string{
 			"trellis.allocation-id":         "allocation",
 			"trellis.allocation-generation": "1",
-			"trellis.job-revision":         "1",
-			"trellis.execution-hash":       "hash",
+			"trellis.job-revision":          "1",
+			"trellis.execution-hash":        "hash",
 		},
 	}
 	local := storage.NewLocalStorage(t.TempDir())
@@ -1032,7 +1468,7 @@ func TestRecoverStoppingAllocationDoesNotStartOrRestart(t *testing.T) {
 	first.allocations["task"] = &Allocation{
 		ID: "task", AllocationID: "allocation", ContainerID: "task",
 		Generation: 1, JobRevision: 1, ExecutionHash: "hash",
-		Spec: &spec.TaskSpec{Name: "task", Image: "image"},
+		Spec:   &spec.TaskSpec{Name: "task", Image: "image"},
 		Status: "running", Health: "healthy",
 	}
 	first.reconciler.Track("task", false, nil)
