@@ -1474,6 +1474,54 @@ func TestStartHonorsControlPlaneDrainWithoutLocalRecord(t *testing.T) {
 	}
 }
 
+func TestDelayedStartDoesNotRollBackNewerDrain(t *testing.T) {
+	rt := &createdRecoveryRuntime{
+		reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusCreated},
+		managedID:         "allocation-g2-first",
+	}
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	request := operationTestRequest()
+	request.Tasks = request.Tasks[:1]
+	agent := recoverCreatedAllocationForRetry(t, rt, local, request, 5)
+
+	// The start was built before the drain but reaches the agent after it.
+	if err := agent.RunGroup(context.Background(), request); err != nil {
+		t.Fatalf("delayed start retry: %v", err)
+	}
+	assertDrainingAfterStartRetry(t, agent, rt, local, 5)
+}
+
+func TestDrainingStartSuppressesAlreadyRunningTask(t *testing.T) {
+	rt := &reconcilerRuntime{status: runtime.StatusRunning}
+	agent := newOperationTestAgent(t, rt)
+	request := operationTestRequest()
+	if err := agent.RunGroup(context.Background(), request); err != nil {
+		t.Fatalf("start allocation: %v", err)
+	}
+	firstID := "allocation-g2-first"
+	if state := agent.reconciler.states[firstID]; state == nil || state.stopping {
+		t.Fatal("undrained task is not tracked with restarts enabled")
+	}
+
+	request.Draining, request.DrainSequence = true, 4
+	if err := agent.RunGroup(context.Background(), request); err != nil {
+		t.Fatalf("draining start retry: %v", err)
+	}
+	if got := agent.allocations[firstID]; !got.Draining || got.DrainSequence != 4 {
+		t.Fatalf("running task = %+v, want draining sequence 4", got)
+	}
+	rt.status = runtime.StatusStopped
+	if err := agent.reconciler.Reconcile(context.Background(), firstID); err != nil {
+		t.Fatalf("reconcile stopped draining task: %v", err)
+	}
+	if rt.restartCount != 0 {
+		t.Fatalf("running task restarted %d times after draining start", rt.restartCount)
+	}
+}
+
 func TestRecoverNonRunningAllocationDefersRestartToServer(t *testing.T) {
 	for _, durableStatus := range []string{"running", "starting"} {
 		t.Run(durableStatus, func(t *testing.T) {

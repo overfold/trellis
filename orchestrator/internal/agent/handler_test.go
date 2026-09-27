@@ -52,3 +52,27 @@ func TestHandleRunRequiresPositiveJobRevision(t *testing.T) {
 		})
 	}
 }
+
+func TestHandleRunRequiresDrainSequenceWhenDraining(t *testing.T) {
+	e := echo.New()
+	NewHandler(&Agent{allocations: map[string]*Allocation{}}).Register(e)
+	body, err := json.Marshal(api.AllocationRequest{
+		AllocationID: "allocation", Generation: 1, JobRevision: 1, ExecutionHash: "hash",
+		Tasks: []spec.TaskSpec{{Name: "task", Image: "image"}}, Draining: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/allocations", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+
+	e.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "drain_sequence must be greater than zero") {
+		t.Fatalf("body = %q, want drain sequence validation error", recorder.Body.String())
+	}
+}

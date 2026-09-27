@@ -544,14 +544,37 @@ func (a *Agent) RunGroup(ctx context.Context, request *api.AllocationRequest) er
 	if err := a.prepareStart(ctx, request); err != nil {
 		return err
 	}
+	draining, drainSequence := a.startDrainState(request)
+	if draining {
+		// Tasks that are already running keep their records, so apply the
+		// drain to them before any task of the generation can restart.
+		if err := a.applyDrain(request.AllocationID, request.Generation, drainSequence); err != nil {
+			return err
+		}
+	}
 	for i := range request.Tasks {
 		task := &request.Tasks[i]
 		id := fmt.Sprintf("%s-g%d-%s", request.AllocationID, request.Generation, task.Name)
-		if err := a.RunAllocation(ctx, id, request.AllocationID, request.Generation, request.JobRevision, request.ExecutionHash, request.Namespace, request.JobName, request.GroupName, task.Name, task, request.Runtime, request.NetworkPlan, request.EnvOverrides, request.Secrets, request.Restart, request.Draining, request.DrainSequence); err != nil {
+		if err := a.RunAllocation(ctx, id, request.AllocationID, request.Generation, request.JobRevision, request.ExecutionHash, request.Namespace, request.JobName, request.GroupName, task.Name, task, request.Runtime, request.NetworkPlan, request.EnvOverrides, request.Secrets, request.Restart, draining, drainSequence); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// startDrainState combines the drain state carried by a start request with the
+// newest drain or resume the agent already applied to that generation. The
+// higher sequence wins, so a delayed start cannot roll back a later drain.
+func (a *Agent) startDrainState(request *api.AllocationRequest) (bool, uint64) {
+	draining, sequence := request.Draining, request.DrainSequence
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	for _, allocation := range a.allocations {
+		if allocation.AllocationID == request.AllocationID && allocation.Generation == request.Generation && allocation.DrainSequence > sequence {
+			draining, sequence = allocation.Draining, allocation.DrainSequence
+		}
+	}
+	return draining, sequence
 }
 
 // UpdateNetworkPlan refreshes the network shared by running allocations.
@@ -641,26 +664,32 @@ func (a *Agent) DrainGroup(request *api.DrainAllocationRequest) error {
 	if err := a.AcceptEpoch(request.Epoch); err != nil {
 		return err
 	}
+	return a.applyDrain(request.AllocationID, request.Generation, request.Sequence)
+}
+
+// applyDrain marks one allocation generation draining at sequence. The caller
+// must hold the allocation operation lock.
+func (a *Agent) applyDrain(allocationID string, generation, sequence uint64) error {
 	a.mu.Lock()
 	var ids []string
 	var persistErr error
 	for _, allocation := range a.allocations {
-		if allocation.AllocationID != request.AllocationID {
+		if allocation.AllocationID != allocationID {
 			continue
 		}
-		if allocation.Generation > request.Generation {
+		if allocation.Generation > generation {
 			a.mu.Unlock()
-			return fmt.Errorf("%w: current %d, requested %d", ErrStaleGeneration, allocation.Generation, request.Generation)
+			return fmt.Errorf("%w: current %d, requested %d", ErrStaleGeneration, allocation.Generation, generation)
 		}
-		if allocation.Generation != request.Generation {
+		if allocation.Generation != generation {
 			continue
 		}
-		if request.Sequence < allocation.DrainSequence {
+		if sequence < allocation.DrainSequence {
 			continue
 		}
 		previousDraining, previousSequence := allocation.Draining, allocation.DrainSequence
 		allocation.Draining = true
-		allocation.DrainSequence = request.Sequence
+		allocation.DrainSequence = sequence
 		if err := a.persistAllocation(allocation); err != nil {
 			allocation.Draining, allocation.DrainSequence = previousDraining, previousSequence
 			persistErr = fmt.Errorf("persist draining allocation: %w", err)
@@ -726,8 +755,8 @@ func (a *Agent) ResumeGroup(request *api.DrainAllocationRequest) error {
 }
 
 // RunAllocation creates and starts one allocation task. draining and
-// drainSequence are the control plane's drain state for the generation; a
-// draining task starts restart-suppressed.
+// drainSequence are the generation's drain state; a draining task starts
+// restart-suppressed.
 func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, generation uint64, jobRevision int, executionHash, namespace, jobName, groupName, taskName string, taskSpec *spec.TaskSpec, groupRuntime string, networkPlan *network.Plan, envOverrides map[string]string, delivered []api.DeliveredSecret, restartPolicy *spec.RestartPolicySpec, draining bool, drainSequence uint64) (runErr error) {
 	ts := taskSpec
 	if ts == nil {
