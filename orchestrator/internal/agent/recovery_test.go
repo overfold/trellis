@@ -394,6 +394,34 @@ func TestRecoverRetryStopsOlderGenerationFoundLate(t *testing.T) {
 		if state := agent.reconciler.states["task"]; state == nil || !state.stopping {
 			t.Fatal("superseded generation regained local restarts")
 		}
+		if !agent.recoveryPending() {
+			t.Fatal("failed superseded stop is not retried")
+		}
+		rt.stopErr = nil
+		if agent.retryRecovery(context.Background()) {
+			t.Fatal("retry left recovery work pending after the superseded stop succeeded")
+		}
+		if rt.stopCount != 2 || agent.allocations["task"] != nil {
+			t.Fatalf("superseded retry stop calls = %d, allocation = %+v; want stopped", rt.stopCount, agent.allocations["task"])
+		}
+	}
+}
+
+func TestStopAllocationKeepsPortClaimSharedWithRetainedAllocation(t *testing.T) {
+	rt := &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{}, listErr: errors.New("containerd unavailable")}
+	stale := recoveryTestAllocation(18088)
+	stale.Status = "stopping"
+	live := recoveryTestAllocation(18088)
+	live.ID, live.ContainerID, live.AllocationID = "live", "live", "other"
+	agent, _ := newRecoveryTestAgent(t, rt, stale, live)
+	if err := agent.recover(context.Background()); err == nil {
+		t.Fatal("recover succeeded despite listing failure")
+	}
+	if err := agent.StopGroup(context.Background(), &api.StopAllocationRequest{AllocationID: "allocation", Generation: 1}); err != nil {
+		t.Fatalf("stop stale allocation: %v", err)
+	}
+	if agent.allocations["task"] != nil || !portClaimed(agent, 18088) {
+		t.Fatal("stopping a stale allocation released a live allocation's port")
 	}
 }
 
