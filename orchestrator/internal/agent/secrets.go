@@ -131,7 +131,8 @@ func (a *Agent) recordedSecretRoot() (root string, reuse bool, err error) {
 // removeSecretDir removes a recorded secret directory. After a reboot empties
 // /dev/shm another user may recreate the root path, for example as a symlink
 // that would redirect the removal, so the parent must still be a directory the
-// agent owns. A missing parent means there is nothing left to remove.
+// agent owns. A missing parent, or one another user owns, cannot hold this
+// agent's secrets, so there is nothing left to remove.
 func removeSecretDir(dir string) error {
 	if dir == "" {
 		return nil
@@ -144,8 +145,11 @@ func removeSecretDir(dir string) error {
 	if err != nil {
 		return fmt.Errorf("inspect secret root: %w", err)
 	}
-	if !info.IsDir() || !ownedByAgent(info) {
-		return fmt.Errorf("refuse to remove %s: %s is not an agent-owned directory", dir, parent)
+	if !ownedByAgent(info) {
+		return nil
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("refuse to remove %s: %s is not a directory", dir, parent)
 	}
 	return os.RemoveAll(dir)
 }

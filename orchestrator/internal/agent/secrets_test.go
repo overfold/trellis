@@ -400,3 +400,26 @@ func TestRunAllocationKeepsSecretDirectoryItDidNotCreate(t *testing.T) {
 		t.Fatalf("failed start removed a secret directory it did not create: %v", err)
 	}
 }
+
+func TestRemoveSecretDirIgnoresForeignRoot(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("changing directory ownership requires root")
+	}
+	root := filepath.Join(t.TempDir(), "trellis-secrets-foreign")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(root, "victim")
+	if err := os.Mkdir(victim, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(root, 65534, 65534); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeSecretDir(victim); err != nil {
+		t.Fatalf("foreign root blocked cleanup: %v", err)
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Fatalf("removed a directory below another user's root: %v", err)
+	}
+}
