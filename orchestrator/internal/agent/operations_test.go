@@ -336,7 +336,9 @@ func newOperationTestAgent(t *testing.T, rt runtime.ContainerRuntime) *Agent {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	reconciler := NewAllocationReconciler(rt, nil)
-	return NewAgent(log, rt, health.NewHealthManager(log, rt, nil), reconciler, NewPortManager(rt, 0, 0, 0), NewVolumeManager(t.TempDir()), nil, uuid.New())
+	agent := NewAgent(log, rt, health.NewHealthManager(log, rt, nil), reconciler, NewPortManager(rt, 0, 0, 0), NewVolumeManager(t.TempDir()), nil, uuid.New())
+	agent.secretBase = t.TempDir()
+	return agent
 }
 
 func operationTestRequest() *api.AllocationRequest {
