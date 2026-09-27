@@ -244,6 +244,16 @@ func materializeSecrets(dir, taskName string, delivered []api.DeliveredSecret) (
 // record or in-memory allocation owns. They are left behind when the agent
 // stops after writing secrets but before the allocation record is durable.
 // It runs after recovery and before the agent accepts allocation requests.
+// recoveredSecretDir returns where an allocation known only from runtime
+// labels would keep its secret files, so stopping it removes them.
+func (a *Agent) recoveredSecretDir(allocID string) string {
+	root, reuse, err := a.recordedSecretRoot()
+	if err != nil || !reuse {
+		return ""
+	}
+	return filepath.Join(root, allocationFileName(allocID))
+}
+
 func (a *Agent) removeOrphanedSecretDirs() {
 	root, reuse, err := a.recordedSecretRoot()
 	if err != nil {

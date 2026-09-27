@@ -636,3 +636,30 @@ func TestStopGroupChecksUnrecordedSiblingsWhileListingIncomplete(t *testing.T) {
 		t.Fatalf("stop after every container is accounted for: %v", err)
 	}
 }
+
+func TestRecoverRetryKeepsExhaustedRestartBudgetTerminal(t *testing.T) {
+	rt := &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusStopped}, listErr: errors.New("containerd unavailable")}
+	record := recoveryTestAllocation(0)
+	record.RestartExhausted = true
+	agent, _ := newRecoveryTestAgent(t, rt, record)
+	if err := agent.recover(context.Background()); err == nil {
+		t.Fatal("recover succeeded despite listing failure")
+	}
+	task := &spec.TaskSpec{Name: "task", Image: "image"}
+	if err := agent.RunAllocation(context.Background(), "task", "allocation", 1, 1, "hash", "default", "job", "group", "task", task, "", nil, nil, nil, nil, false, 0); !errors.Is(err, ErrRestartBudgetExhausted) {
+		t.Fatalf("start retry error = %v, want exhausted restart budget", err)
+	}
+
+	rt.listErr = nil
+	rt.containers = []runtime.ContainerInfo{{ID: "task", Status: runtime.StatusStopped, Labels: recoveryTestLabels(record)}}
+	if agent.retryRecovery(context.Background()) {
+		t.Fatal("retry left recovery work pending")
+	}
+	recovered := agent.allocations["task"]
+	if recovered == nil || recovered.Status != "failed" || recovered.Health != "unhealthy" {
+		t.Fatalf("allocation after retry = %+v, want terminal failed", recovered)
+	}
+	if rt.restartCount != 0 || rt.stopCount != 0 {
+		t.Fatalf("restart=%d stop=%d; exhausted allocation must not be restarted or replaced", rt.restartCount, rt.stopCount)
+	}
+}

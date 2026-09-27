@@ -62,9 +62,12 @@ type Agent struct {
 	// supersededStops holds retained older generations that recovery must
 	// stop itself because the control plane rejects their stops as stale.
 	supersededStops map[string]string
-	secretMu        sync.Mutex
-	secretBase      string
-	secretRoot      string
+	// recoverySweepPending defers the orphaned secret sweep that a failed
+	// initial listing skipped until a later listing completes recovery.
+	recoverySweepPending bool
+	secretMu             sync.Mutex
+	secretBase           string
+	secretRoot           string
 }
 
 type allocationOperation struct {
@@ -368,6 +371,7 @@ func (a *Agent) recover(ctx context.Context) error {
 		// record and its resources until the runtime can be observed again.
 		a.mu.Lock()
 		a.recoveryListPending = true
+		a.recoverySweepPending = true
 		a.mu.Unlock()
 		for containerID, allocation := range stored {
 			if containerID != "" {
@@ -572,6 +576,7 @@ func (a *Agent) recoverMissing(ctx context.Context, allocation *Allocation) {
 		a.mu.Unlock()
 		return
 	}
+	a.closeExecSessionsForTask(ctx, allocation.ID, allocation.ContainerID)
 	a.health.DeregisterTask(allocation.ID)
 	_ = a.reconciler.Untrack(allocation.ID)
 	a.mu.Lock()
@@ -673,7 +678,16 @@ func (a *Agent) relistRecovery(ctx context.Context, managed runtime.ManagedRunti
 		}
 		a.mu.Lock()
 		a.recoveryListPending = stillPending || a.hasUnreadableUnknownLocked(containers)
+		sweep := !a.recoveryListPending && a.recoverySweepPending
+		if sweep {
+			a.recoverySweepPending = false
+		}
 		a.mu.Unlock()
+		if sweep {
+			// Every listed container is now recorded or retained, so secret
+			// directories without an owner are orphans, as at startup.
+			a.removeOrphanedSecretDirs()
+		}
 	}
 }
 
@@ -734,6 +748,7 @@ func (a *Agent) adoptUnrecorded(ctx context.Context, listed runtime.ContainerInf
 		// that start could not stop it. Retain it as stopping;
 		// queueSupersededStops schedules the stop.
 		allocation.Status = "stopping"
+		allocation.SecretDir = a.recoveredSecretDir(allocation.ID)
 		a.adoptPorts(allocation)
 		a.mu.Lock()
 		a.allocations[allocation.ID] = allocation
@@ -1162,6 +1177,7 @@ func (a *Agent) stopUnrecorded(ctx context.Context, request *api.StopAllocationR
 			continue
 		}
 		allocation.Status = "stopping"
+		allocation.SecretDir = a.recoveredSecretDir(allocation.ID)
 		a.adoptPorts(allocation)
 		a.mu.Lock()
 		a.allocations[allocation.ID] = allocation
