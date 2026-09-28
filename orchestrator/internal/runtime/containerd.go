@@ -10,7 +10,9 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -201,10 +203,38 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 
 const cgroupRoot = "/sys/fs/cgroup"
 
-// SwapAccountingDetected reports whether this host's memory cgroup visibly
-// supports swap accounting, without which task memory limits cannot cap swap.
-func SwapAccountingDetected() bool {
-	return swapLimitApplies(cgroupRoot, "runsc")
+// SwapUncapped reports whether the host has active swap that its memory
+// cgroup visibly cannot account, so task memory limits may not cap swap.
+func SwapUncapped() bool {
+	return swapActive("/proc/swaps") && !swapAccountingDetected(cgroupRoot)
+}
+
+// PidsControllerDetected reports whether the host exposes the pids cgroup
+// controller that task pids limits require.
+func PidsControllerDetected() bool {
+	if data, err := os.ReadFile(filepath.Join(cgroupRoot, "cgroup.controllers")); err == nil {
+		return slices.Contains(strings.Fields(string(data)), "pids")
+	}
+	_, err := os.Stat(filepath.Join(cgroupRoot, "pids"))
+	return err == nil
+}
+
+func swapActive(procSwaps string) bool {
+	data, err := os.ReadFile(procSwaps)
+	if err != nil {
+		return false
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	return len(lines) > 1
+}
+
+func swapAccountingDetected(cgroupRoot string) bool {
+	if _, err := os.Stat(filepath.Join(cgroupRoot, "cgroup.controllers")); err != nil {
+		_, err := os.Stat(filepath.Join(cgroupRoot, "memory", "memory.memsw.limit_in_bytes"))
+		return err == nil
+	}
+	matches, _ := filepath.Glob(filepath.Join(cgroupRoot, "*", "memory.swap.max"))
+	return len(matches) > 0
 }
 
 // swapLimitApplies reports whether a task's memory+swap limit can be set.
@@ -214,15 +244,10 @@ func SwapAccountingDetected() bool {
 // memory.swap.max. It is probed per create because controllers can be enabled
 // after startup.
 func swapLimitApplies(cgroupRoot, taskRuntime string) bool {
-	if _, err := os.Stat(filepath.Join(cgroupRoot, "cgroup.controllers")); err != nil {
-		_, err := os.Stat(filepath.Join(cgroupRoot, "memory", "memory.memsw.limit_in_bytes"))
-		return err == nil
-	}
-	if taskRuntime != "runsc" {
+	if _, err := os.Stat(filepath.Join(cgroupRoot, "cgroup.controllers")); err == nil && taskRuntime != "runsc" {
 		return true
 	}
-	matches, _ := filepath.Glob(filepath.Join(cgroupRoot, "*", "memory.swap.max"))
-	return len(matches) > 0
+	return swapAccountingDetected(cgroupRoot)
 }
 
 // resourceSpecOpts converts task resource limits into cgroup settings. The

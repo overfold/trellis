@@ -134,6 +134,25 @@ func TestSwapLimitApplies(t *testing.T) {
 	}
 }
 
+func TestSwapActive(t *testing.T) {
+	dir := t.TempDir()
+	for name, tc := range map[string]struct {
+		data string
+		want bool
+	}{
+		"none":   {data: "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n"},
+		"active": {data: "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n/swapfile file 1048572 0 -2\n", want: true},
+	} {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(tc.data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := swapActive(path); got != tc.want {
+			t.Errorf("%s: swapActive = %t, want %t", name, got, tc.want)
+		}
+	}
+}
+
 func TestResourceSpecOptsOmitsUnsetLimits(t *testing.T) {
 	opts, err := resourceSpecOpts(CreateOptions{}, true)
 	if err != nil {

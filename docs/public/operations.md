@@ -62,7 +62,8 @@ resources:
 ```
 
 Nodes require the `pids` cgroup controller, which systemd-based
-distributions enable by default; task creation fails without it rather than
+distributions enable by default; the node warns at startup when it is missing,
+and task creation fails without it rather than
 running tasks unbounded. This is node hardening policy, not part of a job: it is applied when the node
 creates a container and is not part of the execution hash, so changing it does
 not restart running allocations or their local restarts. The new value applies
