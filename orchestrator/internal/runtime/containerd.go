@@ -90,6 +90,10 @@ func (c *ContainerdRuntime) Pull(ctx context.Context, image string) error {
 
 // Create creates a container from the supplied options.
 func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (id string, err error) {
+	resourceOpts, err := resourceSpecOpts(options, swapLimitApplies(cgroupRoot, options.Runtime))
+	if err != nil {
+		return "", err
+	}
 	ctx = c.withNamespace(ctx)
 	if err := ensureRuntimeDir(c.logDir); err != nil {
 		return "", fmt.Errorf("create runtime directory: %w", err)
@@ -166,10 +170,6 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 			ociSpecOpts = append(ociSpecOpts, withoutRawSocketCapability())
 		}
 	}
-	resourceOpts, err := resourceSpecOpts(options, swapLimitSupported())
-	if err != nil {
-		return "", err
-	}
 	ociSpecOpts = append(ociSpecOpts, resourceOpts...)
 
 	containerOpts := []containerd.NewContainerOpts{
@@ -199,26 +199,27 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 	return container.ID(), nil
 }
 
-// SwapLimitSupported reports whether this host's memory cgroup can enforce a
-// memory+swap limit. Without swap accounting, runc and runsc either ignore or
-// reject the limit, so the runtime omits it and tasks may swap.
-func SwapLimitSupported() bool {
-	return swapLimitSupported()
+const cgroupRoot = "/sys/fs/cgroup"
+
+// SwapAccountingDetected reports whether this host's memory cgroup visibly
+// supports swap accounting, without which task memory limits cannot cap swap.
+func SwapAccountingDetected() bool {
+	return swapLimitApplies(cgroupRoot, "runsc")
 }
 
-var swapLimitSupported = sync.OnceValue(func() bool {
-	return swapControllerAvailable("/sys/fs/cgroup")
-})
-
-// swapControllerAvailable probes swap accounting where containerd places
-// tasks. cgroup v2 exposes memory.swap.max only in non-root cgroups whose
-// parent enables the memory controller with swap accounting, so any
-// top-level cgroup carrying it proves support; cgroup v1 exposes
-// memory.memsw.limit_in_bytes.
-func swapControllerAvailable(cgroupRoot string) bool {
+// swapLimitApplies reports whether a task's memory+swap limit can be set.
+// cgroup v1 rejects memsw limits without swap accounting. On cgroup v2 runc
+// silently skips a missing memory.swap.max when disabling swap, but runsc
+// does not, so for runsc it requires a top-level cgroup carrying
+// memory.swap.max. It is probed per create because controllers can be enabled
+// after startup.
+func swapLimitApplies(cgroupRoot, taskRuntime string) bool {
 	if _, err := os.Stat(filepath.Join(cgroupRoot, "cgroup.controllers")); err != nil {
 		_, err := os.Stat(filepath.Join(cgroupRoot, "memory", "memory.memsw.limit_in_bytes"))
 		return err == nil
+	}
+	if taskRuntime != "runsc" {
+		return true
 	}
 	matches, _ := filepath.Glob(filepath.Join(cgroupRoot, "*", "memory.swap.max"))
 	return len(matches) > 0

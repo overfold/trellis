@@ -103,17 +103,18 @@ func TestResourceSpecOptsSkipsSwapWithoutSwapAccounting(t *testing.T) {
 	}
 }
 
-func TestSwapControllerAvailable(t *testing.T) {
+func TestSwapLimitApplies(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		files []string
-		want  bool
+		name    string
+		files   []string
+		runtime string
+		want    bool
 	}{
-		{name: "v2 with swap", files: []string{"cgroup.controllers", "system.slice/memory.swap.max"}, want: true},
-		{name: "v2 without swap accounting", files: []string{"cgroup.controllers", "system.slice/memory.max"}},
-		{name: "v2 without memory controller", files: []string{"cgroup.controllers", "system.slice/cgroup.procs"}},
-		{name: "v1 with memsw", files: []string{"memory/memory.memsw.limit_in_bytes"}, want: true},
-		{name: "v1 without memsw", files: []string{"memory/memory.limit_in_bytes"}},
+		{name: "v2 runc without detected swap accounting", files: []string{"cgroup.controllers"}, runtime: "runc", want: true},
+		{name: "v2 runsc with swap", files: []string{"cgroup.controllers", "system.slice/memory.swap.max"}, runtime: "runsc", want: true},
+		{name: "v2 runsc without swap accounting", files: []string{"cgroup.controllers", "system.slice/memory.max"}, runtime: "runsc"},
+		{name: "v1 with memsw", files: []string{"memory/memory.memsw.limit_in_bytes"}, runtime: "runc", want: true},
+		{name: "v1 without memsw", files: []string{"memory/memory.limit_in_bytes"}, runtime: "runc"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -126,8 +127,8 @@ func TestSwapControllerAvailable(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if got := swapControllerAvailable(root); got != tc.want {
-				t.Fatalf("swapControllerAvailable = %t, want %t", got, tc.want)
+			if got := swapLimitApplies(root, tc.runtime); got != tc.want {
+				t.Fatalf("swapLimitApplies = %t, want %t", got, tc.want)
 			}
 		})
 	}

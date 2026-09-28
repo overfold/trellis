@@ -372,8 +372,8 @@ func run(parent context.Context, cfg *config) error {
 		cfg.DNSListen = net.JoinHostPort(dnsHost, strconv.Itoa(dnsPort))
 	}
 	if cfg.Runtime == "containerd" {
-		if !containerruntime.SwapLimitSupported() {
-			log.Warn("host memory cgroup has no swap accounting; task memory limits cannot cap swap")
+		if !containerruntime.SwapAccountingDetected() {
+			log.Warn("swap accounting not detected in the host memory cgroup; task memory limits may not cap swap")
 		}
 		if dnsPort != 53 {
 			return fmt.Errorf("workload DNS must listen on port 53; resolv.conf nameserver entries cannot include a custom port")
