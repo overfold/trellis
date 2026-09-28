@@ -8,6 +8,11 @@ import (
 	"fmt"
 )
 
+// UsageExit is the probe's exit status for arguments it refuses. It is
+// distinct from 1 (unhealthy) and from 2, which the Go runtime uses for a
+// panic or fatal error.
+const UsageExit = 64
+
 // MaxLength bounds an HTTP health-check request target.
 const MaxLength = 1024
 

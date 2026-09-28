@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/clofour/trellis/internal/probepath"
 )
 
 func TestHTTPProbe(t *testing.T) {
@@ -58,8 +60,8 @@ func TestHTTPProbeKeepsRequestOnLoopback(t *testing.T) {
 func TestHTTPProbeRejectsNonOriginPaths(t *testing.T) {
 	for _, path := range []string{"@169.254.169.254/latest", "http://169.254.169.254/latest", "health", "/%zz", "/a|b", "/héalth", "/a#b"} {
 		t.Run(path, func(t *testing.T) {
-			if code := run([]string{"http", "8080", path, "1s"}); code != 2 {
-				t.Fatalf("probe of %q exit code = %d, want 2", path, code)
+			if code := run([]string{"http", "8080", path, "1s"}); code != probepath.UsageExit {
+				t.Fatalf("probe of %q exit code = %d, want %d", path, code, probepath.UsageExit)
 			}
 		})
 	}
@@ -96,6 +98,8 @@ func TestHTTPProbeFollowsOnlyLoopbackRedirects(t *testing.T) {
 			http.Redirect(w, r, "https://"+r.Host+"/ok", http.StatusFound)
 		case "/to-localhost-failing":
 			http.Redirect(w, r, "http://localhost:"+requestPort(r)+"/failing", http.StatusFound)
+		case "/to-localhost-dot-ok":
+			http.Redirect(w, r, "http://localhost.:"+requestPort(r)+"/ok", http.StatusFound)
 		case "/to-ipv6-loopback":
 			http.Redirect(w, r, "http://[::1]:"+requestPort(r)+"/ok", http.StatusFound)
 		case "/loop":
@@ -121,6 +125,7 @@ func TestHTTPProbeFollowsOnlyLoopbackRedirects(t *testing.T) {
 		"/to-https":             0,
 		"/loop":                 1,
 		"/to-localhost-failing": 1,
+		"/to-localhost-dot-ok":  0,
 		"/to-ipv6-loopback":     1, // followed; the server listens only on 127.0.0.1
 		"/hops/10":              0,
 		"/hops/11":              1,
@@ -157,8 +162,8 @@ func TestProbeRejectsUnsupportedArguments(t *testing.T) {
 		{"http", "80", "/"},
 	} {
 		t.Run(fmt.Sprint(args), func(t *testing.T) {
-			if code := run(args); code != 2 {
-				t.Fatalf("invalid arguments exit code = %d, want 2", code)
+			if code := run(args); code != probepath.UsageExit {
+				t.Fatalf("invalid arguments exit code = %d, want %d", code, probepath.UsageExit)
 			}
 		})
 	}

@@ -11,7 +11,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/clofour/trellis/internal/probepath"
@@ -28,16 +27,16 @@ func main() {
 
 func run(args []string) int {
 	if len(args) < 3 {
-		return 2
+		return probepath.UsageExit
 	}
 
 	port, err := strconv.Atoi(args[1])
 	if err != nil || port < 1 || port > 65535 {
-		return 2
+		return probepath.UsageExit
 	}
 	timeout, err := time.ParseDuration(args[len(args)-1])
 	if err != nil || timeout <= 0 {
-		return 2
+		return probepath.UsageExit
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -46,15 +45,15 @@ func run(args []string) int {
 	switch args[0] {
 	case "http":
 		if len(args) != 4 {
-			return 2
+			return probepath.UsageExit
 		}
 		target, err := httpTarget(port, args[2])
 		if err != nil {
-			return 2
+			return probepath.UsageExit
 		}
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+target.Host, nil)
 		if err != nil {
-			return 2
+			return probepath.UsageExit
 		}
 		request.URL = target
 		response, err := probeClient(port).Do(request)
@@ -68,7 +67,7 @@ func run(args []string) int {
 		return 0
 	case "tcp":
 		if len(args) != 3 {
-			return 2
+			return probepath.UsageExit
 		}
 		conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort(loopback, strconv.Itoa(port)))
 		if err != nil {
@@ -77,7 +76,7 @@ func run(args []string) int {
 		_ = conn.Close()
 		return 0
 	default:
-		return 2
+		return probepath.UsageExit
 	}
 }
 
@@ -100,24 +99,26 @@ func httpTarget(port int, path string) (*url.URL, error) {
 	return target, nil
 }
 
-// probeClient never uses a proxy, dials only loopback addresses, and follows
-// at most maxRedirects redirects, only while they stay on a loopback host and
-// the probed port. Like a kubelet HTTP probe, it stops at a redirect anywhere
-// else and treats that 3xx response as the result, so a check never leaves
-// task-local loopback.
+// probeClient never uses a proxy or resolves names, dials only loopback
+// addresses, and follows at most maxRedirects redirects, only while they stay
+// on a loopback host and the probed port. Like a kubelet HTTP probe, it stops
+// at a redirect anywhere else and treats that 3xx response as the result, so a
+// check never leaves task-local loopback.
 func probeClient(port int) *http.Client {
-	dialer := &net.Dialer{Control: func(_, address string, _ syscall.RawConn) error {
-		host, _, err := net.SplitHostPort(address)
+	dialer := &net.Dialer{}
+	dial := func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, targetPort, err := net.SplitHostPort(address)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
-			return fmt.Errorf("refusing non-loopback address %s", address)
+		ip, ok := loopbackIP(host)
+		if !ok {
+			return nil, fmt.Errorf("refusing non-loopback address %s", address)
 		}
-		return nil
-	}}
+		return dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), targetPort))
+	}
 	return &http.Client{
-		Transport: &http.Transport{Proxy: nil, DialContext: dialer.DialContext, DisableKeepAlives: true},
+		Transport: &http.Transport{Proxy: nil, DialContext: dial, DisableKeepAlives: true},
 		CheckRedirect: func(request *http.Request, via []*http.Request) error {
 			if len(via) > maxRedirects {
 				return errors.New("too many redirects")
@@ -130,8 +131,8 @@ func probeClient(port int) *http.Client {
 	}
 }
 
-// loopbackTarget reports whether target is plain HTTP to a loopback host
-// (localhost or a loopback IP literal) on port.
+// loopbackTarget reports whether target is plain HTTP to a loopback host on
+// port.
 func loopbackTarget(target *url.URL, port int) bool {
 	if target.Scheme != "http" {
 		return false
@@ -140,13 +141,16 @@ func loopbackTarget(target *url.URL, port int) bool {
 	if targetPort == "" {
 		targetPort = "80"
 	}
-	if targetPort != strconv.Itoa(port) {
-		return false
-	}
-	host := target.Hostname()
-	if strings.EqualFold(host, "localhost") {
-		return true
+	_, ok := loopbackIP(target.Hostname())
+	return ok && targetPort == strconv.Itoa(port)
+}
+
+// loopbackIP maps localhost to 127.0.0.1 without consulting a resolver and
+// accepts loopback IP literals; every other host is refused.
+func loopbackIP(host string) (net.IP, bool) {
+	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
+		return net.ParseIP(loopback), true
 	}
 	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	return ip, ip != nil && ip.IsLoopback()
 }
