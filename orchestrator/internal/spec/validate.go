@@ -306,9 +306,9 @@ func Validate(job *JobSpec) error {
 						add(checkPath+".port", "out_of_range", "port is required and must be between 1 and 65535")
 					}
 					if task.HealthCheck.Type == HealthCheckHTTP {
-						if len(task.HealthCheck.Path) > probepath.MaxLength {
-							add(checkPath+".path", "too_long", fmt.Sprintf("must be at most %d bytes", probepath.MaxLength))
-						} else if err := probepath.Validate(task.HealthCheck.Path); err != nil {
+						if err := probepath.Validate(task.HealthCheck.Path); errors.Is(err, probepath.ErrTooLong) {
+							add(checkPath+".path", "too_long", err.Error())
+						} else if err != nil {
 							add(checkPath+".path", "invalid", err.Error())
 						}
 					}

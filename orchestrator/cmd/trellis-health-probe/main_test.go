@@ -103,6 +103,8 @@ func TestHTTPProbeFollowsOnlyLoopbackRedirects(t *testing.T) {
 			http.Redirect(w, r, "http://localhost:"+requestPort(r)+"/failing", http.StatusFound)
 		case "/to-padded-port-failing":
 			http.Redirect(w, r, "http://127.0.0.1:0"+requestPort(r)+"/failing", http.StatusFound)
+		case "/to-external-after-hops":
+			http.Redirect(w, r, "/hops-then-external/9", http.StatusFound)
 		case "/to-localhost-dot-ok":
 			http.Redirect(w, r, "http://localhost.:"+requestPort(r)+"/ok", http.StatusFound)
 		case "/to-ipv6-loopback":
@@ -110,6 +112,14 @@ func TestHTTPProbeFollowsOnlyLoopbackRedirects(t *testing.T) {
 		case "/loop":
 			http.Redirect(w, r, "/loop", http.StatusFound)
 		default:
+			if hops, err := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/hops-then-external/")); err == nil {
+				if hops == 0 {
+					http.Redirect(w, r, "https://example.com/", http.StatusFound)
+					return
+				}
+				http.Redirect(w, r, "/hops-then-external/"+strconv.Itoa(hops-1), http.StatusFound)
+				return
+			}
 			if hops, err := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/hops/")); err == nil {
 				if hops == 0 {
 					w.WriteHeader(http.StatusOK)
@@ -135,6 +145,7 @@ func TestHTTPProbeFollowsOnlyLoopbackRedirects(t *testing.T) {
 		"/to-ipv6-loopback":       1, // followed; the server listens only on 127.0.0.1
 		"/hops/10":                0,
 		"/hops/11":                1,
+		"/to-external-after-hops": 0,
 	} {
 		if code := run([]string{"http", port, path, "2s"}); code != want {
 			t.Errorf("probe of %s exit code = %d, want %d", path, code, want)

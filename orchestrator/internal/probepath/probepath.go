@@ -16,6 +16,9 @@ const UsageExit = 64
 // MaxLength bounds an HTTP health-check request target.
 const MaxLength = 1024
 
+// ErrTooLong reports a request target longer than MaxLength.
+var ErrTooLong = fmt.Errorf("must be at most %d bytes", MaxLength)
+
 // Pattern is the JSON Schema equivalent of Validate: empty, or an absolute
 // path and optional query of RFC 3986 path/query characters and well-formed
 // percent-encodings.
@@ -29,7 +32,7 @@ func Validate(path string) error {
 		return nil
 	}
 	if len(path) > MaxLength {
-		return fmt.Errorf("must be at most %d bytes", MaxLength)
+		return ErrTooLong
 	}
 	if path[0] != '/' {
 		return errors.New("must begin with /")

@@ -124,11 +124,11 @@ func probeClient(port int) *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{Proxy: nil, DialContext: dial, DisableKeepAlives: true},
 		CheckRedirect: func(request *http.Request, via []*http.Request) error {
-			if len(via) > maxRedirects {
-				return errors.New("too many redirects")
-			}
 			if !loopbackTarget(request.URL, port) {
 				return http.ErrUseLastResponse
+			}
+			if len(via) > maxRedirects {
+				return errors.New("too many redirects")
 			}
 			return nil
 		},
