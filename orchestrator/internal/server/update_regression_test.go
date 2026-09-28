@@ -192,20 +192,24 @@ func TestReconcileStopsPendingFromOldRevision(t *testing.T) {
 
 func TestReconcileChargesAllocationsQueuedForStop(t *testing.T) {
 	tests := []struct {
-		name  string
-		setup func(*testing.T, *Server, *Node, []spec.TaskSpec) *Allocation
-		tasks []spec.TaskSpec
+		name              string
+		setup             func(*testing.T, *Server, *Node, []spec.TaskSpec) *Allocation
+		tasks             []spec.TaskSpec
+		cpu               int
+		memoryAllocatable int64
 	}{
 		{
-			name: "deleted job resources",
+			name: "deleted job CPU",
 			setup: func(_ *testing.T, s *Server, node *Node, tasks []spec.TaskSpec) *Allocation {
 				s.jobs[jobKey("default", "wanted")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "wanted", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: tasks}}}, Revision: 1}
 				return &Allocation{ID: "obsolete", Namespace: "default", JobName: "deleted", TaskGroupName: "app", Tasks: tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning}
 			},
-			tasks: []spec.TaskSpec{{Name: "app", Image: "app", Resources: &spec.ResourcesSpec{CPU: 1000, Memory: 1 << 30}}},
+			tasks:             []spec.TaskSpec{{Name: "app", Image: "app", Resources: &spec.ResourcesSpec{CPU: 1000, Memory: 128 << 20}}},
+			cpu:               1000,
+			memoryAllocatable: 1 << 30,
 		},
 		{
-			name: "namespace-unadmitted resources",
+			name: "namespace-unadmitted memory",
 			setup: func(t *testing.T, s *Server, node *Node, tasks []spec.TaskSpec) *Allocation {
 				limits := spec.DefaultLimits()
 				limits.MaxDesiredAllocationsPerNamespace = 1
@@ -216,7 +220,9 @@ func TestReconcileChargesAllocationsQueuedForStop(t *testing.T) {
 				s.jobs[jobKey("default", "unadmitted")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "unadmitted", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: tasks}}}, Revision: 1}
 				return &Allocation{ID: "obsolete", Namespace: "default", JobName: "unadmitted", TaskGroupName: "app", Tasks: tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning}
 			},
-			tasks: []spec.TaskSpec{{Name: "app", Image: "app", Resources: &spec.ResourcesSpec{CPU: 1000, Memory: 1 << 30}}},
+			tasks:             []spec.TaskSpec{{Name: "app", Image: "app", Resources: &spec.ResourcesSpec{CPU: 100, Memory: 1 << 30}}},
+			cpu:               1000,
+			memoryAllocatable: 1 << 30,
 		},
 		{
 			name: "recreate-obsolete static host port",
@@ -224,7 +230,9 @@ func TestReconcileChargesAllocationsQueuedForStop(t *testing.T) {
 				s.jobs[jobKey("default", "web")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: tasks}}}, Revision: 2}
 				return &Allocation{ID: "obsolete", Namespace: "default", JobName: "web", TaskGroupName: "app", Tasks: tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning}
 			},
-			tasks: []spec.TaskSpec{{Name: "app", Image: "app:v2", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkHost, Ports: []spec.PortSpec{{Port: 8080}}}}},
+			tasks:             []spec.TaskSpec{{Name: "app", Image: "app:v2", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkHost, Ports: []spec.PortSpec{{Port: 8080}}}}},
+			cpu:               1000,
+			memoryAllocatable: 1 << 30,
 		},
 	}
 
@@ -232,7 +240,7 @@ func TestReconcileChargesAllocationsQueuedForStop(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			s, agent := newTestServerWithAgent()
 			defer agent.server.Close()
-			node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now(), CPUAllocatable: 1000, MemoryAllocatable: 1 << 30}
+			node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now(), CPUAllocatable: tt.cpu, MemoryAllocatable: tt.memoryAllocatable}
 			s.nodes[node.ID] = node
 			obsolete := tt.setup(t, s, node, tt.tasks)
 			s.allocations = []*Allocation{obsolete}
