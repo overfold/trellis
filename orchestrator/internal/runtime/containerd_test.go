@@ -111,6 +111,8 @@ func TestSwapLimitApplies(t *testing.T) {
 		want    bool
 	}{
 		{name: "v2 runc without detected swap accounting", files: []string{"cgroup.controllers"}, runtime: "runc", want: true},
+		{name: "v2 default runtime is runc", files: []string{"cgroup.controllers"}, want: true},
+		{name: "v2 runsc in nested cgroup namespace", files: []string{"cgroup.controllers", "memory.swap.max"}, runtime: "runsc", want: true},
 		{name: "v2 runsc with swap", files: []string{"cgroup.controllers", "system.slice/memory.swap.max"}, runtime: "runsc", want: true},
 		{name: "v2 runsc without swap accounting", files: []string{"cgroup.controllers", "system.slice/memory.max"}, runtime: "runsc"},
 		{name: "v1 with memsw", files: []string{"memory/memory.memsw.limit_in_bytes"}, runtime: "runc", want: true},
@@ -131,6 +133,32 @@ func TestSwapLimitApplies(t *testing.T) {
 				t.Fatalf("swapLimitApplies = %t, want %t", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestPidsControllerDetected(t *testing.T) {
+	for name, tc := range map[string]struct {
+		files map[string]string
+		want  bool
+	}{
+		"v2 with pids":    {files: map[string]string{"cgroup.controllers": "cpuset cpu io memory pids\n"}, want: true},
+		"v2 without pids": {files: map[string]string{"cgroup.controllers": "cpuset cpu io memory\n"}},
+		"v1 with pids":    {files: map[string]string{"pids/pids.max": "max"}, want: true},
+		"v1 without pids": {files: map[string]string{"memory/memory.limit_in_bytes": "0"}},
+	} {
+		root := t.TempDir()
+		for path, data := range tc.files {
+			path = filepath.Join(root, path)
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := pidsControllerDetected(root); got != tc.want {
+			t.Errorf("%s: pidsControllerDetected = %t, want %t", name, got, tc.want)
+		}
 	}
 }
 

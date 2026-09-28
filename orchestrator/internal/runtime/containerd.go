@@ -212,6 +212,10 @@ func SwapUncapped() bool {
 // PidsControllerDetected reports whether the host exposes the pids cgroup
 // controller that task pids limits require.
 func PidsControllerDetected() bool {
+	return pidsControllerDetected(cgroupRoot)
+}
+
+func pidsControllerDetected(cgroupRoot string) bool {
 	if data, err := os.ReadFile(filepath.Join(cgroupRoot, "cgroup.controllers")); err == nil {
 		return slices.Contains(strings.Fields(string(data)), "pids")
 	}
@@ -228,10 +232,22 @@ func swapActive(procSwaps string) bool {
 	return len(lines) > 1
 }
 
+func cgroupV2(cgroupRoot string) bool {
+	_, err := os.Stat(filepath.Join(cgroupRoot, "cgroup.controllers"))
+	return err == nil
+}
+
+// swapAccountingDetected looks for swap accounting where containerd places
+// tasks. cgroup v2 exposes memory.swap.max only in non-root cgroups whose
+// parent enables the memory controller with swap accounting (or at the root
+// of a nested cgroup namespace); cgroup v1 exposes memory.memsw.limit_in_bytes.
 func swapAccountingDetected(cgroupRoot string) bool {
-	if _, err := os.Stat(filepath.Join(cgroupRoot, "cgroup.controllers")); err != nil {
+	if !cgroupV2(cgroupRoot) {
 		_, err := os.Stat(filepath.Join(cgroupRoot, "memory", "memory.memsw.limit_in_bytes"))
 		return err == nil
+	}
+	if _, err := os.Stat(filepath.Join(cgroupRoot, "memory.swap.max")); err == nil {
+		return true
 	}
 	matches, _ := filepath.Glob(filepath.Join(cgroupRoot, "*", "memory.swap.max"))
 	return len(matches) > 0
@@ -240,11 +256,11 @@ func swapAccountingDetected(cgroupRoot string) bool {
 // swapLimitApplies reports whether a task's memory+swap limit can be set.
 // cgroup v1 rejects memsw limits without swap accounting. On cgroup v2 runc
 // silently skips a missing memory.swap.max when disabling swap, but runsc
-// does not, so for runsc it requires a top-level cgroup carrying
-// memory.swap.max. It is probed per create because controllers can be enabled
-// after startup.
+// does not, so runsc requires detected swap accounting. An empty runtime uses
+// the containerd client's default, io.containerd.runc.v2. It is probed per
+// create because controllers can be enabled after startup.
 func swapLimitApplies(cgroupRoot, taskRuntime string) bool {
-	if _, err := os.Stat(filepath.Join(cgroupRoot, "cgroup.controllers")); err == nil && taskRuntime != "runsc" {
+	if cgroupV2(cgroupRoot) && taskRuntime != "runsc" {
 		return true
 	}
 	return swapAccountingDetected(cgroupRoot)
