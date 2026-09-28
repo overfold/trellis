@@ -203,6 +203,8 @@ A `host_path` beginning with `@/` is resolved relative to Trellis's volume root 
 
 An absolute `host_path` such as `/srv/postgres` is used verbatim and must already exist on the selected node. This is an intentional escape hatch and **does not provide filesystem-level namespace isolation**: two namespaces can point at the same absolute host directory if an operator configures them that way. Use node constraints when an absolute path only exists on particular nodes so first placement does not repeatedly choose an unsuitable node.
 
+Namespace authorization does not prevent a manifest submitter from requesting an absolute path. A frontend serving untrusted tenants must reject this form; see [Multitenancy and trust boundaries](multitenancy.md).
+
 Changing `host_path` does not change the volume identity or move it to another node. A later revision may point the same name at another path on its registered node, but Trellis does not copy or migrate the bytes; preparing the new backing data is the operator's responsibility.
 
 Because locality is attached to `(namespace, name)`, multiple allocations that use the same name intentionally share one node registration. This is useful when several tasks need the same local data, but it also means a replicated stateful system that requires independent disks on separate nodes must use distinct volume names for those members. Trellis does not replicate, snapshot, back up, or migrate volume contents.
