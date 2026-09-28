@@ -569,7 +569,7 @@ func (s *Server) Reconcile(ctx context.Context) {
 				continue
 			}
 			requiredCapabilities := spec.GroupRequiredCapabilities(&group)
-			placements := Schedule(&PlacementIntent{Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Count: deficit, Nodes: s.nodePointers(), Allocations: occupied, Tasks: group.Tasks, Constraints: group.Constraints, RequiredCapabilities: requiredCapabilities, VolumeOwners: volumeOwners})
+			placements := Schedule(&PlacementIntent{Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Count: deficit, Nodes: s.nodePointers(), Allocations: occupied, DesiredAllocations: valid, Tasks: group.Tasks, Constraints: group.Constraints, RequiredCapabilities: requiredCapabilities, VolumeOwners: volumeOwners})
 			for i, placement := range placements {
 				node := s.nodes[placement.NodeID]
 				if i < len(pending) {

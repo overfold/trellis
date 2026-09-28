@@ -124,6 +124,23 @@ func TestScheduleSpreadsTaskGroupReplicas(t *testing.T) {
 	}
 }
 
+func TestScheduleSeparatesDesiredReplicasFromOccupancy(t *testing.T) {
+	a := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000002"), Status: NodeStatusHealthy}
+	b := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000001"), Status: NodeStatusHealthy}
+	obsolete := &Allocation{Namespace: "default", JobName: "web", TaskGroupName: "api", Node: a}
+	desired := &Allocation{Namespace: "default", JobName: "web", TaskGroupName: "api", Node: b}
+
+	placements := Schedule(&PlacementIntent{
+		Namespace: "default", JobName: "web", TaskGroupName: "api", Count: 1,
+		Nodes:              []*Node{a, b},
+		Allocations:        []*Allocation{obsolete, desired},
+		DesiredAllocations: []*Allocation{desired},
+	})
+	if len(placements) != 1 || placements[0].NodeID != a.ID {
+		t.Fatalf("placements = %#v, want node without a desired replica", placements)
+	}
+}
+
 func TestScheduleAvoidsOccupiedHostPorts(t *testing.T) {
 	a := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000001"), Status: NodeStatusHealthy}
 	b := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000002"), Status: NodeStatusHealthy}
