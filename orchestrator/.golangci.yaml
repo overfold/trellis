@@ -1,4 +1,9 @@
 version: "2"
+run:
+  # Lint the multi-process integration suite and the integration-only node
+  # runtime wiring alongside the default build.
+  build-tags:
+    - integration
 linters:
   default: standard
   enable:

@@ -51,6 +51,7 @@ import (
 	"github.com/labstack/echo/v5/middleware"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 const shutdownTime = 10 * time.Second
@@ -60,7 +61,7 @@ type config struct {
 	AgentListen, AgentAdvertise, ServerListen, ServerAdvertise                     string
 	RaftListen, RaftAdvertise, Join                                                string
 	DataDir, Cluster, AdminPublicKey, EnrollmentToken, SigningMode, ContainerdSock string
-	Runtime, RuntimeFaults                                                         string
+	Runtime                                                                        string
 	WireGuardPool, WireGuardEndpoint                                               string
 	WireGuardPort, WireGuardPortCount                                              int
 	DNSListen                                                                      string
@@ -111,8 +112,10 @@ func main() {
 	f.StringVar(&cfg.EnrollmentToken, "enrollment-token", "", "Managed-mode node enrollment credential")
 	f.StringVar(&cfg.SigningMode, "node-signing-mode", "managed", "Node certificate signing mode: managed or external")
 	f.StringVar(&cfg.ContainerdSock, "containerd-sock", "/run/containerd/containerd.sock", "Containerd socket path")
-	f.StringVar(&cfg.Runtime, "runtime", "containerd", "Workload runtime: containerd or injected (test only)")
-	f.StringVar(&cfg.RuntimeFaults, "runtime-faults", "", "Injected runtime fault-control file")
+	f.StringVar(&cfg.Runtime, "runtime", "containerd", "Workload runtime: containerd")
+	if buildTestRuntime != nil {
+		buildTestRuntime.addFlags(f)
+	}
 	f.StringVar(&cfg.WireGuardPool, "wireguard-pool", "10.64.0.0/10", "Cluster address pool used for automatic namespace networking")
 	f.StringVar(&cfg.WireGuardEndpoint, "wireguard-endpoint", "", "Externally reachable WireGuard host or base host:port")
 	f.IntVar(&cfg.WireGuardPort, "wireguard-port", 51820, "First UDP port in the per-namespace WireGuard range")
@@ -148,6 +151,9 @@ func run(parent context.Context, cfg *config) error {
 	}
 	if cfg.SigningMode != "managed" && cfg.SigningMode != "external" {
 		return fmt.Errorf("node_signing_mode must be managed or external")
+	}
+	if err := validateRuntime(cfg.Runtime); err != nil {
+		return err
 	}
 	if cfg.SigningMode == "managed" && cfg.EnrollmentToken == "" {
 		return fmt.Errorf("enrollment_token or --enrollment-token is required in managed mode")
@@ -321,23 +327,9 @@ func run(parent context.Context, cfg *config) error {
 		}
 	}
 
-	var runtimeClient containerruntime.ContainerRuntime
-	var runtimeCloser io.Closer
-	switch cfg.Runtime {
-	case "containerd":
-		r, err := containerruntime.NewContainerdRuntime(cfg.ContainerdSock)
-		if err != nil {
-			return fmt.Errorf("init runtime: %w", err)
-		}
-		runtimeClient, runtimeCloser = r, r
-	case "injected":
-		r, err := containerruntime.NewInjectedRuntime(filepath.Join(cfg.DataDir, "injected-runtime.json"), cfg.RuntimeFaults)
-		if err != nil {
-			return fmt.Errorf("init injected runtime: %w", err)
-		}
-		runtimeClient, runtimeCloser = r, r
-	default:
-		return fmt.Errorf("unsupported runtime %q", cfg.Runtime)
+	runtimeClient, runtimeCloser, capabilities, err := openRuntime(cfg)
+	if err != nil {
+		return err
 	}
 	defer func() {
 		if err := runtimeCloser.Close(); err != nil {
@@ -401,7 +393,7 @@ func run(parent context.Context, cfg *config) error {
 	if err := ag.SetResources(goruntime.NumCPU()*1000, memory, goruntime.GOOS, goruntime.GOARCH); err != nil {
 		return fmt.Errorf("configure node resources: %w", err)
 	}
-	ag.SetCapabilities(detectNodeCapabilities(cfg.Runtime))
+	ag.SetCapabilities(capabilities)
 	if len(cfg.Labels) > 0 {
 		labels, err := parseLabels(cfg.Labels)
 		if err != nil {
@@ -541,10 +533,47 @@ func detectAdvertiseHost() (string, error) {
 	return "", fmt.Errorf("no non-loopback IPv4 address found")
 }
 
-func detectNodeCapabilities(runtimeName string) []spec.NodeCapability {
-	if runtimeName == "injected" {
-		return []spec.NodeCapability{spec.CapabilityRunsc, spec.CapabilityNamespaceNetworking}
+// testRuntime describes a runtime that exists only for tests. It is nil in
+// normal builds and set by runtime_injected.go in integration builds, so a
+// production node cannot select a runtime that reports workloads as running
+// without executing them.
+type testRuntime struct {
+	name     string
+	addFlags func(*pflag.FlagSet)
+	open     func(dataDir string) (containerruntime.ContainerRuntime, io.Closer, error)
+}
+
+var buildTestRuntime *testRuntime
+
+func validateRuntime(name string) error {
+	if name == "containerd" || (buildTestRuntime != nil && name == buildTestRuntime.name) {
+		return nil
 	}
+	return fmt.Errorf("unsupported runtime %q", name)
+}
+
+// openRuntime opens the configured workload runtime and returns the node
+// capabilities it can honestly advertise.
+func openRuntime(cfg *config) (containerruntime.ContainerRuntime, io.Closer, []spec.NodeCapability, error) {
+	if err := validateRuntime(cfg.Runtime); err != nil {
+		return nil, nil, nil, err
+	}
+	if cfg.Runtime == "containerd" {
+		r, err := containerruntime.NewContainerdRuntime(cfg.ContainerdSock)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("init runtime: %w", err)
+		}
+		return r, r, detectNodeCapabilities(), nil
+	}
+	// Test runtimes execute nothing, so they advertise no optional capabilities.
+	r, closer, err := buildTestRuntime.open(cfg.DataDir)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return r, closer, nil, nil
+}
+
+func detectNodeCapabilities() []spec.NodeCapability {
 	var capabilities []spec.NodeCapability
 	if _, err := exec.LookPath("runsc"); err == nil {
 		if config, err := os.ReadFile("/etc/containerd/config.toml"); err == nil && bytes.Contains(config, []byte("io.containerd.runsc.v1")) {

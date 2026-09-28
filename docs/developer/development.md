@@ -26,7 +26,15 @@ CGO_ENABLED=0 go build -o /tmp/trellis-health-probe ./cmd/trellis-health-probe
 sudo env TRELLIS_HEALTH_PROBE=/tmp/trellis-health-probe "$(command -v go)" test -tags=containerd_e2e ./internal/runtime -run 'TestContainerd(AllocationAdoption|HealthProbe|StopsCreatedTask|RestartsTaskWithManagedVolume|ListsPausedContainer|ListsContainerWithDeletedTask)' -count=1 -timeout=3m
 ```
 
-Multi-node integration uses the test/injected runtime and is separated in CI. Tests beside each package document state-machine invariants, Raft persistence, scheduler behavior, network planning, durability, update regressions, and security validation.
+Multi-node integration uses the test/injected runtime and is separated in CI. The injected runtime is compiled into the node binary only under the `integration` build tag; the suite builds its own node binary with that tag:
+
+```sh
+go test -tags=integration ./integration -count=1 -timeout=6m
+```
+
+Normal builds reject `--runtime injected`.
+
+Tests beside each package document state-machine invariants, Raft persistence, scheduler behavior, network planning, durability, update regressions, and security validation.
 
 ## Three-node Vagrant demo
 
