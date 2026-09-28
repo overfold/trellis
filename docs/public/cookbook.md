@@ -180,6 +180,8 @@ Keep related services that need private discovery in the same namespace. Put unr
 
 Do not emulate namespaces with job-name prefixes or labels. Labels are useful for selection and routing; they are not an authorization boundary.
 
+Namespace scope separates Trellis-owned resources but does not decide which valid manifest capabilities a submitter may request. If submitters are untrusted tenants, put a policy-enforcing frontend in front of the API and follow [Multitenancy and trust boundaries](multitenancy.md).
+
 ## Place workloads only on compatible nodes
 
 **Outcome:** schedule a task group only where its runtime, architecture, hardware, locality, or operator-managed dependency is available.
