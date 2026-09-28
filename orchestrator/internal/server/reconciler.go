@@ -156,6 +156,31 @@ func applyReconciledAllocation(allocation, update *Allocation, node *Node) {
 	allocation.Events = update.Events
 }
 
+func (s *Server) persistAllocationUpdate(ctx context.Context, allocation *Allocation, update func(*Allocation) error) error {
+	s.mutationMu.Lock()
+	defer s.mutationMu.Unlock()
+	s.mu.RLock()
+	allocation.mu.Lock()
+	next, err := cloneAllocationForReconcile(allocation)
+	allocation.mu.Unlock()
+	s.mu.RUnlock()
+	if err != nil {
+		return err
+	}
+	if err := update(next); err != nil {
+		return err
+	}
+	if err := s.state.PutAllocation(ctx, next); err != nil {
+		return err
+	}
+	s.mu.RLock()
+	allocation.mu.Lock()
+	applyAllocationSnapshot(allocation, next)
+	allocation.mu.Unlock()
+	s.mu.RUnlock()
+	return nil
+}
+
 func sameAllocationState(a, b *Allocation) (bool, error) {
 	aRaw, err := json.Marshal(a)
 	if err != nil {
@@ -172,7 +197,12 @@ func sameAllocationState(a, b *Allocation) (bool, error) {
 func (s *Server) Reconcile(ctx context.Context) {
 	start := time.Now()
 	s.reconcileMu.Lock()
+	s.mutationMu.Lock()
+	mutationLocked := true
 	defer func() {
+		if mutationLocked {
+			s.mutationMu.Unlock()
+		}
 		s.reconcileMu.Unlock()
 		if s.metrics != nil {
 			s.metrics.ReconcileDuration.Observe(time.Since(start).Seconds())
@@ -738,6 +768,8 @@ func (s *Server) Reconcile(ctx context.Context) {
 		}
 		s.mu.Unlock()
 	}
+	s.mutationMu.Unlock()
+	mutationLocked = false
 	for _, backoff := range delayed {
 		next := backoff.NextReplacementAt
 		s.log.Info("delaying task group replacement after failed allocations", "namespace", backoff.Namespace, "job", backoff.JobName, "group", backoff.TaskGroupName, "failures", backoff.Failures, "next_replacement_at", next, "last_allocation", backoff.LastAllocationID)
@@ -1091,19 +1123,35 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 	// is queued on mu.
 	s.mu.RLock()
 	alloc.mu.Lock()
-	defer alloc.mu.Unlock()
 
 	serverLocked := true
+	allocationLocked := true
+	unlockAllocation := func() {
+		if allocationLocked {
+			alloc.mu.Unlock()
+			allocationLocked = false
+		}
+	}
 	unlockServer := func() {
 		if serverLocked {
 			s.mu.RUnlock()
 			serverLocked = false
 		}
 	}
+	unlockState := func() {
+		unlockAllocation()
+		unlockServer()
+	}
+	defer unlockAllocation()
 	defer unlockServer()
 
 	now := s.now().UTC()
 	address := fmt.Sprintf("%s:%d", alloc.Node.Host, alloc.Node.Port)
+	requestNodeID := alloc.Node.ID
+	allocationID := alloc.ID
+	generation := alloc.Generation
+	drainSequence := alloc.DrainSequence
+	draining := alloc.Draining
 	epoch := s.controlEpoch
 	serverAddr := s.serverAddr
 	nodeStatus := alloc.Node.Status
@@ -1136,16 +1184,16 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 			request.NetworkPlan = plan
 		}
 
-		// Everything below may perform storage or network I/O. Release mu while
-		// retaining allocation.mu so the allocation lifecycle remains serialized.
-		unlockServer()
+		// Everything below may perform storage or network I/O. Release both state
+		// locks; each durable lifecycle update takes a fresh serialized snapshot.
+		unlockState()
 
 		for _, task := range request.Tasks {
 			for _, ref := range task.Secrets {
 				if s.secrets == nil {
 					return fmt.Errorf("secret %s is unavailable: secrets are not configured", ref.Name)
 				}
-				value, version, err := s.secrets.Resolve(ctx, alloc.Namespace, ref.Name)
+				value, version, err := s.secrets.Resolve(ctx, request.Namespace, ref.Name)
 				if err != nil {
 					return fmt.Errorf("secret %s is unavailable", ref.Name)
 				}
@@ -1158,7 +1206,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 			}
 		}()
 		if groupAPIAccess != nil {
-			token, err := s.apiAccessToken(ctx, groupAPIAccess, alloc.Namespace)
+			token, err := s.apiAccessToken(ctx, groupAPIAccess, request.Namespace)
 			if err != nil {
 				return err
 			}
@@ -1169,7 +1217,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 			request.EnvOverrides = map[string]string{
 				"TRELLIS_TOKEN":     token,
 				"TRELLIS_ADDR":      apiAddr,
-				"TRELLIS_NAMESPACE": alloc.Namespace,
+				"TRELLIS_NAMESPACE": request.Namespace,
 			}
 			_, port, err := net.SplitHostPort(serverAddr)
 			if err != nil {
@@ -1213,91 +1261,124 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 		raw, _ := json.Marshal(hashInput)
 		hash := sha256.Sum256(raw)
 		request.ExecutionHash = hex.EncodeToString(hash[:])
-		if alloc.Phase == lifecycle.PhasePlaced || alloc.Phase == lifecycle.PhaseStopped || alloc.Phase == lifecycle.PhaseFailed || alloc.Phase == lifecycle.PhaseLost {
-			if err := alloc.Transition(lifecycle.PhaseStarting, now, "", ""); err != nil {
-				return err
+		if err := s.persistAllocationUpdate(ctx, alloc, func(next *Allocation) error {
+			if next.Phase == lifecycle.PhasePlaced || next.Phase == lifecycle.PhaseStopped || next.Phase == lifecycle.PhaseFailed || next.Phase == lifecycle.PhaseLost {
+				return next.Transition(lifecycle.PhaseStarting, now, "", "")
 			}
-		}
-		if err := s.state.PutAllocation(ctx, alloc); err != nil {
+			return nil
+		}); err != nil {
 			return fmt.Errorf("persist allocation: %w", err)
 		}
-		if err := s.client.RunAllocation(ctx, alloc.Node.ID, address, request); err != nil {
+		if err := s.client.RunAllocation(ctx, requestNodeID, address, request); err != nil {
 			if code := agentOperationCode(err); code == api.OperationStaleEpoch {
 				return err
 			} else if code == api.OperationStaleGeneration || code == api.OperationConflict || code == api.OperationRestartExhausted {
-				_ = alloc.Transition(lifecycle.PhaseFailed, now, string(code), err.Error())
-				alloc.NextRetryAt = nil
-				_ = s.state.PutAllocation(context.WithoutCancel(ctx), alloc)
+				if persistErr := s.persistAllocationUpdate(context.WithoutCancel(ctx), alloc, func(next *Allocation) error {
+					if next.Phase != lifecycle.PhaseStarting && next.Phase != lifecycle.PhaseRunning {
+						return nil
+					}
+					if transitionErr := next.Transition(lifecycle.PhaseFailed, now, string(code), err.Error()); transitionErr != nil {
+						return transitionErr
+					}
+					next.NextRetryAt = nil
+					return nil
+				}); persistErr != nil {
+					return fmt.Errorf("%w (persist allocation failure: %v)", err, persistErr)
+				}
 				return err
 			}
-			alloc.Attempt++
-			alloc.Reason, alloc.Message = "agent_start_failed", err.Error()
-			if alloc.Attempt >= maxExecutionAttempts {
-				_ = alloc.Transition(lifecycle.PhaseFailed, now, "retry_limit", err.Error())
-				alloc.NextRetryAt = nil
-			} else {
-				next := now.Add(retryDelay(alloc.ID, alloc.Attempt))
-				alloc.NextRetryAt = &next
+			if persistErr := s.persistAllocationUpdate(context.WithoutCancel(ctx), alloc, func(next *Allocation) error {
+				if next.Phase != lifecycle.PhaseStarting && next.Phase != lifecycle.PhaseRunning {
+					return nil
+				}
+				next.Attempt++
+				next.Reason, next.Message = "agent_start_failed", err.Error()
+				if next.Attempt >= maxExecutionAttempts {
+					if transitionErr := next.Transition(lifecycle.PhaseFailed, now, "retry_limit", err.Error()); transitionErr != nil {
+						return transitionErr
+					}
+					next.NextRetryAt = nil
+				} else {
+					retryAt := now.Add(retryDelay(next.ID, next.Attempt))
+					next.NextRetryAt = &retryAt
+				}
+				return nil
+			}); persistErr != nil {
+				return fmt.Errorf("%w (persist allocation failure: %v)", err, persistErr)
 			}
-			_ = s.state.PutAllocation(context.WithoutCancel(ctx), alloc)
 			return err
 		}
-		alloc.Attempt, alloc.NextRetryAt = 0, nil
-		_ = alloc.Transition(lifecycle.PhaseRunning, now, "", "")
-		if err := s.state.PutAllocation(ctx, alloc); err != nil {
+		if err := s.persistAllocationUpdate(ctx, alloc, func(next *Allocation) error {
+			if next.Phase != lifecycle.PhaseStarting && next.Phase != lifecycle.PhaseRunning {
+				return nil
+			}
+			next.Attempt, next.NextRetryAt = 0, nil
+			return next.Transition(lifecycle.PhaseRunning, now, "", "")
+		}); err != nil {
 			return fmt.Errorf("persist running allocation: %w", err)
 		}
 	case ActionDrain:
-		unlockServer()
+		unlockState()
 		if nodeStatus != NodeStatusHealthy && nodeStatus != NodeStatusDraining {
-			return fmt.Errorf("node %s is unavailable for allocation drain", alloc.Node.ID)
+			return fmt.Errorf("node %s is unavailable for allocation drain", requestNodeID)
 		}
-		return s.client.DrainAllocation(ctx, alloc.Node.ID, address, &api.DrainAllocationRequest{AllocationID: alloc.ID, Generation: alloc.Generation, Epoch: epoch, Sequence: alloc.DrainSequence})
+		return s.client.DrainAllocation(ctx, requestNodeID, address, &api.DrainAllocationRequest{AllocationID: allocationID, Generation: generation, Epoch: epoch, Sequence: drainSequence})
 	case ActionResume:
-		unlockServer()
+		unlockState()
 		if nodeStatus != NodeStatusHealthy {
-			return fmt.Errorf("node %s is unavailable for allocation resume", alloc.Node.ID)
+			return fmt.Errorf("node %s is unavailable for allocation resume", requestNodeID)
 		}
-		if alloc.Draining {
+		if draining {
 			return nil
 		}
-		request := &api.DrainAllocationRequest{AllocationID: alloc.ID, Generation: alloc.Generation, Epoch: epoch, Sequence: alloc.DrainSequence}
-		if err := s.client.ResumeAllocation(ctx, alloc.Node.ID, address, request); err != nil {
+		request := &api.DrainAllocationRequest{AllocationID: allocationID, Generation: generation, Epoch: epoch, Sequence: drainSequence}
+		if err := s.client.ResumeAllocation(ctx, requestNodeID, address, request); err != nil {
 			return err
 		}
 		s.recordResumeDelivered(request)
 	case ActionStop:
-		unlockServer()
+		unlockState()
 
-		if alloc.Phase != lifecycle.PhaseStopping {
-			if err := alloc.Transition(lifecycle.PhaseStopping, now, "", ""); err != nil {
-				return err
+		if err := s.persistAllocationUpdate(ctx, alloc, func(next *Allocation) error {
+			if next.Phase != lifecycle.PhaseStopping {
+				return next.Transition(lifecycle.PhaseStopping, now, "", "")
 			}
-			if err := s.state.PutAllocation(ctx, alloc); err != nil {
-				return err
-			}
+			return nil
+		}); err != nil {
+			return err
 		}
 		if nodeStatus != NodeStatusHealthy && nodeStatus != NodeStatusDraining {
-			return fmt.Errorf("node %s is unavailable for allocation stop", alloc.Node.ID)
+			return fmt.Errorf("node %s is unavailable for allocation stop", requestNodeID)
 		}
-		if err := s.client.StopAllocation(ctx, alloc.Node.ID, address, &api.StopAllocationRequest{AllocationID: alloc.ID, Generation: alloc.Generation, Epoch: epoch}); err != nil {
+		if err := s.client.StopAllocation(ctx, requestNodeID, address, &api.StopAllocationRequest{AllocationID: allocationID, Generation: generation, Epoch: epoch}); err != nil {
 			if code := agentOperationCode(err); code == api.OperationStaleEpoch || code == api.OperationStaleGeneration {
 				return err
 			}
-			alloc.Attempt++
-			alloc.Reason, alloc.Message = "agent_stop_failed", err.Error()
-			next := now.Add(retryDelay(alloc.ID, alloc.Attempt))
-			alloc.NextRetryAt = &next
-			_ = s.state.PutAllocation(context.WithoutCancel(ctx), alloc)
+			if persistErr := s.persistAllocationUpdate(context.WithoutCancel(ctx), alloc, func(next *Allocation) error {
+				if next.Phase != lifecycle.PhaseStopping {
+					return nil
+				}
+				next.Attempt++
+				next.Reason, next.Message = "agent_stop_failed", err.Error()
+				retryAt := now.Add(retryDelay(next.ID, next.Attempt))
+				next.NextRetryAt = &retryAt
+				return nil
+			}); persistErr != nil {
+				return fmt.Errorf("%w (persist allocation failure: %v)", err, persistErr)
+			}
 			return err
 		}
-		alloc.Attempt, alloc.NextRetryAt = 0, nil
-		_ = alloc.Transition(lifecycle.PhaseStopped, now, "", "")
-		if err := s.state.PutAllocation(ctx, alloc); err != nil {
+		if err := s.persistAllocationUpdate(ctx, alloc, func(next *Allocation) error {
+			if next.Phase != lifecycle.PhaseStopping && next.Phase != lifecycle.PhaseStopped {
+				return nil
+			}
+			next.Attempt, next.NextRetryAt = 0, nil
+			return next.Transition(lifecycle.PhaseStopped, now, "", "")
+		}); err != nil {
 			return fmt.Errorf("persist stopped allocation: %w", err)
 		}
 	default:
-		unlockServer()
+		unlockState()
 	}
 	return nil
 }

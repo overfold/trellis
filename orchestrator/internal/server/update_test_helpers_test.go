@@ -24,6 +24,7 @@ type testAgent struct {
 	port       int
 	mu         sync.Mutex
 	calls      []agentCall
+	failRun    bool
 	failResume bool
 }
 
@@ -39,8 +40,13 @@ func newTestAgent() *testAgent {
 		body, _ := io.ReadAll(r.Body)
 		agent.mu.Lock()
 		agent.calls = append(agent.calls, agentCall{method: r.Method, path: r.URL.Path, body: body})
+		failRun := agent.failRun
 		failResume := agent.failResume
 		agent.mu.Unlock()
+		if failRun && r.Method == http.MethodPost && r.URL.Path == "/v1/allocations" {
+			http.Error(w, "run unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		if failResume && r.Method == http.MethodDelete {
 			http.Error(w, "resume unavailable", http.StatusServiceUnavailable)
 			return
