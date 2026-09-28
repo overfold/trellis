@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/clofour/trellis/internal/plan"
+	"github.com/overfold/trellis/internal/plan"
 )
 
 func printJobPlan(w io.Writer, result *plan.Result) error {

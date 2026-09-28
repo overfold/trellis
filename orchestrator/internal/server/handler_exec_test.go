@@ -10,10 +10,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/clofour/trellis/internal/auth"
-	"github.com/clofour/trellis/internal/spec"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
+	"github.com/overfold/trellis/internal/auth"
+	"github.com/overfold/trellis/internal/spec"
 )
 
 // newExecTestHandler places one allocation on a node whose agent answers

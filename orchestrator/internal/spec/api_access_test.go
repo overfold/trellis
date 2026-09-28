@@ -21,7 +21,7 @@ func TestValidateRejectsInvalidAPIAccess(t *testing.T) {
 	job := &JobSpec{Namespace: "default", Name: "api-client", TaskGroups: []TaskGroupSpec{{
 		Name: "client", Count: 1,
 		APIAccess: &APIAccessSpec{Scope: "other", Access: APIAccessRead},
-		Tasks: []TaskSpec{{Name: "client", Image: "example/client:1", Networking: &TaskNetworkingSpec{Mode: TaskNetworkHost}}},
+		Tasks:     []TaskSpec{{Name: "client", Image: "example/client:1", Networking: &TaskNetworkingSpec{Mode: TaskNetworkHost}}},
 	}}}
 	if err := Validate(job); err == nil {
 		t.Fatal("expected invalid api_access scope to be rejected")
@@ -32,7 +32,7 @@ func TestValidateRejectsAPIAccessWithoutRoutableNetworking(t *testing.T) {
 	job := &JobSpec{Namespace: "default", Name: "api-client", TaskGroups: []TaskGroupSpec{{
 		Name: "client", Count: 1,
 		APIAccess: &APIAccessSpec{Scope: APIAccessNamespace, Access: APIAccessRead},
-		Tasks: []TaskSpec{{Name: "client", Image: "example/client:1"}},
+		Tasks:     []TaskSpec{{Name: "client", Image: "example/client:1"}},
 	}}}
 	if err := Validate(job); err == nil {
 		t.Fatal("expected api_access without host or namespace networking to be rejected")

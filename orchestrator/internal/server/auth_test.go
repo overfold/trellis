@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/clofour/trellis/internal/api"
-	"github.com/clofour/trellis/internal/auth"
 	"github.com/labstack/echo/v5"
+	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/auth"
 )
 
 func TestHandleWhoAmI(t *testing.T) {

@@ -9,12 +9,12 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/clofour/trellis/internal/api"
-	"github.com/clofour/trellis/internal/client"
-	"github.com/clofour/trellis/internal/network"
-	"github.com/clofour/trellis/internal/runtime"
-	"github.com/clofour/trellis/internal/spec"
-	"github.com/clofour/trellis/internal/storage"
+	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/client"
+	"github.com/overfold/trellis/internal/network"
+	"github.com/overfold/trellis/internal/runtime"
+	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/internal/storage"
 )
 
 // recoveringNetworkManager records attachments by allocation ID the way the

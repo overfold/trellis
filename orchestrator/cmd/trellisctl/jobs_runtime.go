@@ -11,9 +11,9 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/clofour/trellis/internal/api"
-	"github.com/clofour/trellis/internal/client"
-	"github.com/clofour/trellis/internal/lifecycle"
+	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/client"
+	"github.com/overfold/trellis/internal/lifecycle"
 )
 
 func isHTTPStatus(err error, status int) bool {

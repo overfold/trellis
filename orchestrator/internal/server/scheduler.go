@@ -5,8 +5,8 @@ import (
 	"math"
 	"slices"
 
-	"github.com/clofour/trellis/internal/spec"
 	"github.com/google/uuid"
+	"github.com/overfold/trellis/internal/spec"
 )
 
 // PlacementIntent describes an allocation placement request.

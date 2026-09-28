@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/clofour/trellis/internal/lifecycle"
-	"github.com/clofour/trellis/internal/spec"
-	"github.com/clofour/trellis/internal/state"
 	"github.com/google/uuid"
+	"github.com/overfold/trellis/internal/lifecycle"
+	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/internal/state"
 )
 
 type failingBatchStore struct {

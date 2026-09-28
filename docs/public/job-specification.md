@@ -12,7 +12,7 @@ The repository publishes two schemas:
 The schema improves editing but never replaces `trellisctl jobs apply --check` or server validation.
 
 ```yaml
-# yaml-language-server: $schema=https://raw.githubusercontent.com/clofour/trellis/main/schemas/trellis-job.schema.json
+# yaml-language-server: $schema=https://raw.githubusercontent.com/overfold/trellis/main/schemas/trellis-job.schema.json
 name: web
 namespace: default
 task_groups:
@@ -35,7 +35,7 @@ task_groups:
       max_parallel: 1
     tasks:
       - name: app
-        image: ghcr.io/clofour/trellis-tutorial:v2
+        image: ghcr.io/overfold/trellis-tutorial:v2
         networking:
           mode: host
           ports:

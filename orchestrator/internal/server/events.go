@@ -3,7 +3,7 @@ package server
 import (
 	"sync"
 
-	"github.com/clofour/trellis/internal/api"
+	"github.com/overfold/trellis/internal/api"
 )
 
 // EventBus distributes cluster events to SSE subscribers.

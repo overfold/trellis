@@ -2,8 +2,8 @@
 package api
 
 import (
-	"github.com/clofour/trellis/internal/network"
-	"github.com/clofour/trellis/internal/spec"
+	"github.com/overfold/trellis/internal/network"
+	"github.com/overfold/trellis/internal/spec"
 )
 
 // AllocationRequest describes an allocation for an agent to start. Generation

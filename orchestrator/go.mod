@@ -1,4 +1,4 @@
-module github.com/clofour/trellis
+module github.com/overfold/trellis
 
 go 1.26.4
 

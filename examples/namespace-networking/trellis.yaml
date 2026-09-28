@@ -1,4 +1,4 @@
-# yaml-language-server: $schema=https://raw.githubusercontent.com/clofour/trellis/main/schemas/trellis-job.schema.json
+# yaml-language-server: $schema=https://raw.githubusercontent.com/overfold/trellis/main/schemas/trellis-job.schema.json
 name: namespace-networking
 namespace: default
 task_groups:
@@ -6,7 +6,7 @@ task_groups:
     count: 2
     tasks:
       - name: tutorial
-        image: ghcr.io/clofour/trellis-tutorial:network-v1
+        image: ghcr.io/overfold/trellis-tutorial:network-v1
         networking:
           mode: namespace
         resources:
@@ -16,7 +16,7 @@ task_groups:
     count: 1
     tasks:
       - name: tutorial
-        image: ghcr.io/clofour/trellis-tutorial:network-v1
+        image: ghcr.io/overfold/trellis-tutorial:network-v1
         env:
           TUTORIAL_PEER_URL: http://web.namespace-networking.default.trellis:8080/health
         networking:

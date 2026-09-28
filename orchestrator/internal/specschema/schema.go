@@ -9,13 +9,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/clofour/trellis/internal/probepath"
-	"github.com/clofour/trellis/internal/spec"
+	"github.com/overfold/trellis/internal/probepath"
+	"github.com/overfold/trellis/internal/spec"
 )
 
 const (
-	apiID  = "https://raw.githubusercontent.com/clofour/trellis/main/schemas/trellis-job-api.schema.json"
-	yamlID = "https://raw.githubusercontent.com/clofour/trellis/main/schemas/trellis-job.schema.json"
+	apiID  = "https://raw.githubusercontent.com/overfold/trellis/main/schemas/trellis-job-api.schema.json"
+	yamlID = "https://raw.githubusercontent.com/overfold/trellis/main/schemas/trellis-job.schema.json"
 )
 
 var (

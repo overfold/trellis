@@ -139,7 +139,7 @@ unset TOKEN
 The upgrade entrypoint performs the node-maintenance sequence instead of asking the operator to remember it:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/clofour/trellis/main/scripts/upgrade.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/upgrade.sh | sudo bash
 ```
 
 It downloads and verifies the new release before touching the running daemon, then swaps the binaries, refreshes the installer-owned systemd unit, starts the daemon, and verifies both the service and control-plane API. If the new daemon does not become healthy, the previous binaries and unit are restored.
@@ -195,7 +195,7 @@ The error names the file or container and ends with `see "Agent recovery refused
 The default uninstall is a reversible machine-removal operation:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/clofour/trellis/main/scripts/uninstall.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/uninstall.sh | sudo bash
 ```
 
 It removes only dependencies/repositories recorded as introduced by Trellis; older installations without ownership records are handled conservatively and shared host packages are left alone. The user's `trellisctl` contexts are also kept because they describe cluster connections, not ownership of this machine. On a live multi-node cluster the script first hands the node's work and membership to the rest of the cluster; see [Multi-node clusters](multi-node.md#maintain-a-multi-node-cluster).
@@ -205,7 +205,7 @@ Instead of throwing away the encryption key while retaining encrypted state, nor
 For deliberate permanent destruction, use:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/clofour/trellis/main/scripts/uninstall.sh | \
+curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/uninstall.sh | \
   sudo bash -s -- --purge
 ```
 

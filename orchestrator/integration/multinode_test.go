@@ -22,8 +22,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/clofour/trellis/internal/api"
-	"github.com/clofour/trellis/internal/client"
+	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/client"
 )
 
 // TestMultiNodeFailureRecovery intentionally uses OS processes, loopback TCP,

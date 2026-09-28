@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/clofour/trellis/internal/auth"
+	"github.com/overfold/trellis/internal/auth"
 )
 
 // CreateCredential mints a scoped operator credential. The HTTP layer restricts

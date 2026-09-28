@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/clofour/trellis/internal/api"
+	"github.com/overfold/trellis/internal/api"
 )
 
 func TestExecCommandWritesStreamsAndPreservesExitStatus(t *testing.T) {

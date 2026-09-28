@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"sort"
 
-	"github.com/clofour/trellis/internal/spec"
+	"github.com/overfold/trellis/internal/spec"
 )
 
 // Change describes one semantic change to a job specification.
