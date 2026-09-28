@@ -1584,6 +1584,33 @@ func (s *Server) ListServices(namespace string, filter *catalog.ListFilter) api.
 	return s.catalog.List(namespace, filter)
 }
 
+// ListServicesForNode returns services only for namespaces with active
+// allocations assigned to the authenticated node.
+func (s *Server) ListServicesForNode(nodeID uuid.UUID, filter *catalog.ListFilter) api.ServiceListResponse {
+	s.mu.RLock()
+	namespaces := make(map[string]struct{})
+	for _, allocation := range s.allocations {
+		allocation.mu.Lock()
+		if allocation.Node != nil && allocation.Node.ID == nodeID &&
+			allocation.Phase != lifecycle.PhaseStopped && allocation.Phase != lifecycle.PhaseFailed && allocation.Phase != lifecycle.PhaseLost {
+			namespaces[allocation.Namespace] = struct{}{}
+		}
+		allocation.mu.Unlock()
+	}
+	s.mu.RUnlock()
+
+	names := make([]string, 0, len(namespaces))
+	for namespace := range namespaces {
+		names = append(names, namespace)
+	}
+	sort.Strings(names)
+	var result api.ServiceListResponse
+	for _, namespace := range names {
+		result = append(result, s.catalog.List(namespace, filter)...)
+	}
+	return result
+}
+
 // Catalog returns the service catalog.
 func (s *Server) Catalog() *catalog.ServiceCatalog {
 	return s.catalog

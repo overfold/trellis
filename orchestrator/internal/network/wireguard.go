@@ -53,13 +53,17 @@ func (execRunner) Run(ctx context.Context, name string, args ...string) error {
 // WorkloadDNSAddress is the reserved node-local resolver address injected into workloads.
 const WorkloadDNSAddress = "198.18.0.53"
 
+const forwardChain = "TRELLIS-FORWARD"
+
 // WireGuardManager manages allocation networking with WireGuard.
 type WireGuardManager struct {
-	configDir  string
-	stateDir   string
-	run        commandRunner
-	mu         sync.Mutex
-	dnsAddress string
+	configDir            string
+	stateDir             string
+	run                  commandRunner
+	mu                   sync.Mutex
+	dnsAddress           string
+	namespaceCIDRs       map[netip.Prefix]string
+	namespaceCIDRsLoaded bool
 	// netnsDir is where "ip netns" keeps named network namespaces.
 	netnsDir string
 }
@@ -481,22 +485,36 @@ func (m *WireGuardManager) reconcileFirewall(ctx context.Context, bridge, wg, ci
 		return fmt.Errorf("namespace firewall gateway %q must be within %s", gateway, prefix)
 	}
 	cidr = prefix.String()
+	if err := m.ensureForwardChain(ctx); err != nil {
+		return err
+	}
 	// Reject packets that claim to come from outside this node's namespace
 	// subnet before they can reach WireGuard or a host-local service.
-	sourceDrop := []string{"FORWARD", "-i", bridge, "!", "-s", cidr, "-j", "DROP"}
+	sourceDrop := []string{forwardChain, "-i", bridge, "!", "-s", cidr, "-j", "DROP"}
 	if m.run.Run(ctx, "iptables", append([]string{"-C"}, sourceDrop...)...) != nil {
-		if err := m.run.Run(ctx, "iptables", append([]string{"-I"}, sourceDrop...)...); err != nil {
+		if err := m.run.Run(ctx, "iptables", append([]string{"-A"}, sourceDrop...)...); err != nil {
 			return err
 		}
 	}
-	if m.run.Run(ctx, "iptables", "-C", "FORWARD", "-i", bridge, "!", "-o", wg, "-j", "DROP") != nil {
-		if err := m.run.Run(ctx, "iptables", "-A", "FORWARD", "-i", bridge, "!", "-o", wg, "-j", "DROP"); err != nil {
+	if m.run.Run(ctx, "iptables", "-C", forwardChain, "-i", bridge, "!", "-o", wg, "-j", "DROP") != nil {
+		if err := m.run.Run(ctx, "iptables", "-A", forwardChain, "-i", bridge, "!", "-o", wg, "-j", "DROP"); err != nil {
 			return err
 		}
 	}
-	if m.run.Run(ctx, "iptables", "-C", "FORWARD", "-o", bridge, "!", "-i", wg, "-j", "DROP") != nil {
-		if err := m.run.Run(ctx, "iptables", "-A", "FORWARD", "-o", bridge, "!", "-i", wg, "-j", "DROP"); err != nil {
+	if m.run.Run(ctx, "iptables", "-C", forwardChain, "-o", bridge, "!", "-i", wg, "-j", "DROP") != nil {
+		if err := m.run.Run(ctx, "iptables", "-A", forwardChain, "-o", bridge, "!", "-i", wg, "-j", "DROP"); err != nil {
 			return err
+		}
+	}
+	for _, legacy := range [][]string{
+		{"FORWARD", "-i", bridge, "!", "-s", cidr, "-j", "DROP"},
+		{"FORWARD", "-i", bridge, "!", "-o", wg, "-j", "DROP"},
+		{"FORWARD", "-o", bridge, "!", "-i", wg, "-j", "DROP"},
+	} {
+		if m.run.Run(ctx, "iptables", append([]string{"-C"}, legacy...)...) == nil {
+			if err := m.run.Run(ctx, "iptables", append([]string{"-D"}, legacy...)...); err != nil {
+				return err
+			}
 		}
 	}
 	if m.dnsAddress != "" {
@@ -536,6 +554,24 @@ func (m *WireGuardManager) reconcileFirewall(ctx context.Context, bridge, wg, ci
 		if err := m.run.Run(ctx, "iptables", "-A", "INPUT", "-i", bridge, "-j", "DROP"); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func (m *WireGuardManager) ensureForwardChain(ctx context.Context) error {
+	if m.run.Run(ctx, "iptables", "-L", forwardChain, "-n") != nil {
+		if err := m.run.Run(ctx, "iptables", "-N", forwardChain); err != nil {
+			return fmt.Errorf("create Trellis forwarding chain: %w", err)
+		}
+	}
+	jump := []string{"FORWARD", "-j", forwardChain}
+	if m.run.Run(ctx, "iptables", append([]string{"-C"}, jump...)...) == nil {
+		if err := m.run.Run(ctx, "iptables", append([]string{"-D"}, jump...)...); err != nil {
+			return fmt.Errorf("reposition Trellis forwarding chain: %w", err)
+		}
+	}
+	if err := m.run.Run(ctx, "iptables", "-I", "FORWARD", "1", "-j", forwardChain); err != nil {
+		return fmt.Errorf("install Trellis forwarding chain: %w", err)
 	}
 	return nil
 }

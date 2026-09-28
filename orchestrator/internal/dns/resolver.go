@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
@@ -30,16 +31,22 @@ type DiscoveryLookup interface {
 	ListDiscovery(ctx context.Context) (*api.ServiceListResponse, error)
 }
 
+// NamespaceLookup identifies the namespace network that owns a workload IP.
+type NamespaceLookup interface {
+	NamespaceForIP(netip.Addr) (string, bool)
+}
+
 type record struct {
 	addresses []net.IP
 }
 
 // Resolver serves DNS records backed by service discovery.
 type Resolver struct {
-	log       *slog.Logger
-	domain    string
-	lookup    DiscoveryLookup
-	upstreams []string
+	log        *slog.Logger
+	domain     string
+	lookup     DiscoveryLookup
+	namespaces NamespaceLookup
+	upstreams  []string
 
 	mu    sync.RWMutex
 	cache map[string]*record // "group.job.namespace" -> record
@@ -47,16 +54,17 @@ type Resolver struct {
 
 // NewResolver creates a DNS resolver for the supplied discovery source.
 // Queries outside the Trellis discovery suffix are forwarded to upstreams.
-func NewResolver(log *slog.Logger, lookup DiscoveryLookup, domain string, upstreams ...string) *Resolver {
+func NewResolver(log *slog.Logger, lookup DiscoveryLookup, namespaces NamespaceLookup, domain string, upstreams ...string) *Resolver {
 	if domain == "" {
 		domain = DefaultDomain
 	}
 	return &Resolver{
-		log:       log,
-		domain:    domain,
-		lookup:    lookup,
-		upstreams: append([]string(nil), upstreams...),
-		cache:     make(map[string]*record),
+		log:        log,
+		domain:     domain,
+		lookup:     lookup,
+		namespaces: namespaces,
+		upstreams:  append([]string(nil), upstreams...),
+		cache:      make(map[string]*record),
 	}
 }
 
@@ -154,7 +162,7 @@ func (r *Resolver) serveUDP(ctx context.Context, conn *net.UDPConn) error {
 			}
 			return fmt.Errorf("read UDP DNS query: %w", err)
 		}
-		response := r.handleQueryNetwork(buf[:n], "udp")
+		response := r.handleQueryNetwork(buf[:n], "udp", remote)
 		if response != nil {
 			if _, err := conn.WriteToUDP(response, remote); err != nil && ctx.Err() == nil && r.log != nil {
 				r.log.Error("dns UDP write error", "error", err)
@@ -194,7 +202,7 @@ func (r *Resolver) serveTCPConnection(ctx context.Context, conn net.Conn) {
 		if _, err := io.ReadFull(conn, packet); err != nil {
 			return
 		}
-		response := r.handleQueryNetwork(packet, "tcp")
+		response := r.handleQueryNetwork(packet, "tcp", conn.RemoteAddr())
 		if response == nil || len(response) > maxDNSMessageSize {
 			return
 		}
@@ -281,10 +289,10 @@ func (r *Resolver) resolve(name string) []net.IP {
 
 // handleQuery parses a DNS query and produces a response.
 func (r *Resolver) handleQuery(packet []byte) []byte {
-	return r.handleQueryNetwork(packet, "udp")
+	return r.handleQueryNetwork(packet, "udp", nil)
 }
 
-func (r *Resolver) handleQueryNetwork(packet []byte, network string) []byte {
+func (r *Resolver) handleQueryNetwork(packet []byte, network string, remote net.Addr) []byte {
 	if len(packet) < 12 {
 		return nil
 	}
@@ -307,11 +315,43 @@ func (r *Resolver) handleQueryNetwork(packet []byte, network string) []byte {
 
 	qtype := binary.BigEndian.Uint16(packet[offset : offset+2])
 	qclass := binary.BigEndian.Uint16(packet[offset+2 : offset+4])
+	if r.namespaces != nil {
+		remoteIP, ok := remoteAddress(remote)
+		if !ok {
+			return buildResponse(id, name, qtype, qclass, nil)
+		}
+		namespace, ok := r.namespaces.NamespaceForIP(remoteIP)
+		if !ok || queryNamespace(name, r.domain) != namespace {
+			return buildResponse(id, name, qtype, qclass, nil)
+		}
+	}
+
 	if qtype != 1 || qclass != 1 {
 		return buildResponse(id, name, qtype, qclass, nil)
 	}
 	ips := r.resolve(name)
 	return buildResponse(id, name, qtype, qclass, ips)
+}
+
+func remoteAddress(remote net.Addr) (netip.Addr, bool) {
+	if remote == nil {
+		return netip.Addr{}, false
+	}
+	host, _, err := net.SplitHostPort(remote.String())
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	address, err := netip.ParseAddr(host)
+	return address, err == nil
+}
+
+func queryNamespace(name, domain string) string {
+	query := strings.TrimSuffix(name, "."+domain+".")
+	parts := strings.Split(query, ".")
+	if len(parts) != 3 {
+		return ""
+	}
+	return parts[2]
 }
 
 func (r *Resolver) forward(packet []byte, network string) []byte {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -16,6 +17,17 @@ type mockLookup struct {
 	services *api.ServiceListResponse
 }
 
+type namespaceLookup map[netip.Prefix]string
+
+func (n namespaceLookup) NamespaceForIP(address netip.Addr) (string, bool) {
+	for prefix, namespace := range n {
+		if prefix.Contains(address) {
+			return namespace, true
+		}
+	}
+	return "", false
+}
+
 func (m *mockLookup) ListDiscovery(_ context.Context) (*api.ServiceListResponse, error) {
 	return m.services, nil
 }
@@ -26,7 +38,7 @@ func TestResolveGroupJobNamespace(t *testing.T) {
 		{Group: "frontend", Job: "web", Namespace: "acme", Address: "10.0.0.2"},
 		{Group: "primary", Job: "db", Namespace: "acme", Address: "10.0.0.3"},
 	}
-	r := NewResolver(nil, &mockLookup{services: &services}, "trellis")
+	r := NewResolver(nil, &mockLookup{services: &services}, nil, "trellis")
 	r.refresh(context.Background())
 
 	ips := r.resolve("frontend.web.acme.trellis.")
@@ -60,7 +72,7 @@ func TestHandleQuery(t *testing.T) {
 		{Group: "frontend", Job: "web", Namespace: "acme", Address: "10.0.0.1"},
 		{Group: "frontend", Job: "web", Namespace: "acme", Address: "10.0.0.2"},
 	}
-	r := NewResolver(nil, &mockLookup{services: &services}, "trellis")
+	r := NewResolver(nil, &mockLookup{services: &services}, nil, "trellis")
 	r.refresh(context.Background())
 
 	query := buildQuery("frontend.web.acme.trellis.")
@@ -78,6 +90,32 @@ func TestHandleQuery(t *testing.T) {
 	rcode := flags & 0x000F
 	if rcode != 0 {
 		t.Fatalf("expected NOERROR, got rcode %d", rcode)
+	}
+}
+
+func TestHandleQueryRestrictsDiscoveryToSourceNamespace(t *testing.T) {
+	services := api.ServiceListResponse{
+		{Group: "frontend", Job: "web", Namespace: "acme", Address: "10.0.0.1"},
+		{Group: "frontend", Job: "web", Namespace: "other", Address: "10.1.0.1"},
+	}
+	namespaces := namespaceLookup{
+		netip.MustParsePrefix("10.42.1.0/24"): "acme",
+		netip.MustParsePrefix("10.42.2.0/24"): "other",
+	}
+	r := NewResolver(nil, &mockLookup{services: &services}, namespaces, "trellis")
+	r.refresh(context.Background())
+
+	allowed := r.handleQueryNetwork(buildQuery("frontend.web.acme.trellis."), "udp", &net.UDPAddr{IP: net.ParseIP("10.42.1.9"), Port: 53000})
+	if got := binary.BigEndian.Uint16(allowed[6:8]); got != 1 {
+		t.Fatalf("same-namespace answers = %d, want 1", got)
+	}
+	denied := r.handleQueryNetwork(buildQuery("frontend.web.other.trellis."), "udp", &net.UDPAddr{IP: net.ParseIP("10.42.1.9"), Port: 53000})
+	if got := binary.BigEndian.Uint16(denied[6:8]); got != 0 {
+		t.Fatalf("cross-namespace answers = %d, want 0", got)
+	}
+	unknown := r.handleQueryNetwork(buildQuery("frontend.web.acme.trellis."), "tcp", &net.TCPAddr{IP: net.ParseIP("192.0.2.9"), Port: 53000})
+	if got := binary.BigEndian.Uint16(unknown[6:8]); got != 0 {
+		t.Fatalf("unknown-source answers = %d, want 0", got)
 	}
 }
 
@@ -100,7 +138,7 @@ func TestBuildResponseCountsOnlyIPv4Answers(t *testing.T) {
 }
 
 func TestHandleQueryNXDomain(t *testing.T) {
-	r := NewResolver(nil, &mockLookup{services: &api.ServiceListResponse{}}, "trellis")
+	r := NewResolver(nil, &mockLookup{services: &api.ServiceListResponse{}}, nil, "trellis")
 	r.refresh(context.Background())
 
 	query := buildQuery("missing.web.acme.trellis.")
@@ -133,7 +171,7 @@ func TestResolveIgnoresEmptyAddresses(t *testing.T) {
 		{Group: "frontend", Job: "web", Namespace: "acme", Address: "10.0.0.1"},
 		{Group: "frontend", Job: "web", Namespace: "acme", Address: ""},
 	}
-	r := NewResolver(nil, &mockLookup{services: &services}, "trellis")
+	r := NewResolver(nil, &mockLookup{services: &services}, nil, "trellis")
 	r.refresh(context.Background())
 
 	ips := r.resolve("frontend.web.acme.trellis.")
@@ -165,7 +203,7 @@ func TestResolveMultipleNamespaces(t *testing.T) {
 		{Group: "frontend", Job: "web", Namespace: "acme", Address: "10.0.0.1"},
 		{Group: "frontend", Job: "web", Namespace: "staging", Address: "10.0.1.1"},
 	}
-	r := NewResolver(nil, &mockLookup{services: &services}, "trellis")
+	r := NewResolver(nil, &mockLookup{services: &services}, nil, "trellis")
 	r.refresh(context.Background())
 
 	ips := r.resolve("frontend.web.acme.trellis.")
@@ -198,7 +236,7 @@ func TestForwardsExternalQueriesToUpstream(t *testing.T) {
 		_, _ = upstream.WriteToUDP(response, remote)
 	}()
 
-	r := NewResolver(nil, &mockLookup{services: &api.ServiceListResponse{}}, "trellis", upstream.LocalAddr().String())
+	r := NewResolver(nil, &mockLookup{services: &api.ServiceListResponse{}}, nil, "trellis", upstream.LocalAddr().String())
 	resp := r.handleQuery(buildQuery("example.com."))
 	if resp == nil {
 		t.Fatal("expected forwarded response")
@@ -209,7 +247,7 @@ func TestForwardsExternalQueriesToUpstream(t *testing.T) {
 }
 
 func TestExternalQueryWithoutUpstreamReturnsServfail(t *testing.T) {
-	r := NewResolver(nil, &mockLookup{services: &api.ServiceListResponse{}}, "trellis")
+	r := NewResolver(nil, &mockLookup{services: &api.ServiceListResponse{}}, nil, "trellis")
 	resp := r.handleQuery(buildQuery("example.com."))
 	if resp == nil {
 		t.Fatal("expected SERVFAIL response")

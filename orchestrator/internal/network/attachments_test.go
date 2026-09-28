@@ -3,6 +3,7 @@ package network
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -90,6 +91,18 @@ func TestAttachRecordsAttachmentBeforeCreatingResources(t *testing.T) {
 	assertAttachments(t, manager, "alloc-one")
 }
 
+func TestNamespaceForIPUsesJournaledNamespaceCIDR(t *testing.T) {
+	manager, _ := newRecoveryTestManager(t)
+	attachForRecovery(t, manager, "alloc-one")
+
+	if namespace, ok := manager.NamespaceForIP(netip.MustParseAddr("10.42.1.23")); !ok || namespace != "acme" {
+		t.Fatalf("NamespaceForIP(local) = %q, %v; want acme, true", namespace, ok)
+	}
+	if namespace, ok := manager.NamespaceForIP(netip.MustParseAddr("10.42.2.23")); ok || namespace != "" {
+		t.Fatalf("NamespaceForIP(other) = %q, %v; want empty, false", namespace, ok)
+	}
+}
+
 func TestDetachAllocationRemovesLeftoverAttachmentByID(t *testing.T) {
 	manager, runner := newRecoveryTestManager(t)
 	// The agent stopped before it recorded the attachment Attach returned.
@@ -103,7 +116,9 @@ func TestDetachAllocationRemovesLeftoverAttachmentByID(t *testing.T) {
 	for _, want := range []string{
 		"ip link del " + attachment.HostVeth,
 		"ip netns del alloc-one",
-		"iptables -D FORWARD -i " + attachment.Bridge + " ! -s 10.42.1.0/24 -j DROP",
+		"iptables -D TRELLIS-FORWARD -i " + attachment.Bridge + " ! -s 10.42.1.0/24 -j DROP",
+		"iptables -D FORWARD -j TRELLIS-FORWARD",
+		"iptables -X TRELLIS-FORWARD",
 		"iptables -D INPUT -i " + attachment.Bridge + " -s 10.42.1.0/24 -d 10.42.1.1 -p tcp --dport 8126 -j ACCEPT",
 		"iptables -D INPUT -i " + attachment.Bridge + " -d 10.42.1.1 -p tcp --dport 8126 -j ACCEPT",
 		"iptables -D INPUT -i " + attachment.Bridge + " -s 10.42.1.0/24 -d " + WorkloadDNSAddress + " -p udp --dport 53 -j ACCEPT",
