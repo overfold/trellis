@@ -24,6 +24,7 @@ resources:
   reserved:
     cpu: 500
     memory: 1GiB
+  task_pids_limit: 2048
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -33,6 +34,9 @@ resources:
 	}
 	if cfg.Cluster != "production" || cfg.AdminPublicKey != "test-public-key" || cfg.EnrollmentToken != "trls_enroll_test" || cfg.SigningMode != "managed" || cfg.AgentAdvertise != "node-a:8127" || cfg.WireGuardPort != 51900 || cfg.WireGuardPortCount != 64 {
 		t.Fatalf("unexpected config: %#v", cfg)
+	}
+	if cfg.TaskPidsLimit != 2048 {
+		t.Fatalf("task pids limit = %d, want 2048", cfg.TaskPidsLimit)
 	}
 	if len(cfg.Labels) != 1 || cfg.Labels[0] != "storage=fast" {
 		t.Fatalf("unexpected labels: %v", cfg.Labels)

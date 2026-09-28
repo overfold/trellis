@@ -182,6 +182,8 @@ resources:
 
 CPU is expressed in millicores. The first-party YAML representation accepts a raw byte count or readable binary/decimal size such as `256MiB`, `1GiB`, or `500MB`; canonical JSON represents memory as integer bytes. The scheduler multiplies each task request by its group count when considering desired capacity. A task may omit `resources`; Trellis resolves it to the operator-configured default CPU and memory before persistence and scheduling. When supplied, both values must be positive; zero never requests the default.
 
+The memory request is also the task's hard memory limit, including swap: Trellis sets the combined memory and swap limit to the same value, so a task cannot exceed its declared memory by swapping. On hosts whose memory cgroup lacks swap accounting (cgroup v1 without `memory.memsw.*`, or cgroup v2 without `memory.swap.max`, for example when booted with `swapaccount=0`), the kernel cannot enforce this and a node with active swap logs a warning at startup; enable swap accounting or disable swap on such hosts. These cgroup limits are applied when a node creates a task container, so containers created before a node gained them keep their earlier limits until the allocation is replaced. Each task container is also limited to the node's configured number of processes and threads (`task_pids_limit`, default 4096; see [Node configuration](operations.md#node-configuration)); that limit is operator policy and has no job field.
+
 ### Volumes
 
 ```yaml
