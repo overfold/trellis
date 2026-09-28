@@ -10,7 +10,7 @@ Trellis uses Raft internally to replicate desired state and elect a control-plan
 
 ## Namespaces and jobs
 
-A **namespace** is the tenant, authorization, discovery, and workload-isolation boundary for jobs, allocations, secrets, volume identities, and namespace tokens.
+A **namespace** is the tenant, authorization, discovery, and workload-isolation boundary for jobs, allocations, secrets, volume identities, and namespace tokens. It scopes the resources Trellis owns, but does not act as admission policy for manifest capabilities such as host networking or absolute host paths. See [Multitenancy and trust boundaries](multitenancy.md) when accepting workloads from untrusted tenants.
 
 A **job** is named desired state inside a namespace. Humans define a job with a YAML **job manifest**. Applying a manifest creates the job or advances its **revision** when desired state changes.
 
