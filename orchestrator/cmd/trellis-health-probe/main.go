@@ -4,11 +4,14 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/clofour/trellis/internal/probepath"
@@ -49,11 +52,12 @@ func run(args []string) int {
 		if err != nil {
 			return 2
 		}
-		request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+target.Host, nil)
 		if err != nil {
 			return 2
 		}
-		response, err := probeClient(target.Host).Do(request)
+		request.URL = target
+		response, err := probeClient(port).Do(request)
 		if err != nil {
 			return 1
 		}
@@ -96,18 +100,29 @@ func httpTarget(port int, path string) (*url.URL, error) {
 	return target, nil
 }
 
-// probeClient never uses a proxy and follows at most maxRedirects redirects,
-// only while they stay on the probed loopback host and port. Like a kubelet
-// HTTP probe, it stops at a redirect anywhere else and treats that 3xx
-// response as the result, so a check never leaves task-local loopback.
-func probeClient(host string) *http.Client {
+// probeClient never uses a proxy, dials only loopback addresses, and follows
+// at most maxRedirects redirects, only while they stay on a loopback host and
+// the probed port. Like a kubelet HTTP probe, it stops at a redirect anywhere
+// else and treats that 3xx response as the result, so a check never leaves
+// task-local loopback.
+func probeClient(port int) *http.Client {
+	dialer := &net.Dialer{Control: func(_, address string, _ syscall.RawConn) error {
+		host, _, err := net.SplitHostPort(address)
+		if err != nil {
+			return err
+		}
+		if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+			return fmt.Errorf("refusing non-loopback address %s", address)
+		}
+		return nil
+	}}
 	return &http.Client{
-		Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true},
+		Transport: &http.Transport{Proxy: nil, DialContext: dialer.DialContext, DisableKeepAlives: true},
 		CheckRedirect: func(request *http.Request, via []*http.Request) error {
-			if len(via) >= maxRedirects {
+			if len(via) > maxRedirects {
 				return errors.New("too many redirects")
 			}
-			if request.URL.Scheme != "http" || canonicalHost(request.URL) != host {
+			if !loopbackTarget(request.URL, port) {
 				return http.ErrUseLastResponse
 			}
 			return nil
@@ -115,11 +130,23 @@ func probeClient(host string) *http.Client {
 	}
 }
 
-// canonicalHost returns host:port with the scheme's default port filled in.
-func canonicalHost(target *url.URL) string {
-	port := target.Port()
-	if port == "" {
-		port = "80"
+// loopbackTarget reports whether target is plain HTTP to a loopback host
+// (localhost or a loopback IP literal) on port.
+func loopbackTarget(target *url.URL, port int) bool {
+	if target.Scheme != "http" {
+		return false
 	}
-	return net.JoinHostPort(target.Hostname(), port)
+	targetPort := target.Port()
+	if targetPort == "" {
+		targetPort = "80"
+	}
+	if targetPort != strconv.Itoa(port) {
+		return false
+	}
+	host := target.Hostname()
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

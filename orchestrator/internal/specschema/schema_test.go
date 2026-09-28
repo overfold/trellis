@@ -3,10 +3,9 @@ package specschema
 import (
 	"bytes"
 	"encoding/json"
-	"regexp"
 	"testing"
 
-	"github.com/clofour/trellis/internal/spec"
+	"github.com/clofour/trellis/internal/probepath"
 )
 
 func TestGenerateDeterministic(t *testing.T) {
@@ -94,7 +93,7 @@ func contains(values []any, want string) bool {
 	return false
 }
 
-func TestHTTPHealthCheckPathPatternMatchesValidator(t *testing.T) {
+func TestHTTPHealthCheckPathUsesProbePathRules(t *testing.T) {
 	_, yamlRaw, err := Generate()
 	if err != nil {
 		t.Fatal(err)
@@ -104,7 +103,6 @@ func TestHTTPHealthCheckPathPatternMatchesValidator(t *testing.T) {
 		t.Fatal(err)
 	}
 	check := yaml["$defs"].(map[string]any)["HealthCheckSpec"].(map[string]any)
-	var pattern string
 	for _, condition := range check["allOf"].([]any) {
 		condition := condition.(map[string]any)
 		typeCondition := condition["if"].(map[string]any)["properties"].(map[string]any)["type"].(map[string]any)
@@ -112,37 +110,10 @@ func TestHTTPHealthCheckPathPatternMatchesValidator(t *testing.T) {
 			continue
 		}
 		path := condition["then"].(map[string]any)["properties"].(map[string]any)["path"].(map[string]any)
-		pattern = path["pattern"].(string)
-	}
-	if pattern == "" {
-		t.Fatal("HTTP health-check path pattern missing")
-	}
-	matcher := regexp.MustCompile(pattern)
-
-	for path, valid := range map[string]bool{
-		"":                        true,
-		"/":                       true,
-		"/health?ready=1":         true,
-		"/@169.254.169.254/x":     true,
-		"health":                  false,
-		"@169.254.169.254/latest": false,
-		"/health check":           false,
-		"/health\r\n":             false,
-		"/health#fragment":        false,
-		"/héalth":                 false,
-		"/health%zz":              false,
-		"/health?x=%zz":           false,
-		"/a|b":                    false,
-	} {
-		job := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{
-			Name: "api", Count: 1,
-			Tasks: []spec.TaskSpec{{Name: "server", Image: "example/server:1", HealthCheck: &spec.HealthCheckSpec{Type: spec.HealthCheckHTTP, Port: 8080, Path: path}}},
-		}}}
-		if got := spec.Validate(job) == nil; got != valid {
-			t.Fatalf("validator accepts %q = %v, want %v", path, got, valid)
+		if path["pattern"] != probepath.Pattern || path["maxLength"] != float64(probepath.MaxLength) {
+			t.Fatalf("HTTP path schema = %#v, want probepath rules", path)
 		}
-		if got := matcher.MatchString(path); got != valid {
-			t.Fatalf("schema pattern matches %q = %v, want %v", path, got, valid)
-		}
+		return
 	}
+	t.Fatal("HTTP health-check path condition missing")
 }

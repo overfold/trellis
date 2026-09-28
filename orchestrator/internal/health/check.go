@@ -13,6 +13,10 @@ import (
 // ProbeContainerPath is the reserved path of the health probe inside tasks.
 const ProbeContainerPath = "/run/trellis/health-probe"
 
+// probeUsageExit is the probe's exit code for arguments it refuses, such as
+// an HTTP path that is not a valid origin-form request target.
+const probeUsageExit = 2
+
 // CheckHTTP runs an HTTP health check inside a task.
 func CheckHTTP(ctx context.Context, c runtime.ContainerRuntime, containerID string, port int, path string, timeout time.Duration) (bool, error) {
 	return checkProbe(ctx, c, containerID, []string{ProbeContainerPath, "http", strconv.Itoa(port), path, timeout.String()})
@@ -27,6 +31,9 @@ func checkProbe(ctx context.Context, c runtime.ContainerRuntime, containerID str
 	code, err := c.Exec(ctx, containerID, command)
 	if err != nil {
 		return false, fmt.Errorf("executing health probe: %w", err)
+	}
+	if code == probeUsageExit {
+		return false, fmt.Errorf("health probe rejected its configuration %q", command[1:])
 	}
 	return code == 0, nil
 }

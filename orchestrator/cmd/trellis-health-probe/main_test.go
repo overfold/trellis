@@ -65,6 +65,11 @@ func TestHTTPProbeRejectsNonOriginPaths(t *testing.T) {
 	}
 }
 
+func requestPort(r *http.Request) string {
+	_, port, _ := net.SplitHostPort(r.Host)
+	return port
+}
+
 func TestHTTPProbeFollowsOnlyLoopbackRedirects(t *testing.T) {
 	var offHost atomic.Bool
 	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -89,20 +94,36 @@ func TestHTTPProbeFollowsOnlyLoopbackRedirects(t *testing.T) {
 			http.Redirect(w, r, other.URL+"/", http.StatusFound)
 		case "/to-https":
 			http.Redirect(w, r, "https://"+r.Host+"/ok", http.StatusFound)
+		case "/to-localhost-failing":
+			http.Redirect(w, r, "http://localhost:"+requestPort(r)+"/failing", http.StatusFound)
+		case "/to-ipv6-loopback":
+			http.Redirect(w, r, "http://[::1]:"+requestPort(r)+"/ok", http.StatusFound)
 		case "/loop":
 			http.Redirect(w, r, "/loop", http.StatusFound)
+		default:
+			if hops, err := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/hops/")); err == nil {
+				if hops == 0 {
+					w.WriteHeader(http.StatusOK)
+					return
+				}
+				http.Redirect(w, r, "/hops/"+strconv.Itoa(hops-1), http.StatusFound)
+			}
 		}
 	}))
 	defer server.Close()
 	port := strings.TrimPrefix(server.URL, "http://127.0.0.1:")
 
 	for path, want := range map[string]int{
-		"/to-ok":         0,
-		"/to-failing":    1,
-		"/to-metadata":   0,
-		"/to-other-port": 0,
-		"/to-https":      0,
-		"/loop":          1,
+		"/to-ok":                0,
+		"/to-failing":           1,
+		"/to-metadata":          0,
+		"/to-other-port":        0,
+		"/to-https":             0,
+		"/loop":                 1,
+		"/to-localhost-failing": 1,
+		"/to-ipv6-loopback":     1, // followed; the server listens only on 127.0.0.1
+		"/hops/10":              0,
+		"/hops/11":              1,
 	} {
 		if code := run([]string{"http", port, path, "2s"}); code != want {
 			t.Errorf("probe of %s exit code = %d, want %d", path, code, want)
@@ -140,5 +161,12 @@ func TestProbeRejectsUnsupportedArguments(t *testing.T) {
 				t.Fatalf("invalid arguments exit code = %d, want 2", code)
 			}
 		})
+	}
+}
+
+func TestProbeClientDialsOnlyLoopback(t *testing.T) {
+	_, err := probeClient(80).Get("http://192.0.2.1:80/")
+	if err == nil || !strings.Contains(err.Error(), "refusing non-loopback address") {
+		t.Fatalf("non-loopback dial error = %v, want refusal", err)
 	}
 }

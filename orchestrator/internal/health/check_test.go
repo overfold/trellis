@@ -90,3 +90,15 @@ func TestScriptCheckExecutesUserCommandUnchanged(t *testing.T) {
 		t.Fatalf("exec command = %#v, want %#v", rt.command, command)
 	}
 }
+
+func TestProbeUsageExitIsAnError(t *testing.T) {
+	rt := &probeRuntime{exitCode: probeUsageExit}
+	healthy, err := CheckHTTP(context.Background(), rt, "container", 8080, "not-a-path", time.Second)
+	if healthy || err == nil || !strings.Contains(err.Error(), "not-a-path") {
+		t.Fatalf("CheckHTTP() = %v, %v; want unhealthy with a configuration error", healthy, err)
+	}
+	rt.exitCode = 1
+	if healthy, err := CheckHTTP(context.Background(), rt, "container", 8080, "/", time.Second); healthy || err != nil {
+		t.Fatalf("CheckHTTP() = %v, %v; want plain unhealthy", healthy, err)
+	}
+}

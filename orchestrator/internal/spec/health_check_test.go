@@ -1,10 +1,7 @@
 package spec
 
 import (
-	"strings"
 	"testing"
-
-	"github.com/clofour/trellis/internal/probepath"
 )
 
 func healthCheckJob(check *HealthCheckSpec) *JobSpec {
@@ -13,52 +10,23 @@ func healthCheckJob(check *HealthCheckSpec) *JobSpec {
 	return job
 }
 
-func TestValidateAcceptsHTTPHealthCheckPaths(t *testing.T) {
-	for _, path := range []string{
-		"",
-		"/",
-		"/health",
-		"/health/ready?verbose=1&probe=trellis",
-		"/a:b;c=d,e!f$g'h(i)j*k~l",
-		"/v1/status%2Fready",
-		"/@169.254.169.254/latest",
-		"//health",
-		"/" + strings.Repeat("a", probepath.MaxLength-1),
-	} {
-		t.Run(path, func(t *testing.T) {
-			if err := Validate(healthCheckJob(&HealthCheckSpec{Type: HealthCheckHTTP, Port: 8080, Path: path})); err != nil {
-				t.Fatalf("valid path rejected: %v", err)
-			}
-		})
+// The accepted path syntax is covered by internal/probepath; these tests
+// cover how validation applies it.
+func TestValidateHTTPHealthCheckPath(t *testing.T) {
+	for _, path := range []string{"", "/health?ready=1"} {
+		if err := Validate(healthCheckJob(&HealthCheckSpec{Type: HealthCheckHTTP, Port: 8080, Path: path})); err != nil {
+			t.Fatalf("valid path %q rejected: %v", path, err)
+		}
 	}
-}
-
-func TestValidateRejectsInvalidHTTPHealthCheckPaths(t *testing.T) {
-	for _, path := range []string{
-		"health",
-		"@169.254.169.254/latest",
-		"http://169.254.169.254/latest",
-		"/health check",
-		"/health\tcheck",
-		"/health\r\nHost: evil",
-		"/health\x00",
-		"/health\x7f",
-		"/héalth",
-		"/health#fragment",
-		"/health%zz",
-		"/a|b",
-		"/" + strings.Repeat("a", probepath.MaxLength),
-	} {
-		t.Run(path, func(t *testing.T) {
-			err := Validate(healthCheckJob(&HealthCheckSpec{Type: HealthCheckHTTP, Port: 8080, Path: path}))
-			issues, ok := err.(ValidationErrors)
-			if !ok || len(issues) != 1 {
-				t.Fatalf("expected one validation issue, got %T: %v", err, err)
-			}
-			if want := "task_groups[api].tasks[server].health_check.path"; issues[0].Path != want || issues[0].Code != "invalid" {
-				t.Fatalf("issue = %+v, want invalid %s", issues[0], want)
-			}
-		})
+	for _, path := range []string{"@169.254.169.254/latest", "/health check"} {
+		err := Validate(healthCheckJob(&HealthCheckSpec{Type: HealthCheckHTTP, Port: 8080, Path: path}))
+		issues, ok := err.(ValidationErrors)
+		if !ok || len(issues) != 1 {
+			t.Fatalf("path %q: expected one validation issue, got %T: %v", path, err, err)
+		}
+		if want := "task_groups[api].tasks[server].health_check.path"; issues[0].Path != want || issues[0].Code != "invalid" {
+			t.Fatalf("path %q: issue = %+v, want invalid %s", path, issues[0], want)
+		}
 	}
 }
 
