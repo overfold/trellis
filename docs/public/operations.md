@@ -1,6 +1,6 @@
 # Operations
 
-Operational commands use the vocabulary in the [Trellis user model](user-model.md): apply/delete jobs, inspect allocations, and drain/undrain nodes. Raft and leadership controls are advanced control-plane operations rather than part of the normal workload model. The [CLI workflows guide](cli.md) covers contexts, planning, rollout watching, diagnosis, logging, and structured output in detail.
+Operational commands use the vocabulary in the [Trellis user model](user-model.md): apply/delete jobs, inspect allocations, and drain/undrain nodes. Cluster membership, quorum, and leadership are covered separately in [Multi-node clusters](multi-node.md) because they are not part of the normal workload model. The [CLI workflows guide](cli.md) covers contexts, planning, rollout watching, diagnosis, logging, and structured output in detail.
 
 ## Routine workflow
 
@@ -48,8 +48,8 @@ job_limits:
 defaults shown above are used when the section is omitted. Every task without a
 `resources` block receives the configured CPU and memory requests before it is
 stored, scheduled, and sent to containerd. Explicit zero or negative resource
-values are invalid. Keep these values identical on every control-plane node so
-leadership changes preserve the same admission policy.
+values are invalid. In a [multi-node cluster](multi-node.md#prepare-the-network-and-configuration),
+keep these values identical on every node.
 
 Edit this file when changing persistent node configuration, then restart the service:
 
@@ -69,73 +69,7 @@ Logs from allocations already running at the former `$TMPDIR/trellis-logs` locat
 
 ## Add a node
 
-### Managed signing (default)
-
-Adding a server is explicit rather than another branch in the first-install questionnaire. The joining server needs four pieces of information from an existing member:
-
-- an existing control-plane address such as `node-a:8128`;
-- the dedicated node-enrollment credential;
-- a pinned copy of the trusted node CA certificate;
-- the **same secrets-encryption key used by the existing servers**.
-
-The last requirement is important: encrypted secret records are replicated cluster state, so every server that may lead the cluster must be able to decrypt them with the same key/key ID. A joining server must not generate its own key.
-
-On an existing node, make temporary root-readable copies for secure transfer:
-
-```sh
-sudo awk -F': ' '$1 == "enrollment_token" { print $2; exit }' \
-  /etc/trellis/trellis.yaml | \
-  sudo tee /root/trellis-enrollment-token >/dev/null
-sudo chmod 600 /root/trellis-enrollment-token
-sudo install -m 644 /var/lib/trellis/data/node-ca.crt /root/trellis-node-ca.crt
-sudo install -m 600 /etc/trellis/secrets.key /root/trellis-secrets.key
-```
-
-Transfer those files to the new machine over a secure channel, then run:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/clofour/trellis/main/scripts/setup.sh | \
-  sudo bash -s -- \
-    --join node-a:8128 \
-    --enrollment-token-file /root/trellis-enrollment-token \
-    --ca-cert-file /root/trellis-node-ca.crt \
-    --secrets-key-file /root/trellis-secrets.key
-```
-
-Normal installer-created clusters derive the secrets key ID from the shared key, so no additional argument is needed. If the existing cluster explicitly sets `secrets_key_id` in its node configuration, pass that same value with `--secrets-key-id ID` (or `TRELLIS_SECRETS_KEY_ID`) on the joining node.
-
-The installer shows the complete plan before making changes; choose **Customize** to change it interactively. `--advertise HOST` overrides address auto-detection when peers cannot reach the detected private address. Namespace networking and gVisor/runsc are installed by default on fresh nodes; `--without-networking` and `--without-gvisor` are the automation opt-outs. The dashboard remains opt-in through **Customize**, `--with-dashboard`, or `--dashboard-write`. Delete the temporary transferred copies after setup succeeds.
-
-After the daemon starts, verify membership from any operator context:
-
-```sh
-trellisctl nodes list
-```
-
-The enrollment credential is accepted only by the managed enrollment endpoint and is never administrator API authority. Enrollment sends it only over TLS authenticated by the pinned CA. After enrollment, node registration, heartbeats, Raft joins, and node-to-agent traffic use the node's unique certificate-bound UUID instead of a shared bearer token. Administrator requests are checked by the current leader against the replicated public key, so followers do not need or retain the administrator private key. Managed mode deliberately trusts every Trellis node and makes the CA signing key available to every leader-capable member so failover does not disable enrollment. Treat compromise of any node in managed mode as compromise of the cluster.
-
-### External signing
-
-Set `node_signing_mode: external` when the operator owns the node CA. Every node configuration must provide `ca_cert`, `cert`, and `key`; omit `ca_key` and `enrollment_token`. Trellis verifies the key pair, trust chain, client-auth usage, and immutable node ID at startup, stores the trusted CA certificate and node key pair, and does not require or persist the CA private key.
-
-Before first start, choose a UUID, write it to `<data_dir>/node-id` with mode `0600`, and have the external signer issue a certificate containing that UUID as URI SAN `trellis-node:UUID`. The certificate must allow TLS client and server authentication and include `trellis` plus the node's agent, control-plane, and Raft advertised DNS names or IP addresses as SANs. A minimal first-node configuration is:
-
-```yaml
-node_signing_mode: external
-administrator_public_key: MCowBQYDK2VwAyEA...
-ca_cert: /etc/trellis/node-ca.crt
-cert: /etc/trellis/node.crt
-key: /etc/trellis/node.key
-```
-
-Generate the administrator key on the operator workstation, keep the private key in a password manager, and put only its unpadded base64 PKIX public key in node configuration:
-
-```sh
-openssl genpkey -algorithm ED25519 -out trellis-administrator.pem
-openssl pkey -in trellis-administrator.pem -pubout -outform DER | base64 | tr -d '=\n'
-```
-
-For another pre-issued node, omit `administrator_public_key` and add `join: node-a:8128`; its authenticated node certificate authorizes only that certificate's UUID as the Raft voter ID. Its advertised control-plane and Raft hosts must match certificate SANs. Loss of the external signer prevents issuing certificates for new nodes but does not affect operation or leader failover among nodes that already have certificates. A certificate from any other CA, or one whose node ID differs from `<data_dir>/node-id`, is rejected.
+To grow the cluster beyond one node, see [Multi-node clusters](multi-node.md). It covers cluster sizing, networking between nodes, settings that must match, and both the managed and external-signing join workflows.
 
 ## Mint operator credentials
 
@@ -168,11 +102,11 @@ trellisctl --token "$TOKEN" --namespace staging context save staging --use
 unset TOKEN
 ```
 
-Administrator signing is accepted through any node; followers proxy the challenge and signed request unchanged to the current leader. `trellisctl` automatically fetches a fresh challenge and retries if leadership changes between those requests. Enrollment credentials and ordinary `cluster/write` bearer credentials cannot mint credentials, change Raft membership, or perform backup/restore.
+`trellisctl` fetches the signing challenge and signs the request automatically. Enrollment credentials and ordinary `cluster/write` bearer credentials cannot mint credentials, change Raft membership, or perform backup/restore.
 
 ## Drain and maintenance
 
-`trellisctl nodes drain NODE` prevents new placement and migrates allocations. `NODE` may be the host/address displayed by `nodes list`, a unique UUID prefix, or a complete UUID. Wait until workloads have healthy replacements before maintenance. `trellisctl nodes undrain NODE` re-enables scheduling. `nodes remove NODE` permanently removes a node from the cluster, requires the administrator key, and is different from draining.
+`trellisctl nodes drain NODE` prevents new placement and migrates allocations to other nodes. `NODE` may be the host/address displayed by `nodes list`, a unique UUID prefix, or a complete UUID. Wait until workloads have healthy replacements before maintenance. `trellisctl nodes undrain NODE` re-enables scheduling. `nodes remove NODE` permanently removes a node from the cluster, requires the administrator key, and is different from draining; see [Multi-node clusters](multi-node.md#maintain-a-multi-node-cluster) before removing a member.
 
 ## Upgrade a node
 
@@ -182,9 +116,9 @@ The upgrade entrypoint performs the node-maintenance sequence instead of asking 
 curl -fsSL https://raw.githubusercontent.com/clofour/trellis/main/scripts/upgrade.sh | sudo bash
 ```
 
-It downloads and verifies the new release before touching the running daemon. In a multi-node cluster it drains the local node and waits for its local allocations to stop; Trellis only stops draining allocations after healthy replacement capacity exists. The script then swaps the binaries, refreshes the installer-owned systemd unit, starts the daemon, and verifies both the service and control-plane API. If the new daemon does not become healthy, the previous binaries and unit are restored and the node is undrained.
+It downloads and verifies the new release before touching the running daemon, then swaps the binaries, refreshes the installer-owned systemd unit, starts the daemon, and verifies both the service and control-plane API. If the new daemon does not become healthy, the previous binaries and unit are restored.
 
-After a successful core upgrade, the script refreshes a dashboard that was installed and recorded by the setup lifecycle state, then undrains the node. A service that was already stopped remains stopped. Single-node clusters skip evacuation because there is nowhere to move their allocations.
+After a successful core upgrade, the script refreshes a dashboard that was installed and recorded by the setup lifecycle state. A service that was already stopped remains stopped. On a multi-node cluster the script also evacuates the node first; see [Multi-node clusters](multi-node.md#maintain-a-multi-node-cluster).
 
 ## Uninstall a node
 
@@ -194,7 +128,7 @@ The default uninstall is a reversible machine-removal operation:
 curl -fsSL https://raw.githubusercontent.com/clofour/trellis/main/scripts/uninstall.sh | sudo bash
 ```
 
-On a live multi-node cluster it drains the node, waits for healthy replacements, transfers leadership away when necessary, and removes the local Raft member before deleting local software. It removes only dependencies/repositories recorded as introduced by Trellis; older installations without ownership records are handled conservatively and shared host packages are left alone. The user's `trellisctl` contexts are also kept because they describe cluster connections, not ownership of this machine.
+It removes only dependencies/repositories recorded as introduced by Trellis; older installations without ownership records are handled conservatively and shared host packages are left alone. The user's `trellisctl` contexts are also kept because they describe cluster connections, not ownership of this machine. On a live multi-node cluster the script first hands the node's work and membership to the rest of the cluster; see [Multi-node clusters](multi-node.md#maintain-a-multi-node-cluster).
 
 Instead of throwing away the encryption key while retaining encrypted state, normal uninstall archives the complete recoverable set—node data, `/etc/trellis` configuration and the configured secrets key, plus installer state—under a timestamped `/var/lib/trellis/recovery/` directory.
 
@@ -206,12 +140,6 @@ curl -fsSL https://raw.githubusercontent.com/clofour/trellis/main/scripts/uninst
 ```
 
 `--purge` deletes active node state and any previous recovery archives. Its confirmation therefore defaults to **no**. Both modes expose `--yes` for controlled non-interactive automation.
-
-## Advanced control-plane maintenance
-
-Trellis uses Raft internally. If an operator deliberately needs to move control-plane leadership before maintenance, the advanced command `trellisctl --administrator-key ./trellis-administrator.pem nodes transfer-leadership` requests a transfer to another voter. It is intentionally hidden from normal CLI help because workload operations should not require understanding Raft leadership.
-
-Preserve quorum: operate an odd number of Raft voters and avoid removing several members together.
 
 ## Backups
 
@@ -240,10 +168,8 @@ For normal workload diagnosis, start and usually finish with `jobs status`. `rea
 
 ## Networking and TLS
 
-Ports `8127`, `8128`, and `8129` must be reachable between appropriate cluster members. Namespace networking gives each namespace its own WireGuard interface and UDP port. Allow the configured WireGuard port range between participating nodes; by default `wireguard_port: 51820` with `wireguard_port_count: 256` uses UDP `51820-52075`. `wireguard_port_count` must match on every cluster node so a namespace slot means the same offset everywhere; the base port may differ per node. `wireguard_endpoint` is the externally reachable host or base `host:port`; Trellis applies the namespace's stable port offset to that base when building peer endpoints. Workloads use Trellis's node-local DNS resolver on the reserved internal address `198.18.0.53:53`; it is not intended to be exposed on external interfaces. Node and Raft transports require mutually authenticated TLS. Possession of the CA key is not API or leader authorization: requests still need a certificate identifying one immutable node ID, and leader work is executed only by the current Raft leader with control-epoch, generation, revision, and execution-hash fencing where applicable. Administrator and enrollment bearer credentials are separate from node identity. Advertised addresses must be routable from peers, not wildcard bind addresses.
+Workloads use Trellis's node-local DNS resolver on the reserved internal address `198.18.0.53:53`; it is not intended to be exposed on external interfaces. Node and Raft transports require mutually authenticated TLS. Possession of the CA key is not API or leader authorization: requests still need a certificate identifying one immutable node ID, and leader work is executed only by the current Raft leader with control-epoch, generation, revision, and execution-hash fencing where applicable. Administrator and enrollment bearer credentials are separate from node identity.
 
-## Failure recovery
+Ports and WireGuard settings needed between nodes are described in [Multi-node clusters](multi-node.md#prepare-the-network-and-configuration).
 
-A missed-heartbeat node becomes unhealthy; allocations may become lost after leader recovery grace and an availability timeout. Reconciliation replaces missing desired capacity when placement remains valid. A lost allocation is not re-adopted: if its node returns with the old containers still running, Trellis stops them and keeps the replacement. A namespace-scoped volume registration stays bound to its original node even while that node is absent, so Trellis leaves a dependent workload unplaced rather than creating an unrelated second copy elsewhere. If the data is intentionally abandoned, use a new volume name; changing only `host_path` does not change the owning node.
-
-[Documentation index](../README.md) · [Previous: CLI workflows](cli.md) · [Next: Cookbook](cookbook.md)
+[Documentation index](../README.md) · [Previous: CLI workflows](cli.md) · [Next: Multi-node clusters](multi-node.md)

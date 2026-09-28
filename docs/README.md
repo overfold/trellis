@@ -29,6 +29,7 @@ Getting Started is the only installation walkthrough and [`examples/hello`](../e
 | Guide | Use it to |
 |---|---|
 | [Operations](public/operations.md) | Maintain jobs and nodes, manage backups/secrets, observe failures, and configure TLS |
+| [Multi-node clusters](public/multi-node.md) | Add nodes, choose a cluster size, prepare networking between nodes, and handle node failure |
 | [Operations dashboard](public/dashboard.md) | Configure the first-party dashboard and use its operational views |
 | [Multitenancy and trust boundaries](public/multitenancy.md) | Build a frontend that exposes a tenant-safe subset of Trellis and understand the remaining shared surfaces |
 
