@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"testing"
+
+	"github.com/clofour/trellis/internal/probepath"
 )
 
 func TestGenerateDeterministic(t *testing.T) {
@@ -89,4 +91,29 @@ func contains(values []any, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestHTTPHealthCheckPathUsesProbePathRules(t *testing.T) {
+	_, yamlRaw, err := Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var yaml map[string]any
+	if err := json.Unmarshal(yamlRaw, &yaml); err != nil {
+		t.Fatal(err)
+	}
+	check := yaml["$defs"].(map[string]any)["HealthCheckSpec"].(map[string]any)
+	for _, condition := range check["allOf"].([]any) {
+		condition := condition.(map[string]any)
+		typeCondition := condition["if"].(map[string]any)["properties"].(map[string]any)["type"].(map[string]any)
+		if typeCondition["const"] != "http" {
+			continue
+		}
+		path := condition["then"].(map[string]any)["properties"].(map[string]any)["path"].(map[string]any)
+		if path["pattern"] != probepath.Pattern || path["maxLength"] != float64(probepath.MaxLength) {
+			t.Fatalf("HTTP path schema = %#v, want probepath rules", path)
+		}
+		return
+	}
+	t.Fatal("HTTP health-check path condition missing")
 }

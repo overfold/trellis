@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/clofour/trellis/internal/probepath"
 	"github.com/clofour/trellis/internal/runtime"
 )
 
@@ -88,5 +89,17 @@ func TestScriptCheckExecutesUserCommandUnchanged(t *testing.T) {
 	}
 	if !reflect.DeepEqual(rt.command, command) {
 		t.Fatalf("exec command = %#v, want %#v", rt.command, command)
+	}
+}
+
+func TestProbeUsageExitIsAnError(t *testing.T) {
+	rt := &probeRuntime{exitCode: probepath.UsageExit}
+	healthy, err := CheckHTTP(context.Background(), rt, "container", 8080, "health?token=secret", time.Second)
+	if healthy || err == nil || !strings.Contains(err.Error(), "container") || strings.Contains(err.Error(), "secret") {
+		t.Fatalf("CheckHTTP() = %v, %v; want unhealthy with a configuration error", healthy, err)
+	}
+	rt.exitCode = 2 // A Go runtime panic or fatal error, not a refused configuration.
+	if healthy, err := CheckHTTP(context.Background(), rt, "container", 8080, "/", time.Second); healthy || err != nil {
+		t.Fatalf("CheckHTTP() = %v, %v; want plain unhealthy", healthy, err)
 	}
 }

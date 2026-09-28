@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/clofour/trellis/internal/probepath"
 	"github.com/clofour/trellis/internal/spec"
 )
 
@@ -231,6 +232,15 @@ func addHealthCheckConditions(check schema) {
 			},
 		},
 		{
+			"if": schema{"required": []string{"type"}, "properties": schema{"type": schema{"const": "http"}}},
+			"then": schema{
+				"properties": schema{"path": schema{
+					"pattern":   probepath.Pattern,
+					"maxLength": probepath.MaxLength,
+				}},
+			},
+		},
+		{
 			"if": schema{"properties": schema{"type": schema{"const": "script"}}},
 			"then": schema{
 				"required":   []string{"command"},
@@ -324,7 +334,7 @@ func describeAuthoringFields(root schema) {
 
 	describeDef(root, "HealthCheckSpec", "type", "Health-check implementation: http, tcp, or script.")
 	describeDef(root, "HealthCheckSpec", "port", "Port checked by HTTP or TCP health checks.")
-	describeDef(root, "HealthCheckSpec", "path", "HTTP request path; ignored by TCP and script checks.")
+	describeDef(root, "HealthCheckSpec", "path", "HTTP request path and optional query on task-local loopback, beginning with /; ignored by TCP and script checks.")
 	describeDef(root, "HealthCheckSpec", "command", "Command argv executed for a script health check.")
 	describeDef(root, "HealthCheckSpec", "interval", "Delay between health checks. Omit to use the Trellis default.")
 	describeDef(root, "HealthCheckSpec", "timeout", "Maximum duration of one health check. Omit to use the Trellis default.")

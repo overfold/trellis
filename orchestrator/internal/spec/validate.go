@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/clofour/trellis/internal/probepath"
 )
 
 var identifierPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$`)
@@ -302,6 +304,13 @@ func Validate(job *JobSpec) error {
 				case HealthCheckHTTP, HealthCheckTCP:
 					if task.HealthCheck.Port < 1 || task.HealthCheck.Port > 65535 {
 						add(checkPath+".port", "out_of_range", "port is required and must be between 1 and 65535")
+					}
+					if task.HealthCheck.Type == HealthCheckHTTP {
+						if err := probepath.Validate(task.HealthCheck.Path); errors.Is(err, probepath.ErrTooLong) {
+							add(checkPath+".path", "too_long", err.Error())
+						} else if err != nil {
+							add(checkPath+".path", "invalid", err.Error())
+						}
 					}
 				case HealthCheckScript:
 					if len(task.HealthCheck.Command) == 0 {

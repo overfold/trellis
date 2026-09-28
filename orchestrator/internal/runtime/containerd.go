@@ -4,6 +4,7 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -666,11 +667,10 @@ func (c *ContainerdRuntime) Exec(ctx context.Context, containerID string, comman
 	}
 
 	execID := fmt.Sprintf("healthcheck-%d", time.Now().UnixNano())
-	containerSpec, err := container.Spec(ctx)
+	process, err := containerExecProcess(ctx, container, command, false)
 	if err != nil {
-		return 1, fmt.Errorf("reading spec for %s: %w", containerID, err)
+		return 1, err
 	}
-	process := execProcessSpec(containerSpec, command, false)
 
 	taskExec, err := task.Exec(ctx, execID, process, cio.NullIO)
 	if err != nil {
@@ -689,38 +689,50 @@ func (c *ContainerdRuntime) Exec(ctx context.Context, containerID string, comman
 	return int(code), nil
 }
 
-func execProcessSpec(containerSpec *specs.Spec, command []string, terminal bool) *specs.Process {
-	process := &specs.Process{
-		Args:     append([]string(nil), command...),
-		Cwd:      "/",
-		Terminal: terminal,
-	}
+// execProcessSpec builds an exec process from the container's own OCI
+// process so exec, script checks, probes, and terminals keep the task's user,
+// supplementary groups, environment, working directory, capabilities, rlimits,
+// and security labels. Only the argv and terminal settings are replaced. It
+// fails closed rather than falling back to a default (root) process.
+func execProcessSpec(containerSpec *specs.Spec, command []string, terminal bool) (*specs.Process, error) {
 	if containerSpec == nil || containerSpec.Process == nil {
-		return process
+		return nil, fmt.Errorf("container spec has no process")
 	}
-	process.Env = append([]string(nil), containerSpec.Process.Env...)
-	process.User = containerSpec.Process.User
-	// Carry the task's security context explicitly rather than relying on the
-	// OCI runtime to inherit it: runc, for example, takes no_new_privs from
-	// the exec process spec, so an unset field would disable it.
-	process.NoNewPrivileges = containerSpec.Process.NoNewPrivileges
-	process.ApparmorProfile = containerSpec.Process.ApparmorProfile
-	if capabilities := containerSpec.Process.Capabilities; capabilities != nil {
-		process.Capabilities = &specs.LinuxCapabilities{
-			Bounding:    append([]string(nil), capabilities.Bounding...),
-			Effective:   append([]string(nil), capabilities.Effective...),
-			Inheritable: append([]string(nil), capabilities.Inheritable...),
-			Permitted:   append([]string(nil), capabilities.Permitted...),
-			Ambient:     append([]string(nil), capabilities.Ambient...),
-		}
+	// A JSON round trip deep-copies every field, including ones added to the
+	// OCI spec later, so the exec process never aliases the container's.
+	encoded, err := json.Marshal(containerSpec.Process)
+	if err != nil {
+		return nil, fmt.Errorf("copying container process: %w", err)
 	}
-	if containerSpec.Process.Cwd != "" {
-		process.Cwd = containerSpec.Process.Cwd
+	process := &specs.Process{}
+	if err := json.Unmarshal(encoded, process); err != nil {
+		return nil, fmt.Errorf("copying container process: %w", err)
+	}
+	process.Args = append([]string(nil), command...)
+	process.CommandLine = ""
+	process.Terminal = terminal
+	process.ConsoleSize = nil
+	if process.Cwd == "" {
+		process.Cwd = "/"
 	}
 	if hasSecretEnvironment(containerSpec) {
 		process.Args = secretEnvironmentCommand(command)
 	}
-	return process
+	return process, nil
+}
+
+// containerExecProcess loads the container's OCI spec and derives an exec
+// process from it.
+func containerExecProcess(ctx context.Context, container containerd.Container, command []string, terminal bool) (*specs.Process, error) {
+	containerSpec, err := container.Spec(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("loading spec for %s: %w", container.ID(), err)
+	}
+	process, err := execProcessSpec(containerSpec, command, terminal)
+	if err != nil {
+		return nil, fmt.Errorf("preparing exec for %s: %w", container.ID(), err)
+	}
+	return process, nil
 }
 
 func hasSecretEnvironment(containerSpec *specs.Spec) bool {
@@ -957,11 +969,10 @@ func (c *ContainerdRuntime) ExecOutput(ctx context.Context, containerID string, 
 	}
 
 	execID := fmt.Sprintf("exec-%d", time.Now().UnixNano())
-	containerSpec, err := container.Spec(ctx)
+	process, err := containerExecProcess(ctx, container, command, false)
 	if err != nil {
-		return nil, nil, 1, fmt.Errorf("reading spec for %s: %w", containerID, err)
+		return nil, nil, 1, err
 	}
-	process := execProcessSpec(containerSpec, command, false)
 
 	var outBuf, errBuf lockedBuffer
 	// Output a background child writes after this returns is not collected.
@@ -1236,11 +1247,10 @@ func (c *ContainerdRuntime) StartTerminal(ctx context.Context, containerID strin
 		return nil, fmt.Errorf("getting task for %s: %w", containerID, err)
 	}
 
-	containerSpec, err := container.Spec(ctx)
+	processSpec, err := containerExecProcess(ctx, container, command, true)
 	if err != nil {
-		return nil, fmt.Errorf("reading spec for %s: %w", containerID, err)
+		return nil, err
 	}
-	processSpec := execProcessSpec(containerSpec, command, true)
 	if term != "" {
 		env := make([]string, 0, len(processSpec.Env)+1)
 		for _, value := range processSpec.Env {

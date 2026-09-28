@@ -350,25 +350,73 @@ func TestWriteDNSConfigCreatesParentDirectory(t *testing.T) {
 	}
 }
 
-func TestExecProcessSpecInheritsContainerContext(t *testing.T) {
-	containerSpec := &specs.Spec{Process: &specs.Process{
-		Env:  []string{"PATH=/usr/local/bin:/usr/bin", "TRELLIS_NAMESPACE=default"},
-		Cwd:  "/app",
-		User: specs.User{UID: 1000, GID: 1000},
-	}}
-	process := execProcessSpec(containerSpec, []string{"node", "-v"}, false)
+func TestExecProcessSpecCopiesContainerProcess(t *testing.T) {
+	umask := uint32(0o027)
+	oomScoreAdj := 100
+	containerProcess := &specs.Process{
+		Terminal:    false,
+		ConsoleSize: &specs.Box{Height: 24, Width: 80},
+		User:        specs.User{UID: 1000, GID: 1000, Umask: &umask, AdditionalGids: []uint32{20, 44}, Username: "app"},
+		Args:        []string{"/usr/bin/app", "serve"},
+		CommandLine: "app serve",
+		Env:         []string{"PATH=/usr/local/bin:/usr/bin", "TRELLIS_NAMESPACE=default"},
+		Cwd:         "/app",
+		Capabilities: &specs.LinuxCapabilities{
+			Bounding:  []string{"CAP_CHOWN"},
+			Effective: []string{"CAP_CHOWN"},
+			Permitted: []string{"CAP_CHOWN"},
+		},
+		Rlimits:         []specs.POSIXRlimit{{Type: "RLIMIT_NOFILE", Hard: 1024, Soft: 1024}},
+		NoNewPrivileges: true,
+		ApparmorProfile: "trellis-default",
+		OOMScoreAdj:     &oomScoreAdj,
+		SelinuxLabel:    "system_u:system_r:container_t:s0",
+	}
+	containerSpec := &specs.Spec{Process: containerProcess}
 
-	if !reflect.DeepEqual(process.Env, containerSpec.Process.Env) {
-		t.Fatalf("env = %#v, want %#v", process.Env, containerSpec.Process.Env)
+	for _, terminal := range []bool{false, true} {
+		process, err := execProcessSpec(containerSpec, []string{"node", "-v"}, terminal)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		want := *containerProcess
+		want.Args = []string{"node", "-v"}
+		want.CommandLine = ""
+		want.Terminal = terminal
+		want.ConsoleSize = nil
+		if !reflect.DeepEqual(*process, want) {
+			t.Fatalf("terminal=%v: process = %#v, want %#v", terminal, *process, want)
+		}
+
+		// The exec process must not alias the container's spec.
+		process.Env[0] = "PATH=/tmp"
+		process.User.AdditionalGids[0] = 0
+		*process.User.Umask = 0
+		process.Rlimits[0].Hard = 0
+		*process.OOMScoreAdj = 0
+		if containerProcess.Env[0] != "PATH=/usr/local/bin:/usr/bin" || containerProcess.User.AdditionalGids[0] != 20 ||
+			*containerProcess.User.Umask != 0o027 || containerProcess.Rlimits[0].Hard != 1024 || *containerProcess.OOMScoreAdj != 100 ||
+			containerProcess.Terminal || containerProcess.ConsoleSize == nil || containerProcess.CommandLine == "" || containerProcess.Args[0] != "/usr/bin/app" {
+			t.Fatalf("exec process mutated container process: %#v", containerProcess)
+		}
 	}
-	if process.Cwd != "/app" {
-		t.Fatalf("cwd = %q, want /app", process.Cwd)
+}
+
+func TestExecProcessSpecWrapsSecretEnvironment(t *testing.T) {
+	containerSpec := &specs.Spec{
+		Process: &specs.Process{User: specs.User{UID: 1000, GID: 1000}},
+		Mounts:  []specs.Mount{{Destination: secretEnvContainerPath}},
 	}
-	if process.User.UID != 1000 || process.User.GID != 1000 {
-		t.Fatalf("user = %#v, want uid/gid 1000", process.User)
+	process, err := execProcessSpec(containerSpec, []string{"/bin/check"}, false)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if process.Terminal {
-		t.Fatal("non-interactive exec unexpectedly requested a terminal")
+	if want := secretEnvironmentCommand([]string{"/bin/check"}); !reflect.DeepEqual(process.Args, want) {
+		t.Fatalf("args = %#v, want %#v", process.Args, want)
+	}
+	if process.User.UID != 1000 {
+		t.Fatalf("uid = %d, want 1000", process.User.UID)
 	}
 }
 
@@ -378,7 +426,10 @@ func TestExecProcessSpecInheritsSecurityContext(t *testing.T) {
 	if len(loaded) != 1 {
 		t.Fatalf("loaded apparmor profiles %v, want one", loaded)
 	}
-	process := execProcessSpec(containerSpec, []string{"/bin/sh"}, true)
+	process, err := execProcessSpec(containerSpec, []string{"/bin/sh"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if !process.NoNewPrivileges {
 		t.Fatal("exec process dropped no_new_privs")
@@ -463,13 +514,57 @@ func TestManagedSecretsStayOutOfPersistedOCIEnvironmentAndUseProcessOwner(t *tes
 	}
 }
 
-func TestExecProcessSpecDefaultsWithoutContainerProcess(t *testing.T) {
-	process := execProcessSpec(nil, []string{"/bin/true"}, true)
+func TestExecProcessSpecDefaultsEmptyCwd(t *testing.T) {
+	process, err := execProcessSpec(&specs.Spec{Process: &specs.Process{User: specs.User{UID: 1000}}}, []string{"/bin/true"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if process.Cwd != "/" {
 		t.Fatalf("cwd = %q, want /", process.Cwd)
 	}
-	if !process.Terminal {
-		t.Fatal("terminal exec did not preserve terminal flag")
+	if process.User.UID != 1000 {
+		t.Fatalf("uid = %d, want 1000", process.User.UID)
+	}
+}
+
+func TestExecProcessSpecFailsClosedWithoutContainerProcess(t *testing.T) {
+	for name, containerSpec := range map[string]*specs.Spec{
+		"nil spec":    nil,
+		"nil process": {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if process, err := execProcessSpec(containerSpec, []string{"/bin/true"}, true); err == nil {
+				t.Fatalf("process = %#v, want error", process)
+			}
+		})
+	}
+}
+
+type specContainer struct {
+	containerd.Container
+	spec *specs.Spec
+	err  error
+}
+
+func (c specContainer) ID() string { return "container-1" }
+
+func (c specContainer) Spec(context.Context) (*oci.Spec, error) { return c.spec, c.err }
+
+func TestContainerExecProcessFailsClosed(t *testing.T) {
+	specErr := errors.New("spec unavailable")
+	if _, err := containerExecProcess(context.Background(), specContainer{err: specErr}, []string{"/bin/true"}, false); !errors.Is(err, specErr) {
+		t.Fatalf("err = %v, want %v", err, specErr)
+	}
+	if _, err := containerExecProcess(context.Background(), specContainer{spec: &specs.Spec{}}, []string{"/bin/true"}, false); err == nil {
+		t.Fatal("exec process without container process succeeded")
+	}
+
+	process, err := containerExecProcess(context.Background(), specContainer{spec: &specs.Spec{Process: &specs.Process{User: specs.User{UID: 1000, GID: 1000}}}}, []string{"/bin/true"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if process.User.UID != 1000 || process.User.GID != 1000 {
+		t.Fatalf("user = %#v, want uid/gid 1000", process.User)
 	}
 }
 

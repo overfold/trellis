@@ -71,6 +71,26 @@
           "if": {
             "properties": {
               "type": {
+                "const": "http"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "path": {
+                "maxLength": 1024,
+                "pattern": "^(?:/(?:[A-Za-z0-9._~!$\u0026'()*+,;=:@/?-]|%[0-9A-Fa-f]{2})*)?$"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
                 "const": "script"
               }
             }
