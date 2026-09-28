@@ -47,7 +47,6 @@ type nodeConfigFile struct {
 	NodeSigningMode    *string              `yaml:"node_signing_mode"`
 	ContainerdSock     *string              `yaml:"containerd_socket"`
 	Runtime            *string              `yaml:"runtime"`
-	RuntimeFaults      *string              `yaml:"runtime_faults"`
 	WireGuardPool      *string              `yaml:"wireguard_pool"`
 	WireGuardEndpoint  *string              `yaml:"wireguard_endpoint"`
 	WireGuardPort      *int                 `yaml:"wireguard_port"`
@@ -97,7 +96,6 @@ func loadNodeConfig(path string, cfg *config, flags *pflag.FlagSet) error {
 	setString("node-signing-mode", parsed.NodeSigningMode, &cfg.SigningMode)
 	setString("containerd-sock", parsed.ContainerdSock, &cfg.ContainerdSock)
 	setString("runtime", parsed.Runtime, &cfg.Runtime)
-	setString("runtime-faults", parsed.RuntimeFaults, &cfg.RuntimeFaults)
 	setString("wireguard-pool", parsed.WireGuardPool, &cfg.WireGuardPool)
 	setString("wireguard-endpoint", parsed.WireGuardEndpoint, &cfg.WireGuardEndpoint)
 	setString("dns-listen", parsed.DNSListen, &cfg.DNSListen)
