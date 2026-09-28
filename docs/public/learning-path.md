@@ -47,31 +47,13 @@ Host networking has no Trellis NAT or port translation. The reservation prevents
 
 Apply the example and reach the service at the selected node's port 8080. If its health check blocks readiness, `jobs status web-service` includes the relevant allocation diagnostics automatically. Do not add replicas yet; first make the one-allocation service model concrete.
 
-### Optional three-node Vagrant demo
+### Before stage 3: add nodes
 
-Stages 1 and 2 work on the single node from Getting Started. The repository also includes [`orchestrator/Vagrantfile`](../../orchestrator/Vagrantfile) for the point where the learning path begins to need real multi-node placement. It provisions three Debian 12 VMs named `control`, `worker-1`, and `worker-2`, installs containerd and Trellis on them, joins them into one cluster, and deploys a couple of demo workloads.
-
-The Vagrantfile contains no provider-specific VM configuration and requires no hostmanager plugin. It uses Vagrant's high-level private-network abstraction plus guest mDNS for peer names, so use whichever Vagrant VM provider is available on your host. Some providers still have their own normal setup requirements—for example, Hyper-V asks which virtual switch to use.
-
-Start it from the orchestrator directory:
-
-```sh
-cd orchestrator
-vagrant up
-```
-
-Or select a provider explicitly when your Vagrant installation has more than one:
-
-```sh
-vagrant up --provider=virtualbox
-# or: --provider=libvirt / --provider=hyperv / another compatible provider
-```
-
-This demo is an optional local lab, not a supported production installation method and not a separate Trellis abstraction. You can use any three compatible machines instead. The important property for the next two lessons is simply having enough independently schedulable nodes to make placement and rollout overlap visible.
+Stages 1 and 2 work on the single node from Getting Started. From stage 3 onward, several lessons need more than one schedulable node to make placement and rollout overlap visible. Follow [Multi-node clusters](multi-node.md) to grow your cluster to three nodes, or use its local three-node Vagrant lab. Volume locality (stage 6) and namespace networking (stage 8) are also more instructive across several nodes.
 
 ## 3. Replicas and placement
 
-The `replicated-service` example changes the healthy service from one desired allocation to two. Both replicas reserve port 8080, so they cannot share a node and require at least two compatible nodes. The three-node Vagrant demo above is enough to run this lesson without provisioning separate hosts manually.
+The `replicated-service` example changes the healthy service from one desired allocation to two. Both replicas reserve port 8080, so they cannot share a node and require at least two compatible nodes. A three-node cluster, or the local Vagrant lab described in [Multi-node clusters](multi-node.md#try-it-locally-with-vagrant), is enough.
 
 This stage is about scheduling rather than rollout policy. Inspect both allocations with:
 
@@ -95,7 +77,7 @@ update:
 
 Change only the tutorial image from `v1` to `v2`, run `jobs apply --dry-run`, then apply again. Trellis starts healthy replacement capacity before completing removal of the old revision.
 
-The fixed host port makes the temporary-capacity cost visible: two old replicas already occupy port 8080 on two nodes, so the first replacement needs another compatible node with that port free. `max_parallel: 1` limits how much replacement capacity can be in flight at once. The three-node Vagrant demo has exactly enough nodes to demonstrate this overlap. If placement or health blocks progress, use `jobs status` rather than treating the rollout as an opaque failed command.
+The fixed host port makes the temporary-capacity cost visible: two old replicas already occupy port 8080 on two nodes, so the first replacement needs another compatible node with that port free. `max_parallel: 1` limits how much replacement capacity can be in flight at once. A three-node cluster has exactly enough nodes to demonstrate this overlap. If placement or health blocks progress, use `jobs status` rather than treating the rollout as an opaque failed command.
 
 ## 5. Secrets
 
@@ -156,7 +138,7 @@ http://web.namespace-networking.default.trellis:8080/health
 
 That makes both discovery and the private network visible in `trellisctl jobs logs` without introducing an application proxy or special service resource.
 
-Configure the namespace-networking dependencies on every participating node and open the configured WireGuard UDP range between nodes (by default `51820-52075`). Each namespace is assigned one stable port from that range. The installer sets up WireGuard when namespace networking is enabled and optionally installs gVisor/runsc for additional sandboxing. Use `trellisctl jobs status` to see placement and current diagnostics, `jobs logs` to see application-level peer probes, and `jobs status NAME --history` when you need the recorded allocation lifecycle transitions that led to the current state.
+The installer sets up WireGuard when namespace networking is enabled and optionally installs gVisor/runsc for additional sandboxing. Across several nodes, the WireGuard UDP range must also be open between them; see [Multi-node clusters](multi-node.md#prepare-the-network-and-configuration). Use `trellisctl jobs status` to see placement and current diagnostics, `jobs logs` to see application-level peer probes, and `jobs status NAME --history` when you need the recorded allocation lifecycle transitions that led to the current state.
 
 Treat discovery as runtime endpoint information, not application consensus. Applications that require a single writer, leader election, or distributed locking still need their own coordination protocol.
 
@@ -196,7 +178,8 @@ Use the learning path to acquire the model; use these pages afterward:
 
 - [Job manifest reference](job-specification.md) for exact fields and validation.
 - [CLI workflows](cli.md) for contexts, planning, diagnostics, lifecycle history, logging, and automation.
-- [Operations](operations.md) for node maintenance, backups, TLS, and recovery.
+- [Operations](operations.md) for node maintenance, backups, and TLS.
+- [Multi-node clusters](multi-node.md) for adding nodes, cluster sizing, and node failure.
 - [Cookbook](cookbook.md) for architecture outcomes and tradeoffs.
 
 [Documentation index](../README.md) · [Previous: Getting Started](getting-started.md) · [Next: User model](user-model.md)
