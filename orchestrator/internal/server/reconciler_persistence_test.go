@@ -4,13 +4,25 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/clofour/trellis/internal/lifecycle"
 	"github.com/clofour/trellis/internal/spec"
 	"github.com/clofour/trellis/internal/state"
+	"github.com/google/uuid"
 )
+
+type failingBatchStore struct {
+	memoryStore
+	batches [][]state.Mutation
+}
+
+func (s *failingBatchStore) Batch(_ context.Context, mutations []state.Mutation) error {
+	s.batches = append(s.batches, append([]state.Mutation(nil), mutations...))
+	return errors.New("storage unavailable")
+}
 
 type controlledBatchStore struct {
 	memoryStore
@@ -135,5 +147,64 @@ func TestReconcilePersistenceFailureDoesNotAdvanceMemory(t *testing.T) {
 	}
 	if persisted[allocation.ID] == nil || persisted[allocation.ID].Phase != lifecycle.PhasePending {
 		t.Fatalf("persisted allocation after failed update = %#v, want pending", persisted[allocation.ID])
+	}
+}
+
+func TestReconcileCommitsVolumeRegistrationWithAllocation(t *testing.T) {
+	store := &failingBatchStore{memoryStore: memoryStore{}}
+	controller := NewStateController(store, "test")
+	s := NewServer(slog.Default(), nil, controller, store, "test", "")
+	node := &Node{ID: uuid.New(), Status: NodeStatusHealthy, LastHeartbeat: time.Now()}
+	s.nodes[node.ID] = node
+	s.jobs[jobKey("acme", "database")] = &Job{
+		Spec: &spec.JobSpec{
+			Namespace: "acme",
+			Name:      "database",
+			TaskGroups: []spec.TaskGroupSpec{{
+				Name:  "db",
+				Count: 1,
+				Tasks: []spec.TaskSpec{{
+					Name:  "database",
+					Image: "database:latest",
+					Volumes: []spec.VolumeSpec{{
+						Name:          "data",
+						HostPath:      "@/data",
+						ContainerPath: "/var/lib/database",
+					}},
+				}},
+			}},
+		},
+		Revision: 1,
+	}
+
+	s.Reconcile(context.Background())
+
+	if len(s.allocations) != 0 {
+		t.Fatalf("in-memory allocations after failed commit = %d, want 0", len(s.allocations))
+	}
+	registrations, err := controller.ListVolumeRegistrations(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(registrations) != 0 {
+		t.Fatalf("volume registrations after failed commit = %v, want none", registrations)
+	}
+	allocations, err := controller.ListAllocations(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(allocations) != 0 {
+		t.Fatalf("persisted allocations after failed commit = %v, want none", allocations)
+	}
+	if len(store.batches) != 1 {
+		t.Fatalf("batch count = %d, want 1", len(store.batches))
+	}
+	var allocationMutation, volumeMutation bool
+	for _, mutation := range store.batches[0] {
+		allocationMutation = allocationMutation || strings.Contains(mutation.Key, "/allocations/")
+		volumeMutation = volumeMutation || strings.Contains(mutation.Key, "/volume-registrations/")
+	}
+	if !allocationMutation || !volumeMutation {
+		t.Fatalf("reconciliation batch = %#v, want allocation and volume registration", store.batches[0])
 	}
 }

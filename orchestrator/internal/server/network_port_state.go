@@ -4,10 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
 	"sort"
+
+	"github.com/clofour/trellis/internal/state"
 )
 
 var errNetworkPortExhausted = errors.New("WireGuard namespace port range is exhausted")
@@ -42,12 +45,7 @@ func (s *StateController) PutNetworkPortRegistration(ctx context.Context, regist
 	if registration == nil || registration.Namespace == "" || registration.Slot < 0 {
 		return fmt.Errorf("invalid network port registration")
 	}
-	key := fmt.Sprintf(
-		"%s/%s/network-port-registrations/%s",
-		trellisNamespace,
-		s.cluster,
-		url.QueryEscape(registration.Namespace),
-	)
+	key := s.networkPortRegistrationKey(registration.Namespace)
 	if err := s.put(ctx, key, registration); err != nil {
 		return fmt.Errorf("put network port registration: %w", err)
 	}
@@ -59,16 +57,51 @@ func (s *StateController) DeleteNetworkPortRegistration(ctx context.Context, nam
 	if namespace == "" {
 		return fmt.Errorf("network namespace is required")
 	}
-	key := fmt.Sprintf(
+	key := s.networkPortRegistrationKey(namespace)
+	if err := s.store.Delete(ctx, key); err != nil {
+		return fmt.Errorf("delete network port registration: %w", err)
+	}
+	return nil
+}
+
+func (s *StateController) commitNetworkPortRegistrations(ctx context.Context, registrations []*NetworkPortRegistration, deleteNamespaces []string) error {
+	if len(registrations)+len(deleteNamespaces) == 0 {
+		return nil
+	}
+	atomic, ok := s.store.(state.AtomicStore)
+	if !ok {
+		return fmt.Errorf("state store does not support atomic network port registration updates")
+	}
+	mutations := make([]state.Mutation, 0, len(registrations)+len(deleteNamespaces))
+	for _, namespace := range deleteNamespaces {
+		if namespace == "" {
+			return fmt.Errorf("network namespace is required")
+		}
+		mutations = append(mutations, state.Mutation{Key: s.networkPortRegistrationKey(namespace)})
+	}
+	for _, registration := range registrations {
+		if registration == nil || registration.Namespace == "" || registration.Slot < 0 {
+			return fmt.Errorf("invalid network port registration")
+		}
+		raw, err := json.Marshal(registration)
+		if err != nil {
+			return fmt.Errorf("marshal network port registration for %s: %w", registration.Namespace, err)
+		}
+		mutations = append(mutations, state.Mutation{Key: s.networkPortRegistrationKey(registration.Namespace), Value: raw})
+	}
+	if err := atomic.Batch(ctx, mutations); err != nil {
+		return fmt.Errorf("commit network port registrations: %w", err)
+	}
+	return nil
+}
+
+func (s *StateController) networkPortRegistrationKey(namespace string) string {
+	return fmt.Sprintf(
 		"%s/%s/network-port-registrations/%s",
 		trellisNamespace,
 		s.cluster,
 		url.QueryEscape(namespace),
 	)
-	if err := s.store.Delete(ctx, key); err != nil {
-		return fmt.Errorf("delete network port registration: %w", err)
-	}
-	return nil
 }
 
 func (s *Server) ensureNetworkPortRegistrations(ctx context.Context, namespaces []string) (map[string]int, error) {
@@ -86,16 +119,19 @@ func (s *Server) ensureNetworkPortRegistrations(ctx context.Context, namespaces 
 		}
 		wanted[namespace] = struct{}{}
 	}
+	deleteNamespaces := make([]string, 0)
 	for namespace := range registrations {
 		if _, keep := wanted[namespace]; keep {
 			continue
 		}
-		if err := s.state.DeleteNetworkPortRegistration(ctx, namespace); err != nil {
-			return nil, err
-		}
+		deleteNamespaces = append(deleteNamespaces, namespace)
 		delete(registrations, namespace)
 	}
+	sort.Strings(deleteNamespaces)
 	if len(namespaces) == 0 {
+		if err := s.state.commitNetworkPortRegistrations(ctx, nil, deleteNamespaces); err != nil {
+			return nil, err
+		}
 		return registrations, nil
 	}
 
@@ -116,6 +152,8 @@ func (s *Server) ensureNetworkPortRegistrations(ctx context.Context, namespaces 
 
 	namespaces = append([]string(nil), namespaces...)
 	sort.Strings(namespaces)
+	newRegistrations := make([]*NetworkPortRegistration, 0)
+	var planErr error
 	for _, namespace := range namespaces {
 		if _, exists := registrations[namespace]; exists {
 			continue
@@ -131,13 +169,15 @@ func (s *Server) ensureNetworkPortRegistrations(ctx context.Context, namespaces 
 			}
 		}
 		if assigned < 0 {
-			return registrations, fmt.Errorf("%w (%d ports); increase wireguard_port_count on every node", errNetworkPortExhausted, count)
+			planErr = fmt.Errorf("%w (%d ports); increase wireguard_port_count on every node", errNetworkPortExhausted, count)
+			break
 		}
-		if err := s.state.PutNetworkPortRegistration(ctx, &NetworkPortRegistration{Namespace: namespace, Slot: assigned}); err != nil {
-			return nil, err
-		}
+		newRegistrations = append(newRegistrations, &NetworkPortRegistration{Namespace: namespace, Slot: assigned})
 		registrations[namespace] = assigned
 		used[assigned] = namespace
 	}
-	return registrations, nil
+	if err := s.state.commitNetworkPortRegistrations(ctx, newRegistrations, deleteNamespaces); err != nil {
+		return nil, err
+	}
+	return registrations, planErr
 }

@@ -79,6 +79,36 @@ func TestReconcileContinuesAfterWireGuardPortExhaustion(t *testing.T) {
 	}
 }
 
+func TestReconcileScaleDownSelectionIsDeterministic(t *testing.T) {
+	for _, ids := range [][]string{{"a", "z"}, {"z", "a"}} {
+		s, agent := newTestServerWithAgent()
+		node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
+		s.nodes[node.ID] = node
+		tasks := []spec.TaskSpec{{Name: "server", Image: "app"}}
+		s.jobs[jobKey("default", "web")] = &Job{
+			Spec: &spec.JobSpec{
+				Namespace:  "default",
+				Name:       "web",
+				TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: tasks}},
+			},
+			Revision: 1,
+		}
+		byID := make(map[string]*Allocation, len(ids))
+		for _, id := range ids {
+			allocation := &Allocation{ID: id, Namespace: "default", JobName: "web", TaskGroupName: "api", Tasks: tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
+			s.allocations = append(s.allocations, allocation)
+			byID[id] = allocation
+		}
+
+		s.Reconcile(context.Background())
+		agent.server.Close()
+
+		if byID["a"].Phase != lifecycle.PhaseRunning || byID["z"].Phase != lifecycle.PhaseStopped {
+			t.Fatalf("input order %v produced phases a=%s z=%s; want a running and z stopped", ids, byID["a"].Phase, byID["z"].Phase)
+		}
+	}
+}
+
 func TestNamespaceDesiredAllocationLimitIncludesOtherJobs(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()

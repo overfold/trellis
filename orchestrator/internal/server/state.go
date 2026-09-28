@@ -10,6 +10,7 @@ import (
 
 	"github.com/clofour/trellis/internal/spec"
 	"github.com/clofour/trellis/internal/state"
+	"github.com/google/uuid"
 )
 
 // StateController persists typed server state.
@@ -215,25 +216,26 @@ func (s *StateController) PutAllocations(ctx context.Context, allocations []*All
 
 // ReconciliationCommit is the durable outcome of one reconciliation pass.
 type ReconciliationCommit struct {
-	Allocations       []*Allocation
-	DeleteAllocations []string
-	Backoffs          []*ReplacementBackoff
-	DeleteBackoffs    []*ReplacementBackoff
+	Allocations         []*Allocation
+	DeleteAllocations   []string
+	VolumeRegistrations []*VolumeRegistration
+	Backoffs            []*ReplacementBackoff
+	DeleteBackoffs      []*ReplacementBackoff
 }
 
-// CommitReconciliation applies allocation updates, terminal-record pruning,
-// and replacement backoff changes as one durable state transition. The
-// mutations carry every value, including leader-chosen timestamps, so replaying
-// the Raft entry is deterministic.
+// CommitReconciliation applies allocation updates, new volume bindings,
+// terminal-record pruning, and replacement backoff changes as one durable state
+// transition. The mutations carry every value, including leader-chosen
+// timestamps, so replaying the Raft entry is deterministic.
 func (s *StateController) CommitReconciliation(ctx context.Context, commit *ReconciliationCommit) error {
-	if commit == nil || len(commit.Allocations)+len(commit.DeleteAllocations)+len(commit.Backoffs)+len(commit.DeleteBackoffs) == 0 {
+	if commit == nil || len(commit.Allocations)+len(commit.DeleteAllocations)+len(commit.VolumeRegistrations)+len(commit.Backoffs)+len(commit.DeleteBackoffs) == 0 {
 		return nil
 	}
 	atomic, ok := s.store.(state.AtomicStore)
 	if !ok {
 		return fmt.Errorf("state store does not support atomic reconciliation updates")
 	}
-	mutations := make([]state.Mutation, 0, len(commit.Allocations)+len(commit.DeleteAllocations)+len(commit.Backoffs)+len(commit.DeleteBackoffs))
+	mutations := make([]state.Mutation, 0, len(commit.Allocations)+len(commit.DeleteAllocations)+len(commit.VolumeRegistrations)+len(commit.Backoffs)+len(commit.DeleteBackoffs))
 	for _, allocation := range commit.Allocations {
 		raw, err := json.Marshal(allocation)
 		if err != nil {
@@ -243,6 +245,16 @@ func (s *StateController) CommitReconciliation(ctx context.Context, commit *Reco
 	}
 	for _, id := range commit.DeleteAllocations {
 		mutations = append(mutations, state.Mutation{Key: s.allocationKey(id)})
+	}
+	for _, registration := range commit.VolumeRegistrations {
+		if registration == nil || registration.Namespace == "" || registration.Name == "" || registration.NodeID == uuid.Nil {
+			return fmt.Errorf("invalid volume registration")
+		}
+		raw, err := json.Marshal(registration)
+		if err != nil {
+			return fmt.Errorf("marshal volume registration %s/%s: %w", registration.Namespace, registration.Name, err)
+		}
+		mutations = append(mutations, state.Mutation{Key: s.volumeRegistrationStorageKey(registration.Namespace, registration.Name), Value: raw})
 	}
 	for _, backoff := range commit.Backoffs {
 		raw, err := json.Marshal(backoff)
