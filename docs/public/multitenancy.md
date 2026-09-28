@@ -23,7 +23,7 @@ Within Trellis, a namespace provides these boundaries:
 
 - **Authorization:** a namespace-scoped credential remains bound to its stored namespace regardless of request headers. It can read or write only the ordinary API resources allowed by its access level in that namespace.
 - **Jobs and allocations:** names, desired state, runtime queries, logs, exec targets, and events are selected within the authorized namespace.
-- **Discovery and networking:** service catalog and DNS lookup are namespace-aware. Tasks using `networking.mode: namespace` join that namespace's private network rather than another namespace's network.
+- **Discovery and networking:** nodes receive catalog entries only for namespaces with active allocations assigned to them. For `networking.mode: namespace`, the resolver derives the caller namespace from its network source address and returns only matching `group.job.namespace.trellis` records. Each namespace joins its own private bridge and WireGuard path, whose forwarding isolation runs before shared host `FORWARD` rules.
 - **Volume identity and managed paths:** volume registrations are keyed by `(namespace, name)`. A `host_path` beginning with `@/` resolves below the namespace's Trellis-managed volume root.
 - **Secrets:** secret records and job references are namespace-scoped. A job can receive only secrets from its own namespace, and APIs return metadata rather than plaintext after a secret is stored. Secrets are not separately ACLed per job: a manifest submitter is trusted to reference any secret name in that namespace.
 
