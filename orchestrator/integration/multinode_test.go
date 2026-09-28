@@ -38,13 +38,13 @@ func TestMultiNodeFailureRecovery(t *testing.T) {
 	defer h.close()
 	h.waitNodes(3)
 
-	t.Run("persistent state and ambiguous start reconciliation", func(t *testing.T) {
+	t.Run("persistent state and ambiguous start reconciliation", func(*testing.T) {
 		h.fault(1, "start", "after")
 		h.submit(job("web", "v1", 2, "rolling"))
 		h.waitJob("web", 1, 2)
 	})
 
-	t.Run("leader failure and stale leader fencing", func(t *testing.T) {
+	t.Run("leader failure and stale leader fencing", func(*testing.T) {
 		leader := h.leader()
 		h.stop(leader)
 		h.waitJob("web", 1, 2) // a surviving follower proxies to the new leader
@@ -55,7 +55,7 @@ func TestMultiNodeFailureRecovery(t *testing.T) {
 		h.waitNodes(3)
 	})
 
-	t.Run("rolling update across election", func(t *testing.T) {
+	t.Run("rolling update across election", func(*testing.T) {
 		h.submit(job("web", "v2", 3, "rolling"))
 		oldLeader := h.leader()
 		h.stop(oldLeader)
@@ -78,7 +78,7 @@ func TestMultiNodeFailureRecovery(t *testing.T) {
 		}
 	})
 
-	t.Run("ambiguous stop converges", func(t *testing.T) {
+	t.Run("ambiguous stop converges", func(*testing.T) {
 		for i := range h.nodes {
 			if h.nodes[i].cmd != nil {
 				h.fault(i, "stop", "after")
@@ -113,7 +113,7 @@ func newHarness(t *testing.T, count int) *harness {
 		t.Fatal(err)
 	}
 	bin := filepath.Join(t.TempDir(), "trellis")
-	c := exec.Command("go", "build", "-o", bin, "./cmd/trellis")
+	c := exec.Command("go", "build", "-tags=integration", "-o", bin, "./cmd/trellis")
 	c.Dir = root
 	if out, err := c.CombinedOutput(); err != nil {
 		t.Fatalf("build node: %v\n%s", err, out)
@@ -229,7 +229,7 @@ func (h *harness) waitHTTP(i int) {
 		}
 		r, e := h.request(i, "GET", "/v1/nodes", nil)
 		if r != nil {
-			r.Body.Close()
+			_ = r.Body.Close()
 		}
 		return e == nil && r.StatusCode == 200
 	}, "node API did not become ready")
@@ -260,7 +260,7 @@ func (h *harness) submit(v any) {
 	if e != nil {
 		h.t.Fatal(e)
 	}
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 	if r.StatusCode/100 != 2 {
 		b, _ := io.ReadAll(r.Body)
 		h.t.Fatalf("submit: %s: %s", r.Status, b)
@@ -272,12 +272,12 @@ func (h *harness) waitNodes(want int) {
 		if e != nil {
 			return false
 		}
-		defer r.Body.Close()
+		defer func() { _ = r.Body.Close() }()
 		var v []any
 		return r.StatusCode == 200 && json.NewDecoder(r.Body).Decode(&v) == nil && len(v) >= want
 	}, "node registration did not converge")
 }
-func (h *harness) waitJob(name string, revision, desired int) {
+func (h *harness) waitJob(name string, revision, desired int) { //nolint:unparam // The name keeps call sites readable; the suite currently uses one job.
 	var last []byte
 	converged := false
 	defer func() {
@@ -290,7 +290,7 @@ func (h *harness) waitJob(name string, revision, desired int) {
 		if e != nil {
 			return false
 		}
-		defer r.Body.Close()
+		defer func() { _ = r.Body.Close() }()
 		last, _ = io.ReadAll(r.Body)
 		var v struct{ Revision, Desired, Running int }
 		converged = r.StatusCode == 200 && json.Unmarshal(last, &v) == nil && v.Revision == revision && v.Desired == desired && v.Running == desired
