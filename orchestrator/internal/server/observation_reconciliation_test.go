@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/clofour/trellis/internal/api"
-	"github.com/clofour/trellis/internal/lifecycle"
-	"github.com/clofour/trellis/internal/spec"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
+	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/lifecycle"
+	"github.com/overfold/trellis/internal/spec"
 )
 
 func TestHeartbeatReturnsNoContent(t *testing.T) {

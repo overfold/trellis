@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/clofour/trellis/internal/nodecapacity"
-	"github.com/clofour/trellis/internal/spec"
+	"github.com/overfold/trellis/internal/nodecapacity"
+	"github.com/overfold/trellis/internal/spec"
 	"github.com/spf13/pflag"
 	"gopkg.in/yaml.v3"
 )

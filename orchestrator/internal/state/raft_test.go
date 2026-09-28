@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/clofour/trellis/internal/tlsutil"
 	"github.com/google/uuid"
 	"github.com/hashicorp/raft"
+	"github.com/overfold/trellis/internal/tlsutil"
 )
 
 var (

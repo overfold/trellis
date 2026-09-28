@@ -16,12 +16,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/clofour/trellis/internal/api"
-	"github.com/clofour/trellis/internal/client"
-	"github.com/clofour/trellis/internal/lifecycle"
-	"github.com/clofour/trellis/internal/network"
-	"github.com/clofour/trellis/internal/spec"
 	"github.com/google/uuid"
+	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/client"
+	"github.com/overfold/trellis/internal/lifecycle"
+	"github.com/overfold/trellis/internal/network"
+	"github.com/overfold/trellis/internal/spec"
 )
 
 // ActionType identifies a reconciliation operation.

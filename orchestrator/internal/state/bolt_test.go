@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/clofour/trellis/internal/spec"
+	"github.com/overfold/trellis/internal/spec"
 )
 
 func validSnapshotJob(t *testing.T, namespace, name string, revision int) (string, []byte) {

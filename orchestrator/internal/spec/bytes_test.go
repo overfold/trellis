@@ -4,10 +4,10 @@ import "testing"
 
 func TestParseByteSize(t *testing.T) {
 	tests := map[string]ByteSize{
-		"64MiB":  64 << 20,
-		"512Mi":  512 << 20,
-		"1GiB":   1 << 30,
-		"100MB":  100_000_000,
+		"64MiB":   64 << 20,
+		"512Mi":   512 << 20,
+		"1GiB":    1 << 30,
+		"100MB":   100_000_000,
 		"1048576": 1 << 20,
 	}
 	for input, want := range tests {

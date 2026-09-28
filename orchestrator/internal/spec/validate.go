@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/clofour/trellis/internal/probepath"
+	"github.com/overfold/trellis/internal/probepath"
 )
 
 var identifierPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$`)

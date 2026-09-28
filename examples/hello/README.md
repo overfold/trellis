@@ -23,8 +23,8 @@ The first logs include `Trellis tutorial · v1` and confirm that the workload is
 To deploy a real second application version, change:
 
 ```diff
--        image: ghcr.io/clofour/trellis-tutorial:v1
-+        image: ghcr.io/clofour/trellis-tutorial:v2
+-        image: ghcr.io/overfold/trellis-tutorial:v1
++        image: ghcr.io/overfold/trellis-tutorial:v2
 ```
 
 Then preview and apply it:

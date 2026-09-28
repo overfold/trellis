@@ -4,7 +4,7 @@ package catalog
 import (
 	"sync"
 
-	"github.com/clofour/trellis/internal/api"
+	"github.com/overfold/trellis/internal/api"
 )
 
 // ServiceInstance describes one discoverable allocation endpoint.

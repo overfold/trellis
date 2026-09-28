@@ -6,7 +6,7 @@ import (
 	"os"
 	"text/tabwriter"
 
-	"github.com/clofour/trellis/internal/client"
+	"github.com/overfold/trellis/internal/client"
 	"github.com/spf13/cobra"
 )
 

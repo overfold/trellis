@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-RAW_COMMON="https://raw.githubusercontent.com/clofour/trellis/main/scripts/common.sh"
+RAW_COMMON="https://raw.githubusercontent.com/overfold/trellis/main/scripts/common.sh"
 COMMON_TMP=""
 WORK_TMP=""
 ROLLBACK_NEEDED=false

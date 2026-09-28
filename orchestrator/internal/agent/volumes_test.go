@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/clofour/trellis/internal/spec"
+	"github.com/overfold/trellis/internal/spec"
 	"golang.org/x/sys/unix"
 )
 

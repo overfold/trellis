@@ -532,7 +532,7 @@
       "type": "object"
     }
   },
-  "$id": "https://raw.githubusercontent.com/clofour/trellis/main/schemas/trellis-job.schema.json",
+  "$id": "https://raw.githubusercontent.com/overfold/trellis/main/schemas/trellis-job.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "description": "Schema for the first-party human-authored YAML representation. Trellis itself consumes canonical JSON after the consumer converts human quantities.",

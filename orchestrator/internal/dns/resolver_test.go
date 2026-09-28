@@ -10,7 +10,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/clofour/trellis/internal/api"
+	"github.com/overfold/trellis/internal/api"
 )
 
 type mockLookup struct {

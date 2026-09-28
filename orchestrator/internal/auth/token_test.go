@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/clofour/trellis/internal/state"
+	"github.com/overfold/trellis/internal/state"
 )
 
 type memStore struct {

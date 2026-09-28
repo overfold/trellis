@@ -12,9 +12,9 @@ import (
 	"io"
 	"os"
 
-	"github.com/clofour/trellis/internal/client"
-	"github.com/clofour/trellis/internal/localconfig"
-	"github.com/clofour/trellis/internal/version"
+	"github.com/overfold/trellis/internal/client"
+	"github.com/overfold/trellis/internal/localconfig"
+	"github.com/overfold/trellis/internal/version"
 	"github.com/spf13/cobra"
 )
 

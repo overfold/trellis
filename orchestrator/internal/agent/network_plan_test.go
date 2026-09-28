@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/clofour/trellis/internal/api"
-	"github.com/clofour/trellis/internal/network"
+	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/network"
 )
 
 type blockingPlanManager struct {

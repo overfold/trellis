@@ -3,9 +3,9 @@ package server
 import (
 	"net/http"
 
-	"github.com/clofour/trellis/internal/api"
-	"github.com/clofour/trellis/internal/auth"
 	"github.com/labstack/echo/v5"
+	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/auth"
 )
 
 // PrincipalContextKey stores the authenticated credential principal in request context.

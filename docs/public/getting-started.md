@@ -7,7 +7,7 @@ This is the shortest complete Trellis journey: install one node, use the CLI as 
 You need a Debian or Ubuntu x86-64 machine with `sudo`. The installer can install containerd when it is missing.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/clofour/trellis/main/scripts/setup.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/setup.sh | sudo bash
 ```
 
 The default plan is the feature-complete beginner path: create a new single-node cluster, auto-detect a reachable node address, install the namespace-networking dependencies and gVisor/runsc, and leave the dashboard disabled. The plan is shown before anything changes. Press Enter to install it, or choose **Customize** to change the cluster mode, address, networking, gVisor, or dashboard access. You do not need to discover command-line flags just to make a different first-install choice.
@@ -31,7 +31,7 @@ trellisctl nodes list
 Create an empty working directory and save this as `trellis.yaml`:
 
 ```yaml
-# yaml-language-server: $schema=https://raw.githubusercontent.com/clofour/trellis/main/schemas/trellis-job.schema.json
+# yaml-language-server: $schema=https://raw.githubusercontent.com/overfold/trellis/main/schemas/trellis-job.schema.json
 name: hello
 namespace: default
 task_groups:
@@ -39,7 +39,7 @@ task_groups:
     count: 1
     tasks:
       - name: hello
-        image: ghcr.io/clofour/trellis-tutorial:v1
+        image: ghcr.io/overfold/trellis-tutorial:v1
         resources:
           cpu: 100
           memory: 64MiB
@@ -74,7 +74,7 @@ You should see the tutorial v1 startup/log message. If the job is not ready, `jo
 Change only the image tag:
 
 ```yaml
-image: ghcr.io/clofour/trellis-tutorial:v2
+image: ghcr.io/overfold/trellis-tutorial:v2
 ```
 
 Then preview and apply the new revision:

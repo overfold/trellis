@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/clofour/trellis/internal/nodecapacity"
+	"github.com/overfold/trellis/internal/nodecapacity"
 	"github.com/spf13/pflag"
 )
 
