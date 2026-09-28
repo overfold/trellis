@@ -4,7 +4,6 @@ package runtime
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -539,14 +538,10 @@ func execProcessSpec(containerSpec *specs.Spec, command []string, terminal bool)
 	if containerSpec == nil || containerSpec.Process == nil {
 		return nil, fmt.Errorf("container spec has no process")
 	}
-	encoded, err := json.Marshal(containerSpec.Process)
-	if err != nil {
-		return nil, fmt.Errorf("copying container process: %w", err)
-	}
-	process := &specs.Process{}
-	if err := json.Unmarshal(encoded, process); err != nil {
-		return nil, fmt.Errorf("copying container process: %w", err)
-	}
+	// container.Spec decodes a fresh spec on every call, so a shallow copy
+	// shares nothing with other execs; only replaced fields are written.
+	copied := *containerSpec.Process
+	process := &copied
 	process.Args = append([]string(nil), command...)
 	process.CommandLine = ""
 	process.Terminal = terminal

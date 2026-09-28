@@ -56,7 +56,7 @@ func TestHTTPProbeKeepsRequestOnLoopback(t *testing.T) {
 }
 
 func TestHTTPProbeRejectsNonOriginPaths(t *testing.T) {
-	for _, path := range []string{"@169.254.169.254/latest", "http://169.254.169.254/latest", "health", "/%zz"} {
+	for _, path := range []string{"@169.254.169.254/latest", "http://169.254.169.254/latest", "health", "/%zz", "/a|b", "/héalth", "/a#b"} {
 		t.Run(path, func(t *testing.T) {
 			if code := run([]string{"http", "8080", path, "1s"}); code != 2 {
 				t.Fatalf("probe of %q exit code = %d, want 2", path, code)
@@ -65,24 +65,51 @@ func TestHTTPProbeRejectsNonOriginPaths(t *testing.T) {
 	}
 }
 
-func TestHTTPProbeDoesNotFollowRedirects(t *testing.T) {
-	var followed atomic.Bool
+func TestHTTPProbeFollowsOnlyLoopbackRedirects(t *testing.T) {
+	var offHost atomic.Bool
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		offHost.Store(true)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer other.Close()
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/target" {
-			followed.Store(true)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
+		switch r.URL.Path {
+		case "/ok":
+			w.WriteHeader(http.StatusOK)
+		case "/failing":
+			w.WriteHeader(http.StatusServiceUnavailable)
+		case "/to-ok":
+			http.Redirect(w, r, "/ok", http.StatusFound)
+		case "/to-failing":
+			http.Redirect(w, r, "/failing", http.StatusMovedPermanently)
+		case "/to-metadata":
+			http.Redirect(w, r, "http://169.254.169.254/latest", http.StatusFound)
+		case "/to-other-port":
+			http.Redirect(w, r, other.URL+"/", http.StatusFound)
+		case "/to-https":
+			http.Redirect(w, r, "https://"+r.Host+"/ok", http.StatusFound)
+		case "/loop":
+			http.Redirect(w, r, "/loop", http.StatusFound)
 		}
-		http.Redirect(w, r, "/target", http.StatusFound)
 	}))
 	defer server.Close()
 	port := strings.TrimPrefix(server.URL, "http://127.0.0.1:")
 
-	if code := run([]string{"http", port, "/health", "1s"}); code != 0 {
-		t.Fatalf("redirecting HTTP probe exit code = %d, want 0 for the unfollowed 3xx", code)
+	for path, want := range map[string]int{
+		"/to-ok":         0,
+		"/to-failing":    1,
+		"/to-metadata":   0,
+		"/to-other-port": 0,
+		"/to-https":      0,
+		"/loop":          1,
+	} {
+		if code := run([]string{"http", port, path, "2s"}); code != want {
+			t.Errorf("probe of %s exit code = %d, want %d", path, code, want)
+		}
 	}
-	if followed.Load() {
-		t.Fatal("probe followed a redirect")
+	if offHost.Load() {
+		t.Fatal("probe followed a redirect off the probed loopback port")
 	}
 }
 

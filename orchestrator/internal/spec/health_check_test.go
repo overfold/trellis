@@ -3,6 +3,8 @@ package spec
 import (
 	"strings"
 	"testing"
+
+	"github.com/clofour/trellis/internal/probepath"
 )
 
 func healthCheckJob(check *HealthCheckSpec) *JobSpec {
@@ -17,10 +19,11 @@ func TestValidateAcceptsHTTPHealthCheckPaths(t *testing.T) {
 		"/",
 		"/health",
 		"/health/ready?verbose=1&probe=trellis",
+		"/a:b;c=d,e!f$g'h(i)j*k~l",
 		"/v1/status%2Fready",
 		"/@169.254.169.254/latest",
 		"//health",
-		"/" + strings.Repeat("a", MaxHealthCheckPathLength-1),
+		"/" + strings.Repeat("a", probepath.MaxLength-1),
 	} {
 		t.Run(path, func(t *testing.T) {
 			if err := Validate(healthCheckJob(&HealthCheckSpec{Type: HealthCheckHTTP, Port: 8080, Path: path})); err != nil {
@@ -43,7 +46,8 @@ func TestValidateRejectsInvalidHTTPHealthCheckPaths(t *testing.T) {
 		"/héalth",
 		"/health#fragment",
 		"/health%zz",
-		"/" + strings.Repeat("a", MaxHealthCheckPathLength),
+		"/a|b",
+		"/" + strings.Repeat("a", probepath.MaxLength),
 	} {
 		t.Run(path, func(t *testing.T) {
 			err := Validate(healthCheckJob(&HealthCheckSpec{Type: HealthCheckHTTP, Port: 8080, Path: path}))

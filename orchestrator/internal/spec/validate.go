@@ -3,18 +3,16 @@ package spec
 import (
 	"errors"
 	"fmt"
-	"net/url"
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/clofour/trellis/internal/probepath"
 )
 
 var identifierPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$`)
 var labelKeyPattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9._/-]{0,62}$`)
 var envPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-
-// MaxHealthCheckPathLength bounds an HTTP health-check request target.
-const MaxHealthCheckPathLength = 1024
 
 // ValidationIssue describes one independently actionable manifest error.
 type ValidationIssue struct {
@@ -308,8 +306,8 @@ func Validate(job *JobSpec) error {
 						add(checkPath+".port", "out_of_range", "port is required and must be between 1 and 65535")
 					}
 					if task.HealthCheck.Type == HealthCheckHTTP {
-						if message := healthCheckPathError(task.HealthCheck.Path); message != "" {
-							add(checkPath+".path", "invalid", message)
+						if err := probepath.Validate(task.HealthCheck.Path); err != nil {
+							add(checkPath+".path", "invalid", err.Error())
 						}
 					}
 				case HealthCheckScript:
@@ -327,32 +325,4 @@ func Validate(job *JobSpec) error {
 		return issues
 	}
 	return nil
-}
-
-// healthCheckPathError describes why path is not an acceptable HTTP
-// health-check request target, or returns an empty string. A path must be an
-// origin-form target (absolute path plus optional query) so the probe can
-// never be pointed away from task-local loopback.
-func healthCheckPathError(path string) string {
-	if path == "" {
-		return ""
-	}
-	if len(path) > MaxHealthCheckPathLength {
-		return fmt.Sprintf("must be at most %d bytes", MaxHealthCheckPathLength)
-	}
-	if path[0] != '/' {
-		return "must begin with /"
-	}
-	for i := 0; i < len(path); i++ {
-		switch c := path[i]; {
-		case c <= ' ' || c > '~':
-			return "must contain only visible ASCII characters; percent-encode others"
-		case c == '#':
-			return "must not contain a fragment"
-		}
-	}
-	if _, err := url.ParseRequestURI(path); err != nil {
-		return "must be a valid HTTP request path"
-	}
-	return ""
 }

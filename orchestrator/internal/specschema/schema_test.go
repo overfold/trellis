@@ -130,6 +130,9 @@ func TestHTTPHealthCheckPathPatternMatchesValidator(t *testing.T) {
 		"/health\r\n":             false,
 		"/health#fragment":        false,
 		"/héalth":                 false,
+		"/health%zz":              false,
+		"/health?x=%zz":           false,
+		"/a|b":                    false,
 	} {
 		job := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{
 			Name: "api", Count: 1,

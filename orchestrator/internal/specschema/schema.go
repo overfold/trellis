@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/clofour/trellis/internal/probepath"
 	"github.com/clofour/trellis/internal/spec"
 )
 
@@ -234,10 +235,8 @@ func addHealthCheckConditions(check schema) {
 			"if": schema{"properties": schema{"type": schema{"const": "http"}}},
 			"then": schema{
 				"properties": schema{"path": schema{
-					// Origin-form request target: an absolute path plus an
-					// optional query of visible ASCII, without a fragment.
-					"pattern":   `^(?:/[!"$-~]*)?$`,
-					"maxLength": spec.MaxHealthCheckPathLength,
+					"pattern":   probepath.Pattern,
+					"maxLength": probepath.MaxLength,
 				}},
 			},
 		},

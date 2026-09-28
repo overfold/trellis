@@ -10,9 +10,14 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/clofour/trellis/internal/probepath"
 )
 
-const loopback = "127.0.0.1"
+const (
+	loopback     = "127.0.0.1"
+	maxRedirects = 10
+)
 
 func main() {
 	os.Exit(run(os.Args[1:]))
@@ -45,10 +50,10 @@ func run(args []string) int {
 			return 2
 		}
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
-		if err != nil || request.URL.Hostname() != loopback {
+		if err != nil {
 			return 2
 		}
-		response, err := probeClient().Do(request)
+		response, err := probeClient(target.Host).Do(request)
 		if err != nil {
 			return 1
 		}
@@ -72,35 +77,49 @@ func run(args []string) int {
 	}
 }
 
-// httpTarget builds the task-local loopback URL for an origin-form request
-// path. The path never contributes to the scheme, host, or user information.
+// httpTarget builds the task-local loopback URL for a validated origin-form
+// request path. The path never contributes to the scheme, host, or user
+// information, and it is sent unchanged.
 func httpTarget(port int, path string) (*url.URL, error) {
+	if err := probepath.Validate(path); err != nil {
+		return nil, err
+	}
 	if path == "" {
 		path = "/"
-	}
-	if path[0] != '/' {
-		return nil, errors.New("path must begin with /")
 	}
 	target, err := url.ParseRequestURI(path)
 	if err != nil {
 		return nil, err
-	}
-	if target.Scheme != "" || target.Host != "" || target.User != nil {
-		return nil, errors.New("path must be an origin-form request target")
 	}
 	target.Scheme = "http"
 	target.Host = net.JoinHostPort(loopback, strconv.Itoa(port))
 	return target, nil
 }
 
-// probeClient never follows redirects and never uses a proxy, so a check
-// cannot leave task-local loopback. A 3xx response is itself the probe result
-// and counts as healthy: the task answered on its port.
-func probeClient() *http.Client {
+// probeClient never uses a proxy and follows at most maxRedirects redirects,
+// only while they stay on the probed loopback host and port. Like a kubelet
+// HTTP probe, it stops at a redirect anywhere else and treats that 3xx
+// response as the result, so a check never leaves task-local loopback.
+func probeClient(host string) *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true},
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
+		CheckRedirect: func(request *http.Request, via []*http.Request) error {
+			if len(via) >= maxRedirects {
+				return errors.New("too many redirects")
+			}
+			if request.URL.Scheme != "http" || canonicalHost(request.URL) != host {
+				return http.ErrUseLastResponse
+			}
+			return nil
 		},
 	}
+}
+
+// canonicalHost returns host:port with the scheme's default port filled in.
+func canonicalHost(target *url.URL) string {
+	port := target.Port()
+	if port == "" {
+		port = "80"
+	}
+	return net.JoinHostPort(target.Hostname(), port)
 }

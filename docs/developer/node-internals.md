@@ -18,7 +18,7 @@ Exec, interactive exec sessions, and allocation metrics address only task record
 
 ## Ports and health
 
-A host port of zero requests allocation by the node port manager; a nonzero port reserves that exact host port. Reported mappings feed status and service discovery. Health checks run on configured intervals/timeouts and require a threshold of failures/successes before state changes. Script probes execute the supplied command in the task context. HTTP and TCP checks execute the dedicated helper mounted read-only at `/run/trellis/health-probe`, so they probe task-local loopback in host, isolated, and namespace networking with either supported runtime. The helper builds the HTTP URL from a fixed loopback host and the validated origin-form path, refuses any target whose host is not loopback, bypasses proxies, and never follows redirects.
+A host port of zero requests allocation by the node port manager; a nonzero port reserves that exact host port. Reported mappings feed status and service discovery. Health checks run on configured intervals/timeouts and require a threshold of failures/successes before state changes. Script probes execute the supplied command in the task context. HTTP and TCP checks execute the dedicated helper mounted read-only at `/run/trellis/health-probe`, so they probe task-local loopback in host, isolated, and namespace networking with either supported runtime. The helper shares the control plane's path validation (`internal/probepath`), builds the HTTP URL from a fixed loopback host and the validated origin-form path, bypasses proxies, and follows redirects only while they stay on the probed loopback address and port.
 
 ## Volumes
 
