@@ -142,7 +142,7 @@ func TestHTTPProbeFollowsOnlyLoopbackRedirects(t *testing.T) {
 		"/to-localhost-failing":   1,
 		"/to-localhost-dot-ok":    0,
 		"/to-padded-port-failing": 1,
-		"/to-ipv6-loopback":       1, // followed; the server listens only on 127.0.0.1
+		"/to-ipv6-loopback":       0, // a different socket: not followed
 		"/hops/10":                0,
 		"/hops/11":                1,
 		"/to-external-after-hops": 0,
@@ -188,7 +188,7 @@ func TestProbeRejectsUnsupportedArguments(t *testing.T) {
 
 func TestProbeClientDialsOnlyLoopback(t *testing.T) {
 	_, err := probeClient(80).Get("http://192.0.2.1:80/")
-	if err == nil || !strings.Contains(err.Error(), "refusing non-loopback address") {
+	if err == nil || !strings.Contains(err.Error(), "not the probed loopback address") {
 		t.Fatalf("non-loopback dial error = %v, want refusal", err)
 	}
 }

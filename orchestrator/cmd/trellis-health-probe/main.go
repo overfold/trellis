@@ -103,9 +103,9 @@ func httpTarget(port int, path string) (*url.URL, error) {
 	return target, nil
 }
 
-// probeClient never uses a proxy or resolves names, dials only loopback
-// addresses, and follows at most maxRedirects redirects, only while they stay
-// on a loopback host and the probed port. Like a kubelet HTTP probe, it stops
+// probeClient never uses a proxy or resolves names, dials only 127.0.0.1, and
+// follows at most maxRedirects redirects, only while they stay on 127.0.0.1
+// (or localhost) and the probed port. Like a kubelet HTTP probe, it stops
 // at a redirect anywhere else and treats that 3xx response as the result, so a
 // check never leaves task-local loopback.
 func probeClient(port int) *http.Client {
@@ -117,7 +117,7 @@ func probeClient(port int) *http.Client {
 		}
 		ip, ok := loopbackIP(host)
 		if !ok {
-			return nil, fmt.Errorf("refusing non-loopback address %s", address)
+			return nil, fmt.Errorf("refusing %s: not the probed loopback address", address)
 		}
 		return dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), targetPort))
 	}
@@ -135,8 +135,8 @@ func probeClient(port int) *http.Client {
 	}
 }
 
-// loopbackTarget reports whether target is plain HTTP to a loopback host on
-// port.
+// loopbackTarget reports whether target is plain HTTP to the probed socket:
+// 127.0.0.1 (or localhost) on port.
 func loopbackTarget(target *url.URL, port int) bool {
 	if target.Scheme != "http" {
 		return false
@@ -153,13 +153,14 @@ func loopbackTarget(target *url.URL, port int) bool {
 }
 
 // loopbackIP maps localhost to 127.0.0.1 without consulting a resolver and
-// accepts loopback IP literals; every other host is refused.
+// refuses every host other than 127.0.0.1, so the probe only ever dials the
+// probed loopback address.
 func loopbackIP(host string) (net.IP, bool) {
 	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
-		return net.ParseIP(loopback), true
+		host = loopback
 	}
 	ip := net.ParseIP(host)
-	return ip, ip != nil && ip.IsLoopback()
+	return ip, ip != nil && ip.Equal(net.ParseIP(loopback))
 }
 
 func runEnvExec(args []string) int {
