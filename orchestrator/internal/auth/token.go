@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/clofour/trellis/internal/state"
@@ -104,8 +105,9 @@ func (p Principal) Validate() error {
 
 // TokenManager creates and validates persisted scoped tokens.
 type TokenManager struct {
-	store   state.Store
-	cluster string
+	store            state.Store
+	cluster          string
+	workloadTokensMu sync.Mutex
 }
 
 // NewTokenManager creates a token manager backed by state storage.
@@ -115,6 +117,17 @@ func NewTokenManager(store state.Store, cluster string) *TokenManager {
 
 // CreateToken creates and persists a token for principal.
 func (m *TokenManager) CreateToken(ctx context.Context, principal Principal) (string, error) {
+	token, key, data, err := m.prepareToken(principal)
+	if err != nil {
+		return "", err
+	}
+	if err := m.store.Put(ctx, key, data); err != nil {
+		return "", fmt.Errorf("store token: %w", err)
+	}
+	return token, nil
+}
+
+func (m *TokenManager) prepareToken(principal Principal) (string, string, []byte, error) {
 	if principal.Scope == AccessCluster {
 		principal.Namespace = ""
 	}
@@ -122,12 +135,12 @@ func (m *TokenManager) CreateToken(ctx context.Context, principal Principal) (st
 		principal.CreatedAt = time.Now().UTC()
 	}
 	if err := principal.Validate(); err != nil {
-		return "", err
+		return "", "", nil, err
 	}
 
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
-		return "", fmt.Errorf("generate token: %w", err)
+		return "", "", nil, fmt.Errorf("generate token: %w", err)
 	}
 	prefix := "trls_op_"
 	if principal.Kind == CredentialWorkload {
@@ -138,13 +151,10 @@ func (m *TokenManager) CreateToken(ctx context.Context, principal Principal) (st
 	hashHex := hex.EncodeToString(hash[:])
 	data, err := json.Marshal(&principal)
 	if err != nil {
-		return "", fmt.Errorf("marshal principal: %w", err)
+		return "", "", nil, fmt.Errorf("marshal principal: %w", err)
 	}
 	key := fmt.Sprintf("trellis/%s/tokens/%s", m.cluster, hashHex)
-	if err := m.store.Put(ctx, key, data); err != nil {
-		return "", fmt.Errorf("store token: %w", err)
-	}
-	return token, nil
+	return token, key, data, nil
 }
 
 // ValidateToken returns the principal for a valid generated token.
@@ -181,6 +191,14 @@ func (m *TokenManager) GetOrCreateWorkloadToken(ctx context.Context, scope Acces
 	mapping := fmt.Sprintf("%s/%s/%s", scope, access, namespace)
 	mappingHash := sha256.Sum256([]byte(mapping))
 	rawKey := fmt.Sprintf("trellis/%s/workload-tokens/%s", m.cluster, hex.EncodeToString(mappingHash[:]))
+
+	// The active leader owns one TokenManager. Serializing its read and batch
+	// prevents concurrent allocation starts from minting competing credentials;
+	// leader activation's Raft barrier makes committed batches visible before a
+	// successor starts serving this path.
+	m.workloadTokensMu.Lock()
+	defer m.workloadTokensMu.Unlock()
+
 	existing, err := m.store.Get(ctx, rawKey)
 	if err != nil {
 		return "", fmt.Errorf("lookup existing workload token: %w", err)
@@ -191,12 +209,16 @@ func (m *TokenManager) GetOrCreateWorkloadToken(ctx context.Context, scope Acces
 			return token, nil
 		}
 	}
-	token, err := m.CreateToken(ctx, principal)
+	token, tokenKey, tokenData, err := m.prepareToken(principal)
 	if err != nil {
 		return "", err
 	}
-	if err := m.store.Put(ctx, rawKey, []byte(token)); err != nil {
-		return "", fmt.Errorf("store workload token mapping: %w", err)
+	atomic, ok := m.store.(state.AtomicStore)
+	if !ok {
+		return "", fmt.Errorf("state store does not support atomic workload tokens")
+	}
+	if err := atomic.Batch(ctx, []state.Mutation{{Key: tokenKey, Value: tokenData}, {Key: rawKey, Value: []byte(token)}}); err != nil {
+		return "", fmt.Errorf("store workload token: %w", err)
 	}
 	return token, nil
 }
