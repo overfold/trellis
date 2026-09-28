@@ -75,6 +75,27 @@ limit also cannot start those. Raise it for workloads that legitimately run
 many threads or processes. Keep it consistent across nodes unless you
 deliberately want different per-node bounds.
 
+`allocation_loss_timeout` (flag `--allocation-loss-timeout`) is how long a
+node may go without a heartbeat before the leader marks its allocations
+`lost` and replaces them. It is a Go-style duration between `30s` and `24h`
+and defaults to `45s`:
+
+```yaml
+allocation_loss_timeout: 2m
+```
+
+Lost is terminal, so this is the point at which Trellis gives up on the
+node's allocations. When the node returns, its old containers keep running
+until enough replacements are running and are then stopped. They are stopped
+sooner if they block a replacement. See [lost allocations](user-model.md#lost-allocations).
+Raise the timeout when nodes can be briefly unreachable, for example during
+reboots or on unreliable networks, and replacing their work would cost more
+than waiting. This matters most for groups bound to one node by a volume,
+because their replacement can only run on that node anyway. Lower values
+replace work faster after a real failure. The leader still waits 30 seconds
+after it is elected before marking anything lost. The timeout applies on
+whichever node is leader, so keep it the same on every node.
+
 Edit this file when changing persistent node configuration, then restart the service:
 
 ```sh

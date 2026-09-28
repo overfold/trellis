@@ -49,6 +49,7 @@ Some settings must match on every node, because any node may become leader or ta
 
 - the **secrets-encryption key** (and `secrets_key_id`, if set explicitly), so every potential leader can decrypt replicated secret records;
 - `job_limits`, so admission policy does not change with leadership;
+- `allocation_loss_timeout`, so how long a silent node is tolerated does not change with leadership;
 - `wireguard_port_count`, so a namespace's port offset means the same thing everywhere (the base `wireguard_port` may differ per node);
 - the node signing mode and trusted node CA.
 
@@ -169,9 +170,9 @@ To move control-plane leadership deliberately before maintenance, the advanced c
 
 ## Node failure
 
-A node that misses heartbeats becomes unhealthy. After a leader recovery grace period and an availability timeout, its allocations may become lost, and reconciliation replaces missing desired capacity on other nodes when placement remains valid.
+A node that misses heartbeats for 30 seconds becomes unhealthy and receives no new allocations. Once it has been silent for the allocation loss timeout (`allocation_loss_timeout`, default 45 seconds), and the current leader has been leader for at least 30 seconds, its allocations become lost. Reconciliation then replaces the missing capacity on other nodes when placement remains valid.
 
-A lost allocation is not re-adopted: if its node returns with the old containers still running, Trellis stops them and keeps the replacement. Allocations that depend on a volume bound to the failed node stay unplaced rather than starting with an empty copy elsewhere. If that data is intentionally abandoned, use a new volume name; changing only `host_path` does not change the owning node.
+A lost allocation is not re-adopted. If its node returns with the old containers still running, Trellis keeps them running until enough replacements are `running`, then stops them. It stops them sooner if they block a replacement, such as one that needs the same host port on that node. Allocations that depend on a volume bound to the failed node stay unplaced rather than starting with an empty copy elsewhere. If that data is intentionally abandoned, use a new volume name; changing only `host_path` does not change the owning node.
 
 If a failure takes the cluster below quorum, see [Choose a cluster size](#choose-a-cluster-size): restore enough voters to regain a majority before expecting any of this reconciliation to happen.
 

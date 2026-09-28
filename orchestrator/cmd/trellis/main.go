@@ -76,6 +76,7 @@ type config struct {
 	MaxTaskCPU                                                                     int
 	MaxTaskMemory                                                                  string
 	TaskPidsLimit                                                                  int64
+	AllocationLossTimeout                                                          time.Duration
 }
 
 func main() {
@@ -131,6 +132,7 @@ func main() {
 	f.StringVar(&cfg.SecretsKeyID, "secrets-key-id", "", "Identifier for the active secrets encryption key")
 	f.StringArrayVar(&cfg.Labels, "label", nil, "Node label in key=value form (repeatable)")
 	f.Int64Var(&cfg.TaskPidsLimit, "task-pids-limit", agent.DefaultTaskPidsLimit, "Maximum processes and threads in each task container created on this node")
+	f.DurationVar(&cfg.AllocationLossTimeout, "allocation-loss-timeout", server.DefaultAllocationLossTimeout, "How long a node may miss heartbeats before its allocations become lost and are replaced")
 	defaults := spec.DefaultLimits()
 	f.IntVar(&cfg.MaxReplicasPerTaskGroup, "max-replicas-per-task-group", defaults.MaxReplicasPerTaskGroup, "Maximum replicas allowed in one task group")
 	f.IntVar(&cfg.MaxTaskGroupsPerJob, "max-task-groups-per-job", defaults.MaxTaskGroupsPerJob, "Maximum task groups allowed in one job")
@@ -169,6 +171,9 @@ func run(parent context.Context, cfg *config) error {
 	}
 	if cfg.WireGuardPortCount < 1 || cfg.WireGuardPort+cfg.WireGuardPortCount-1 > 65535 {
 		return fmt.Errorf("--wireguard-port-count must be positive and fit between --wireguard-port and 65535")
+	}
+	if err := server.ValidateAllocationLossTimeout(cfg.AllocationLossTimeout); err != nil {
+		return fmt.Errorf("allocation_loss_timeout or --allocation-loss-timeout: %w", err)
 	}
 	if err := agent.ValidateTaskPidsLimit(cfg.TaskPidsLimit); err != nil {
 		return fmt.Errorf("resources.task_pids_limit or --task-pids-limit: %w", err)
@@ -300,6 +305,9 @@ func run(parent context.Context, cfg *config) error {
 	stateCtl := server.NewStateController(raftStore, cfg.Cluster)
 	control := server.NewServer(log, local, stateCtl, raftStore, cfg.Cluster, cfg.ServerAdvertise)
 	if err := control.SetJobLimits(limits); err != nil {
+		return err
+	}
+	if err := control.SetAllocationLossTimeout(cfg.AllocationLossTimeout); err != nil {
 		return err
 	}
 	if cfg.SecretsKey != "" {
