@@ -6,6 +6,7 @@ import (
 
 	"github.com/clofour/trellis/internal/auth"
 	"github.com/clofour/trellis/internal/spec"
+	"github.com/clofour/trellis/internal/state"
 )
 
 type apiAccessStore map[string][]byte
@@ -20,8 +21,17 @@ func (m apiAccessStore) List(_ context.Context, prefix string) (map[string][]byt
 	}
 	return result, nil
 }
-func (m apiAccessStore) Put(_ context.Context, key string, value []byte) error { m[key] = value; return nil }
+func (m apiAccessStore) Put(_ context.Context, key string, value []byte) error {
+	m[key] = value
+	return nil
+}
 func (m apiAccessStore) Delete(_ context.Context, key string) error { delete(m, key); return nil }
+func (m apiAccessStore) Batch(_ context.Context, mutations []state.Mutation) error {
+	for _, mutation := range mutations {
+		m[mutation.Key] = mutation.Value
+	}
+	return nil
+}
 
 func TestAPIAccessTokenClusterRead(t *testing.T) {
 	manager := auth.NewTokenManager(apiAccessStore{}, "test")
