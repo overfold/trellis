@@ -61,7 +61,7 @@ Lost is terminal. Heartbeats never move a lost allocation to another phase, and 
 - a retained original never blocks a replacement. If the originals are the only reason fewer replacements fit, such as a group pinned to the original's node by a host volume that needs the same host port, the originals on the nodes the unobstructed placement would use are released (same group first, then by ID) until the unobstructed count fits. A retained original that holds a host port an allocation already placed on its node needs is also released. Releasing trades a short gap for progress. Keeping the original would deadlock: the replacement could never start, so the original would never be stopped;
 - the stops of released originals run before every other action of the pass, so a replacement starts only after the original holding its port is stopped.
 
-These decisions are derived each pass from the allocation snapshot and the latest node observations. Nothing about them is persisted, trial placements use copies of the volume-owner map, and scheduler inputs are never mutated. Any originals not kept by a group are stopped in the same pass.
+These decisions are derived each pass from the allocation snapshot and the latest node observations. Nothing about them is persisted, and scheduler inputs are never mutated. Retained originals are added only to placement occupancy, never to the allocations counted for replica spreading. Any originals not kept by a group are stopped in the same pass.
 
 ## Catalog and discovery
 

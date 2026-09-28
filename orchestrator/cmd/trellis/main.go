@@ -510,6 +510,11 @@ func run(parent context.Context, cfg *config) error {
 				leaderCancel()
 			}
 			return nil
+		case err := <-ag.Failed():
+			if leaderCancel != nil {
+				leaderCancel()
+			}
+			return fmt.Errorf("allocation agent: %w", err)
 		case event, ok := <-events:
 			if !ok {
 				return fmt.Errorf("leader election event stream closed")

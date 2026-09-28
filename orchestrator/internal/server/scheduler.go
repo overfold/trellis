@@ -12,17 +12,19 @@ import (
 // PlacementIntent describes an allocation placement request.
 // Placement associates a task group index with a node.
 type PlacementIntent struct {
-	Namespace            string
-	JobName              string
-	TaskGroupName        string
-	Count                int
-	Nodes                []*Node
-	Allocations          []*Allocation
+	Namespace     string
+	JobName       string
+	TaskGroupName string
+	Count         int
+	Nodes         []*Node
+	// Allocations contains every allocation occupying node resources or ports.
+	Allocations []*Allocation
+	// DesiredAllocations contains allocations counted for replica spreading.
+	DesiredAllocations   []*Allocation
 	Tasks                []spec.TaskSpec
 	Constraints          []spec.ConstraintSpec
 	RequiredCapabilities []spec.NodeCapability
 	// VolumeOwners maps namespace/name volume registrations to their owning node.
-	// Schedule mutates the map when it places the first allocation for a volume.
 	VolumeOwners map[string]uuid.UUID
 }
 
@@ -30,9 +32,18 @@ type PlacementIntent struct {
 type Placement struct {
 	TaskGroupName string
 	NodeID        uuid.UUID
+	VolumeClaims  []VolumeClaim
 }
 
-// Schedule selects placements for an intent.
+// VolumeClaim binds a previously unowned namespace-scoped volume to the node
+// selected for its first placement.
+type VolumeClaim struct {
+	Namespace string
+	Name      string
+	NodeID    uuid.UUID
+}
+
+// Schedule selects placements for an intent without mutating it.
 func Schedule(intent *PlacementIntent) []Placement {
 	result := make([]Placement, 0, intent.Count)
 
@@ -40,14 +51,22 @@ func Schedule(intent *PlacementIntent) []Placement {
 	slices.SortFunc(nodes, func(a, b *Node) int {
 		return bytes.Compare(a.ID[:], b.ID[:])
 	})
-	if intent.VolumeOwners == nil {
-		intent.VolumeOwners = make(map[string]uuid.UUID)
+	volumeOwners := make(map[string]uuid.UUID, len(intent.VolumeOwners))
+	for key, owner := range intent.VolumeOwners {
+		volumeOwners[key] = owner
 	}
 
 	replicaCounts := make(map[uuid.UUID]int)
 	usedCPU := make(map[uuid.UUID]int)
+	usedCPUOverflow := make(map[uuid.UUID]bool)
 	usedMemory := make(map[uuid.UUID]int64)
+	usedMemoryOverflow := make(map[uuid.UUID]bool)
 	usedPorts := make(map[uuid.UUID]map[int]bool)
+	for _, alloc := range intent.DesiredAllocations {
+		if alloc.Node != nil && alloc.Namespace == intent.Namespace && alloc.JobName == intent.JobName && alloc.TaskGroupName == intent.TaskGroupName {
+			replicaCounts[alloc.Node.ID]++
+		}
+	}
 	for _, alloc := range intent.Allocations {
 		if alloc.Node != nil {
 			if usedPorts[alloc.Node.ID] == nil {
@@ -58,9 +77,6 @@ func Schedule(intent *PlacementIntent) []Placement {
 					usedPorts[alloc.Node.ID][port.HostPort] = true
 				}
 			}
-			if alloc.Namespace == intent.Namespace && alloc.JobName == intent.JobName && alloc.TaskGroupName == intent.TaskGroupName {
-				replicaCounts[alloc.Node.ID]++
-			}
 			for _, task := range alloc.Tasks {
 				if task.Networking != nil {
 					for _, port := range task.Networking.Ports {
@@ -70,8 +86,12 @@ func Schedule(intent *PlacementIntent) []Placement {
 					}
 				}
 				if task.Resources != nil {
-					usedCPU[alloc.Node.ID] = saturatingAddInt(usedCPU[alloc.Node.ID], task.Resources.CPU)
-					usedMemory[alloc.Node.ID] = saturatingAddInt64(usedMemory[alloc.Node.ID], int64(task.Resources.Memory))
+					if !usedCPUOverflow[alloc.Node.ID] {
+						usedCPU[alloc.Node.ID], usedCPUOverflow[alloc.Node.ID] = checkedAddInt(usedCPU[alloc.Node.ID], task.Resources.CPU)
+					}
+					if !usedMemoryOverflow[alloc.Node.ID] {
+						usedMemory[alloc.Node.ID], usedMemoryOverflow[alloc.Node.ID] = checkedAddInt64(usedMemory[alloc.Node.ID], int64(task.Resources.Memory))
+					}
 				}
 			}
 		}
@@ -87,18 +107,25 @@ func Schedule(intent *PlacementIntent) []Placement {
 		}
 	}
 
-	for i := 0; i < intent.Count; i++ {
-		var target *Node
-		var reqCPU int
-		var reqMemory int64
-		for _, task := range intent.Tasks {
-			if task.Resources != nil {
-				reqCPU = saturatingAddInt(reqCPU, task.Resources.CPU)
-				reqMemory = saturatingAddInt64(reqMemory, int64(task.Resources.Memory))
+	var reqCPU int
+	var reqCPUOverflow bool
+	var reqMemory int64
+	var reqMemoryOverflow bool
+	for _, task := range intent.Tasks {
+		if task.Resources != nil {
+			if !reqCPUOverflow {
+				reqCPU, reqCPUOverflow = checkedAddInt(reqCPU, task.Resources.CPU)
+			}
+			if !reqMemoryOverflow {
+				reqMemory, reqMemoryOverflow = checkedAddInt64(reqMemory, int64(task.Resources.Memory))
 			}
 		}
+	}
+
+	for i := 0; i < intent.Count; i++ {
+		var target *Node
 		for _, node := range nodes {
-			if node.Status != NodeStatusHealthy || !nodeMatchesConstraints(node, intent.Constraints) || !nodeHasTaskVolumes(node.ID, intent.Namespace, intent.Tasks, intent.VolumeOwners) || !nodeHasCapabilities(node, intent.RequiredCapabilities) {
+			if node.Status != NodeStatusHealthy || !nodeMatchesConstraints(node, intent.Constraints) || !nodeHasTaskVolumes(node.ID, intent.Namespace, intent.Tasks, volumeOwners) || !nodeHasCapabilities(node, intent.RequiredCapabilities) {
 				continue
 			}
 			portsAvailable := true
@@ -111,7 +138,7 @@ func Schedule(intent *PlacementIntent) []Placement {
 			if !portsAvailable {
 				continue
 			}
-			if (node.CPUAllocatable > 0 && saturatingAddInt(usedCPU[node.ID], reqCPU) > node.CPUAllocatable) || (node.MemoryAllocatable > 0 && saturatingAddInt64(usedMemory[node.ID], reqMemory) > node.MemoryAllocatable) {
+			if !fitsIntCapacity(node.CPUAllocatable, usedCPU[node.ID], usedCPUOverflow[node.ID], reqCPU, reqCPUOverflow) || !fitsInt64Capacity(node.MemoryAllocatable, usedMemory[node.ID], usedMemoryOverflow[node.ID], reqMemory, reqMemoryOverflow) {
 				continue
 			}
 			better := target == nil
@@ -119,8 +146,8 @@ func Schedule(intent *PlacementIntent) []Placement {
 				// Best fit compares normalized utilization rather than adding
 				// incomparable CPU and byte units. Replica count is a soft
 				// anti-affinity tiebreaker after the best-fit score.
-				utilization := placementUtilization(node, usedCPU[node.ID]+reqCPU, usedMemory[node.ID]+reqMemory)
-				targetUtilization := placementUtilization(target, usedCPU[target.ID]+reqCPU, usedMemory[target.ID]+reqMemory)
+				utilization := placementUtilization(node, usedCPU[node.ID], reqCPU, usedMemory[node.ID], reqMemory)
+				targetUtilization := placementUtilization(target, usedCPU[target.ID], reqCPU, usedMemory[target.ID], reqMemory)
 				better = utilization > targetUtilization ||
 					utilization == targetUtilization && replicaCounts[node.ID] < replicaCounts[target.ID]
 			}
@@ -132,14 +159,21 @@ func Schedule(intent *PlacementIntent) []Placement {
 			break
 		}
 
-		claimTaskVolumes(target.ID, intent.Namespace, intent.Tasks, intent.VolumeOwners)
+		volumeClaims := claimTaskVolumes(target.ID, intent.Namespace, intent.Tasks, volumeOwners)
 		result = append(result, Placement{
 			TaskGroupName: intent.TaskGroupName,
 			NodeID:        target.ID,
+			VolumeClaims:  volumeClaims,
 		})
 		replicaCounts[target.ID]++
-		usedCPU[target.ID] = saturatingAddInt(usedCPU[target.ID], reqCPU)
-		usedMemory[target.ID] = saturatingAddInt64(usedMemory[target.ID], reqMemory)
+		if !usedCPUOverflow[target.ID] {
+			usedCPU[target.ID], usedCPUOverflow[target.ID] = checkedAddInt(usedCPU[target.ID], reqCPU)
+			usedCPUOverflow[target.ID] = usedCPUOverflow[target.ID] || reqCPUOverflow
+		}
+		if !usedMemoryOverflow[target.ID] {
+			usedMemory[target.ID], usedMemoryOverflow[target.ID] = checkedAddInt64(usedMemory[target.ID], reqMemory)
+			usedMemoryOverflow[target.ID] = usedMemoryOverflow[target.ID] || reqMemoryOverflow
+		}
 		if usedPorts[target.ID] == nil {
 			usedPorts[target.ID] = make(map[int]bool)
 		}
@@ -151,18 +185,26 @@ func Schedule(intent *PlacementIntent) []Placement {
 	return result
 }
 
-func saturatingAddInt(a, b int) int {
-	if b > 0 && a > math.MaxInt-b {
-		return math.MaxInt
+func checkedAddInt(a, b int) (int, bool) {
+	if b > 0 && a > math.MaxInt-b || b < 0 && a < math.MinInt-b {
+		return 0, true
 	}
-	return a + b
+	return a + b, false
 }
 
-func saturatingAddInt64(a, b int64) int64 {
-	if b > 0 && a > math.MaxInt64-b {
-		return math.MaxInt64
+func checkedAddInt64(a, b int64) (int64, bool) {
+	if b > 0 && a > math.MaxInt64-b || b < 0 && a < math.MinInt64-b {
+		return 0, true
 	}
-	return a + b
+	return a + b, false
+}
+
+func fitsIntCapacity(capacity, used int, usedOverflow bool, requested int, requestedOverflow bool) bool {
+	return capacity <= 0 || !usedOverflow && !requestedOverflow && used <= capacity && requested <= capacity-used
+}
+
+func fitsInt64Capacity(capacity, used int64, usedOverflow bool, requested int64, requestedOverflow bool) bool {
+	return capacity <= 0 || !usedOverflow && !requestedOverflow && used <= capacity && requested <= capacity-used
 }
 
 func nodeHasCapabilities(node *Node, required []spec.NodeCapability) bool {
@@ -187,15 +229,18 @@ func nodeHasTaskVolumes(nodeID uuid.UUID, namespace string, tasks []spec.TaskSpe
 	return true
 }
 
-func claimTaskVolumes(nodeID uuid.UUID, namespace string, tasks []spec.TaskSpec, owners map[string]uuid.UUID) {
+func claimTaskVolumes(nodeID uuid.UUID, namespace string, tasks []spec.TaskSpec, owners map[string]uuid.UUID) []VolumeClaim {
+	var claims []VolumeClaim
 	for _, task := range tasks {
 		for _, volume := range task.Volumes {
 			key := volumeRegistrationKey(namespace, volume.Name)
 			if _, ok := owners[key]; !ok {
 				owners[key] = nodeID
+				claims = append(claims, VolumeClaim{Namespace: namespace, Name: volume.Name, NodeID: nodeID})
 			}
 		}
 	}
+	return claims
 }
 
 func nodeMatchesConstraints(node *Node, constraints []spec.ConstraintSpec) bool {
@@ -216,13 +261,23 @@ func nodeMatchesConstraints(node *Node, constraints []spec.ConstraintSpec) bool 
 	return true
 }
 
-func placementUtilization(node *Node, cpu int, memory int64) float64 {
+func placementUtilization(node *Node, usedCPU, requestedCPU int, usedMemory, requestedMemory int64) float64 {
 	var cpuRatio, memoryRatio float64
 	if node.CPUAllocatable > 0 {
-		cpuRatio = float64(cpu) / float64(node.CPUAllocatable)
+		cpu, overflow := checkedAddInt(usedCPU, requestedCPU)
+		if overflow {
+			cpuRatio = math.Inf(1)
+		} else {
+			cpuRatio = float64(cpu) / float64(node.CPUAllocatable)
+		}
 	}
 	if node.MemoryAllocatable > 0 {
-		memoryRatio = float64(memory) / float64(node.MemoryAllocatable)
+		memory, overflow := checkedAddInt64(usedMemory, requestedMemory)
+		if overflow {
+			memoryRatio = math.Inf(1)
+		} else {
+			memoryRatio = float64(memory) / float64(node.MemoryAllocatable)
+		}
 	}
 	return max(cpuRatio, memoryRatio)
 }

@@ -148,7 +148,7 @@ func TestInitRejectsIncompleteDurableFencingState(t *testing.T) {
 				}
 				return &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{}}
 			},
-			want: "control-plane epoch is missing",
+			want: "control-plane epoch agent/control-epoch is missing while 1 allocation recovery records exist",
 		},
 		{
 			name: "malformed allocation record",
@@ -185,9 +185,9 @@ func TestInitRejectsIncompleteDurableFencingState(t *testing.T) {
 			want: "read allocation recovery records",
 		},
 		{
-			name: "runtime listing failure",
+			name: "missing control epoch with allocation record and runtime listing failure",
 			prepare: func(t *testing.T, _ string, local *storage.LocalStorage) runtime.ContainerRuntime {
-				if err := local.Put("agent/control-epoch", uint64(1)); err != nil {
+				if err := local.Put(allocationRecordKey(validAllocation.ID), &validAllocation); err != nil {
 					t.Fatal(err)
 				}
 				return &listingRecoveryRuntime{
@@ -195,7 +195,30 @@ func TestInitRejectsIncompleteDurableFencingState(t *testing.T) {
 					listErr:           errors.New("runtime unavailable"),
 				}
 			},
-			want: "list managed containers",
+			want: "control-plane epoch agent/control-epoch is missing while 1 allocation recovery records exist",
+		},
+		{
+			name: "missing control epoch with runtime container",
+			prepare: func(_ *testing.T, _ string, _ *storage.LocalStorage) runtime.ContainerRuntime {
+				return &listingRecoveryRuntime{
+					reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning},
+					containers:        []runtime.ContainerInfo{{ID: "task", Status: runtime.StatusRunning}},
+				}
+			},
+			want: `control-plane epoch agent/control-epoch is missing while managed runtime container "task" exists`,
+		},
+		{
+			name: "mis-keyed allocation record",
+			prepare: func(t *testing.T, _ string, local *storage.LocalStorage) runtime.ContainerRuntime {
+				if err := local.Put("agent/control-epoch", uint64(1)); err != nil {
+					t.Fatal(err)
+				}
+				if err := local.Put(allocationRecordKey("other"), &validAllocation); err != nil {
+					t.Fatal(err)
+				}
+				return &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{}}
+			},
+			want: "record name does not match allocation ID",
 		},
 		{
 			name: "runtime container without durable record",
@@ -216,7 +239,7 @@ func TestInitRejectsIncompleteDurableFencingState(t *testing.T) {
 					}},
 				}
 			},
-			want: "has no durable allocation record",
+			want: `managed runtime container "task" (labelled allocation "allocation", generation "1") has no durable allocation record`,
 		},
 	}
 
@@ -232,6 +255,9 @@ func TestInitRejectsIncompleteDurableFencingState(t *testing.T) {
 			err := agent.Init(context.Background())
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("Init error = %v, want containing %q", err, tt.want)
+			}
+			if !strings.Contains(err.Error(), "Agent recovery refused") {
+				t.Fatalf("Init error = %v, want it to point to the operator recovery steps", err)
 			}
 		})
 	}

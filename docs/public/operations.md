@@ -167,6 +167,50 @@ It downloads and verifies the new release before touching the running daemon, th
 
 After a successful core upgrade, the script refreshes a dashboard that was installed and recorded by the setup lifecycle state. A service that was already stopped remains stopped. On a multi-node cluster the script also evacuates the node first; see [Multi-node clusters](multi-node.md#maintain-a-multi-node-cluster).
 
+## Agent recovery refused
+
+When the daemon starts, its allocation agent restores the node's allocations from durable records below `data_dir` (`agent/control-epoch` and `agent/allocations/`) and compares them with the containers containerd reports for the cluster. If containerd cannot list containers, the agent starts anyway: it keeps its recorded allocations and their ports, reports them with unknown health, and retries until a listing succeeds. Restore containerd; nothing else is needed.
+
+The agent refuses to start, and the daemon exits, when that state is broken:
+
+- `agent/control-epoch` or an allocation record is unreadable or malformed, or a record's file name does not match its allocation ID;
+- the control epoch is missing while allocation records or managed containers exist, or while containerd cannot be listed to confirm an empty first boot;
+- a Trellis container of this cluster has no allocation record.
+
+The last check also runs when a listing succeeds after containerd was unavailable at startup; the daemon then exits with the same error, and restarting refuses at startup. The agent does not adopt such a container from its labels: labels carry no control epoch, drain state, or restart budget, so adopting it could keep running or restart a task the control plane has already replaced. While the daemon is down its allocations stop heartbeating and are replaced on other nodes.
+
+The error names the file or container and ends with `see "Agent recovery refused"`. To recover:
+
+1. Read the error and stop the restart loop while you work:
+
+   ```sh
+   sudo journalctl -u trellis -n 50
+   sudo systemctl stop trellis
+   ```
+
+2. **Missing epoch while containerd is unavailable.** Fix containerd (`sudo systemctl status containerd`) and start Trellis again.
+
+3. **Container without a record.** Inspect the named container, then remove it. Do not write an allocation record by hand. If its workload is still desired, the control plane starts it again.
+
+   ```sh
+   sudo ctr -n trellis containers info CONTAINER_ID
+   sudo ctr -n trellis tasks kill -s SIGKILL CONTAINER_ID
+   sudo ctr -n trellis tasks delete CONTAINER_ID
+   sudo ctr -n trellis containers rm CONTAINER_ID
+   sudo systemctl start trellis
+   ```
+
+4. **Damaged agent state**: an unreadable, malformed, or mis-keyed file, or a missing epoch while records or containers exist. Restore the named file from a backup of that node if you have one. Otherwise reset the node's allocation state: remove every Trellis container of this cluster as in step 3 (list them with `sudo ctr -n trellis containers ls 'labels."trellis.cluster"==CLUSTER'`), move the agent's allocation state aside, and start again. With no records and no containers left, the agent starts as an empty node and the control plane reschedules its work.
+
+   ```sh
+   cd /var/lib/trellis/data   # data_dir
+   sudo mkdir -p agent-broken
+   sudo mv agent/allocations agent/control-epoch agent-broken/
+   sudo systemctl start trellis
+   ```
+
+   Keep `agent/secret-root`: startup uses it to remove secret files that no allocation owns. Staging mounts and network attachments left by the removed containers are cleaned up at startup as well.
+
 ## Uninstall a node
 
 The default uninstall is a reversible machine-removal operation:

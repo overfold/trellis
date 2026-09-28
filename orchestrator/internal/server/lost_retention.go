@@ -1,7 +1,6 @@
 package server
 
 import (
-	"maps"
 	"slices"
 	"sort"
 
@@ -103,27 +102,26 @@ func unreleasedAllocations(retained []*retainedOriginal) []*Allocation {
 
 // scheduleAroundRetained places a group's deficit while treating retained
 // originals as occupying their node's ports, CPU, and memory, so replacements
-// prefer nodes where they can start alongside them. When the retained
-// originals are the only reason fewer replacements fit — for example the
-// group is pinned to the original's node by a host volume and needs the same
-// host port — the blocking originals are released, same-group originals
-// first, so the replacement can take their place.
+// prefer nodes where they can start alongside them. Retained originals never
+// count as replicas for spreading. When the retained originals are the only
+// reason fewer replacements fit — for example the group is pinned to the
+// original's node by a host volume and needs the same host port — the
+// blocking originals are released, same-group originals first, so the
+// replacement can take their place.
 //
-// Trial placements use copies of the volume owners; only the final Schedule
-// call claims volumes. Neither intent.Allocations nor any allocation is
-// mutated. It returns the placements and the originals it released.
+// Neither the intent nor any allocation is mutated. It returns the
+// placements and the originals it released.
 func scheduleAroundRetained(intent PlacementIntent, retained []*retainedOriginal) ([]Placement, []*retainedOriginal) {
-	schedule := func(held []*Allocation, owners map[string]uuid.UUID) []Placement {
+	schedule := func(held []*Allocation) []Placement {
 		candidate := intent
 		candidate.Allocations = slices.Concat(intent.Allocations, held)
-		candidate.VolumeOwners = owners
 		return Schedule(&candidate)
 	}
 	var released []*retainedOriginal
 	if held := unreleasedAllocations(retained); len(held) > 0 && intent.Count > 0 {
-		withHeld := len(schedule(held, maps.Clone(intent.VolumeOwners)))
+		withHeld := len(schedule(held))
 		if withHeld < intent.Count {
-			unblocked := schedule(nil, maps.Clone(intent.VolumeOwners))
+			unblocked := schedule(nil)
 			if len(unblocked) > withHeld {
 				targets := make(map[uuid.UUID]bool, len(unblocked))
 				for _, placement := range unblocked {
@@ -142,12 +140,12 @@ func scheduleAroundRetained(intent PlacementIntent, retained []*retainedOriginal
 				for _, original := range candidates {
 					original.released = true
 					released = append(released, original)
-					if len(schedule(unreleasedAllocations(retained), maps.Clone(intent.VolumeOwners))) >= len(unblocked) {
+					if len(schedule(unreleasedAllocations(retained))) >= len(unblocked) {
 						break
 					}
 				}
 			}
 		}
 	}
-	return schedule(unreleasedAllocations(retained), intent.VolumeOwners), released
+	return schedule(unreleasedAllocations(retained)), released
 }

@@ -521,6 +521,14 @@ func (s *Server) Reconcile(ctx context.Context) {
 		valid = append(valid, allocation)
 		allocation.mu.Unlock()
 	}
+	occupied := make([]*Allocation, 0, len(allocations))
+	occupiedSet := make(map[*Allocation]bool, len(allocations))
+	for _, allocation := range allocations {
+		if allocation.Node != nil && allocation.Phase != lifecycle.PhaseStopped && allocation.Phase != lifecycle.PhaseFailed && allocation.Phase != lifecycle.PhaseLost {
+			occupied = append(occupied, allocation)
+			occupiedSet[allocation] = true
+		}
+	}
 
 	plannedBackoffs := make(map[string]*ReplacementBackoff)
 	for _, key := range jobKeys {
@@ -565,7 +573,7 @@ func (s *Server) Reconcile(ctx context.Context) {
 				if original.released || original.kept || !original.inGroup(namespace, jobName, group.Name) {
 					continue
 				}
-				if missing > 0 && (original.allocation.JobRevision == job.Revision || updateStrategy(job, group.Name) == spec.UpdateRolling) && !original.blocksPlacedAllocation(valid) {
+				if missing > 0 && (original.allocation.JobRevision == job.Revision || updateStrategy(job, group.Name) == spec.UpdateRolling) && !original.blocksPlacedAllocation(occupied) {
 					original.kept = true
 					missing--
 					continue
@@ -622,11 +630,14 @@ func (s *Server) Reconcile(ctx context.Context) {
 				continue
 			}
 			requiredCapabilities := spec.GroupRequiredCapabilities(&group)
-			placements, released := scheduleAroundRetained(PlacementIntent{Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Count: deficit, Nodes: s.nodePointers(), Allocations: valid, Tasks: group.Tasks, Constraints: group.Constraints, RequiredCapabilities: requiredCapabilities, VolumeOwners: volumeOwners}, retained)
+			placements, released := scheduleAroundRetained(PlacementIntent{Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Count: deficit, Nodes: s.nodePointers(), Allocations: occupied, DesiredAllocations: valid, Tasks: group.Tasks, Constraints: group.Constraints, RequiredCapabilities: requiredCapabilities, VolumeOwners: volumeOwners}, retained)
 			for _, original := range released {
 				retainedStops = append(retainedStops, original.stopAction())
 			}
 			for i, placement := range placements {
+				for _, claim := range placement.VolumeClaims {
+					volumeOwners[volumeRegistrationKey(claim.Namespace, claim.Name)] = claim.NodeID
+				}
 				node := s.nodes[placement.NodeID]
 				if i < len(pending) {
 					allocation := pending[i]
@@ -634,6 +645,10 @@ func (s *Server) Reconcile(ctx context.Context) {
 					_ = allocation.Transition(lifecycle.PhasePlaced, now, "", "")
 					markUpdated(allocation)
 					actions = append(actions, Action{Type: ActionStart, Allocation: allocation})
+					if !occupiedSet[allocation] {
+						occupied = append(occupied, allocation)
+						occupiedSet[allocation] = true
+					}
 					continue
 				}
 				name := fmt.Sprintf("%s-%s-%s-%s", namespace, jobName, group.Name, uuid.NewString()[:8])
@@ -641,6 +656,8 @@ func (s *Server) Reconcile(ctx context.Context) {
 				actions = append(actions, Action{Type: ActionStart, Allocation: allocation})
 				newAllocations = append(newAllocations, allocation)
 				valid = append(valid, allocation)
+				occupied = append(occupied, allocation)
+				occupiedSet[allocation] = true
 			}
 			if len(placements) == 0 && len(pending) == 0 && len(requiredCapabilities) > 0 && noCompatibleCapabilityNode(s.nodePointers(), group.Constraints, group.Tasks, volumeOwners, namespace, requiredCapabilities) {
 				for i := 0; i < deficit; i++ {

@@ -345,8 +345,11 @@ func TestScheduleAroundRetainedDoesNotMutateInputs(t *testing.T) {
 	if len(valid) != 0 || cap(valid) != 0 || original.Phase != lifecycle.PhaseLost {
 		t.Fatalf("scheduler inputs changed: valid=%#v original=%s", valid, original.Phase)
 	}
-	if len(owners) != 1 || owners[volumeRegistrationKey("default", "data")] != node.ID {
-		t.Fatalf("volume owners = %#v, want only the final placement's claim", owners)
+	if len(owners) != 0 {
+		t.Fatalf("volume owners = %#v, want the caller's map untouched", owners)
+	}
+	if claims := placements[0].VolumeClaims; len(claims) != 1 || claims[0].Name != "data" || claims[0].NodeID != node.ID {
+		t.Fatalf("volume claims = %#v, want the placement to claim the volume on its node", claims)
 	}
 
 	// The same inputs always yield the same decision.
