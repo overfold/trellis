@@ -48,7 +48,7 @@ Each task selects its attachment through `networking.mode`. Omission or `isolate
 
 A volume has a stable namespace-scoped `name`, an explicit node-side `host_path`, and a `container_path`. The first allocation using an unseen volume name establishes its node registration; future allocations using the same `(namespace, name)` are constrained to that node. `@/path` resolves below Trellis's per-namespace volume root, while an absolute host path is used verbatim and therefore does not receive filesystem-level namespace isolation. Volume registration provides locality, not replication or migration.
 
-**Secrets** are namespace-scoped named values referenced by job manifests without embedding their plaintext in YAML. Trellis encrypts stored secret records and injects values into allocations as environment variables or files below `/run/trellis-secrets/`. Updating a secret does not mutate already-running allocations.
+**Secrets** are namespace-scoped named values referenced by job manifests without embedding their plaintext in YAML. Trellis encrypts stored secret records and delivers values from verified tmpfs storage as environment variables or files below `/run/trellis-secrets/`. Managed environment values are absent from containerd's persisted OCI metadata, but necessarily become part of the live application process environment; prefer file delivery when supported. Updating a secret does not mutate already-running allocations.
 
 ## Updates
 

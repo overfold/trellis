@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -57,4 +60,22 @@ func TestProbeRejectsUnsupportedArguments(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReadSecretEnvironmentReadsOnlyMountedDirectoryFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "PASSWORD"), []byte("secret-value"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "ignored"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	values, err := readSecretEnvironment(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 1 || !bytes.Equal(values["PASSWORD"], []byte("secret-value")) {
+		t.Fatalf("environment values = %#v", values)
+	}
+	clear(values["PASSWORD"])
 }

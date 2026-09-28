@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/clofour/trellis/internal/api"
 	"github.com/clofour/trellis/internal/auth"
@@ -261,6 +262,16 @@ func (h *Handler) handleSetSecret(c *echo.Context) error {
 	var request api.SecretWriteRequest
 	if err := c.Bind(&request); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	}
+	decodedSize := base64.StdEncoding.DecodedLen(len(request.ValueBase64))
+	if strings.HasSuffix(request.ValueBase64, "=") {
+		decodedSize--
+	}
+	if strings.HasSuffix(request.ValueBase64, "==") {
+		decodedSize--
+	}
+	if len(request.ValueBase64) > base64.StdEncoding.EncodedLen(secretstore.MaxValueSize) || decodedSize > secretstore.MaxValueSize {
+		return echo.NewHTTPError(http.StatusRequestEntityTooLarge, "secret exceeds 65536 bytes")
 	}
 	value, err := base64.StdEncoding.DecodeString(request.ValueBase64)
 	if err != nil {
