@@ -161,7 +161,7 @@ func run(parent context.Context, cfg *config) error {
 		return fmt.Errorf("--wireguard-port-count must be positive and fit between --wireguard-port and 65535")
 	}
 	if err := agent.ValidateTaskPidsLimit(cfg.TaskPidsLimit); err != nil {
-		return fmt.Errorf("--task-pids-limit: %w", err)
+		return fmt.Errorf("resources.task_pids_limit or --task-pids-limit: %w", err)
 	}
 	defaultMemory, err := spec.ParseByteSize(cfg.DefaultTaskMemory)
 	if err != nil {
@@ -356,7 +356,7 @@ func run(parent context.Context, cfg *config) error {
 	ag := agent.NewAgent(log, runtimeClient, healthMgr, restartCtl, agent.NewPortManager(runtimeClient, 0, 0, 0), volumeManager, leaderClient, id)
 	ag.SetVersion(version.Current())
 	if err := ag.SetTaskPidsLimit(cfg.TaskPidsLimit); err != nil {
-		return fmt.Errorf("--task-pids-limit: %w", err)
+		return fmt.Errorf("resources.task_pids_limit or --task-pids-limit: %w", err)
 	}
 	ag.ConfigureDurability(local, cfg.Cluster)
 	networkManager, err := network.NewAutomatedWireGuardManager(filepath.Join(cfg.DataDir, "network"))
@@ -372,6 +372,9 @@ func run(parent context.Context, cfg *config) error {
 		cfg.DNSListen = net.JoinHostPort(dnsHost, strconv.Itoa(dnsPort))
 	}
 	if cfg.Runtime == "containerd" {
+		if !containerruntime.SwapLimitSupported() {
+			log.Warn("host memory cgroup has no swap accounting; task memory limits cannot cap swap")
+		}
 		if dnsPort != 53 {
 			return fmt.Errorf("workload DNS must listen on port 53; resolv.conf nameserver entries cannot include a custom port")
 		}

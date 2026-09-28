@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -166,7 +167,7 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 			ociSpecOpts = append(ociSpecOpts, withoutRawSocketCapability())
 		}
 	}
-	resourceOpts, err := resourceSpecOpts(options, swapLimitSupported())
+	resourceOpts, err := resourceSpecOpts(options, SwapLimitSupported())
 	if err != nil {
 		return "", err
 	}
@@ -199,16 +200,33 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 	return container.ID(), nil
 }
 
-// swapLimitSupported reports whether runc can apply a memory+swap limit on
-// this host. runc ignores a zero memory.swap.max on cgroup v2 hosts without
-// swap, but rejects memsw limits on cgroup v1 hosts without swap accounting.
-var swapLimitSupported = sync.OnceValue(func() bool {
-	if _, err := os.Stat("/sys/fs/cgroup/cgroup.controllers"); err == nil {
-		return true
-	}
-	_, err := os.Stat("/sys/fs/cgroup/memory/memory.memsw.limit_in_bytes")
-	return err == nil
+// SwapLimitSupported reports whether this host's memory cgroup can enforce a
+// memory+swap limit. Without swap accounting, runc and runsc either ignore or
+// reject the limit, so the runtime omits it and tasks may swap.
+var SwapLimitSupported = sync.OnceValue(func() bool {
+	return swapControllerAvailable("/sys/fs/cgroup", "/proc/self/cgroup")
 })
+
+// swapControllerAvailable mirrors containerd CRI's probe: cgroup v2 exposes
+// memory.swap.max only in non-root cgroups with swap accounting, so it checks
+// the caller's own cgroup; cgroup v1 exposes memory.memsw.limit_in_bytes.
+func swapControllerAvailable(cgroupRoot, selfCgroup string) bool {
+	if _, err := os.Stat(filepath.Join(cgroupRoot, "cgroup.controllers")); err != nil {
+		_, err := os.Stat(filepath.Join(cgroupRoot, "memory", "memory.memsw.limit_in_bytes"))
+		return err == nil
+	}
+	data, err := os.ReadFile(selfCgroup)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if path, ok := strings.CutPrefix(line, "0::"); ok {
+			_, err := os.Stat(filepath.Join(cgroupRoot, filepath.Clean("/"+path), "memory.swap.max"))
+			return err == nil
+		}
+	}
+	return false
+}
 
 // resourceSpecOpts converts task resource limits into cgroup settings. The
 // OCI swap value is the combined memory and swap limit, so setting it equal to
@@ -217,7 +235,7 @@ var swapLimitSupported = sync.OnceValue(func() bool {
 func resourceSpecOpts(options CreateOptions, limitSwap bool) ([]oci.SpecOpts, error) {
 	var opts []oci.SpecOpts
 	if options.CPU < 0 || options.Memory < 0 || options.PidsLimit < 0 {
-		return nil, fmt.Errorf("resource limits must not be negative")
+		return nil, fmt.Errorf("resource limits for %s must not be negative: cpu=%d memory=%d pids=%d", options.ID, options.CPU, options.Memory, options.PidsLimit)
 	}
 	if options.CPU > 0 {
 		cpuQuota := int64(options.CPU) * 100

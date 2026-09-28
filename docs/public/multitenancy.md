@@ -58,7 +58,7 @@ A manifest may reference a secret name, and the allocation receives the value fr
 Namespaces share the cluster's nodes, host kernels, container runtime, image cache and pull path, physical network, local disks, DNS forwarders, control plane, and operator-managed secret-encryption key. Consequences include:
 
 - node or control-plane failure can affect several tenants;
-- CPU, memory, disk, network, image pulls, and API capacity remain contention and denial-of-service surfaces unless the frontend constrains them. Each task is capped at its declared CPU and memory (memory including swap) and at the node's `task_pids_limit` processes and threads, but those caps bound a single task, not the aggregate a tenant can schedule; on cgroup v1 hosts without swap accounting the swap cap is not enforced;
+- CPU, memory, disk, network, image pulls, and API capacity remain contention and denial-of-service surfaces unless the frontend constrains them. Each task is capped at its declared CPU and memory (memory including swap) and at the node's `task_pids_limit` processes and threads, but those caps bound a single task, not the aggregate a tenant can schedule; on hosts without memory-cgroup swap accounting the swap cap is not enforced;
 - `@/` volumes provide path separation, not encryption, distributed storage, snapshots, or protection from node administrators;
 - namespace networking separates tenant network paths, but workloads still share the host networking stack, DNS forwarders, and Trellis control-plane route;
 - container isolation ultimately depends on the selected OCI runtime and host security; and

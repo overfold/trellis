@@ -66,7 +66,10 @@ creates a container and is not part of the execution hash, so changing it does
 not restart running allocations or their local restarts. The new value applies
 to containers created afterward, such as when a job update or reschedule
 replaces an allocation.
-Raise it for workloads that legitimately run many threads or processes. Keep it
+The limit covers everything in the container's cgroup, including `trellisctl
+exec` sessions and script health checks, so a task at its limit also cannot
+start those. Raise it for workloads that legitimately run many threads or
+processes. Keep it
 consistent across nodes unless you deliberately want different per-node bounds.
 
 Edit this file when changing persistent node configuration, then restart the service:
