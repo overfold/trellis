@@ -4,6 +4,7 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +19,10 @@ import (
 	v1stats "github.com/containerd/cgroups/v3/cgroup1/stats"
 	v2stats "github.com/containerd/cgroups/v3/cgroup2/stats"
 	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/contrib/apparmor"
+	"github.com/containerd/containerd/v2/contrib/seccomp"
+	"github.com/containerd/containerd/v2/core/containers"
+	hostapparmor "github.com/containerd/containerd/v2/pkg/apparmor"
 	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/oci"
@@ -28,6 +33,8 @@ import (
 
 const trellisNamespace = "trellis"
 const gracePeriod = 10 * time.Second
+const secretEnvContainerPath = "/run/trellis/env-secrets"
+const healthProbeContainerPath = "/run/trellis/health-probe"
 
 // ContainerdRuntime implements container lifecycle operations with containerd.
 type ContainerdRuntime struct {
@@ -47,14 +54,71 @@ type Mount struct {
 	HostPath      string
 	ContainerPath string
 	ReadOnly      bool
+	// Secret marks a memory-backed mount whose source must be made readable
+	// only by the image-configured process user before container creation.
+	Secret bool
+	// SecretEnv marks the private directory containing environment-secret
+	// files. The runtime wraps the configured process so these values never
+	// enter the container's persisted OCI environment.
+	SecretEnv bool
 }
 
-func withoutRawSocketCapability() oci.SpecOpts {
-	return oci.WithDroppedCapabilities([]string{"CAP_NET_RAW"})
+// appArmorProfileName is the AppArmor profile Trellis generates from
+// containerd's default template and applies to runc workloads.
+const appArmorProfileName = "trellis-default"
+
+// droppedCapabilities are removed from containerd's default capability set for
+// every workload. CAP_NET_RAW would allow raw and packet sockets, which in host
+// networking can sniff and inject on every namespace bridge and WireGuard
+// interface. CAP_MKNOD would allow creating device nodes that persist in
+// volumes.
+var droppedCapabilities = []string{"CAP_MKNOD", "CAP_NET_RAW"}
+
+// hostAppArmorProfile returns the loader for Trellis's AppArmor profile, or nil
+// when the host does not support AppArmor.
+func hostAppArmorProfile() func(string) oci.SpecOpts {
+	if !hostapparmor.HostSupports() {
+		return nil
+	}
+	return apparmor.WithDefaultProfile
 }
 
-func shouldDropRawSocketCapability(networkNamespace string) bool {
-	return networkNamespace != "" && networkNamespace != "/proc/1/ns/net"
+// workloadSecurityOpts hardens containerd's default OCI spec, which applies no
+// seccomp filter and no AppArmor profile on its own. appArmorProfile loads and
+// applies the named profile; nil means the host does not support AppArmor.
+// These options must follow every other option that changes capabilities.
+func workloadSecurityOpts(runtimeName string, appArmorProfile func(string) oci.SpecOpts) []oci.SpecOpts {
+	opts := []oci.SpecOpts{
+		oci.WithDroppedCapabilities(droppedCapabilities),
+		// The default seccomp profile derives allowed syscalls from the
+		// capability set, so it must follow capability changes. runsc ignores
+		// OCI seccomp unless configured with --oci-seccomp, in which case the
+		// Sentry enforces it; either way it does not break gVisor workloads.
+		seccomp.WithDefaultProfile(),
+	}
+	// runsc ignores the OCI AppArmor profile, so loading one for it would only
+	// add a host dependency on apparmor_parser without confining anything.
+	if appArmorProfile != nil && runtimeName != "runsc" {
+		opts = append(opts, appArmorProfile(appArmorProfileName))
+	}
+	return opts
+}
+
+// bindMount returns a Trellis-generated bind mount. nosuid and nodev keep a
+// workload from using setuid binaries or device nodes planted in the source,
+// including host-persistent volumes. noexec is deliberately omitted because
+// volumes and the health probe must remain executable.
+func bindMount(source, destination string, readOnly bool) specs.Mount {
+	mode := "rw"
+	if readOnly {
+		mode = "ro"
+	}
+	return specs.Mount{
+		Source:      source,
+		Destination: destination,
+		Type:        "bind",
+		Options:     []string{"rbind", mode, "nosuid", "nodev"},
+	}
 }
 
 // NewContainerdRuntime connects to containerd at socketPath.
@@ -133,12 +197,7 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 			return "", fmt.Errorf("write resolv.conf for %s: %w", options.ID, err)
 		}
 		createdFiles = append(createdFiles, resolvPath)
-		allMounts = append(allMounts, specs.Mount{
-			Source:      resolvPath,
-			Destination: "/etc/resolv.conf",
-			Type:        "bind",
-			Options:     []string{"rbind", "ro"},
-		})
+		allMounts = append(allMounts, bindMount(resolvPath, "/etc/resolv.conf", true))
 	}
 	if len(options.ExtraHosts) > 0 {
 		hostsPath := filepath.Join(c.logDir, options.ID+"-hosts")
@@ -146,26 +205,20 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 			return "", fmt.Errorf("write hosts file for %s: %w", options.ID, err)
 		}
 		createdFiles = append(createdFiles, hostsPath)
-		allMounts = append(allMounts, specs.Mount{
-			Source:      hostsPath,
-			Destination: "/etc/hosts",
-			Type:        "bind",
-			Options:     []string{"rbind", "ro"},
-		})
+		allMounts = append(allMounts, bindMount(hostsPath, "/etc/hosts", true))
 	}
 	ociSpecOpts := []oci.SpecOpts{
 		oci.WithImageConfig(image),
 		oci.WithEnv(convertEnv(options.Env)),
 		oci.WithMounts(allMounts),
+		withManagedSecretMounts(options.Mounts),
 	}
 	if options.NetworkNamespace != "" {
 		ociSpecOpts = append(ociSpecOpts, oci.WithLinuxNamespace(specs.LinuxNamespace{
 			Type: specs.NetworkNamespace, Path: options.NetworkNamespace,
 		}))
-		if shouldDropRawSocketCapability(options.NetworkNamespace) {
-			ociSpecOpts = append(ociSpecOpts, withoutRawSocketCapability())
-		}
 	}
+	ociSpecOpts = append(ociSpecOpts, workloadSecurityOpts(options.Runtime, hostAppArmorProfile())...)
 	if options.CPU > 0 {
 		cpuQuota := int64(options.CPU) * 100
 		if cpuQuota/100 != int64(options.CPU) {
@@ -213,6 +266,13 @@ func (c *ContainerdRuntime) Start(ctx context.Context, containerID string) error
 		return fmt.Errorf("loading container %s: %w", containerID, err)
 	}
 
+	containerSpec, err := container.Spec(ctx)
+	if err != nil {
+		return fmt.Errorf("reading spec for %s: %w", containerID, err)
+	}
+	if err := ensureAppArmorProfile(containerSpec); err != nil {
+		return fmt.Errorf("loading AppArmor profile for %s: %w", containerID, err)
+	}
 	if err := ensureRuntimeDir(c.logDir); err != nil {
 		return fmt.Errorf("create log directory: %w", err)
 	}
@@ -228,6 +288,16 @@ func (c *ContainerdRuntime) Start(ctx context.Context, containerID string) error
 	}
 
 	return nil
+}
+
+// ensureAppArmorProfile reloads Trellis's AppArmor profile when a stored spec
+// names it, because the profile may have been unloaded since the container was
+// created and every new task, including in-place restarts, needs it.
+func ensureAppArmorProfile(containerSpec *specs.Spec) error {
+	if containerSpec.Process == nil || containerSpec.Process.ApparmorProfile != appArmorProfileName {
+		return nil
+	}
+	return apparmor.LoadDefaultProfile(appArmorProfileName)
 }
 
 func (c *ContainerdRuntime) logPath(containerID string) string {
@@ -538,16 +608,25 @@ func execProcessSpec(containerSpec *specs.Spec, command []string, terminal bool)
 	if containerSpec == nil || containerSpec.Process == nil {
 		return nil, fmt.Errorf("container spec has no process")
 	}
-	// container.Spec decodes a fresh spec on every call, so a shallow copy
-	// shares nothing with other execs; only replaced fields are written.
-	copied := *containerSpec.Process
-	process := &copied
+	// A JSON round trip deep-copies every field, including ones added to the
+	// OCI spec later, so the exec process never aliases the container's.
+	encoded, err := json.Marshal(containerSpec.Process)
+	if err != nil {
+		return nil, fmt.Errorf("copying container process: %w", err)
+	}
+	process := &specs.Process{}
+	if err := json.Unmarshal(encoded, process); err != nil {
+		return nil, fmt.Errorf("copying container process: %w", err)
+	}
 	process.Args = append([]string(nil), command...)
 	process.CommandLine = ""
 	process.Terminal = terminal
 	process.ConsoleSize = nil
 	if process.Cwd == "" {
 		process.Cwd = "/"
+	}
+	if hasSecretEnvironment(containerSpec) {
+		process.Args = secretEnvironmentCommand(command)
 	}
 	return process, nil
 }
@@ -564,6 +643,55 @@ func containerExecProcess(ctx context.Context, container containerd.Container, c
 		return nil, fmt.Errorf("preparing exec for %s: %w", container.ID(), err)
 	}
 	return process, nil
+}
+
+func hasSecretEnvironment(containerSpec *specs.Spec) bool {
+	if containerSpec == nil {
+		return false
+	}
+	for _, mount := range containerSpec.Mounts {
+		if mount.Destination == secretEnvContainerPath {
+			return true
+		}
+	}
+	return false
+}
+
+func secretEnvironmentCommand(command []string) []string {
+	wrapped := []string{healthProbeContainerPath, "env-exec", secretEnvContainerPath, "--"}
+	return append(wrapped, command...)
+}
+
+func withManagedSecretMounts(mounts []*Mount) oci.SpecOpts {
+	return func(_ context.Context, _ oci.Client, _ *containers.Container, spec *oci.Spec) error {
+		if spec.Process == nil {
+			return fmt.Errorf("container process is missing")
+		}
+		uid, gid := int(spec.Process.User.UID), int(spec.Process.User.GID)
+		for _, mount := range mounts {
+			if !mount.Secret {
+				continue
+			}
+			if mount.SecretEnv {
+				entries, err := os.ReadDir(mount.HostPath)
+				if err != nil {
+					return fmt.Errorf("list environment secrets: %w", err)
+				}
+				for _, entry := range entries {
+					if err := os.Chown(filepath.Join(mount.HostPath, entry.Name()), uid, gid); err != nil {
+						return fmt.Errorf("set environment secret ownership: %w", err)
+					}
+				}
+			}
+			if err := os.Chown(mount.HostPath, uid, gid); err != nil {
+				return fmt.Errorf("set secret ownership: %w", err)
+			}
+		}
+		if hasSecretEnvironment(spec) {
+			spec.Process.Args = secretEnvironmentCommand(spec.Process.Args)
+		}
+		return nil
+	}
 }
 
 // Inspect returns the current state of a container.
@@ -683,18 +811,7 @@ func convertMounts(mounts []*Mount) []specs.Mount {
 	result := make([]specs.Mount, len(mounts))
 
 	for i, m := range mounts {
-
-		mode := "rw"
-		if m.ReadOnly {
-			mode = "ro"
-		}
-		result[i] = specs.Mount{
-			Source:      m.HostPath,
-			Destination: m.ContainerPath,
-			Type:        "bind",
-			Options:     []string{"rbind", mode},
-		}
-
+		result[i] = bindMount(m.HostPath, m.ContainerPath, m.ReadOnly)
 	}
 
 	return result

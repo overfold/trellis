@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/clofour/trellis/internal/api"
 	"github.com/clofour/trellis/internal/auth"
@@ -261,6 +262,16 @@ func (h *Handler) handleSetSecret(c *echo.Context) error {
 	var request api.SecretWriteRequest
 	if err := c.Bind(&request); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	}
+	decodedSize := base64.StdEncoding.DecodedLen(len(request.ValueBase64))
+	if strings.HasSuffix(request.ValueBase64, "=") {
+		decodedSize--
+	}
+	if strings.HasSuffix(request.ValueBase64, "==") {
+		decodedSize--
+	}
+	if len(request.ValueBase64) > base64.StdEncoding.EncodedLen(secretstore.MaxValueSize) || decodedSize > secretstore.MaxValueSize {
+		return echo.NewHTTPError(http.StatusRequestEntityTooLarge, "secret exceeds 65536 bytes")
 	}
 	value, err := base64.StdEncoding.DecodeString(request.ValueBase64)
 	if err != nil {
@@ -592,6 +603,9 @@ func (h *Handler) handleRaftJoin(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusForbidden, "Raft join identity does not match certificate")
 	}
 	nodeID = certificateNodeID
+	if err := h.server.BindNodeCertificate(c.Request().Context(), nodeID, certificate); err != nil {
+		return echo.NewHTTPError(http.StatusForbidden, err.Error())
+	}
 	for _, address := range []string{request.RaftAddress, request.ServerAddress} {
 		host, _, err := net.SplitHostPort(address)
 		if err != nil || host == "" {
@@ -610,7 +624,12 @@ func (h *Handler) handleRaftJoin(c *echo.Context) error {
 	if err := h.server.joiner.AddVoter(nodeID.String(), request.RaftAddress); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
-	return c.NoContent(http.StatusNoContent)
+	_, caKey, err := h.server.ClusterCA()
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "load managed signing material")
+	}
+	c.Response().Header().Set("Cache-Control", "no-store")
+	return c.JSON(http.StatusOK, api.RaftJoinResponse{CAKey: caKey})
 }
 
 func (h *Handler) handleEnrollNode(c *echo.Context) error {
@@ -621,7 +640,7 @@ func (h *Handler) handleEnrollNode(c *echo.Context) error {
 	if err := c.Bind(&request); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 	}
-	response, err := h.server.EnrollNode(request.NodeID, request.ServerAdvertise, request.AgentAdvertise, request.RaftAdvertise)
+	response, err := h.server.EnrollNode(c.Request().Context(), request.ServerAdvertise, request.AgentAdvertise, request.RaftAdvertise)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error())
 	}

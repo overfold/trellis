@@ -201,18 +201,22 @@ func (s *Store) Resolve(ctx context.Context, namespace, name string) ([]byte, ui
 	if err != nil {
 		return nil, 0, fmt.Errorf("decode secret nonce: %w", err)
 	}
+	defer clear(nonce)
 	ciphertext, err := base64.RawStdEncoding.DecodeString(rec.Ciphertext)
 	if err != nil {
 		return nil, 0, fmt.Errorf("decode secret ciphertext: %w", err)
 	}
+	defer clear(ciphertext)
 	wrapNonce, err := base64.RawStdEncoding.DecodeString(rec.WrapNonce)
 	if err != nil {
 		return nil, 0, fmt.Errorf("decode key wrap nonce: %w", err)
 	}
+	defer clear(wrapNonce)
 	wrappedDEK, err := base64.RawStdEncoding.DecodeString(rec.WrappedDEK)
 	if err != nil {
 		return nil, 0, fmt.Errorf("decode wrapped key: %w", err)
 	}
+	defer clear(wrappedDEK)
 	dek, err := s.aead.Open(nil, wrapNonce, wrappedDEK, append(aad(namespace, name, rec.RecordID, rec.Version), []byte("\x00dek")...))
 	if err != nil {
 		return nil, 0, fmt.Errorf("unwrap data encryption key: %w", err)

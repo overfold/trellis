@@ -6,9 +6,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/clofour/trellis/internal/api"
+	"github.com/clofour/trellis/internal/runtime"
 	"github.com/clofour/trellis/internal/spec"
 	"github.com/clofour/trellis/internal/storage"
 )
@@ -23,14 +25,16 @@ func TestMaterializeSecretsDeliversEnvAndMemoryBackedFile(t *testing.T) {
 	if err := createSecretDir(dir); err != nil {
 		t.Fatal(err)
 	}
-	env, mounts, err := materializeSecrets(dir, "api", delivered)
+	mounts, err := materializeSecrets(dir, "api", delivered)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if env["PASSWORD"] != "env-value" || env["IGNORED"] != "" {
-		t.Fatalf("unexpected env: %#v", env)
+	t.Cleanup(func() { _ = removeSecretDir(dir) })
+	envValue, err := os.ReadFile(filepath.Join(dir, "env", "PASSWORD"))
+	if err != nil || string(envValue) != "env-value" {
+		t.Fatalf("environment secret = %q, %v", envValue, err)
 	}
-	if len(mounts) != 1 || !mounts[0].ReadOnly || mounts[0].ContainerPath != "/run/trellis-secrets/key" || filepath.Dir(mounts[0].HostPath) != dir {
+	if len(mounts) != 2 || !mounts[0].ReadOnly || mounts[0].ContainerPath != "/run/trellis-secrets/key" || filepath.Dir(mounts[0].HostPath) != dir || !mounts[1].SecretEnv {
 		t.Fatalf("unexpected mounts: %#v", mounts)
 	}
 	value, err := os.ReadFile(mounts[0].HostPath)
@@ -49,6 +53,9 @@ func TestMaterializeSecretsDeliversEnvAndMemoryBackedFile(t *testing.T) {
 	}
 	if info, err := os.Stat(dir); err != nil || info.Mode().Perm() != 0o700 {
 		t.Fatalf("secret directory = %v, %v", info, err)
+	}
+	if info, err := os.Stat(filepath.Join(dir, "env")); err != nil || info.Mode().Perm() != 0o500 {
+		t.Fatalf("environment secret directory = %v, %v", info, err)
 	}
 }
 
@@ -75,14 +82,95 @@ func TestSecretDirForRefusesExistingDirectory(t *testing.T) {
 	}
 }
 
-func TestMaterializeSecretsEnvOnlyNeedsNoDirectory(t *testing.T) {
-	delivered := []api.DeliveredSecret{{Task: "api", Name: "password", Target: spec.SecretTargetEnv, Env: "PASSWORD", Value: []byte("value")}}
-	if taskHasFileSecrets("api", delivered) {
-		t.Fatal("environment-only task reported file secrets")
+func TestSecretDirForRequiresTmpfsBacking(t *testing.T) {
+	agent := newOperationTestAgent(t, &reconcilerRuntime{})
+	agent.secretStatfs = func(_ string, stat *syscall.Statfs_t) error {
+		stat.Type = 0xef53 // ext2/3/4
+		return nil
 	}
-	env, mounts, err := materializeSecrets("", "api", delivered)
-	if err != nil || env["PASSWORD"] != "value" || len(mounts) != 0 {
-		t.Fatalf("env = %#v, mounts = %#v, error = %v", env, mounts, err)
+	if _, err := agent.secretDirFor("allocation"); err == nil || !strings.Contains(err.Error(), "must be backed by tmpfs") {
+		t.Fatalf("disk-backed secret base error = %v", err)
+	}
+	entries, err := os.ReadDir(agent.secretBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("secret files written before filesystem verification: %v", entries)
+	}
+}
+
+func TestMaterializeSecretsEnvUsesMemoryBackedDirectory(t *testing.T) {
+	delivered := []api.DeliveredSecret{{Task: "api", Name: "password", Target: spec.SecretTargetEnv, Env: "PASSWORD", Value: []byte("value")}}
+	if !taskHasSecrets("api", delivered) {
+		t.Fatal("environment-only task did not report secrets")
+	}
+	dir := filepath.Join(t.TempDir(), "alloc")
+	if err := createSecretDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	mounts, err := materializeSecrets(dir, "api", delivered)
+	if err != nil || len(mounts) != 1 || !mounts[0].SecretEnv {
+		t.Fatalf("mounts = %#v, error = %v", mounts, err)
+	}
+	t.Cleanup(func() { _ = removeSecretDir(dir) })
+}
+
+func TestRemoveSecretDirCleansReadOnlyEnvironmentSecrets(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "alloc")
+	if err := createSecretDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := materializeSecrets(dir, "api", []api.DeliveredSecret{{Task: "api", Target: spec.SecretTargetEnv, Env: "PASSWORD", Value: []byte("value")}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeSecretDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("secret directory after cleanup: %v", err)
+	}
+}
+
+type captureCreateRuntime struct {
+	*reconcilerRuntime
+	options runtime.CreateOptions
+}
+
+func (r *captureCreateRuntime) Create(_ context.Context, options runtime.CreateOptions) (string, error) {
+	r.options = options
+	return options.ID, nil
+}
+
+func TestRunAllocationKeepsManagedEnvironmentSecretsOutOfRuntimeEnvironment(t *testing.T) {
+	rt := &captureCreateRuntime{reconcilerRuntime: &reconcilerRuntime{}}
+	agent := newOperationTestAgent(t, rt)
+	request := operationTestRequest()
+	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image"}}
+	request.EnvOverrides = map[string]string{"TRELLIS_TOKEN": "api-token-sentinel", "TRELLIS_NAMESPACE": "default"}
+	request.Secrets = []api.DeliveredSecret{{Task: "first", Name: "password", Target: spec.SecretTargetEnv, Env: "PASSWORD", Value: []byte("secret-sentinel")}}
+	if err := agent.RunGroup(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := rt.options.Env["PASSWORD"]; ok {
+		t.Fatal("managed secret entered runtime environment")
+	}
+	if _, ok := rt.options.Env["TRELLIS_TOKEN"]; ok {
+		t.Fatal("API access token entered runtime environment")
+	}
+	if rt.options.Env["TRELLIS_NAMESPACE"] != "default" {
+		t.Fatalf("ordinary environment override missing: %#v", rt.options.Env)
+	}
+	foundSecretEnv := false
+	for _, mount := range rt.options.Mounts {
+		foundSecretEnv = foundSecretEnv || mount.SecretEnv
+		if mount.SecretEnv {
+			dir := filepath.Dir(mount.HostPath)
+			t.Cleanup(func() { _ = removeSecretDir(dir) })
+		}
+	}
+	if !foundSecretEnv {
+		t.Fatalf("environment secret mount missing: %#v", rt.options.Mounts)
 	}
 }
 
@@ -268,7 +356,7 @@ func TestRemoveOrphanedSecretDirsKeepsOwnedDirectories(t *testing.T) {
 		if err := createSecretDir(dir); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := materializeSecrets(dir, "task", []api.DeliveredSecret{{Task: "task", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Value: []byte("secret")}}); err != nil {
+		if _, err := materializeSecrets(dir, "task", []api.DeliveredSecret{{Task: "task", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Value: []byte("secret")}}); err != nil {
 			t.Fatal(err)
 		}
 		dirs[id] = dir

@@ -116,7 +116,21 @@ func (t *tlsStreamLayer) Dial(address raft.ServerAddress, timeout time.Duration)
 	if err != nil {
 		return nil, err
 	}
-	tlsConn := tls.Client(conn, t.tlsCfg)
+	host, _, err := net.SplitHostPort(string(address))
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("parse Raft peer address %q: %w", address, err)
+	}
+	if host == "" {
+		_ = conn.Close()
+		return nil, fmt.Errorf("parse Raft peer address %q: host is required", address)
+	}
+	peerTLS := t.tlsCfg.Clone()
+	// Raft join already proves that this advertised host is a SAN of the
+	// joining node certificate. Recheck that binding on every new stream rather
+	// than accepting any cluster certificate through the shared trellis SAN.
+	peerTLS.ServerName = host
+	tlsConn := tls.Client(conn, peerTLS)
 	if err := tlsConn.SetDeadline(time.Now().Add(timeout)); err != nil {
 		_ = conn.Close()
 		return nil, err
