@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -44,7 +45,6 @@ func TestEnsureNetworkPortRegistrationsRejectsExhaustion(t *testing.T) {
 	}
 }
 
-
 func TestRegisterNodeRejectsMismatchedWireGuardPortCount(t *testing.T) {
 	s := &Server{
 		state:              NewStateController(memoryStore{}, "test"),
@@ -63,7 +63,6 @@ func TestRegisterNodeRejectsMismatchedWireGuardPortCount(t *testing.T) {
 		t.Fatal("expected mismatched WireGuard port count to be rejected")
 	}
 }
-
 
 func TestEnsureNetworkPortRegistrationsReleasesUnusedNamespace(t *testing.T) {
 	ctx := context.Background()
@@ -92,5 +91,45 @@ func TestEnsureNetworkPortRegistrationsReleasesUnusedNamespace(t *testing.T) {
 	}
 	if third["initech"] != acmeSlot {
 		t.Fatalf("released slot %d was not reusable: %v", acmeSlot, third)
+	}
+}
+
+func TestEnsureNetworkPortRegistrationsFailureIsAtomicAndDeterministic(t *testing.T) {
+	ctx := context.Background()
+	store := &failingBatchStore{memoryStore: memoryStore{}}
+	state := NewStateController(store, "test")
+	for namespace, slot := range map[string]int{"zeta": 0, "acme": 1} {
+		if err := state.PutNetworkPortRegistration(ctx, &NetworkPortRegistration{Namespace: namespace, Slot: slot}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := &Server{state: state, wireGuardPortCount: 2}
+
+	registrations, err := s.ensureNetworkPortRegistrations(ctx, []string{"gamma", "beta"})
+	if err == nil || registrations != nil {
+		t.Fatalf("registrations = %v, error = %v; want failed atomic commit", registrations, err)
+	}
+	persisted, err := state.ListNetworkPortRegistrations(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(persisted, map[string]int{"zeta": 0, "acme": 1}) {
+		t.Fatalf("persisted registrations after failed transition = %v", persisted)
+	}
+	if len(store.batches) != 1 {
+		t.Fatalf("batch count = %d, want 1", len(store.batches))
+	}
+	keys := make([]string, len(store.batches[0]))
+	for i, mutation := range store.batches[0] {
+		keys[i] = mutation.Key
+	}
+	wantKeys := []string{
+		"trellis/test/network-port-registrations/acme",
+		"trellis/test/network-port-registrations/zeta",
+		"trellis/test/network-port-registrations/beta",
+		"trellis/test/network-port-registrations/gamma",
+	}
+	if !reflect.DeepEqual(keys, wantKeys) {
+		t.Fatalf("batch mutation order = %v, want %v", keys, wantKeys)
 	}
 }

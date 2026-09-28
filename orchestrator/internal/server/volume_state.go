@@ -39,14 +39,18 @@ func (s *StateController) PutVolumeRegistration(ctx context.Context, registratio
 	if registration == nil || registration.Namespace == "" || registration.Name == "" || registration.NodeID == uuid.Nil {
 		return fmt.Errorf("invalid volume registration")
 	}
-	key := fmt.Sprintf(
-		"%s/%s/volume-registrations/%s",
-		trellisNamespace,
-		s.cluster,
-		url.QueryEscape(volumeRegistrationKey(registration.Namespace, registration.Name)),
-	)
+	key := s.volumeRegistrationStorageKey(registration.Namespace, registration.Name)
 	if err := s.put(ctx, key, registration); err != nil {
 		return fmt.Errorf("put volume registration: %w", err)
 	}
 	return nil
+}
+
+func (s *StateController) volumeRegistrationStorageKey(namespace, name string) string {
+	return fmt.Sprintf(
+		"%s/%s/volume-registrations/%s",
+		trellisNamespace,
+		s.cluster,
+		url.QueryEscape(volumeRegistrationKey(namespace, name)),
+	)
 }

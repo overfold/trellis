@@ -283,6 +283,7 @@ func (s *Server) Reconcile(ctx context.Context) {
 		originalByPlan[planned] = allocation
 		baseByPlan[planned] = base
 	}
+	sort.Slice(allocations, func(i, j int) bool { return allocations[i].ID < allocations[j].ID })
 	plannedUpdates := make(map[*Allocation]bool)
 	markUpdated := func(allocation *Allocation) {
 		plannedUpdates[allocation] = true
@@ -660,21 +661,24 @@ func (s *Server) Reconcile(ctx context.Context) {
 		}
 	}
 
-	for key, owner := range volumeOwners {
+	volumeKeys := make([]string, 0, len(volumeOwners))
+	for key := range volumeOwners {
 		if _, exists := persistedVolumeOwners[key]; exists {
 			continue
 		}
+		volumeKeys = append(volumeKeys, key)
+	}
+	sort.Strings(volumeKeys)
+	volumeRegistrations := make([]*VolumeRegistration, 0, len(volumeKeys))
+	for _, key := range volumeKeys {
+		owner := volumeOwners[key]
 		namespace, name, ok := strings.Cut(key, "/")
 		if !ok || namespace == "" || name == "" {
 			s.log.Error("invalid volume registration key", "key", key)
 			unlockUpdates()
 			return
 		}
-		if err := s.state.PutVolumeRegistration(ctx, &VolumeRegistration{Namespace: namespace, Name: name, NodeID: owner}); err != nil {
-			s.log.Error("persist volume registration", "volume", key, "node_id", owner, "error", err)
-			unlockUpdates()
-			return
-		}
+		volumeRegistrations = append(volumeRegistrations, &VolumeRegistration{Namespace: namespace, Name: name, NodeID: owner})
 	}
 	updates := make([]*Allocation, 0, len(plannedUpdates)+len(newAllocations))
 	for _, allocation := range allocations {
@@ -687,7 +691,7 @@ func (s *Server) Reconcile(ctx context.Context) {
 	for i, allocation := range pruned {
 		prunedIDs[i] = allocation.ID
 	}
-	if err := s.state.CommitReconciliation(ctx, &ReconciliationCommit{Allocations: updates, DeleteAllocations: prunedIDs, Backoffs: backoffPuts, DeleteBackoffs: backoffDeletes}); err != nil {
+	if err := s.state.CommitReconciliation(ctx, &ReconciliationCommit{Allocations: updates, DeleteAllocations: prunedIDs, VolumeRegistrations: volumeRegistrations, Backoffs: backoffPuts, DeleteBackoffs: backoffDeletes}); err != nil {
 		s.log.Error("persist reconciliation allocation updates", "error", err)
 		unlockUpdates()
 		return

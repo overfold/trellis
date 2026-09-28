@@ -1112,6 +1112,7 @@ func (s *Server) Reload(ctx context.Context) error {
 		}
 		allocations = append(allocations, allocation)
 	}
+	sort.Slice(allocations, func(i, j int) bool { return allocations[i].ID < allocations[j].ID })
 	s.mu.Lock()
 	s.jobs = jobs
 	s.nodes = nodes
