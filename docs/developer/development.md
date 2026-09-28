@@ -29,7 +29,7 @@ sudo env TRELLIS_HEALTH_PROBE=/tmp/trellis-health-probe "$(command -v go)" test 
 Multi-node integration uses the test/injected runtime and is separated in CI. The injected runtime is compiled into the node binary only under the `integration` build tag; the suite builds its own node binary with that tag:
 
 ```sh
-go test -tags=integration ./integration -count=1 -timeout=6m
+go test -tags=integration ./cmd/trellis ./integration -count=1 -timeout=6m
 ```
 
 Normal builds reject `--runtime injected`.

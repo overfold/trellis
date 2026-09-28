@@ -19,6 +19,7 @@ func init() {
 	buildTestRuntime = &testRuntime{
 		name: "injected",
 		addFlags: func(f *pflag.FlagSet) {
+			f.Lookup("runtime").Usage += " or injected (integration builds only)"
 			f.StringVar(&faults, "runtime-faults", "", "Injected runtime fault-control file (integration builds only)")
 		},
 		open: func(dataDir string) (containerruntime.ContainerRuntime, io.Closer, error) {

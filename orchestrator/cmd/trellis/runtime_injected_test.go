@@ -10,6 +10,7 @@ import (
 
 func TestIntegrationBuildOpensInjectedRuntimeWithoutCapabilities(t *testing.T) {
 	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	flags.String("runtime", "containerd", "Workload runtime: containerd")
 	buildTestRuntime.addFlags(flags)
 	if flags.Lookup("runtime-faults") == nil {
 		t.Fatal("runtime-faults flag is not registered in an integration build")
