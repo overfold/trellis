@@ -12,7 +12,6 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -65,10 +64,10 @@ type Agent struct {
 	// supersededStops holds retained older generations that recovery must
 	// stop itself because the control plane rejects their stops as stale.
 	supersededStops map[string]string
-	// newestListed holds the newest generation per scheduler allocation seen
-	// by the latest recovery relist, so an older generation counts as
-	// superseded even when the newer one could not be adopted yet.
-	newestListed map[string]uint64
+	// recoveryErr stops recovery once a late listing finds a container
+	// without an allocation record; failed delivers it to the caller of Init.
+	recoveryErr  error
+	failed       chan error
 	secretMu     sync.Mutex
 	secretBase   string
 	secretRoot   string
@@ -148,6 +147,14 @@ const (
 	recoveryRetryMaxDelay = 30 * time.Second
 )
 
+// controlEpochKey is the local storage key of the highest accepted control
+// epoch, below the node data directory.
+const controlEpochKey = "agent/control-epoch"
+
+// recoveryGuidance points operators at the manual steps for recovery state
+// that the agent refuses to start with.
+const recoveryGuidance = "see \"Agent recovery refused\" in docs/public/operations.md"
+
 // reportedHealth is the health an allocation reports; recovered allocations
 // whose container has not been observed report unknown.
 func reportedHealth(allocation *Allocation) string {
@@ -213,7 +220,7 @@ func (a *Agent) AcceptEpoch(epoch uint64) error {
 		return nil
 	}
 	if a.local != nil {
-		if err := a.local.Put("agent/control-epoch", epoch); err != nil {
+		if err := a.local.Put(controlEpochKey, epoch); err != nil {
 			return fmt.Errorf("persist control-plane epoch: %w", err)
 		}
 	}
@@ -279,6 +286,7 @@ func NewAgent(log *slog.Logger, runtime runtime.ContainerRuntime, health *health
 		network:    network.DisabledManager{},
 		server:     server,
 		nodeInfo:   client.NodeInfo{ID: nodeID, Host: "127.0.0.1", Port: 8127},
+		failed:     make(chan error, 1),
 	}
 
 	return agent
@@ -365,7 +373,9 @@ func (a *Agent) SetLabels(labels map[string]string) {
 // SetVersion configures the reported agent version.
 func (a *Agent) SetVersion(version string) { a.version = version }
 
-// Init restores durable allocations and starts reconciliation.
+// Init restores durable allocations and starts reconciliation. A runtime
+// listing failure does not fail Init: recorded allocations are kept unobserved
+// and the recovery retry lists again. Failed reports a later recovery failure.
 func (a *Agent) Init(ctx context.Context) error {
 	a.health.Subscriber = a
 	a.health.SetContext(ctx)
@@ -385,37 +395,43 @@ func (a *Agent) Init(ctx context.Context) error {
 	return nil
 }
 
+// recover restores allocations from durable records. Unreadable or
+// inconsistent durable state fails it; a failed runtime listing does not,
+// because it says nothing about any container.
 func (a *Agent) recover(ctx context.Context) error {
 	if a.local == nil {
 		a.cleanupVolumeStaging(nil)
 		return nil
 	}
 	var epoch uint64
-	epochErr := a.local.Get("agent/control-epoch", &epoch)
+	epochErr := a.local.Get(controlEpochKey, &epoch)
 	if epochErr != nil && !errors.Is(epochErr, os.ErrNotExist) {
-		return fmt.Errorf("read control-plane epoch: %w", epochErr)
+		return fmt.Errorf("read control-plane epoch %s: %w; %s", controlEpochKey, epochErr, recoveryGuidance)
 	}
 	records, recordErrs := a.local.ListRaw("agent/allocations")
 	if err := errors.Join(recordErrs...); err != nil {
-		return fmt.Errorf("read allocation recovery records: %w", err)
+		return fmt.Errorf("read allocation recovery records: %w; %s", err, recoveryGuidance)
 	}
 	stored := make(map[string]*Allocation, len(records))
 	for name, raw := range records {
 		var allocation Allocation
 		if err := json.Unmarshal(raw, &allocation); err != nil {
-			return fmt.Errorf("decode allocation recovery record %s: %w", name, err)
+			return fmt.Errorf("decode allocation recovery record agent/allocations/%s: %w; %s", name, err, recoveryGuidance)
 		}
 		if allocation.ID == "" || allocation.ContainerID == "" || allocation.AllocationID == "" {
-			return fmt.Errorf("decode allocation recovery record %s: allocation identity is required", name)
+			return fmt.Errorf("decode allocation recovery record agent/allocations/%s: allocation identity is required; %s", name, recoveryGuidance)
 		}
 		expectedName := base64.RawURLEncoding.EncodeToString([]byte(allocation.ID))
 		if name != expectedName {
-			return fmt.Errorf("decode allocation recovery record %s: record name does not match allocation ID %q", name, allocation.ID)
+			return fmt.Errorf("decode allocation recovery record agent/allocations/%s: record name does not match allocation ID %q; %s", name, allocation.ID, recoveryGuidance)
 		}
 		if _, exists := stored[allocation.ContainerID]; exists {
-			return fmt.Errorf("decode allocation recovery record %s: duplicate container ID %q", name, allocation.ContainerID)
+			return fmt.Errorf("decode allocation recovery record agent/allocations/%s: duplicate container ID %q; %s", name, allocation.ContainerID, recoveryGuidance)
 		}
 		stored[allocation.ContainerID] = &allocation
+	}
+	if epochErr != nil && len(records) != 0 {
+		return fmt.Errorf("control-plane epoch %s is missing while %d allocation recovery records exist; %s", controlEpochKey, len(records), recoveryGuidance)
 	}
 	managed, ok := a.runtime.(runtime.ManagedRuntime)
 	if !ok {
@@ -423,7 +439,7 @@ func (a *Agent) recover(ctx context.Context) error {
 			return fmt.Errorf("runtime cannot recover existing allocation records")
 		}
 		if epochErr != nil {
-			if err := a.local.Put("agent/control-epoch", epoch); err != nil {
+			if err := a.local.Put(controlEpochKey, epoch); err != nil {
 				return fmt.Errorf("initialize control-plane epoch: %w", err)
 			}
 		}
@@ -433,29 +449,36 @@ func (a *Agent) recover(ctx context.Context) error {
 	}
 	containers, err := managed.ListManaged(ctx, a.cluster)
 	if err != nil {
+		if epochErr != nil {
+			// Only an empty first boot may start without an epoch, and a
+			// failed listing cannot show that no container exists.
+			return fmt.Errorf("control-plane epoch %s is missing and managed containers could not be listed to confirm an empty first boot: %w; %s", controlEpochKey, err, recoveryGuidance)
+		}
 		// A failed listing proves nothing about any container. Keep every
-		// record and its resources until the runtime can be observed again.
+		// record and its resources until the recovery retry observes the
+		// runtime again; it also runs the checks and the orphaned resource
+		// sweep that a completed listing allows.
+		a.log.Warn("list managed containers during recovery; retrying", "error", err)
+		a.epoch = epoch
 		a.mu.Lock()
 		a.recoveryListPending = true
 		a.mu.Unlock()
-		for containerID, allocation := range stored {
-			if containerID != "" {
-				a.recoverUnobserved(allocation, false)
-			}
+		for _, allocation := range stored {
+			a.recoverUnobserved(allocation)
 		}
-		return fmt.Errorf("list managed containers: %w", err)
+		return nil
 	}
 	if epochErr != nil {
-		if len(records) != 0 || len(containers) != 0 {
-			return fmt.Errorf("control-plane epoch is missing while recoverable allocation state exists")
+		if len(containers) != 0 {
+			return fmt.Errorf("control-plane epoch %s is missing while managed runtime container %q exists; %s", controlEpochKey, containers[0].ID, recoveryGuidance)
 		}
-		if err := a.local.Put("agent/control-epoch", epoch); err != nil {
+		if err := a.local.Put(controlEpochKey, epoch); err != nil {
 			return fmt.Errorf("initialize control-plane epoch: %w", err)
 		}
 	}
 	for _, container := range containers {
 		if stored[container.ID] == nil {
-			return fmt.Errorf("managed runtime container %q has no durable allocation record", container.ID)
+			return unrecordedContainerError(container)
 		}
 	}
 	a.epoch = epoch
@@ -508,11 +531,8 @@ func (a *Agent) pendingSupersededStopLocked(allocation *Allocation) bool {
 }
 
 // supersededLocked reports whether a newer generation of the allocation is
-// known or was listed by recovery.
+// known.
 func (a *Agent) supersededLocked(allocation *Allocation) bool {
-	if a.newestListed[allocation.AllocationID] > allocation.Generation {
-		return true
-	}
 	for _, known := range a.allocations {
 		if known.AllocationID == allocation.AllocationID && known.Generation > allocation.Generation {
 			return true
@@ -521,22 +541,10 @@ func (a *Agent) supersededLocked(allocation *Allocation) bool {
 	return false
 }
 
-// recoverContainer restores one observed container. allocation is its durable
-// record, or nil when the container is known only from runtime labels.
+// recoverContainer restores one observed container from its durable record.
 func (a *Agent) recoverContainer(container runtime.ContainerInfo, allocation *Allocation) {
-	hadRecord := allocation != nil
-	if allocation == nil {
-		allocation = allocationFromRuntime(container)
-		if allocation != nil {
-			allocation.SecretDir = a.recoveredSecretDir(allocation.ID)
-		}
-	}
-	if allocation == nil {
-		a.log.Warn("leave unidentifiable Trellis container untouched", "container", container.ID)
-		return
-	}
 	if !observedStatus(container.Status) {
-		a.recoverUnobserved(allocation, !hadRecord)
+		a.recoverUnobserved(allocation)
 		return
 	}
 	if allocation.unobserved {
@@ -544,7 +552,7 @@ func (a *Agent) recoverContainer(container runtime.ContainerInfo, allocation *Al
 		_ = a.reconciler.Untrack(allocation.ID)
 		allocation.unobserved = false
 	}
-	if hadRecord && allocation.ContainerOwnershipUnverified {
+	if allocation.ContainerOwnershipUnverified {
 		if !a.containerMatchesAllocation(container, allocation) {
 			allocation.Status = "stopping"
 			a.adoptPorts(allocation)
@@ -558,7 +566,7 @@ func (a *Agent) recoverContainer(container runtime.ContainerInfo, allocation *Al
 		// is saved verified below.
 		allocation.ContainerOwnershipUnverified = false
 	}
-	stopping := hadRecord && allocation.Status == "stopping"
+	stopping := allocation.Status == "stopping"
 	restartSuppressed := stopping || allocation.Draining
 	// An exhausted restart budget is terminal for this generation: keep
 	// reporting the failed observation instead of asking for a new start.
@@ -616,21 +624,13 @@ func (a *Agent) recoverContainer(container runtime.ContainerInfo, allocation *Al
 // recoverUnobserved keeps an allocation whose container state could not be
 // read. Unverified state preserves the record, its resources, and its last
 // recorded phase, reported with unknown health; local restarts stay suppressed until a
-// later observation classifies the container. An existing record is left
-// unchanged; persist records an allocation known only from runtime labels.
-func (a *Agent) recoverUnobserved(allocation *Allocation, persist bool) {
+// later observation classifies the container. The record is left unchanged.
+func (a *Agent) recoverUnobserved(allocation *Allocation) {
 	allocation.unobserved = true
 	a.adoptPorts(allocation)
 	a.mu.Lock()
 	a.allocations[allocation.ID] = allocation
-	var persistErr error
-	if persist {
-		persistErr = a.persistAllocation(allocation)
-	}
 	a.mu.Unlock()
-	if persistErr != nil {
-		a.log.Error("record unobserved allocation", "allocation", allocation.AllocationID, "error", persistErr)
-	}
 	a.reconciler.TrackStopping(allocation.ID, false, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow, allocation.RestartExhausted)
 	a.log.Warn("container state unavailable during recovery; preserving allocation", "allocation", allocation.AllocationID, "container", allocation.ContainerID)
 }
@@ -718,14 +718,18 @@ func (a *Agent) adoptPorts(allocation *Allocation) {
 }
 
 // retryRecovery re-observes allocations that recovery could not classify and,
-// after a failed initial listing, adopts containers known only from runtime
-// labels. It reports whether any recovery work remains.
+// after a failed initial listing, checks that every listed container has a
+// record. It reports whether any recovery work remains.
 func (a *Agent) retryRecovery(ctx context.Context) bool {
 	managed, ok := a.runtime.(runtime.ManagedRuntime)
 	if !ok {
 		return false
 	}
 	a.mu.RLock()
+	if a.recoveryErr != nil {
+		a.mu.RUnlock()
+		return true
+	}
 	listPending := a.recoveryListPending
 	pending := make(map[string]*Allocation)
 	for id, allocation := range a.allocations {
@@ -735,7 +739,10 @@ func (a *Agent) retryRecovery(ctx context.Context) bool {
 	}
 	a.mu.RUnlock()
 	if listPending || len(pending) > 0 {
-		a.relistRecovery(ctx, managed, listPending, pending)
+		if err := a.relistRecovery(ctx, managed, listPending, pending); err != nil {
+			a.failRecovery(err)
+			return true
+		}
 	}
 	a.queueSupersededStops()
 	a.mu.RLock()
@@ -752,12 +759,13 @@ func (a *Agent) retryRecovery(ctx context.Context) bool {
 }
 
 // relistRecovery lists containers again to classify unobserved allocations
-// and, while listing is incomplete, adopt unrecorded containers.
-func (a *Agent) relistRecovery(ctx context.Context, managed runtime.ManagedRuntime, listPending bool, pending map[string]*Allocation) {
+// and, while listing is incomplete, to check that every listed container has
+// an allocation record. It returns an error for a container without one.
+func (a *Agent) relistRecovery(ctx context.Context, managed runtime.ManagedRuntime, listPending bool, pending map[string]*Allocation) error {
 	containers, err := managed.ListManaged(ctx, a.cluster)
 	if err != nil {
 		a.log.Warn("retry allocation recovery", "error", err)
-		return
+		return nil
 	}
 	listed := make(map[string]runtime.ContainerInfo, len(containers))
 	for _, container := range containers {
@@ -768,43 +776,35 @@ func (a *Agent) relistRecovery(ctx context.Context, managed runtime.ManagedRunti
 		a.reobserve(ctx, id, allocation.AllocationID, container, found)
 	}
 	if listPending {
-		// Adopt newer generations first so an older one is recognised as
-		// superseded whatever order the runtime lists them in.
-		adoptable := make([]runtime.ContainerInfo, 0, len(containers))
-		generations := make(map[string]uint64, len(containers))
-		newestListed := make(map[string]uint64)
-		for _, container := range containers {
-			if allocation := allocationFromRuntime(container); allocation != nil {
-				adoptable = append(adoptable, container)
-				generations[container.ID] = allocation.Generation
-				newestListed[allocation.AllocationID] = max(newestListed[allocation.AllocationID], allocation.Generation)
-			}
-		}
-		a.mu.Lock()
-		a.newestListed = newestListed
-		a.mu.Unlock()
-		sort.SliceStable(adoptable, func(i, j int) bool {
-			return generations[adoptable[i].ID] > generations[adoptable[j].ID]
-		})
 		stillPending := false
-		for _, container := range adoptable {
-			if !a.adoptUnrecorded(ctx, container) {
-				stillPending = true
+		for _, container := range containers {
+			relist, err := a.checkRecorded(ctx, container)
+			if err != nil {
+				return err
 			}
+			stillPending = stillPending || relist
 		}
 		a.mu.Lock()
-		a.recoveryListPending = stillPending || a.hasUnreadableUnknownLocked(containers)
+		a.recoveryListPending = stillPending
 		// Listing completes at most once, and Init skipped the orphaned
 		// resource sweep while it was incomplete.
 		sweep := !a.recoveryListPending
 		a.mu.Unlock()
 		if sweep {
-			// Every listed container is now recorded or retained, so secret
-			// directories and network attachments without an owner are
-			// orphans, as at startup.
+			// Every listed container is now recorded, so secret directories
+			// and network attachments without an owner are orphans, as at
+			// startup.
 			a.removeOrphanedResources(ctx)
 		}
 	}
+	return nil
+}
+
+// recoveryFailed reports whether recovery stopped with an error.
+func (a *Agent) recoveryFailed() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.recoveryErr != nil
 }
 
 // recoveryPending reports whether recovery still has containers to observe.
@@ -822,67 +822,81 @@ func (a *Agent) recoveryPending() bool {
 	return false
 }
 
-// adoptUnrecorded recovers a labelled container that has no allocation record.
-// The listing predates the operation lock, so the container is re-inspected to
-// avoid resurrecting an allocation stopped in the meantime. It reports false
-// when the container must be listed again.
-func (a *Agent) adoptUnrecorded(ctx context.Context, listed runtime.ContainerInfo) bool {
+// checkRecorded applies startup's rule to a container found by a late
+// listing: a container without an allocation record fails recovery, because
+// runtime labels alone do not carry the fencing and drain state needed to
+// manage it. The listing predates the operation lock, so the container is
+// re-inspected to rule out one stopped and removed in the meantime. It reports
+// whether the container must be listed again.
+func (a *Agent) checkRecorded(ctx context.Context, listed runtime.ContainerInfo) (bool, error) {
 	a.mu.RLock()
-	_, known := a.allocations[listed.ID]
+	recorded := a.containerRecordedLocked(listed.ID)
 	a.mu.RUnlock()
-	if known {
-		return true
+	if recorded {
+		return false, nil
+	}
+	if listed.Labels == nil {
+		// Unreadable metadata may belong to another cluster, so it does not
+		// prove an unrecorded Trellis container; list it again.
+		a.log.Warn("unreadable container blocks allocation recovery; retrying", "container", listed.ID)
+		return true, nil
 	}
 	unlock := a.lockAllocationOperation(listed.Labels["trellis.allocation-id"])
 	defer unlock()
 	a.mu.RLock()
-	_, known = a.allocations[listed.ID]
+	recorded = a.containerRecordedLocked(listed.ID)
 	a.mu.RUnlock()
-	if known {
-		return true
+	if recorded {
+		return false, nil
 	}
-	observed, err := a.runtime.Inspect(ctx, listed.ID)
-	if errdefs.IsNotFound(err) {
-		// The container may have been removed after the listing, or only
-		// its task may be missing; the next listing decides.
-		return false
+	if _, err := a.runtime.Inspect(ctx, listed.ID); errdefs.IsNotFound(err) {
+		// The container was removed after the listing; the next listing
+		// confirms it. Any other result, including an unreadable state,
+		// leaves a listed container of this cluster without a record.
+		return true, nil
 	}
-	if err != nil {
-		// Keep it as unobserved, as initial recovery does, until a later
-		// observation classifies it.
-		observed = &runtime.ContainerInfo{Status: runtime.StatusUnknown}
-	}
-	container := *observed
-	container.ID = listed.ID
-	if container.Labels == nil {
-		container.Labels = listed.Labels
-	}
-	allocation := allocationFromRuntime(container)
-	if allocation == nil {
-		return true
-	}
-	a.mu.RLock()
-	superseded := a.supersededLocked(allocation)
-	a.mu.RUnlock()
-	if superseded {
-		// A newer generation started while the container was unlisted, so
-		// that start could not stop it. Retain it as stopping;
-		// queueSupersededStops schedules the stop.
-		allocation.Status = "stopping"
-		allocation.SecretDir = a.recoveredSecretDir(allocation.ID)
-		a.adoptPorts(allocation)
-		a.mu.Lock()
-		a.allocations[allocation.ID] = allocation
-		persistErr := a.persistAllocation(allocation)
-		a.mu.Unlock()
-		if persistErr != nil {
-			a.log.Error("record superseded allocation", "allocation", allocation.AllocationID, "error", persistErr)
+	return false, unrecordedContainerError(listed)
+}
+
+// containerRecordedLocked reports whether an allocation owns a container ID.
+func (a *Agent) containerRecordedLocked(containerID string) bool {
+	for _, allocation := range a.allocations {
+		if allocation.ContainerID == containerID {
+			return true
 		}
-		a.reconciler.TrackStopping(allocation.ID, false, nil, 0, time.Time{}, false)
-		return true
 	}
-	a.recoverContainer(container, nil)
-	return true
+	return false
+}
+
+// unrecordedContainerError describes a managed container without a durable
+// allocation record, naming what its labels claim so an operator can find it.
+func unrecordedContainerError(container runtime.ContainerInfo) error {
+	return fmt.Errorf("managed runtime container %q (labelled allocation %q, generation %q) has no durable allocation record; %s",
+		container.ID, container.Labels["trellis.allocation-id"], container.Labels["trellis.allocation-generation"], recoveryGuidance)
+}
+
+// failRecovery stops recovery and reports err through Failed. Recovery does
+// not continue after it, as startup does not.
+func (a *Agent) failRecovery(err error) {
+	a.mu.Lock()
+	first := a.recoveryErr == nil
+	if first {
+		a.recoveryErr = err
+	}
+	a.mu.Unlock()
+	if first {
+		a.log.Error("allocation recovery failed", "error", err)
+		select {
+		case a.failed <- err:
+		default:
+		}
+	}
+}
+
+// Failed delivers an error when recovery fails after Init returned. The agent
+// must then stop; restarting it refuses the same state at Init.
+func (a *Agent) Failed() <-chan error {
+	return a.failed
 }
 
 // stopSuperseded stops a retained older generation if it still qualifies; a
@@ -1011,7 +1025,7 @@ func (a *Agent) snapshotAllocation(id string) (Allocation, bool) {
 // observed.
 func (a *Agent) runRecoveryRetry(ctx context.Context) {
 	delay := recoveryRetryMinDelay
-	for pending := a.recoveryPending(); pending; pending = a.retryRecovery(ctx) {
+	for pending := a.recoveryPending(); pending && !a.recoveryFailed(); pending = a.retryRecovery(ctx) {
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():

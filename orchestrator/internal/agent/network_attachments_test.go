@@ -349,8 +349,8 @@ func TestRecoveryRetrySweepsOrphanedNetworkAttachmentsAfterLateListing(t *testin
 	agent, _ := newRecoveryTestAgent(t, rt)
 	manager := newRecoveringNetworkManager("orphan")
 	agent.SetNetworkManager(manager)
-	if err := agent.recover(context.Background()); err == nil {
-		t.Fatal("recover succeeded despite listing failure")
+	if err := agent.recover(context.Background()); err != nil {
+		t.Fatalf("recover with failed listing: %v", err)
 	}
 	if !agent.recoveryListPending {
 		t.Fatal("listing failure did not leave recovery pending")
