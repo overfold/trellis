@@ -74,7 +74,11 @@ func (c *client) request(ctx context.Context, method string, url string, request
 			return fmt.Errorf("marshal json: %w", err)
 		}
 	}
+	return c.requestBody(ctx, method, url, requestBodyBytes, responseData)
+}
 
+func (c *client) requestBody(ctx context.Context, method string, url string, requestBodyBytes []byte, responseData any) error {
+	defer clear(requestBodyBytes)
 	for attempt := 0; attempt < 2; attempt++ {
 		request, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(requestBodyBytes))
 		if err != nil {

@@ -38,9 +38,9 @@ func newSecretsSetCmd() *cobra.Command {
 		var value []byte
 		var err error
 		if stdin {
-			value, err = io.ReadAll(io.LimitReader(cmd.InOrStdin(), (64<<10)+1))
+			value, err = readSecret(cmd.InOrStdin())
 		} else {
-			value, err = os.ReadFile(file)
+			value, err = readSecretFile(file)
 		}
 		if err != nil {
 			return fmt.Errorf("read secret: %w", err)
@@ -71,6 +71,35 @@ func newSecretsSetCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&stdin, "stdin", false, "Read the secret value from standard input")
 	cmd.Flags().Uint64Var(&expected, "expected-version", 0, "Require the current version (0 creates only)")
 	return cmd
+}
+
+func readSecret(reader io.Reader) ([]byte, error) {
+	value, err := io.ReadAll(io.LimitReader(reader, (64<<10)+1))
+	if err != nil {
+		clear(value)
+		return nil, err
+	}
+	if len(value) > 64<<10 {
+		clear(value)
+		return nil, fmt.Errorf("secret exceeds 65536 bytes")
+	}
+	return value, nil
+}
+
+func readSecretFile(path string) ([]byte, error) {
+	input, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = input.Close() }()
+	info, err := input.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if info.Size() > 64<<10 {
+		return nil, fmt.Errorf("secret exceeds 65536 bytes")
+	}
+	return readSecret(input)
 }
 
 func newSecretsListCmd() *cobra.Command {

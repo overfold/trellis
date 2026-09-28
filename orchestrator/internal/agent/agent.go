@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/clofour/trellis/internal/api"
@@ -70,6 +71,7 @@ type Agent struct {
 	secretMu     sync.Mutex
 	secretBase   string
 	secretRoot   string
+	secretStatfs func(string, *syscall.Statfs_t) error
 }
 
 type allocationOperation struct {
@@ -1655,10 +1657,23 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	for k, v := range ts.Env {
 		env[k] = v
 	}
+	taskSecrets := delivered
 	for k, v := range envOverrides {
+		if k == "TRELLIS_TOKEN" {
+			overridden := false
+			for _, secret := range delivered {
+				overridden = overridden || secret.Task == taskName && secret.Target == spec.SecretTargetEnv && secret.Env == k
+			}
+			if !overridden {
+				value := []byte(v)
+				defer clear(value)
+				taskSecrets = append(taskSecrets, api.DeliveredSecret{Task: taskName, Name: "api-access-token", Target: spec.SecretTargetEnv, Env: k, Value: value})
+			}
+			continue
+		}
 		env[k] = v
 	}
-	if taskHasFileSecrets(taskName, delivered) {
+	if taskHasSecrets(taskName, taskSecrets) {
 		secretDir, err = a.secretDirFor(allocID)
 		if err != nil {
 			return err
@@ -1675,12 +1690,9 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 			return err
 		}
 	}
-	secretEnv, secretMounts, err := materializeSecrets(secretDir, taskName, delivered)
+	secretMounts, err := materializeSecrets(secretDir, taskName, taskSecrets)
 	if err != nil {
 		return err
-	}
-	for k, v := range secretEnv {
-		env[k] = v
 	}
 	mounts = append(mounts, secretMounts...)
 	alloc.Mounts = append([]*runtime.Mount(nil), mounts...)

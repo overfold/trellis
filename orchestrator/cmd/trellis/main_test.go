@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -85,6 +86,21 @@ func TestAcquireNodeIDIsStable(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("node ID mode is %o", info.Mode().Perm())
+	}
+}
+
+func TestDecodeSecretsKeyClearsInputBuffer(t *testing.T) {
+	raw := []byte(base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32)))
+	key, err := decodeSecretsKey(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(key)
+	if !bytes.Equal(key, bytes.Repeat([]byte{7}, 32)) {
+		t.Fatalf("decoded key = %x", key)
+	}
+	if !bytes.Equal(raw, make([]byte, len(raw))) {
+		t.Fatal("raw key-loading buffer was not cleared")
 	}
 }
 

@@ -222,7 +222,7 @@ secrets:
     mode: 256 # decimal form of 0400
 ```
 
-An environment target requires only a valid `env` name and may not collide with `env`. A file target requires a clean path below `/run/trellis-secrets/`; mode may be `0400` or `0600` (or their YAML numeric values), and zero selects the default. Names, environment targets, and file paths must be unique within a task.
+An environment target requires only a valid `env` name and may not collide with `env`. Its plaintext is not stored in containerd's OCI metadata, but it necessarily exists in the running process environment. A file target requires a clean path below `/run/trellis-secrets/`; mode may be `0400` or `0600` (or their YAML numeric values), and zero selects the default. Trellis assigns the mounted file to the image-configured process UID/GID so owner-only files work for non-root images. Names, environment targets, and file paths must be unique within a task.
 
 ### Health checks
 
