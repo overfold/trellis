@@ -55,6 +55,76 @@ func TestRawSocketCapabilityDropIsLimitedToNamespaceNetworking(t *testing.T) {
 	}
 }
 
+func TestResourceSpecOptsLimitMemorySwapAndPids(t *testing.T) {
+	opts, err := resourceSpecOpts(CreateOptions{CPU: 250, Memory: 256 << 20, PidsLimit: 4096}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := oci.Spec{Linux: &specs.Linux{}}
+	for _, opt := range opts {
+		if err := opt(context.Background(), nil, nil, &s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resources := s.Linux.Resources
+	if resources == nil || resources.CPU == nil || resources.Memory == nil || resources.Pids == nil {
+		t.Fatalf("resources = %#v, want CPU, memory, and pids limits", resources)
+	}
+	if got := resources.CPU.Quota; got == nil || *got != 25000 {
+		t.Fatalf("CPU quota = %v, want 25000", got)
+	}
+	if got := resources.Memory.Limit; got == nil || *got != 256<<20 {
+		t.Fatalf("memory limit = %v, want %d", got, 256<<20)
+	}
+	if got := resources.Memory.Swap; got == nil || *got != 256<<20 {
+		t.Fatalf("memory+swap limit = %v, want memory limit %d", got, 256<<20)
+	}
+	if got := resources.Pids.Limit; got == nil || *got != 4096 {
+		t.Fatalf("pids limit = %v, want 4096", got)
+	}
+}
+
+func TestResourceSpecOptsSkipsSwapWithoutSwapAccounting(t *testing.T) {
+	opts, err := resourceSpecOpts(CreateOptions{Memory: 256 << 20}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := oci.Spec{Linux: &specs.Linux{}}
+	for _, opt := range opts {
+		if err := opt(context.Background(), nil, nil, &s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if s.Linux.Resources == nil || s.Linux.Resources.Memory == nil || s.Linux.Resources.Memory.Limit == nil {
+		t.Fatal("memory limit was not applied")
+	}
+	if s.Linux.Resources.Memory.Swap != nil {
+		t.Fatalf("memory+swap limit = %d, want unset without swap accounting", *s.Linux.Resources.Memory.Swap)
+	}
+}
+
+func TestResourceSpecOptsOmitsUnsetLimits(t *testing.T) {
+	opts, err := resourceSpecOpts(CreateOptions{}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(opts) != 0 {
+		t.Fatalf("resource opts = %d, want none for unset limits", len(opts))
+	}
+}
+
+func TestResourceSpecOptsRejectsNegativeLimits(t *testing.T) {
+	for name, options := range map[string]CreateOptions{
+		"cpu":    {CPU: -1},
+		"memory": {Memory: -1},
+		"pids":   {PidsLimit: -1},
+	} {
+		if _, err := resourceSpecOpts(options, true); err == nil {
+			t.Errorf("%s: expected negative limit to be rejected", name)
+		}
+	}
+}
+
 func TestContainerdLogsFallsBackToLegacyDirectory(t *testing.T) {
 	dir := t.TempDir()
 	r := &ContainerdRuntime{

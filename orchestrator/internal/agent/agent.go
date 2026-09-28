@@ -51,6 +51,7 @@ type Agent struct {
 	server      *client.ServerClient
 	nodeInfo    client.NodeInfo
 	dnsServers  []string
+	pidsLimit   int64
 	local       *storage.LocalStorage
 	cluster     string
 	version     string
@@ -292,6 +293,38 @@ func (a *Agent) SetNetworkManager(manager network.Manager) {
 func (a *Agent) SetWireGuardIdentity(publicKey, endpoint string, portBase, portCount int) {
 	a.nodeInfo.WireGuardPublicKey, a.nodeInfo.WireGuardEndpoint = publicKey, endpoint
 	a.nodeInfo.WireGuardPortBase, a.nodeInfo.WireGuardPortCount = portBase, portCount
+}
+
+// DefaultTaskPidsLimit bounds the processes and threads in each task container
+// when the operator does not configure a limit.
+const DefaultTaskPidsLimit int64 = 4096
+
+// MaxTaskPidsLimit is the kernel's upper bound on PID values (PID_MAX_LIMIT).
+const MaxTaskPidsLimit int64 = 1 << 22
+
+// ValidateTaskPidsLimit checks a node's per-task process limit.
+func ValidateTaskPidsLimit(limit int64) error {
+	if limit < 1 || limit > MaxTaskPidsLimit {
+		return fmt.Errorf("task pids limit must be between 1 and %d", MaxTaskPidsLimit)
+	}
+	return nil
+}
+
+// SetTaskPidsLimit configures the process limit applied to every task
+// container this node creates. Existing containers keep their limit.
+func (a *Agent) SetTaskPidsLimit(limit int64) error {
+	if err := ValidateTaskPidsLimit(limit); err != nil {
+		return err
+	}
+	a.pidsLimit = limit
+	return nil
+}
+
+func (a *Agent) taskPidsLimit() int64 {
+	if a.pidsLimit == 0 {
+		return DefaultTaskPidsLimit
+	}
+	return a.pidsLimit
 }
 
 // SetDNSServers configures allocation DNS servers.
@@ -1732,7 +1765,8 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 			}
 			return 0
 		}(),
-		Runtime: groupRuntime,
+		PidsLimit: a.taskPidsLimit(),
+		Runtime:   groupRuntime,
 		NetworkNamespace: func() string {
 			if netAttachment != nil {
 				return netAttachment.NetworkNamespace

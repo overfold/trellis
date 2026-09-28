@@ -166,16 +166,11 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 			ociSpecOpts = append(ociSpecOpts, withoutRawSocketCapability())
 		}
 	}
-	if options.CPU > 0 {
-		cpuQuota := int64(options.CPU) * 100
-		if cpuQuota/100 != int64(options.CPU) {
-			return "", fmt.Errorf("CPU request %d overflows CFS quota", options.CPU)
-		}
-		ociSpecOpts = append(ociSpecOpts, oci.WithCPUCFS(cpuQuota, 100000))
+	resourceOpts, err := resourceSpecOpts(options, swapLimitSupported())
+	if err != nil {
+		return "", err
 	}
-	if options.Memory > 0 {
-		ociSpecOpts = append(ociSpecOpts, oci.WithMemoryLimit(uint64(options.Memory)))
-	}
+	ociSpecOpts = append(ociSpecOpts, resourceOpts...)
 
 	containerOpts := []containerd.NewContainerOpts{
 		containerd.WithImage(image),
@@ -202,6 +197,45 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 	}
 
 	return container.ID(), nil
+}
+
+// swapLimitSupported reports whether runc can apply a memory+swap limit on
+// this host. runc ignores a zero memory.swap.max on cgroup v2 hosts without
+// swap, but rejects memsw limits on cgroup v1 hosts without swap accounting.
+var swapLimitSupported = sync.OnceValue(func() bool {
+	if _, err := os.Stat("/sys/fs/cgroup/cgroup.controllers"); err == nil {
+		return true
+	}
+	_, err := os.Stat("/sys/fs/cgroup/memory/memory.memsw.limit_in_bytes")
+	return err == nil
+})
+
+// resourceSpecOpts converts task resource limits into cgroup settings. The
+// OCI swap value is the combined memory and swap limit, so setting it equal to
+// the memory limit denies swap on both cgroup v1 (memsw) and v2 (runc writes
+// memory.swap.max as swap minus memory).
+func resourceSpecOpts(options CreateOptions, limitSwap bool) ([]oci.SpecOpts, error) {
+	var opts []oci.SpecOpts
+	if options.CPU < 0 || options.Memory < 0 || options.PidsLimit < 0 {
+		return nil, fmt.Errorf("resource limits must not be negative")
+	}
+	if options.CPU > 0 {
+		cpuQuota := int64(options.CPU) * 100
+		if cpuQuota/100 != int64(options.CPU) {
+			return nil, fmt.Errorf("CPU request %d overflows CFS quota", options.CPU)
+		}
+		opts = append(opts, oci.WithCPUCFS(cpuQuota, 100000))
+	}
+	if options.Memory > 0 {
+		opts = append(opts, oci.WithMemoryLimit(uint64(options.Memory)))
+		if limitSwap {
+			opts = append(opts, oci.WithMemorySwap(options.Memory))
+		}
+	}
+	if options.PidsLimit > 0 {
+		opts = append(opts, oci.WithPidsLimit(options.PidsLimit))
+	}
+	return opts, nil
 }
 
 // Start starts a created container.

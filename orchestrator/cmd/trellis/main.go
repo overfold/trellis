@@ -73,6 +73,7 @@ type config struct {
 	DefaultTaskMemory                                                              string
 	MaxTaskCPU                                                                     int
 	MaxTaskMemory                                                                  string
+	TaskPidsLimit                                                                  int64
 }
 
 func main() {
@@ -125,6 +126,7 @@ func main() {
 	f.StringVar(&cfg.SecretsKey, "secrets-key", "", "Path to a root-readable 32-byte or base64-encoded secrets encryption key")
 	f.StringVar(&cfg.SecretsKeyID, "secrets-key-id", "", "Identifier for the active secrets encryption key")
 	f.StringArrayVar(&cfg.Labels, "label", nil, "Node label in key=value form (repeatable)")
+	f.Int64Var(&cfg.TaskPidsLimit, "task-pids-limit", agent.DefaultTaskPidsLimit, "Maximum processes and threads in each task container created on this node")
 	defaults := spec.DefaultLimits()
 	f.IntVar(&cfg.MaxReplicasPerTaskGroup, "max-replicas-per-task-group", defaults.MaxReplicasPerTaskGroup, "Maximum replicas allowed in one task group")
 	f.IntVar(&cfg.MaxTaskGroupsPerJob, "max-task-groups-per-job", defaults.MaxTaskGroupsPerJob, "Maximum task groups allowed in one job")
@@ -157,6 +159,9 @@ func run(parent context.Context, cfg *config) error {
 	}
 	if cfg.WireGuardPortCount < 1 || cfg.WireGuardPort+cfg.WireGuardPortCount-1 > 65535 {
 		return fmt.Errorf("--wireguard-port-count must be positive and fit between --wireguard-port and 65535")
+	}
+	if err := agent.ValidateTaskPidsLimit(cfg.TaskPidsLimit); err != nil {
+		return fmt.Errorf("--task-pids-limit: %w", err)
 	}
 	defaultMemory, err := spec.ParseByteSize(cfg.DefaultTaskMemory)
 	if err != nil {
@@ -350,6 +355,9 @@ func run(parent context.Context, cfg *config) error {
 	volumeManager := agent.NewVolumeManager(cfg.DataDir)
 	ag := agent.NewAgent(log, runtimeClient, healthMgr, restartCtl, agent.NewPortManager(runtimeClient, 0, 0, 0), volumeManager, leaderClient, id)
 	ag.SetVersion(version.Current())
+	if err := ag.SetTaskPidsLimit(cfg.TaskPidsLimit); err != nil {
+		return fmt.Errorf("--task-pids-limit: %w", err)
+	}
 	ag.ConfigureDurability(local, cfg.Cluster)
 	networkManager, err := network.NewAutomatedWireGuardManager(filepath.Join(cfg.DataDir, "network"))
 	if err != nil {

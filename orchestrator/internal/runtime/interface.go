@@ -30,6 +30,7 @@ type CreateOptions struct {
 	Mounts           []*Mount
 	CPU              int
 	Memory           int64
+	PidsLimit        int64
 	Runtime          string
 	NetworkNamespace string
 	DNSServers       []string
