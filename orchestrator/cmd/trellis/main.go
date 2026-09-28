@@ -147,6 +147,9 @@ func main() {
 }
 
 func run(parent context.Context, cfg *config) error {
+	if !spec.ValidIdentifier(cfg.Cluster) {
+		return fmt.Errorf("cluster or --cluster must be a safe identifier (1-63 ASCII letters, digits, dots, underscores, or hyphens; must start with a letter or digit)")
+	}
 	ctx, stop := signal.NotifyContext(parent, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	if cfg.Join == "" && cfg.AdminPublicKey == "" {

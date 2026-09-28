@@ -24,6 +24,7 @@ import (
 	"github.com/clofour/trellis/internal/tlsutil"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
+	"github.com/spf13/pflag"
 )
 
 type fixedElector struct{ leader *election.Leader }
@@ -65,6 +66,73 @@ func (endlessReader) Read(p []byte) (int, error) {
 		p[i] = 'x'
 	}
 	return len(p), nil
+}
+
+func TestRunValidatesClusterNameBeforeStorage(t *testing.T) {
+	tests := []struct {
+		name  string
+		valid bool
+	}{
+		{name: "a", valid: true},
+		{name: strings.Repeat("a", 63), valid: true},
+		{name: "Production_1.eu-west", valid: true},
+		{name: ""},
+		{name: strings.Repeat("a", 64)},
+		{name: "/production"},
+		{name: "production/primary"},
+		{name: `production\primary`},
+		{name: " production"},
+		{name: "production "},
+		{name: "prod:primary"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dataDir := filepath.Join(t.TempDir(), "data")
+			err := run(t.Context(), &config{Cluster: tt.name, DataDir: dataDir})
+			if tt.valid {
+				if err == nil || !strings.Contains(err.Error(), "administrator_public_key or --administrator-public-key is required") {
+					t.Fatalf("run error = %v, want next startup validation error", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), "cluster or --cluster must be a safe identifier") {
+				t.Fatalf("run error = %v, want cluster name validation error", err)
+			}
+			if _, err := os.Stat(dataDir); !os.IsNotExist(err) {
+				t.Fatalf("data directory was touched during startup validation: %v", err)
+			}
+		})
+	}
+}
+
+func TestRunRejectsUnsafeClusterBeforeStorageForFlagAndConfigFile(t *testing.T) {
+	for _, source := range []string{"flag", "config file"} {
+		t.Run(source, func(t *testing.T) {
+			dataDir := filepath.Join(t.TempDir(), "data")
+			cfg := &config{Cluster: "default", DataDir: dataDir}
+			flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
+			flags.StringVar(&cfg.Cluster, "cluster", cfg.Cluster, "")
+			if source == "flag" {
+				if err := flags.Parse([]string{"--cluster", "production/primary"}); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				path := filepath.Join(t.TempDir(), "trellis.yaml")
+				if err := os.WriteFile(path, []byte("cluster: production/primary\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := loadNodeConfig(path, cfg, flags); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			err := run(t.Context(), cfg)
+			if err == nil || !strings.Contains(err.Error(), "cluster or --cluster must be a safe identifier") {
+				t.Fatalf("run error = %v, want cluster name validation error", err)
+			}
+			if _, err := os.Stat(dataDir); !os.IsNotExist(err) {
+				t.Fatalf("data directory was touched before cluster validation: %v", err)
+			}
+		})
+	}
 }
 
 func TestAcquireNodeIDIsStable(t *testing.T) {
