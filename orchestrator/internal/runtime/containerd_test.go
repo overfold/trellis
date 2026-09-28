@@ -822,3 +822,151 @@ func TestContainerStatusReportsPausedTasks(t *testing.T) {
 		}
 	}
 }
+
+func TestResourceSpecOptsLimitMemorySwapAndPids(t *testing.T) {
+	opts, err := resourceSpecOpts(CreateOptions{CPU: 250, Memory: 256 << 20, PidsLimit: 4096}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := oci.Spec{Linux: &specs.Linux{}}
+	for _, opt := range opts {
+		if err := opt(context.Background(), nil, nil, &s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resources := s.Linux.Resources
+	if resources == nil || resources.CPU == nil || resources.Memory == nil || resources.Pids == nil {
+		t.Fatalf("resources = %#v, want CPU, memory, and pids limits", resources)
+	}
+	if got := resources.CPU.Quota; got == nil || *got != 25000 {
+		t.Fatalf("CPU quota = %v, want 25000", got)
+	}
+	if got := resources.Memory.Limit; got == nil || *got != 256<<20 {
+		t.Fatalf("memory limit = %v, want %d", got, 256<<20)
+	}
+	if got := resources.Memory.Swap; got == nil || *got != 256<<20 {
+		t.Fatalf("memory+swap limit = %v, want memory limit %d", got, 256<<20)
+	}
+	if got := resources.Pids.Limit; got == nil || *got != 4096 {
+		t.Fatalf("pids limit = %v, want 4096", got)
+	}
+}
+
+func TestResourceSpecOptsSkipsSwapWithoutSwapAccounting(t *testing.T) {
+	opts, err := resourceSpecOpts(CreateOptions{Memory: 256 << 20}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := oci.Spec{Linux: &specs.Linux{}}
+	for _, opt := range opts {
+		if err := opt(context.Background(), nil, nil, &s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if s.Linux.Resources == nil || s.Linux.Resources.Memory == nil || s.Linux.Resources.Memory.Limit == nil {
+		t.Fatal("memory limit was not applied")
+	}
+	if s.Linux.Resources.Memory.Swap != nil {
+		t.Fatalf("memory+swap limit = %d, want unset without swap accounting", *s.Linux.Resources.Memory.Swap)
+	}
+}
+
+func TestSwapLimitApplies(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		files   []string
+		runtime string
+		want    bool
+	}{
+		{name: "v2 runc without detected swap accounting", files: []string{"cgroup.controllers"}, runtime: "runc", want: true},
+		{name: "v2 default runtime is runc", files: []string{"cgroup.controllers"}, want: true},
+		{name: "v2 runsc in nested cgroup namespace", files: []string{"cgroup.controllers", "memory.swap.max"}, runtime: "runsc", want: true},
+		{name: "v2 runsc with swap", files: []string{"cgroup.controllers", "system.slice/memory.swap.max"}, runtime: "runsc", want: true},
+		{name: "v2 runsc without swap accounting", files: []string{"cgroup.controllers", "system.slice/memory.max"}, runtime: "runsc"},
+		{name: "v1 with memsw", files: []string{"memory/memory.memsw.limit_in_bytes"}, runtime: "runc", want: true},
+		{name: "v1 without memsw", files: []string{"memory/memory.limit_in_bytes"}, runtime: "runc"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			for _, name := range tc.files {
+				path := filepath.Join(root, name)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := swapLimitApplies(root, tc.runtime); got != tc.want {
+				t.Fatalf("swapLimitApplies = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPidsControllerDetected(t *testing.T) {
+	for name, tc := range map[string]struct {
+		files map[string]string
+		want  bool
+	}{
+		"v2 with pids":    {files: map[string]string{"cgroup.controllers": "cpuset cpu io memory pids\n"}, want: true},
+		"v2 without pids": {files: map[string]string{"cgroup.controllers": "cpuset cpu io memory\n"}},
+		"v1 with pids":    {files: map[string]string{"pids/pids.max": "max"}, want: true},
+		"v1 without pids": {files: map[string]string{"memory/memory.limit_in_bytes": "0"}},
+	} {
+		root := t.TempDir()
+		for path, data := range tc.files {
+			path = filepath.Join(root, path)
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := pidsControllerDetected(root); got != tc.want {
+			t.Errorf("%s: pidsControllerDetected = %t, want %t", name, got, tc.want)
+		}
+	}
+}
+
+func TestSwapActive(t *testing.T) {
+	dir := t.TempDir()
+	for name, tc := range map[string]struct {
+		data string
+		want bool
+	}{
+		"none":   {data: "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n"},
+		"active": {data: "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n/swapfile file 1048572 0 -2\n", want: true},
+	} {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(tc.data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := swapActive(path); got != tc.want {
+			t.Errorf("%s: swapActive = %t, want %t", name, got, tc.want)
+		}
+	}
+}
+
+func TestResourceSpecOptsOmitsUnsetLimits(t *testing.T) {
+	opts, err := resourceSpecOpts(CreateOptions{}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(opts) != 0 {
+		t.Fatalf("resource opts = %d, want none for unset limits", len(opts))
+	}
+}
+
+func TestResourceSpecOptsRejectsNegativeLimits(t *testing.T) {
+	for name, options := range map[string]CreateOptions{
+		"cpu":    {CPU: -1},
+		"memory": {Memory: -1},
+		"pids":   {PidsLimit: -1},
+	} {
+		if _, err := resourceSpecOpts(options, true); err == nil {
+			t.Errorf("%s: expected negative limit to be rejected", name)
+		}
+	}
+}

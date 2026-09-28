@@ -11,7 +11,9 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -154,6 +156,10 @@ func (c *ContainerdRuntime) Pull(ctx context.Context, image string) error {
 
 // Create creates a container from the supplied options.
 func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (id string, err error) {
+	resourceOpts, err := resourceSpecOpts(options, swapLimitApplies(cgroupRoot, options.Runtime))
+	if err != nil {
+		return "", err
+	}
 	ctx = c.withNamespace(ctx)
 	if err := ensureRuntimeDir(c.logDir); err != nil {
 		return "", fmt.Errorf("create runtime directory: %w", err)
@@ -219,16 +225,7 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 		}))
 	}
 	ociSpecOpts = append(ociSpecOpts, workloadSecurityOpts(options.Runtime, hostAppArmorProfile())...)
-	if options.CPU > 0 {
-		cpuQuota := int64(options.CPU) * 100
-		if cpuQuota/100 != int64(options.CPU) {
-			return "", fmt.Errorf("CPU request %d overflows CFS quota", options.CPU)
-		}
-		ociSpecOpts = append(ociSpecOpts, oci.WithCPUCFS(cpuQuota, 100000))
-	}
-	if options.Memory > 0 {
-		ociSpecOpts = append(ociSpecOpts, oci.WithMemoryLimit(uint64(options.Memory)))
-	}
+	ociSpecOpts = append(ociSpecOpts, resourceOpts...)
 
 	containerOpts := []containerd.NewContainerOpts{
 		containerd.WithImage(image),
@@ -255,6 +252,99 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 	}
 
 	return container.ID(), nil
+}
+
+const cgroupRoot = "/sys/fs/cgroup"
+
+// SwapUncapped reports whether the host has active swap that its memory
+// cgroup visibly cannot account, so task memory limits may not cap swap.
+func SwapUncapped() bool {
+	return swapActive("/proc/swaps") && !swapAccountingDetected(cgroupRoot)
+}
+
+// PidsControllerDetected reports whether the host exposes the pids cgroup
+// controller that task pids limits require.
+func PidsControllerDetected() bool {
+	return pidsControllerDetected(cgroupRoot)
+}
+
+func pidsControllerDetected(cgroupRoot string) bool {
+	if data, err := os.ReadFile(filepath.Join(cgroupRoot, "cgroup.controllers")); err == nil {
+		return slices.Contains(strings.Fields(string(data)), "pids")
+	}
+	_, err := os.Stat(filepath.Join(cgroupRoot, "pids"))
+	return err == nil
+}
+
+func swapActive(procSwaps string) bool {
+	data, err := os.ReadFile(procSwaps)
+	if err != nil {
+		return false
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	return len(lines) > 1
+}
+
+func cgroupV2(cgroupRoot string) bool {
+	_, err := os.Stat(filepath.Join(cgroupRoot, "cgroup.controllers"))
+	return err == nil
+}
+
+// swapAccountingDetected looks for swap accounting where containerd places
+// tasks. cgroup v2 exposes memory.swap.max only in non-root cgroups whose
+// parent enables the memory controller with swap accounting (or at the root
+// of a nested cgroup namespace); cgroup v1 exposes memory.memsw.limit_in_bytes.
+func swapAccountingDetected(cgroupRoot string) bool {
+	if !cgroupV2(cgroupRoot) {
+		_, err := os.Stat(filepath.Join(cgroupRoot, "memory", "memory.memsw.limit_in_bytes"))
+		return err == nil
+	}
+	if _, err := os.Stat(filepath.Join(cgroupRoot, "memory.swap.max")); err == nil {
+		return true
+	}
+	matches, _ := filepath.Glob(filepath.Join(cgroupRoot, "*", "memory.swap.max"))
+	return len(matches) > 0
+}
+
+// swapLimitApplies reports whether a task's memory+swap limit can be set.
+// cgroup v1 rejects memsw limits without swap accounting. On cgroup v2 runc
+// silently skips a missing memory.swap.max when disabling swap, but runsc
+// does not, so runsc requires detected swap accounting. An empty runtime uses
+// the containerd client's default, io.containerd.runc.v2. It is probed per
+// create because controllers can be enabled after startup.
+func swapLimitApplies(cgroupRoot, taskRuntime string) bool {
+	if cgroupV2(cgroupRoot) && taskRuntime != "runsc" {
+		return true
+	}
+	return swapAccountingDetected(cgroupRoot)
+}
+
+// resourceSpecOpts converts task resource limits into cgroup settings. The
+// OCI swap value is the combined memory and swap limit, so setting it equal to
+// the memory limit denies swap on both cgroup v1 (memsw) and v2 (runc writes
+// memory.swap.max as swap minus memory).
+func resourceSpecOpts(options CreateOptions, limitSwap bool) ([]oci.SpecOpts, error) {
+	var opts []oci.SpecOpts
+	if options.CPU < 0 || options.Memory < 0 || options.PidsLimit < 0 {
+		return nil, fmt.Errorf("resource limits for %s must not be negative: cpu=%d memory=%d pids=%d", options.ID, options.CPU, options.Memory, options.PidsLimit)
+	}
+	if options.CPU > 0 {
+		cpuQuota := int64(options.CPU) * 100
+		if cpuQuota/100 != int64(options.CPU) {
+			return nil, fmt.Errorf("CPU request %d overflows CFS quota", options.CPU)
+		}
+		opts = append(opts, oci.WithCPUCFS(cpuQuota, 100000))
+	}
+	if options.Memory > 0 {
+		opts = append(opts, oci.WithMemoryLimit(uint64(options.Memory)))
+		if limitSwap {
+			opts = append(opts, oci.WithMemorySwap(options.Memory))
+		}
+	}
+	if options.PidsLimit > 0 {
+		opts = append(opts, oci.WithPidsLimit(options.PidsLimit))
+	}
+	return opts, nil
 }
 
 // Start starts a created container.

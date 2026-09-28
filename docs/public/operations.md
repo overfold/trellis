@@ -51,6 +51,30 @@ stored, scheduled, and sent to containerd. Explicit zero or negative resource
 values are invalid. In a [multi-node cluster](multi-node.md#prepare-the-network-and-configuration),
 keep these values identical on every node.
 
+Every task container a node creates is limited to `resources.task_pids_limit`
+processes and threads (default `4096`, maximum `4194304`; flag
+`--task-pids-limit`), so a fork bomb in one task cannot exhaust the host's PIDs
+and take down containerd, the agent, or other workloads:
+
+```yaml
+resources:
+  task_pids_limit: 8192
+```
+
+Nodes require the `pids` cgroup controller, which systemd-based
+distributions enable by default. The node warns at startup when it is missing,
+and task creation then fails rather than running tasks unbounded.
+
+This is node hardening policy, not part of a job: it is applied when the node
+creates a container and is not part of the execution hash, so changing it does
+not restart running allocations or their local restarts. The new value applies
+to containers created afterward, such as when a job update or reschedule
+replaces an allocation. The limit covers everything in the container's cgroup,
+including `trellisctl exec` sessions and script health checks, so a task at its
+limit also cannot start those. Raise it for workloads that legitimately run
+many threads or processes. Keep it consistent across nodes unless you
+deliberately want different per-node bounds.
+
 Edit this file when changing persistent node configuration, then restart the service:
 
 ```sh

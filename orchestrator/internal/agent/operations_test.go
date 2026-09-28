@@ -420,6 +420,60 @@ func TestRunAllocationMountsHealthProbeForEveryNetworkAndRuntime(t *testing.T) {
 	}
 }
 
+func TestRunAllocationAppliesNodeTaskPidsLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		configure int64
+		want      int64
+	}{
+		{name: "default", want: DefaultTaskPidsLimit},
+		{name: "configured", configure: 512, want: 512},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := &blockingStartRuntime{
+				reconcilerRuntime: &reconcilerRuntime{},
+				started:           make(chan string, 1),
+				release:           make(chan struct{}, 1),
+				labels:            map[string]map[string]string{},
+				created:           map[string]runtime.CreateOptions{},
+			}
+			rt.release <- struct{}{}
+			agent := newOperationTestAgent(t, rt)
+			if tc.configure != 0 {
+				if err := agent.SetTaskPidsLimit(tc.configure); err != nil {
+					t.Fatal(err)
+				}
+			}
+			task := &spec.TaskSpec{Name: "web", Image: "image", Resources: &spec.ResourcesSpec{CPU: 100, Memory: 64 << 20}}
+			if err := agent.RunAllocation(context.Background(), "alloc", "scheduler", 1, 1, "hash", "default", "job", "group", "web", task, "runc", nil, nil, nil, nil, false, 0); err != nil {
+				t.Fatal(err)
+			}
+			options := rt.created["alloc"]
+			if options.PidsLimit != tc.want {
+				t.Fatalf("pids limit = %d, want %d", options.PidsLimit, tc.want)
+			}
+			if options.Memory != 64<<20 {
+				t.Fatalf("memory = %d, want %d", options.Memory, 64<<20)
+			}
+		})
+	}
+}
+
+func TestSetTaskPidsLimitRejectsOutOfRangeValues(t *testing.T) {
+	agent := &Agent{}
+	for _, limit := range []int64{-1, 0, MaxTaskPidsLimit + 1} {
+		if err := agent.SetTaskPidsLimit(limit); err == nil {
+			t.Errorf("SetTaskPidsLimit(%d) succeeded, want error", limit)
+		}
+	}
+	if err := agent.SetTaskPidsLimit(MaxTaskPidsLimit); err != nil {
+		t.Fatalf("SetTaskPidsLimit(max): %v", err)
+	}
+	if got := agent.taskPidsLimit(); got != MaxTaskPidsLimit {
+		t.Fatalf("pids limit = %d, want %d", got, MaxTaskPidsLimit)
+	}
+}
+
 func TestRunAllocationRegistersHealthAfterStoringRunningAllocation(t *testing.T) {
 	rt := &firstHealthProbeRuntime{
 		reconcilerRuntime: &reconcilerRuntime{},
