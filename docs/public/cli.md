@@ -161,6 +161,12 @@ The history view combines lifecycle transitions from the job's allocations in ti
 trellisctl jobs status web --history --allocation a1b2c3d4
 ```
 
+When failed allocations put a task group into replacement backoff, `jobs status` prints a **Replacement backoff** table with the failure count, next replacement time, and latest failure. After fixing a cause outside the job manifest, reset the backoff so the failed allocations are replaced without waiting:
+
+```sh
+trellisctl jobs reset-backoff web api
+```
+
 Lifecycle history is control-plane/runtime state such as `placed`, `starting`, `running`, `failed`, or `lost`. It is deliberately separate from task logs: use history to answer **how the allocation moved through Trellis**, and logs to answer **what the process wrote to stdout/stderr**.
 
 ## Read logs by job, allocation, group, or task
@@ -269,7 +275,7 @@ trellisctl namespaces list --output json
 trellisctl nodes status worker-2 -o json
 ```
 
-`jobs logs` remains a log byte stream and `exec` remains a command/terminal stream, while `jobs apply`, `jobs status --watch`, `jobs delete`, node mutation commands, backup operations, and context mutation commands remain human/action workflows rather than pretending to produce a stable JSON document.
+`jobs logs` remains a log byte stream and `exec` remains a command/terminal stream, while `jobs apply`, `jobs status --watch`, `jobs delete`, `jobs reset-backoff`, node mutation commands, backup operations, and context mutation commands remain human/action workflows rather than pretending to produce a stable JSON document.
 
 Explicit `--server-addr`, `--token`, `--namespace`, TLS flags, and `TRELLIS_*` environment variables override saved context values. Named contexts are therefore an interactive convenience, not a hidden requirement for automation.
 

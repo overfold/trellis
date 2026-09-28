@@ -6,14 +6,21 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/clofour/trellis/internal/api"
+	"github.com/clofour/trellis/internal/auth"
+	"github.com/clofour/trellis/internal/client"
 	"github.com/clofour/trellis/internal/lifecycle"
 	"github.com/clofour/trellis/internal/spec"
 	"github.com/clofour/trellis/internal/state"
 	"github.com/google/uuid"
+	"github.com/labstack/echo/v5"
 )
 
 func TestReplacementBackoffDelaySchedule(t *testing.T) {
@@ -78,10 +85,15 @@ func TestPlanReplacementBackoffCountsEachFailureOnce(t *testing.T) {
 		t.Fatal("backoff window does not end exactly at next_replacement_at")
 	}
 
-	// Planning again, even later, must not count the same records again.
-	second := planReplacementBackoff(policy, first, "default", "web", "api", 1, allocations, now.Add(time.Minute))
+	// Planning again must not count the same records again. Once the
+	// backoff has elapsed, only the delayed replacements are released.
+	second := planReplacementBackoff(policy, first, "default", "web", "api", 1, allocations, now.Add(time.Second))
 	if !second.equal(first) {
 		t.Fatalf("replanning changed record: %#v, want %#v", second, first)
+	}
+	later := planReplacementBackoff(policy, first, "default", "web", "api", 1, allocations, now.Add(time.Minute))
+	if later.Failures != 2 || !later.NextReplacementAt.Equal(first.NextReplacementAt) || later.DelayedReplacements != 0 {
+		t.Fatalf("replanning after the backoff = %#v, want the same failures with nothing delayed", later)
 	}
 	if after := marshalAllocations(t, allocations); after != before {
 		t.Fatal("planning mutated its allocation inputs")
@@ -235,7 +247,7 @@ func TestPlanTerminalPruningKeepsNewestAndSkipsUnreleased(t *testing.T) {
 	allocations[1].Node = &Node{ID: node.ID}       // observed by its node: running or cleanup pending
 	allocations[2].Node = &Node{ID: unhealthy.ID}  // node unavailable: unknown
 	allocations[3].Node = &Node{ID: stale.ID}      // node has not reported since termination
-	allocations[4].Node = &Node{ID: uuid.New()}    // node unknown to the leader
+	allocations[4].Node = &Node{ID: uuid.New()}    // node removed from the cluster: released
 	running := failedAllocation("running", 1, now) // active records are never candidates
 	running.Phase = lifecycle.PhaseRunning
 	running.Node = &Node{ID: node.ID}
@@ -250,11 +262,11 @@ func TestPlanTerminalPruningKeepsNewestAndSkipsUnreleased(t *testing.T) {
 	for _, allocation := range pruned {
 		ids = append(ids, allocation.ID)
 	}
-	// f06..f09 are the newest four; of the older records only f00 is
-	// released, f05 is skipped for this pass, and f01..f04 may still hold a
+	// f06..f09 are the newest four; of the older records f04 and f00 are
+	// released, f05 is skipped for this pass, and f01..f03 may still hold a
 	// container or resources.
-	if fmt.Sprint(ids) != "[f00]" {
-		t.Fatalf("pruned %v, want [f00]", ids)
+	if fmt.Sprint(ids) != "[f04 f00]" {
+		t.Fatalf("pruned %v, want [f04 f00]", ids)
 	}
 	if after := marshalAllocations(t, input); after != before {
 		t.Fatal("pruning mutated its allocation inputs")
@@ -676,4 +688,303 @@ func freeTCPPort(t *testing.T) int {
 	}
 	defer func() { _ = listener.Close() }()
 	return listener.Addr().(*net.TCPAddr).Port
+}
+
+func TestPlanReplacementBackoffTracksDelayedReplacements(t *testing.T) {
+	policy := DefaultReplacementPolicy()
+	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	first := planReplacementBackoff(policy, nil, "default", "web", "api", 1, []*Allocation{failedAllocation("a", 1, now)}, now)
+	if first.DelayedReplacements != 1 || first.withheld(3, now) != 1 || first.withheld(0, now) != 0 {
+		t.Fatalf("first failure = %#v, want one delayed replacement", first)
+	}
+	// A second failure while the backoff is active adds to the delayed
+	// replacements.
+	during := now.Add(5 * time.Second)
+	second := planReplacementBackoff(policy, first, "default", "web", "api", 1, []*Allocation{failedAllocation("a", 1, now), failedAllocation("b", 1, during)}, during)
+	if second.Failures != 2 || second.DelayedReplacements != 2 || second.withheld(1, during) != 1 {
+		t.Fatalf("second failure = %#v, want two delayed replacements", second)
+	}
+	// Once the backoff elapses the pass places every replacement, so nothing
+	// stays delayed; a failure counted in that pass is delayed alone.
+	elapsed := second.NextReplacementAt
+	after := planReplacementBackoff(policy, second, "default", "web", "api", 1, []*Allocation{failedAllocation("a", 1, now), failedAllocation("b", 1, during)}, elapsed)
+	if after.DelayedReplacements != 0 || after.withheld(2, elapsed) != 0 {
+		t.Fatalf("elapsed backoff = %#v, want no delayed replacements", after)
+	}
+	third := planReplacementBackoff(policy, second, "default", "web", "api", 1, []*Allocation{failedAllocation("a", 1, now), failedAllocation("b", 1, during), failedAllocation("c", 1, elapsed)}, elapsed)
+	if third.Failures != 3 || third.DelayedReplacements != 1 {
+		t.Fatalf("failure after elapsed backoff = %#v, want one delayed replacement", third)
+	}
+}
+
+func allocationsInPhase(s *Server, phase lifecycle.Phase) []*Allocation {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var result []*Allocation
+	for _, allocation := range s.allocations {
+		if allocation.Phase == phase {
+			result = append(result, allocation)
+		}
+	}
+	return result
+}
+
+func transitionAllocation(t *testing.T, allocation *Allocation, phase lifecycle.Phase, now time.Time, reason string) {
+	t.Helper()
+	allocation.mu.Lock()
+	defer allocation.mu.Unlock()
+	if err := allocation.Transition(phase, now, reason, reason); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReconcilePlacesLostAndScaledDeficitsDuringBackoff(t *testing.T) {
+	s, node, clock := newBackoffReconcileServer(t, memoryStore{})
+	ctx := context.Background()
+	job := s.jobs[jobKey("default", "web")]
+	job.Spec.TaskGroups[0].Count = 2
+	s.Reconcile(ctx)
+	running := activeAllocations(s)
+	if len(running) != 2 {
+		t.Fatalf("setup: active allocations = %d, want 2", len(running))
+	}
+
+	transitionAllocation(t, running[0], lifecycle.PhaseFailed, clock.now, "restart_budget_exhausted")
+	s.Reconcile(ctx)
+	if active := activeAllocations(s); len(active) != 1 {
+		t.Fatalf("failed allocation replaced during backoff: %d active", len(active))
+	}
+
+	// The node loses the other allocation: its replacement is placed
+	// immediately, while the failed allocation's replacement still waits.
+	clock.advance(node, time.Second)
+	transitionAllocation(t, running[1], lifecycle.PhaseLost, clock.now, "node_unavailable")
+	s.Reconcile(ctx)
+	active := activeAllocations(s)
+	if len(active) != 1 || active[0] == running[1] {
+		t.Fatalf("lost allocation replacement = %d active, want one new allocation", len(active))
+	}
+	backoff := s.replacementBackoffs[replacementBackoffKey("default", "web", "api")]
+	if !backoff.active(clock.now) || backoff.Failures != 1 || backoff.DelayedReplacements != 1 {
+		t.Fatalf("backoff after lost replacement = %#v, want one delayed replacement", backoff)
+	}
+
+	// A higher count is placed immediately as well.
+	clock.advance(node, time.Second)
+	job.Spec.TaskGroups[0].Count = 3
+	s.Reconcile(ctx)
+	if active := activeAllocations(s); len(active) != 2 {
+		t.Fatalf("count increase during backoff = %d active, want 2", len(active))
+	}
+	if lost := allocationsInPhase(s, lifecycle.PhaseLost); len(lost) != 1 {
+		t.Fatalf("lost allocations = %d, want 1", len(lost))
+	}
+
+	// The failed allocation is replaced once the backoff elapses.
+	clock.advance(node, 7*time.Second)
+	s.Reconcile(ctx)
+	if active := activeAllocations(s); len(active) != 2 {
+		t.Fatal("failed allocation replaced before backoff elapsed")
+	}
+	clock.advance(node, time.Second)
+	s.Reconcile(ctx)
+	if active := activeAllocations(s); len(active) != 3 {
+		t.Fatalf("failed allocation replacement after backoff = %d active, want 3", len(active))
+	}
+	if backoff := s.replacementBackoffs[replacementBackoffKey("default", "web", "api")]; backoff.DelayedReplacements != 0 || backoff.Failures != 1 {
+		t.Fatalf("backoff after replacement = %#v, want failures kept and nothing delayed", backoff)
+	}
+}
+
+func TestReconcileDropsDelayedReplacementsWithoutMissingCapacity(t *testing.T) {
+	s, node, clock := newBackoffReconcileServer(t, memoryStore{})
+	ctx := context.Background()
+	job := s.jobs[jobKey("default", "web")]
+	job.Spec.TaskGroups[0].Count = 2
+	s.Reconcile(ctx)
+	running := activeAllocations(s)
+	if len(running) != 2 {
+		t.Fatalf("setup: active allocations = %d, want 2", len(running))
+	}
+	transitionAllocation(t, running[0], lifecycle.PhaseFailed, clock.now, "restart_budget_exhausted")
+	s.Reconcile(ctx)
+
+	// Scaling down leaves no failed capacity to replace; scaling back up
+	// during the backoff is a count increase and is placed immediately.
+	job.Spec.TaskGroups[0].Count = 1
+	clock.advance(node, time.Second)
+	s.Reconcile(ctx)
+	if backoff := s.replacementBackoffs[replacementBackoffKey("default", "web", "api")]; backoff.DelayedReplacements != 0 || !backoff.active(clock.now) {
+		t.Fatalf("backoff after scale down = %#v, want active without delayed replacements", backoff)
+	}
+	job.Spec.TaskGroups[0].Count = 2
+	clock.advance(node, time.Second)
+	s.Reconcile(ctx)
+	if active := activeAllocations(s); len(active) != 2 {
+		t.Fatalf("count increase during backoff = %d active, want 2", len(active))
+	}
+}
+
+// authenticatedHandler serves the control-plane handler as a caller with the
+// given authority, standing in for the authentication middleware.
+func authenticatedHandler(s *Server, scope auth.AccessScope, access auth.AccessLevel, namespace string) http.Handler {
+	e := echo.New()
+	NewHandler(s).Register(e)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := context.WithValue(r.Context(), NamespaceContextKey, auth.EncodeScope(scope, access, namespace))
+		e.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// TestResetReplacementBackoffThroughClientAndRaft resets a backoff through
+// the client and HTTP handler against a Raft store, and checks that the leader
+// replaces the failed allocation at once, that a follower replays the reset
+// byte for byte, and that a new leader reloads it.
+func TestResetReplacementBackoffThroughClientAndRaft(t *testing.T) {
+	if testing.Short() {
+		t.Skip("starts a Raft cluster")
+	}
+	leaderStore := newReplacementRaftStore(t, t.TempDir(), "", true)
+	s, _, clock := newBackoffReconcileServer(t, leaderStore)
+	ctx := context.Background()
+	s.Reconcile(ctx)
+	failed := failActive(t, s, clock.now)
+	s.Reconcile(ctx)
+	key := replacementBackoffKey("default", "web", "api")
+	if backoff := s.replacementBackoffs[key]; !backoff.active(clock.now) {
+		t.Fatalf("setup: backoff = %#v, want active", backoff)
+	}
+	events := s.events.subscribe("default")
+
+	httpServer := httptest.NewServer(authenticatedHandler(s, auth.AccessNamespace, auth.AccessWrite, "default"))
+	defer httpServer.Close()
+	serverClient := client.NewNamespaceServerClient("token", httpServer.URL, "default", nil)
+	if err := serverClient.ResetReplacementBackoff(ctx, "web", "missing"); err == nil || !strings.Contains(err.Error(), "404") {
+		t.Fatalf("reset of unknown task group error = %v, want 404", err)
+	}
+	if err := serverClient.ResetReplacementBackoff(ctx, "web", "api"); err != nil {
+		t.Fatal(err)
+	}
+
+	reset := s.replacementBackoffs[key]
+	if reset == nil || reset.Failures != 0 || !reset.NextReplacementAt.IsZero() || reset.DelayedReplacements != 0 || !slices.Contains(reset.SeenAllocations, failed.ID) {
+		t.Fatalf("backoff after reset = %#v, want cleared with the failure still seen", reset)
+	}
+	if status, _ := s.GetJob("default", "web"); len(status.ReplacementBackoff) != 0 {
+		t.Fatalf("job status after reset = %#v, want no backoff", status.ReplacementBackoff)
+	}
+	if active := activeAllocations(s); len(active) != 1 {
+		t.Fatalf("active allocations after reset = %d, want the replacement", len(active))
+	}
+	select {
+	case event := <-events:
+		if event.Type != api.EventJobReplacementBackoffReset || event.JobName != "web" || event.Group != "api" {
+			t.Fatalf("event = %#v", event)
+		}
+	default:
+		t.Fatal("no replacement-backoff-reset event published")
+	}
+	// Resetting again is a no-op.
+	if err := serverClient.ResetReplacementBackoff(ctx, "web", "api"); err != nil {
+		t.Fatal(err)
+	}
+
+	followerDir := t.TempDir()
+	followerStore := newReplacementRaftStore(t, followerDir, "", false)
+	followerAddr := followerStore.LocalAddr()
+	if err := leaderStore.AddVoter(followerAddr, followerAddr); err != nil {
+		t.Fatal(err)
+	}
+	waitReplicatedState(t, leaderStore, followerStore)
+	successor := NewServer(slog.Default(), nil, NewStateController(followerStore, "test"), followerStore, "test", "")
+	if err := successor.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := successor.replacementBackoffs[key]; !got.equal(reset) {
+		t.Fatalf("reloaded backoff = %#v, want %#v", got, reset)
+	}
+}
+
+func TestResetReplacementBackoffRequiresWriteAccess(t *testing.T) {
+	s, _, clock := newBackoffReconcileServer(t, memoryStore{})
+	ctx := context.Background()
+	s.Reconcile(ctx)
+	failActive(t, s, clock.now)
+	s.Reconcile(ctx)
+
+	for _, tt := range []struct {
+		name      string
+		access    auth.AccessLevel
+		namespace string
+		want      int
+	}{
+		{name: "read credential", access: auth.AccessRead, namespace: "default", want: http.StatusForbidden},
+		{name: "other namespace", access: auth.AccessWrite, namespace: "other", want: http.StatusNotFound},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/v1/jobs/web/groups/api/replacement-backoff/reset", nil)
+			authenticatedHandler(s, auth.AccessNamespace, tt.access, tt.namespace).ServeHTTP(rec, req)
+			if rec.Code != tt.want {
+				t.Fatalf("status = %d, want %d; body: %s", rec.Code, tt.want, rec.Body.String())
+			}
+		})
+	}
+	if backoff := s.replacementBackoffs[replacementBackoffKey("default", "web", "api")]; !backoff.active(clock.now) {
+		t.Fatalf("backoff = %#v, want unchanged", backoff)
+	}
+}
+
+func TestReconcilePrunesRecordsOfRemovedNodesOnly(t *testing.T) {
+	store := memoryStore{}
+	s, node, clock := newBackoffReconcileServer(t, store)
+	ctx := context.Background()
+	removed := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000002"), Status: NodeStatusHealthy}
+	down := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000003"), Status: NodeStatusUnhealthy, LastHeartbeat: clock.now.Add(-time.Hour)}
+	for _, n := range []*Node{removed, down} {
+		s.nodes[n.ID] = n
+		if err := s.state.PutNode(ctx, n.ID.String(), nodeSummary(n)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.state.PutNode(ctx, node.ID.String(), nodeSummary(node)); err != nil {
+		t.Fatal(err)
+	}
+	s.replacementPolicy.RetainTerminal = 0
+	for i, n := range []*Node{removed, down} {
+		allocation := failedAllocation(fmt.Sprintf("t%d", i), 1, clock.now.Add(-time.Minute))
+		allocation.Phase = lifecycle.PhaseStopped
+		allocation.Node = n
+		s.allocations = append(s.allocations, allocation)
+		if err := s.state.PutAllocation(ctx, allocation); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The removed node's registration is gone; the down node is still
+	// registered and may still hold its allocation's container.
+	delete(s.nodes, removed.ID)
+	delete(store, fmt.Sprintf("trellis/test/nodes/%s", removed.ID))
+
+	// Every leader decides the same: one that kept the node pointer, and one
+	// that reloaded the record after the removal and sees no node at all.
+	successor := NewServer(slog.Default(), nil, NewStateController(store, "test"), store, "test", "")
+	if err := successor.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for name, leader := range map[string]*Server{"current": s, "reloaded": successor} {
+		leader.mu.RLock()
+		pruned := planTerminalPruning(0, leader.allocations, leader.nodes, nil)
+		leader.mu.RUnlock()
+		if len(pruned) != 1 || pruned[0].ID != "t0" {
+			t.Fatalf("%s leader pruned %v, want [t0]", name, pruned)
+		}
+	}
+
+	s.Reconcile(ctx)
+	if _, exists := store[s.state.allocationKey("t0")]; exists {
+		t.Fatal("record of removed node remains persisted")
+	}
+	if _, exists := store[s.state.allocationKey("t1")]; !exists {
+		t.Fatal("record of down node was pruned")
+	}
 }

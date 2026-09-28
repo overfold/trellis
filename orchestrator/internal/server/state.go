@@ -301,6 +301,13 @@ func (s *StateController) CommitReconciliation(ctx context.Context, commit *Reco
 	return nil
 }
 
+// PutReplacementBackoff persists the replacement backoff record of one job
+// task group. The record carries every value, including leader-chosen
+// timestamps, so applying it is deterministic.
+func (s *StateController) PutReplacementBackoff(ctx context.Context, backoff *ReplacementBackoff) error {
+	return s.put(ctx, s.replacementBackoffKey(backoff), backoff)
+}
+
 // ListReplacementBackoffs loads persisted replacement backoff records keyed by
 // namespace, job, and task group.
 func (s *StateController) ListReplacementBackoffs(ctx context.Context) (map[string]*ReplacementBackoff, error) {

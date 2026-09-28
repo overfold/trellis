@@ -524,6 +524,11 @@ func (s *Server) Reconcile(ctx context.Context) {
 				}
 			}
 			deficit := group.Count - len(current)
+			if backoff != nil && backoff.DelayedReplacements > max(deficit, 0) {
+				// Failed allocations whose capacity is no longer missing have
+				// nothing left to replace.
+				backoff.DelayedReplacements = max(deficit, 0)
+			}
 			if deficit > 0 {
 				strategy := updateStrategy(job, group.Name)
 				if strategy == spec.UpdateRolling && len(draining) > 0 {
@@ -555,13 +560,14 @@ func (s *Server) Reconcile(ctx context.Context) {
 					continue
 				}
 			}
-			if deficit > 0 && backoff.active(now) {
-				// Failed allocations of this group are replaced only after the
-				// backoff elapses; the next pass after it places them.
+			// Replacements of failed allocations wait until the backoff
+			// elapses; the rest of the deficit is placed now.
+			placeable := deficit - backoff.withheld(deficit, now)
+			if placeable <= 0 {
 				continue
 			}
 			requiredCapabilities := spec.GroupRequiredCapabilities(&group)
-			placements := Schedule(&PlacementIntent{Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Count: deficit, Nodes: s.nodePointers(), Allocations: valid, Tasks: group.Tasks, Constraints: group.Constraints, RequiredCapabilities: requiredCapabilities, VolumeOwners: volumeOwners})
+			placements := Schedule(&PlacementIntent{Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Count: placeable, Nodes: s.nodePointers(), Allocations: valid, Tasks: group.Tasks, Constraints: group.Constraints, RequiredCapabilities: requiredCapabilities, VolumeOwners: volumeOwners})
 			for i, placement := range placements {
 				node := s.nodes[placement.NodeID]
 				if i < len(pending) {
@@ -579,7 +585,7 @@ func (s *Server) Reconcile(ctx context.Context) {
 				valid = append(valid, allocation)
 			}
 			if len(placements) == 0 && len(pending) == 0 && len(requiredCapabilities) > 0 && noCompatibleCapabilityNode(s.nodePointers(), group.Constraints, group.Tasks, volumeOwners, namespace, requiredCapabilities) {
-				for i := 0; i < deficit; i++ {
+				for i := 0; i < placeable; i++ {
 					name := fmt.Sprintf("%s-%s-%s-%s", namespace, jobName, group.Name, uuid.NewString()[:8])
 					allocation := &Allocation{ID: name, Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Tasks: group.Tasks, Generation: 1, JobRevision: job.Revision, Phase: lifecycle.PhasePending, Health: lifecycle.HealthUnknown, Diagnostic: lifecycle.Diagnostic{CreatedAt: now, TransitionedAt: now, Reason: "missing_capability", Message: fmt.Sprintf("no eligible node supports required capabilities: %s", strings.Join(capabilityNames(requiredCapabilities), ", "))}}
 					newAllocations = append(newAllocations, allocation)

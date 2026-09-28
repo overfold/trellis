@@ -120,6 +120,18 @@ export async function deleteJob(name: string, namespace: string): Promise<void> 
   );
 }
 
+export async function resetReplacementBackoff(
+  name: string,
+  group: string,
+  namespace: string,
+): Promise<void> {
+  await apiMutation(
+    `/api/v1/jobs/${encodeURIComponent(name)}/groups/${encodeURIComponent(group)}/replacement-backoff/reset`,
+    { method: "POST" },
+    namespace,
+  );
+}
+
 export async function drainNode(id: string): Promise<void> {
   await apiMutation(`/api/v1/nodes/${encodeURIComponent(id)}/drain`, {
     method: "POST",

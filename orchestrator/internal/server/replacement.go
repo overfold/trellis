@@ -1,12 +1,16 @@
 package server
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"slices"
 	"sort"
 	"time"
 
 	"github.com/clofour/trellis/internal/api"
 	"github.com/clofour/trellis/internal/lifecycle"
+	"github.com/clofour/trellis/internal/spec"
 	"github.com/google/uuid"
 )
 
@@ -59,9 +63,14 @@ type ReplacementBackoff struct {
 	LastAllocationID string `json:"last_allocation_id,omitempty"`
 	Reason           string `json:"reason,omitempty"`
 	Message          string `json:"message,omitempty"`
-	// NextReplacementAt is the earliest time new allocations may be placed
-	// for the group while Failures is positive.
+	// NextReplacementAt is the earliest time replacements of failed
+	// allocations may be placed for the group while Failures is positive.
 	NextReplacementAt time.Time `json:"next_replacement_at"`
+	// DelayedReplacements is the number of counted failed allocations whose
+	// replacement waits for NextReplacementAt. Only these placements are
+	// delayed: a deficit from lost allocations or a higher count is placed
+	// immediately. It is never larger than the group's missing capacity.
+	DelayedReplacements int `json:"delayed_replacements,omitempty"`
 }
 
 func replacementBackoffKey(namespace, job, group string) string {
@@ -72,9 +81,32 @@ func (b *ReplacementBackoff) key() string {
 	return replacementBackoffKey(b.Namespace, b.JobName, b.TaskGroupName)
 }
 
-// active reports whether the backoff currently withholds new placements.
+// active reports whether the backoff currently withholds replacements of
+// failed allocations.
 func (b *ReplacementBackoff) active(now time.Time) bool {
 	return b != nil && b.Failures > 0 && now.Before(b.NextReplacementAt)
+}
+
+// withheld returns how many of deficit placements replace counted failed
+// allocations and must wait for the backoff. The rest of the deficit, from
+// lost allocations or a higher count, is placed immediately.
+func (b *ReplacementBackoff) withheld(deficit int, now time.Time) int {
+	if deficit <= 0 || !b.active(now) {
+		return 0
+	}
+	return min(deficit, b.DelayedReplacements)
+}
+
+// reset returns a copy of the record without failures, so replacements are
+// no longer delayed. The failed allocations already seen stay seen, so they
+// are never counted again.
+func (b *ReplacementBackoff) reset() *ReplacementBackoff {
+	next := *b
+	next.SeenAllocations = slices.Clone(b.SeenAllocations)
+	next.Failures = 0
+	next.NextReplacementAt = time.Time{}
+	next.DelayedReplacements = 0
+	return &next
 }
 
 func (b *ReplacementBackoff) equal(other *ReplacementBackoff) bool {
@@ -84,7 +116,7 @@ func (b *ReplacementBackoff) equal(other *ReplacementBackoff) bool {
 	return b.Namespace == other.Namespace && b.JobName == other.JobName && b.TaskGroupName == other.TaskGroupName &&
 		b.JobRevision == other.JobRevision && b.Failures == other.Failures && b.LastFailureAt.Equal(other.LastFailureAt) &&
 		b.LastAllocationID == other.LastAllocationID && b.Reason == other.Reason && b.Message == other.Message &&
-		b.NextReplacementAt.Equal(other.NextReplacementAt) && slices.Equal(b.SeenAllocations, other.SeenAllocations)
+		b.NextReplacementAt.Equal(other.NextReplacementAt) && b.DelayedReplacements == other.DelayedReplacements && slices.Equal(b.SeenAllocations, other.SeenAllocations)
 }
 
 // replacementBackoffDelay returns min(base*2^(failures-1), max). Zero failures
@@ -119,6 +151,10 @@ func isTerminalPhase(phase lifecycle.Phase) bool {
 // and only if it belongs to the current revision and was not draining. The
 // result is nil only when there is neither a previous record nor a failure to
 // count. revision is zero when the group is no longer desired.
+//
+// DelayedReplacements accumulates the failures counted while the backoff is
+// active. Once it elapses, the pass places the whole deficit, so the count
+// restarts from the failures counted in that pass.
 func planReplacementBackoff(policy ReplacementPolicy, previous *ReplacementBackoff, namespace, job, group string, revision int, allocations []*Allocation, now time.Time) *ReplacementBackoff {
 	var next *ReplacementBackoff
 	seen := make(map[string]bool)
@@ -128,10 +164,14 @@ func planReplacementBackoff(policy ReplacementPolicy, previous *ReplacementBacko
 		for _, id := range previous.SeenAllocations {
 			seen[id] = true
 		}
+		if !previous.active(now) {
+			next.DelayedReplacements = 0
+		}
 		if next.JobRevision != revision {
 			next.JobRevision = revision
 			next.Failures = 0
 			next.NextReplacementAt = time.Time{}
+			next.DelayedReplacements = 0
 		}
 	}
 
@@ -163,6 +203,7 @@ func planReplacementBackoff(policy ReplacementPolicy, previous *ReplacementBacko
 		})
 		newest := failures[len(failures)-1]
 		next.Failures += len(failures)
+		next.DelayedReplacements += len(failures)
 		if newest.TransitionedAt.After(next.LastFailureAt) {
 			next.LastFailureAt = newest.TransitionedAt
 		}
@@ -184,6 +225,7 @@ func planReplacementBackoff(policy ReplacementPolicy, previous *ReplacementBacko
 			}
 			next.Failures = 0
 			next.NextReplacementAt = time.Time{}
+			next.DelayedReplacements = 0
 			break
 		}
 	}
@@ -194,10 +236,11 @@ func planReplacementBackoff(policy ReplacementPolicy, previous *ReplacementBacko
 // most retain stopped, failed, or lost records remain per job task group. The
 // newest records by transition time are retained, with the allocation ID as a
 // deterministic tie-breaker. A record is deleted only when no node could
-// still hold its container or resources: either it was never placed, or its
-// node is available and has reported a heartbeat after the allocation became
-// terminal without listing any generation of it. skip excludes allocations
-// that must not be deleted in this pass. The inputs are not mutated.
+// still hold its container or resources: it was never placed, its node has
+// been removed from the cluster, or its node is available and has reported a
+// heartbeat after the allocation became terminal without listing any
+// generation of it. skip excludes allocations that must not be deleted in
+// this pass. The inputs are not mutated.
 func planTerminalPruning(retain int, allocations []*Allocation, nodes map[uuid.UUID]*Node, skip map[*Allocation]bool) []*Allocation {
 	if retain < 0 {
 		return nil
@@ -252,7 +295,13 @@ func terminalAllocationReleased(allocation *Allocation, nodes map[uuid.UUID]*Nod
 		return true
 	}
 	node := nodes[allocation.Node.ID]
-	if node == nil || (node.Status != NodeStatusHealthy && node.Status != NodeStatusDraining) {
+	if node == nil {
+		// The node is no longer registered, so nothing can still hold the
+		// allocation's resources. This matches a leader that reloaded the
+		// record after the removal and sees no node at all.
+		return true
+	}
+	if node.Status != NodeStatusHealthy && node.Status != NodeStatusDraining {
 		return false
 	}
 	if node.observedAt.IsZero() || !node.observedAt.After(allocation.TransitionedAt) {
@@ -264,6 +313,59 @@ func terminalAllocationReleased(allocation *Allocation, nodes map[uuid.UUID]*Nod
 		}
 	}
 	return true
+}
+
+// ErrTaskGroupNotFound reports that a job or one of its task groups does not
+// exist.
+var ErrTaskGroupNotFound = errors.New("task group not found")
+
+// ResetReplacementBackoff clears the replacement backoff of a job task group
+// so the next reconciliation pass replaces its failed allocations without
+// waiting. Failed allocations already counted stay seen and are never counted
+// again. Resetting a group without counted failures is a no-op. The cleared
+// record is committed through the state store, like every other backoff
+// change, before the leader uses it.
+func (s *Server) ResetReplacementBackoff(ctx context.Context, namespace, job, group string) error {
+	s.mutationMu.Lock()
+	s.mu.RLock()
+	current := s.jobs[jobKey(namespace, job)]
+	if current == nil || !slices.ContainsFunc(current.Spec.TaskGroups, func(g spec.TaskGroupSpec) bool { return g.Name == group }) {
+		s.mu.RUnlock()
+		s.mutationMu.Unlock()
+		return fmt.Errorf("task group %s of job %s: %w", group, job, ErrTaskGroupNotFound)
+	}
+	key := replacementBackoffKey(current.Spec.Namespace, current.Spec.Name, group)
+	previous := s.replacementBackoffs[key]
+	s.mu.RUnlock()
+	if previous == nil || previous.Failures == 0 {
+		s.mutationMu.Unlock()
+		return nil
+	}
+	next := previous.reset()
+	if err := s.state.PutReplacementBackoff(ctx, next); err != nil {
+		s.mutationMu.Unlock()
+		return fmt.Errorf("persist replacement backoff reset: %w", err)
+	}
+	s.mu.Lock()
+	backoffs := make(map[string]*ReplacementBackoff, len(s.replacementBackoffs))
+	for k, backoff := range s.replacementBackoffs {
+		backoffs[k] = backoff
+	}
+	backoffs[key] = next
+	s.replacementBackoffs = backoffs
+	s.mu.Unlock()
+	s.mutationMu.Unlock()
+	s.log.Info("reset task group replacement backoff", "namespace", next.Namespace, "job", next.JobName, "group", next.TaskGroupName, "failures", previous.Failures)
+	s.events.publish(api.ClusterEvent{
+		Type:      api.EventJobReplacementBackoffReset,
+		Namespace: next.Namespace,
+		JobName:   next.JobName,
+		Group:     next.TaskGroupName,
+		Revision:  next.JobRevision,
+		At:        s.now().UTC(),
+	})
+	s.Reconcile(ctx)
+	return nil
 }
 
 // replacementBackoffResponsesLocked returns the task groups of a job whose

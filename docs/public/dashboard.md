@@ -4,6 +4,8 @@ The `ui/` directory is a deliberately thin Next.js operations client for Trellis
 
 The Operations page prioritizes failures and changing state. Job creation/editing uses the same YAML authoring representation as `trellisctl`, while the dashboard sends only canonical JSON to the Trellis API. **Review Plan** calls the control plane for the semantic plan; the browser does not maintain an independent implementation of Trellis diff semantics.
 
+A job's page shows each task group in **Replacement backoff** with its consecutive failure count, the latest failed allocation and its reason, and when the next replacement of a failed allocation is allowed. With writes enabled, **Reset backoff** clears a group's backoff through the same operation as `trellisctl jobs reset-backoff`, so the failed allocations are replaced without waiting.
+
 ## Configure and run
 
 ```sh

@@ -151,6 +151,7 @@ func (h *Handler) Register(e *echo.Echo) {
 	v1.GET("/jobs/:name", h.handleGetJob)
 	v1.DELETE("/jobs/:name", h.handleDeleteJob)
 	v1.POST("/jobs/:name/restart", h.handleRestartJob)
+	v1.POST("/jobs/:name/groups/:group/replacement-backoff/reset", h.handleResetReplacementBackoff)
 	v1.GET("/jobs/:name/revisions", h.handleListJobRevisions)
 	v1.GET("/namespaces", h.handleListNamespaces)
 	v1.GET("/allocations", h.handleListAllocations)
@@ -703,6 +704,23 @@ func (h *Handler) handleRestartJob(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusNotFound, err.Error())
 	}
 	return c.NoContent(http.StatusAccepted)
+}
+
+func (h *Handler) handleResetReplacementBackoff(c *echo.Context) error {
+	if err := requireWrite(c, "resetting replacement backoff requires write authorization"); err != nil {
+		return err
+	}
+	name, group := c.Param("name"), c.Param("group")
+	if !spec.ValidIdentifier(name) || !spec.ValidIdentifier(group) {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid job or task group name")
+	}
+	if err := h.server.ResetReplacementBackoff(c.Request().Context(), requestNamespace(c), name, group); err != nil {
+		if errors.Is(err, ErrTaskGroupNotFound) {
+			return echo.NewHTTPError(http.StatusNotFound, "task group not found")
+		}
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	return c.NoContent(http.StatusNoContent)
 }
 
 func (h *Handler) handleListJobRevisions(c *echo.Context) error {
