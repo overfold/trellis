@@ -25,7 +25,7 @@ Within Trellis, a namespace provides these boundaries:
 - **Jobs and allocations:** names, desired state, runtime queries, logs, exec targets, and events are selected within the authorized namespace.
 - **Discovery and networking:** service catalog and DNS lookup are namespace-aware. Tasks using `networking.mode: namespace` join that namespace's private network rather than another namespace's network.
 - **Volume identity and managed paths:** volume registrations are keyed by `(namespace, name)`. A `host_path` beginning with `@/` resolves below the namespace's Trellis-managed volume root.
-- **Secrets:** secret records and job references are namespace-scoped. A job can receive only secrets from its own namespace, and APIs return metadata rather than plaintext after a secret is stored.
+- **Secrets:** secret records and job references are namespace-scoped. A job can receive only secrets from its own namespace, and APIs return metadata rather than plaintext after a secret is stored. Secrets are not separately ACLed per job: a manifest submitter is trusted to reference any secret name in that namespace.
 
 These controls are meaningful security boundaries for the resources Trellis owns. They do not imply separate physical nodes, kernels, container runtimes, disks, or control planes.
 
@@ -41,7 +41,7 @@ At minimum, enforce the following rules:
 - **Do not grant cluster API access.** Reject `api_access.scope: cluster`. For the safest general tenant profile, reject `api_access` entirely: a write credential, including `namespace/write`, lets its holder submit manifests directly and bypass the frontend's policy. If a product deliberately offers namespace API access, constrain it to the minimum access level, place it only in reviewed controller task groups, and treat every task in that group as holding the credential.
 - **Constrain images and runtime.** Apply the product's registry, digest, provenance, and update rules. Prefer `runtime: runsc` on nodes that support it for additional syscall isolation; it is defense in depth, not a replacement for manifest admission.
 - **Enforce resources and scale.** Require CPU and memory values, bound replica counts and aggregate requests, and enforce per-tenant quotas and rate limits in the frontend. Trellis schedules declared resources but does not provide namespace quotas or protect against deliberate under-declaration.
-- **Constrain the remaining model.** Allowlist fields rather than trying to denylist future capabilities. Bound environment and label data, health-check commands, volume counts and sizes through the storage layer, and any exec or log operations the product exposes.
+- **Constrain the remaining model.** Allowlist fields rather than trying to denylist future capabilities. Authorize secret references against the tenant's own secret inventory, and bound environment and label data, health-check commands, volume counts and sizes through the storage layer, and any exec or log operations the product exposes.
 
 Run canonical Trellis validation and planning after frontend admission, but before apply. Those steps catch schema and placement errors; they do not replace the frontend's security policy.
 
@@ -51,7 +51,7 @@ Keep Trellis operator credentials in the frontend backend. Use separate least-pr
 
 Namespace-scoped operator credentials are useful for backend job and allocation operations because the control plane enforces their namespace. The current secret-management endpoints require cluster scope even though each secret record and its delivery are namespace-scoped. A frontend that offers tenant secret management must therefore authorize the tenant and fix the namespace itself before making that backend call. It should accept secret plaintext only over a protected connection, avoid logging it, and return only Trellis's secret metadata after storage.
 
-A manifest may reference a secret name, but the allocation receives the value from the job's own namespace. Prefer file delivery over environment delivery when the application supports it. Tenant separation does not protect a secret from other processes deliberately placed together in the same task group or from a compromised container that receives it.
+A manifest may reference a secret name, and the allocation receives the value from the job's own namespace. Direct manifest access therefore grants the practical ability to consume any known secret in that namespace. A tenant frontend must authorize each reference and should keep different tenants in different namespaces. Prefer file delivery over environment delivery when the application supports it. Tenant separation does not protect a secret from other processes deliberately placed together in the same task group or from a compromised container that receives it.
 
 ## Shared surfaces and residual risk
 
