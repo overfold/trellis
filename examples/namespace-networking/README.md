@@ -18,7 +18,7 @@ The `observer` group runs the same small tutorial image with an opt-in peer prob
 Fresh Trellis installs include the namespace-networking dependencies and gVisor/runsc by default, so the normal setup path is enough:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/clofour/trellis/main/scripts/setup.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/setup.sh | sudo bash
 ```
 
 Keep **Namespace networking** enabled in the plan. **Customize** can opt out on deliberately minimal hosts, but every node that may run this example needs namespace networking available. For an additional cluster member, use the [documented join workflow](../../docs/public/multi-node.md#add-a-node) and open the WireGuard UDP range between nodes as described in [Multi-node clusters](../../docs/public/multi-node.md#prepare-the-network-and-configuration).

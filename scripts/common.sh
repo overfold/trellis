@@ -2,7 +2,7 @@
 # Shared lifecycle helpers for Trellis setup, upgrade, and uninstall.
 # This file is sourced by the entrypoint scripts; it is not meant to be run directly.
 
-REPO="${REPO:-clofour/trellis}"
+REPO="${REPO:-overfold/trellis}"
 RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/${REPO}/main/scripts}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 STATE_ROOT="${STATE_ROOT:-/var/lib/trellis}"
@@ -361,7 +361,7 @@ task_groups:
       access: ${access}
     tasks:
       - name: dashboard
-        image: ghcr.io/clofour/trellis-ui:${tag}
+        image: ghcr.io/overfold/trellis-ui:${tag}
         env:
           TRELLIS_NAMESPACE: ${namespace}
 ${allow_writes}

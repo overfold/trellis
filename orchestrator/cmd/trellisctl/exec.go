@@ -8,8 +8,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/clofour/trellis/internal/api"
-	"github.com/clofour/trellis/internal/client"
+	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/client"
 	"github.com/spf13/cobra"
 )
 

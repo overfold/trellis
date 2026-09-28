@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/clofour/trellis/internal/nodecapacity"
-	"github.com/clofour/trellis/internal/server"
+	"github.com/overfold/trellis/internal/nodecapacity"
+	"github.com/overfold/trellis/internal/server"
 	"github.com/spf13/pflag"
 )
 

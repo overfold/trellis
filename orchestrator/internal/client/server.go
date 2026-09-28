@@ -14,9 +14,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/clofour/trellis/internal/api"
-	"github.com/clofour/trellis/internal/spec"
 	"github.com/google/uuid"
+	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/spec"
 )
 
 // ServerClient sends authenticated requests to the Trellis server API.

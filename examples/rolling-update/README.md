@@ -26,8 +26,8 @@ trellisctl jobs status rolling-update
 Change only the tutorial image:
 
 ```diff
--        image: ghcr.io/clofour/trellis-tutorial:v1
-+        image: ghcr.io/clofour/trellis-tutorial:v2
+-        image: ghcr.io/overfold/trellis-tutorial:v1
++        image: ghcr.io/overfold/trellis-tutorial:v2
 ```
 
 Preview and apply the new revision:

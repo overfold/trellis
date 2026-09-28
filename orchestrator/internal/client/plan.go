@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/clofour/trellis/internal/api"
-	"github.com/clofour/trellis/internal/plan"
-	"github.com/clofour/trellis/internal/spec"
+	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/plan"
+	"github.com/overfold/trellis/internal/spec"
 )
 
 // PlanJob returns the control plane's canonical semantic plan for a desired job.

@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/clofour/trellis/internal/probepath"
-	"github.com/clofour/trellis/internal/runtime"
+	"github.com/overfold/trellis/internal/probepath"
+	"github.com/overfold/trellis/internal/runtime"
 )
 
 // ProbeContainerPath is the reserved path of the health probe inside tasks.

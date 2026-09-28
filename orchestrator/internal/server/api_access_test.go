@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/clofour/trellis/internal/auth"
-	"github.com/clofour/trellis/internal/spec"
-	"github.com/clofour/trellis/internal/state"
+	"github.com/overfold/trellis/internal/auth"
+	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/internal/state"
 )
 
 type apiAccessStore map[string][]byte

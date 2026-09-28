@@ -80,7 +80,7 @@ sudo install -m 600 /etc/trellis/secrets.key /root/trellis-secrets.key
 Transfer those files to the new machine over a secure channel, then run:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/clofour/trellis/main/scripts/setup.sh | \
+curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/setup.sh | \
   sudo bash -s -- \
     --join node-a:8128 \
     --enrollment-token-file /root/trellis-enrollment-token \

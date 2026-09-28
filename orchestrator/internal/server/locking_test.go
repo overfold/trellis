@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/clofour/trellis/internal/lifecycle"
-	"github.com/clofour/trellis/internal/spec"
 	"github.com/google/uuid"
+	"github.com/overfold/trellis/internal/lifecycle"
+	"github.com/overfold/trellis/internal/spec"
 )
 
 func TestExecuteAcquiresServerLockBeforeAllocationLock(t *testing.T) {

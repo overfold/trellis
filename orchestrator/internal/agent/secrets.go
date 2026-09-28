@@ -9,9 +9,9 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/clofour/trellis/internal/api"
-	"github.com/clofour/trellis/internal/runtime"
-	"github.com/clofour/trellis/internal/spec"
+	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/runtime"
+	"github.com/overfold/trellis/internal/spec"
 )
 
 // defaultSecretBase is the memory-backed filesystem holding secret roots.

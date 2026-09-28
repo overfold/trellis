@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/clofour/trellis/internal/tlsutil"
 	"github.com/google/uuid"
+	"github.com/overfold/trellis/internal/tlsutil"
 )
 
 func TestAgentClientRejectsValidCertificateForDifferentNode(t *testing.T) {

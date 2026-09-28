@@ -7,8 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/clofour/trellis/internal/auth"
 	"github.com/labstack/echo/v5"
+	"github.com/overfold/trellis/internal/auth"
 )
 
 func scopedRequest(t *testing.T, method, target, body string, scope auth.AccessScope, access auth.AccessLevel, namespace string) *http.Request {

@@ -5,11 +5,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/clofour/trellis/internal/api"
-	"github.com/clofour/trellis/internal/lifecycle"
-	"github.com/clofour/trellis/internal/runtime"
-	"github.com/clofour/trellis/internal/spec"
-	"github.com/clofour/trellis/internal/storage"
+	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/lifecycle"
+	"github.com/overfold/trellis/internal/runtime"
+	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/internal/storage"
 )
 
 func TestAllocationStatusReportsRestartExhaustionReason(t *testing.T) {

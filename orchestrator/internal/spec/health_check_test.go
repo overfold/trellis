@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/clofour/trellis/internal/probepath"
+	"github.com/overfold/trellis/internal/probepath"
 )
 
 func healthCheckJob(check *HealthCheckSpec) *JobSpec {

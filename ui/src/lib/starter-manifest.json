@@ -8,7 +8,7 @@
       "tasks": [
         {
           "name": "hello",
-          "image": "ghcr.io/clofour/trellis-tutorial:v1",
+          "image": "ghcr.io/overfold/trellis-tutorial:v1",
           "resources": {
             "cpu": 100,
             "memory": 67108864

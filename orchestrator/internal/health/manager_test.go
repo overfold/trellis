@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/clofour/trellis/internal/spec"
+	"github.com/overfold/trellis/internal/spec"
 )
 
 func TestNewHealthConfigUsesDefaults(t *testing.T) {

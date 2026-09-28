@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/clofour/trellis/internal/api"
-	secretstore "github.com/clofour/trellis/internal/secrets"
+	"github.com/overfold/trellis/internal/api"
+	secretstore "github.com/overfold/trellis/internal/secrets"
 )
 
 func secretMetadata(meta *secretstore.Metadata) *api.SecretMetadata {

@@ -3,7 +3,7 @@ package plan
 import (
 	"testing"
 
-	"github.com/clofour/trellis/internal/spec"
+	"github.com/overfold/trellis/internal/spec"
 )
 
 func task(name string) spec.TaskSpec {

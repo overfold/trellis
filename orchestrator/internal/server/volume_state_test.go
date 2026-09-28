@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/clofour/trellis/internal/spec"
 	"github.com/google/uuid"
+	"github.com/overfold/trellis/internal/spec"
 )
 
 func TestVolumeRegistrationRoundTripAndPinsScheduler(t *testing.T) {

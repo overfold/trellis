@@ -3,7 +3,7 @@ package api
 import (
 	"time"
 
-	"github.com/clofour/trellis/internal/spec"
+	"github.com/overfold/trellis/internal/spec"
 )
 
 // SecretWriteRequest contains a secret value and optional version precondition.

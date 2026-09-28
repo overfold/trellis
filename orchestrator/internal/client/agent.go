@@ -14,9 +14,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/clofour/trellis/internal/api"
-	"github.com/clofour/trellis/internal/tlsutil"
 	"github.com/google/uuid"
+	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/tlsutil"
 )
 
 // AgentClient sends authenticated requests to a Trellis agent.

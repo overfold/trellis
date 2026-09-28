@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/clofour/trellis/internal/specschema"
+	"github.com/overfold/trellis/internal/specschema"
 )
 
 func main() {
