@@ -213,6 +213,35 @@ func (s *StateController) PutAllocations(ctx context.Context, allocations []*All
 	return nil
 }
 
+// PutNodeAndAllocations commits a node summary and allocation updates as one
+// durable state transition.
+func (s *StateController) PutNodeAndAllocations(ctx context.Context, node *NodeSummary, allocations []*Allocation) error {
+	if node == nil {
+		return fmt.Errorf("node is required")
+	}
+	atomic, ok := s.store.(state.AtomicStore)
+	if !ok {
+		return fmt.Errorf("state store does not support atomic node updates")
+	}
+	nodeRaw, err := json.Marshal(node)
+	if err != nil {
+		return fmt.Errorf("marshal node %s: %w", node.ID, err)
+	}
+	mutations := make([]state.Mutation, 0, len(allocations)+1)
+	mutations = append(mutations, state.Mutation{Key: fmt.Sprintf("%s/%s/nodes/%s", trellisNamespace, s.cluster, node.ID), Value: nodeRaw})
+	for _, allocation := range allocations {
+		raw, err := json.Marshal(allocation)
+		if err != nil {
+			return fmt.Errorf("marshal allocation %s: %w", allocation.ID, err)
+		}
+		mutations = append(mutations, state.Mutation{Key: s.allocationKey(allocation.ID), Value: raw})
+	}
+	if err := atomic.Batch(ctx, mutations); err != nil {
+		return fmt.Errorf("put node and allocations: %w", err)
+	}
+	return nil
+}
+
 // ReconciliationCommit is the durable outcome of one reconciliation pass.
 type ReconciliationCommit struct {
 	Allocations       []*Allocation

@@ -26,6 +26,10 @@ func (undrainFailingStore) Put(context.Context, string, []byte) error {
 	return errors.New("storage unavailable")
 }
 
+func (undrainFailingStore) Batch(context.Context, []state.Mutation) error {
+	return errors.New("storage unavailable")
+}
+
 type nodeWriteFailingStore struct{ memoryStore }
 
 func (s nodeWriteFailingStore) Put(ctx context.Context, key string, value []byte) error {
@@ -33,6 +37,15 @@ func (s nodeWriteFailingStore) Put(ctx context.Context, key string, value []byte
 		return errors.New("storage unavailable")
 	}
 	return s.memoryStore.Put(ctx, key, value)
+}
+
+func (s nodeWriteFailingStore) Batch(ctx context.Context, mutations []state.Mutation) error {
+	for _, mutation := range mutations {
+		if strings.Contains(mutation.Key, "/nodes/") {
+			return errors.New("storage unavailable")
+		}
+	}
+	return s.memoryStore.Batch(ctx, mutations)
 }
 
 func resumeCalls(agent *testAgent, id string) []api.DrainAllocationRequest {
@@ -72,7 +85,7 @@ func TestHandleUndrainNodeReportsResumeFailure(t *testing.T) {
 	req = req.WithContext(context.WithValue(req.Context(), AdminContextKey, true))
 	rec = httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
-	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "persist resumed allocation original") {
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "put node and allocations") {
 		t.Fatalf("persistence failure: status %d, body %s", rec.Code, rec.Body.String())
 	}
 	// Once the undrain is durable, an agent delivery failure is retried by

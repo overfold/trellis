@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/netip"
 	"os"
 	"sort"
@@ -447,6 +448,33 @@ func (a *Allocation) SetHealth(health lifecycle.Health) error {
 	return nil
 }
 
+func nodeSummary(node *Node) *NodeSummary {
+	return &NodeSummary{ID: node.ID, Host: node.Host, Port: node.Port, CPUCapacity: node.CPUCapacity, MemoryCapacity: node.MemoryCapacity, CPUAllocatable: node.CPUAllocatable, MemoryAllocatable: node.MemoryAllocatable, OS: node.OS, Arch: node.Arch, Labels: node.Labels, Volumes: node.Volumes, Capabilities: node.Capabilities, Status: node.Status, WireGuardPublicKey: node.WireGuardPublicKey, WireGuardEndpoint: node.WireGuardEndpoint, WireGuardPortBase: node.WireGuardPortBase, WireGuardPortCount: node.WireGuardPortCount, LastHeartbeat: node.LastHeartbeat, Version: node.Version}
+}
+
+func applyNodeSnapshot(node, snapshot *Node) {
+	*node = *snapshot
+}
+
+func applyAllocationSnapshot(allocation, snapshot *Allocation) {
+	allocation.Namespace = snapshot.Namespace
+	allocation.JobName = snapshot.JobName
+	allocation.TaskGroupName = snapshot.TaskGroupName
+	allocation.ID = snapshot.ID
+	allocation.Generation = snapshot.Generation
+	allocation.JobRevision = snapshot.JobRevision
+	allocation.Tasks = snapshot.Tasks
+	allocation.Phase = snapshot.Phase
+	allocation.Health = snapshot.Health
+	allocation.Diagnostic = snapshot.Diagnostic
+	allocation.Endpoints = snapshot.Endpoints
+	allocation.Ports = snapshot.Ports
+	allocation.Draining = snapshot.Draining
+	allocation.DrainSequence = snapshot.DrainSequence
+	allocation.DrainReason = snapshot.DrainReason
+	allocation.Events = snapshot.Events
+}
+
 // NewServer constructs an orchestrator server.
 func NewServer(log *slog.Logger, storage *storage.LocalStorage, state *StateController, store state.Store, cluster, serverAddr string) *Server {
 	pool := netip.MustParsePrefix("10.64.0.0/10")
@@ -732,26 +760,28 @@ func (s *Server) RegisterNode(ctx context.Context, nodeRegistration *NodeRegistr
 			return fmt.Errorf("WireGuard port range is outside 1-65535")
 		}
 	}
+	s.mutationMu.Lock()
+	defer s.mutationMu.Unlock()
 	s.mu.RLock()
+	existing := s.nodes[nodeRegistration.ID]
 	status := NodeStatusHealthy
-	if existing := s.nodes[nodeRegistration.ID]; existing != nil && existing.Status == NodeStatusDraining {
-		status = NodeStatusDraining
+	next := &Node{ID: nodeRegistration.ID}
+	if existing != nil && existing.Status == NodeStatusDraining {
+		status = existing.Status
+	}
+	if existing != nil {
+		*next = *existing
 	}
 	s.mu.RUnlock()
-	err := s.state.PutNode(ctx, nodeRegistration.ID.String(), &NodeSummary{
-		ID:          nodeRegistration.ID,
-		Host:        nodeRegistration.Host,
-		Port:        nodeRegistration.Port,
-		CPUCapacity: nodeRegistration.CPUCapacity, MemoryCapacity: nodeRegistration.MemoryCapacity,
-		CPUAllocatable: nodeRegistration.CPUAllocatable, MemoryAllocatable: nodeRegistration.MemoryAllocatable,
-		OS: nodeRegistration.OS, Arch: nodeRegistration.Arch, Labels: nodeRegistration.Labels, Status: status,
-		Volumes:            nodeRegistration.Volumes,
-		Capabilities:       nodeRegistration.Capabilities,
-		WireGuardPublicKey: nodeRegistration.WireGuardPublicKey, WireGuardEndpoint: nodeRegistration.WireGuardEndpoint,
-		WireGuardPortBase: nodeRegistration.WireGuardPortBase, WireGuardPortCount: nodeRegistration.WireGuardPortCount,
-		LastHeartbeat: s.now().UTC(),
-	})
-	if err != nil {
+	next.Host, next.Port, next.Status = nodeRegistration.Host, nodeRegistration.Port, status
+	next.CPUCapacity, next.MemoryCapacity = nodeRegistration.CPUCapacity, nodeRegistration.MemoryCapacity
+	next.CPUAllocatable, next.MemoryAllocatable = nodeRegistration.CPUAllocatable, nodeRegistration.MemoryAllocatable
+	next.OS, next.Arch, next.Labels = nodeRegistration.OS, nodeRegistration.Arch, maps.Clone(nodeRegistration.Labels)
+	next.Volumes, next.Capabilities = append([]string(nil), nodeRegistration.Volumes...), append([]spec.NodeCapability(nil), nodeRegistration.Capabilities...)
+	next.WireGuardPublicKey, next.WireGuardEndpoint = nodeRegistration.WireGuardPublicKey, nodeRegistration.WireGuardEndpoint
+	next.WireGuardPortBase, next.WireGuardPortCount = nodeRegistration.WireGuardPortBase, nodeRegistration.WireGuardPortCount
+	next.LastHeartbeat = s.now().UTC()
+	if err := s.state.PutNode(ctx, nodeRegistration.ID.String(), nodeSummary(next)); err != nil {
 		return fmt.Errorf("save node remotely: %w", err)
 	}
 
@@ -759,22 +789,10 @@ func (s *Server) RegisterNode(ctx context.Context, nodeRegistration *NodeRegistr
 	defer s.mu.Unlock()
 	node := s.nodes[nodeRegistration.ID]
 	if node == nil {
-		node = &Node{ID: nodeRegistration.ID}
+		node = &Node{}
 		s.nodes[nodeRegistration.ID] = node
 	}
-	node.Host, node.Port = nodeRegistration.Host, nodeRegistration.Port
-	if node.Status != NodeStatusDraining {
-		node.Status = NodeStatusHealthy
-	}
-	node.LastHeartbeat = time.Now()
-	node.CPUCapacity, node.MemoryCapacity = nodeRegistration.CPUCapacity, nodeRegistration.MemoryCapacity
-	node.CPUAllocatable, node.MemoryAllocatable = nodeRegistration.CPUAllocatable, nodeRegistration.MemoryAllocatable
-	node.OS, node.Arch = nodeRegistration.OS, nodeRegistration.Arch
-	node.Labels = nodeRegistration.Labels
-	node.Volumes = append([]string(nil), nodeRegistration.Volumes...)
-	node.Capabilities = append([]spec.NodeCapability(nil), nodeRegistration.Capabilities...)
-	node.WireGuardPublicKey, node.WireGuardEndpoint = nodeRegistration.WireGuardPublicKey, nodeRegistration.WireGuardEndpoint
-	node.WireGuardPortBase, node.WireGuardPortCount = nodeRegistration.WireGuardPortBase, nodeRegistration.WireGuardPortCount
+	applyNodeSnapshot(node, next)
 
 	return nil
 }
@@ -789,35 +807,6 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 	}
 	if (resources.MemoryUsed != nil && *resources.MemoryUsed < 0) || (resources.MemoryAvailable != nil && *resources.MemoryAvailable < 0) {
 		return fmt.Errorf("node memory observations must be non-negative")
-	}
-	s.mu.Lock()
-	node, ok := s.nodes[nodeID]
-	if !ok {
-		s.mu.Unlock()
-		return fmt.Errorf("node not found")
-	}
-
-	if node.Status != NodeStatusDraining {
-		node.Status = NodeStatusHealthy
-	}
-	node.LastHeartbeat = time.Now()
-	node.Version = version
-	node.Volumes = append([]string(nil), volumes...)
-	node.Capabilities = append([]spec.NodeCapability(nil), capabilities...)
-	node.CPUCapacity, node.MemoryCapacity = resources.CPUCapacity, resources.MemoryCapacity
-	node.CPUAllocatable, node.MemoryAllocatable = resources.CPUAllocatable, resources.MemoryAllocatable
-	node.CPUUsage, node.MemoryUsed = resources.CPUUsage, resources.MemoryUsed
-	node.MemoryAvailable, node.MetricsAt = resources.MemoryAvailable, resources.MetricsAt
-	owned := make([]*Allocation, 0)
-	for _, allocation := range s.allocations {
-		if allocation.Node == node {
-			owned = append(owned, allocation)
-		}
-	}
-	summary := &NodeSummary{ID: node.ID, Host: node.Host, Port: node.Port, CPUCapacity: node.CPUCapacity, MemoryCapacity: node.MemoryCapacity, CPUAllocatable: node.CPUAllocatable, MemoryAllocatable: node.MemoryAllocatable, OS: node.OS, Arch: node.Arch, Labels: node.Labels, Volumes: node.Volumes, Capabilities: node.Capabilities, Status: node.Status, WireGuardPublicKey: node.WireGuardPublicKey, WireGuardEndpoint: node.WireGuardEndpoint, WireGuardPortBase: node.WireGuardPortBase, WireGuardPortCount: node.WireGuardPortCount, LastHeartbeat: node.LastHeartbeat, Version: node.Version}
-	s.mu.Unlock()
-	if err := s.state.PutNode(ctx, node.ID.String(), summary); err != nil {
-		return fmt.Errorf("persist node heartbeat: %w", err)
 	}
 	type statusInfo struct {
 		ID            string
@@ -882,19 +871,56 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 		}
 		return observed[i].ID < observed[j].ID
 	})
-	s.mu.Lock()
-	if current := s.nodes[nodeID]; current != nil {
-		current.observedAllocations = observed
-		current.observedAt = time.Now().UTC()
+	s.mutationMu.Lock()
+	defer s.mutationMu.Unlock()
+	s.mu.RLock()
+	node := s.nodes[nodeID]
+	if node == nil {
+		s.mu.RUnlock()
+		return fmt.Errorf("node not found")
 	}
-	s.mu.Unlock()
-	var changed []*Allocation
-	for _, a := range owned {
-		a.mu.Lock()
+	nextNode := *node
+	nextNode.Labels = maps.Clone(node.Labels)
+	nextNode.Volumes = append([]string(nil), volumes...)
+	nextNode.Capabilities = append([]spec.NodeCapability(nil), capabilities...)
+	if nextNode.Status != NodeStatusDraining {
+		nextNode.Status = NodeStatusHealthy
+	}
+	heartbeatAt := time.Now().UTC()
+	nextNode.LastHeartbeat = heartbeatAt
+	nextNode.Version = version
+	nextNode.CPUCapacity, nextNode.MemoryCapacity = resources.CPUCapacity, resources.MemoryCapacity
+	nextNode.CPUAllocatable, nextNode.MemoryAllocatable = resources.CPUAllocatable, resources.MemoryAllocatable
+	nextNode.CPUUsage, nextNode.MemoryUsed = resources.CPUUsage, resources.MemoryUsed
+	nextNode.MemoryAvailable, nextNode.MetricsAt = resources.MemoryAvailable, resources.MetricsAt
+	nextNode.observedAllocations = observed
+	nextNode.observedAt = heartbeatAt
+	type allocationUpdate struct {
+		current *Allocation
+		next    *Allocation
+	}
+	updates := make([]allocationUpdate, 0)
+	for _, allocation := range s.allocations {
+		if allocation.Node != node {
+			continue
+		}
+		allocation.mu.Lock()
+		next, err := cloneAllocationForReconcile(allocation)
+		allocation.mu.Unlock()
+		if err != nil {
+			s.mu.RUnlock()
+			return fmt.Errorf("snapshot allocation observation %s: %w", allocation.ID, err)
+		}
+		updates = append(updates, allocationUpdate{current: allocation, next: next})
+	}
+	s.mu.RUnlock()
+
+	changed := make([]allocationUpdate, 0, len(updates))
+	for _, update := range updates {
+		a := update.next
 		info, ok := statuses[fmt.Sprintf("%s/%d", a.ID, a.Generation)]
 		if !ok {
 			if a.Phase != lifecycle.PhaseRunning && a.Phase != lifecycle.PhaseStarting {
-				a.mu.Unlock()
 				continue
 			}
 			info = statusInfo{Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown}
@@ -922,17 +948,23 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 		sort.Slice(info.Endpoints, func(i, j int) bool { return info.Endpoints[i].Task < info.Endpoints[j].Task })
 		a.Endpoints = append([]api.AllocationEndpoint(nil), info.Endpoints...)
 		a.Ports = append([]api.PortMapping(nil), info.Ports...)
-		changed = append(changed, a)
-		a.mu.Unlock()
+		changed = append(changed, update)
 	}
-	for _, allocation := range changed {
-		allocation.mu.Lock()
-		if err := s.state.PutAllocation(ctx, allocation); err != nil {
-			allocation.mu.Unlock()
-			return fmt.Errorf("persist allocation observation: %w", err)
-		}
-		allocation.mu.Unlock()
+	persisted := make([]*Allocation, 0, len(changed))
+	for _, update := range changed {
+		persisted = append(persisted, update.next)
 	}
+	if err := s.state.PutNodeAndAllocations(ctx, nodeSummary(&nextNode), persisted); err != nil {
+		return fmt.Errorf("persist heartbeat: %w", err)
+	}
+	s.mu.Lock()
+	applyNodeSnapshot(node, &nextNode)
+	for _, update := range changed {
+		update.current.mu.Lock()
+		applyAllocationSnapshot(update.current, update.next)
+		update.current.mu.Unlock()
+	}
+	s.mu.Unlock()
 
 	s.refreshCatalog()
 	return nil
@@ -1123,24 +1155,25 @@ func (s *Server) Reload(ctx context.Context) error {
 
 // DrainNode marks a node for allocation evacuation.
 func (s *Server) DrainNode(ctx context.Context, id uuid.UUID) error {
-	s.mu.Lock()
+	s.mutationMu.Lock()
+	s.mu.RLock()
 	node := s.nodes[id]
 	if node == nil {
-		s.mu.Unlock()
+		s.mu.RUnlock()
+		s.mutationMu.Unlock()
 		return fmt.Errorf("node not found")
 	}
-	previousStatus := node.Status
-	node.Status = NodeStatusDraining
-	summary := &NodeSummary{ID: node.ID, Host: node.Host, Port: node.Port, CPUCapacity: node.CPUCapacity, MemoryCapacity: node.MemoryCapacity, CPUAllocatable: node.CPUAllocatable, MemoryAllocatable: node.MemoryAllocatable, OS: node.OS, Arch: node.Arch, Labels: node.Labels, Volumes: node.Volumes, Capabilities: node.Capabilities, Status: node.Status, WireGuardPublicKey: node.WireGuardPublicKey, WireGuardEndpoint: node.WireGuardEndpoint, WireGuardPortBase: node.WireGuardPortBase, WireGuardPortCount: node.WireGuardPortCount, LastHeartbeat: node.LastHeartbeat, Version: node.Version}
-	s.mu.Unlock()
-	if err := s.state.PutNode(ctx, id.String(), summary); err != nil {
-		s.mu.Lock()
-		if current := s.nodes[id]; current == node && current.Status == NodeStatusDraining {
-			current.Status = previousStatus
-		}
-		s.mu.Unlock()
+	next := *node
+	next.Status = NodeStatusDraining
+	s.mu.RUnlock()
+	if err := s.state.PutNode(ctx, id.String(), nodeSummary(&next)); err != nil {
+		s.mutationMu.Unlock()
 		return err
 	}
+	s.mu.Lock()
+	applyNodeSnapshot(node, &next)
+	s.mu.Unlock()
+	s.mutationMu.Unlock()
 	s.Reconcile(ctx)
 	return nil
 }
@@ -1158,28 +1191,33 @@ func (s *Server) UndrainNode(ctx context.Context, id uuid.UUID) error {
 }
 
 func (s *Server) resumeNodeAllocations(ctx context.Context, id uuid.UUID) error {
+	s.mutationMu.Lock()
+	mutationLocked := true
+	defer func() {
+		if mutationLocked {
+			s.mutationMu.Unlock()
+		}
+	}()
 	s.mu.RLock()
 	node := s.nodes[id]
 	if node == nil {
 		s.mu.RUnlock()
 		return fmt.Errorf("%w: %s", ErrNodeNotFound, id)
 	}
-	allocations := append([]*Allocation(nil), s.allocations...)
-	s.mu.RUnlock()
+	nextNode := *node
+	nextNode.Status = NodeStatusHealthy
 	var resumes []resumeDelivery
-	for _, allocation := range allocations {
-		s.mu.RLock()
+	var updates []*Allocation
+	for _, allocation := range s.allocations {
 		allocation.mu.Lock()
 		if allocation.Node == nil || allocation.Node.ID != id || !allocation.Draining || allocation.DrainReason != "node" ||
 			(allocation.Phase != lifecycle.PhaseRunning && allocation.Phase != lifecycle.PhaseStarting && allocation.Phase != lifecycle.PhasePlaced) {
 			allocation.mu.Unlock()
-			s.mu.RUnlock()
 			continue
 		}
 		job := s.jobs[jobKey(allocation.Namespace, allocation.JobName)]
 		if job == nil || allocation.JobRevision != job.Revision {
 			allocation.mu.Unlock()
-			s.mu.RUnlock()
 			continue
 		}
 		groupExists := false
@@ -1191,39 +1229,36 @@ func (s *Server) resumeNodeAllocations(ctx context.Context, id uuid.UUID) error 
 		}
 		if !groupExists {
 			allocation.mu.Unlock()
-			s.mu.RUnlock()
 			continue
 		}
 		address := fmt.Sprintf("%s:%d", node.Host, node.Port)
 		request := &api.DrainAllocationRequest{AllocationID: allocation.ID, Generation: allocation.Generation, Epoch: s.controlEpoch, Sequence: allocation.DrainSequence + 1}
-		s.mu.RUnlock()
-		// Persist the resume before any agent sees it. If a later save fails,
-		// the node stays draining and reconciliation re-drains at a higher
-		// sequence, so no agent is left ahead of durable state.
-		allocation.Draining = false
-		allocation.DrainReason = ""
-		allocation.DrainSequence = request.Sequence
-		if err := s.state.PutAllocation(ctx, allocation); err != nil {
-			allocation.Draining = true
-			allocation.DrainReason = "node"
-			allocation.DrainSequence--
-			allocation.mu.Unlock()
-			return fmt.Errorf("persist resumed allocation %s: %w", allocation.ID, err)
-		}
+		next, err := cloneAllocationForReconcile(allocation)
 		allocation.mu.Unlock()
+		if err != nil {
+			s.mu.RUnlock()
+			return fmt.Errorf("snapshot resumed allocation %s: %w", allocation.ID, err)
+		}
+		next.Draining = false
+		next.DrainReason = ""
+		next.DrainSequence = request.Sequence
+		updates = append(updates, next)
 		resumes = append(resumes, resumeDelivery{allocation: allocation, address: address, request: request})
 	}
-	s.mu.RLock()
-	summary := &NodeSummary{ID: node.ID, Host: node.Host, Port: node.Port, CPUCapacity: node.CPUCapacity, MemoryCapacity: node.MemoryCapacity, CPUAllocatable: node.CPUAllocatable, MemoryAllocatable: node.MemoryAllocatable, OS: node.OS, Arch: node.Arch, Labels: node.Labels, Volumes: node.Volumes, Capabilities: node.Capabilities, Status: NodeStatusHealthy, WireGuardPublicKey: node.WireGuardPublicKey, WireGuardEndpoint: node.WireGuardEndpoint, WireGuardPortBase: node.WireGuardPortBase, WireGuardPortCount: node.WireGuardPortCount, LastHeartbeat: node.LastHeartbeat, Version: node.Version}
 	s.mu.RUnlock()
-	if err := s.state.PutNode(ctx, id.String(), summary); err != nil {
+	if err := s.state.PutNodeAndAllocations(ctx, nodeSummary(&nextNode), updates); err != nil {
 		return err
 	}
 	s.mu.Lock()
-	if s.nodes[id] == node {
-		node.Status = NodeStatusHealthy
+	applyNodeSnapshot(node, &nextNode)
+	for i, resume := range resumes {
+		resume.allocation.mu.Lock()
+		applyAllocationSnapshot(resume.allocation, updates[i])
+		resume.allocation.mu.Unlock()
 	}
 	s.mu.Unlock()
+	s.mutationMu.Unlock()
+	mutationLocked = false
 	// The undrain is durable. A resume the agent does not acknowledge now is
 	// redelivered by reconciliation.
 	for _, resume := range resumes {
@@ -1345,20 +1380,22 @@ func (s *Server) GetJob(namespace, name string) (*api.JobStatusResponse, bool) {
 // DeleteJob removes desired job state.
 func (s *Server) DeleteJob(ctx context.Context, namespace, name string) error {
 	s.mutationMu.Lock()
-	defer s.mutationMu.Unlock()
 	s.mu.RLock()
 	key := jobKey(namespace, name)
 	_, ok := s.jobs[key]
 	s.mu.RUnlock()
 	if !ok {
+		s.mutationMu.Unlock()
 		return fmt.Errorf("job %s not found", name)
 	}
 	if err := s.state.DeleteJob(ctx, key); err != nil {
+		s.mutationMu.Unlock()
 		return err
 	}
 	s.mu.Lock()
 	delete(s.jobs, key)
 	s.mu.Unlock()
+	s.mutationMu.Unlock()
 	s.events.publish(api.ClusterEvent{
 		Type:      api.EventJobDeleted,
 		Namespace: namespace,
