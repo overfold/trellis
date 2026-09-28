@@ -168,7 +168,7 @@ For normal workload diagnosis, start and usually finish with `jobs status`. `rea
 
 ## Networking and TLS
 
-Workloads use Trellis's node-local DNS resolver on the reserved internal address `198.18.0.53:53`; it is not intended to be exposed on external interfaces. Node and Raft transports require mutually authenticated TLS. Possession of the CA key is not API or leader authorization: requests still need a certificate identifying one immutable node ID, and leader work is executed only by the current Raft leader with control-epoch, generation, revision, and execution-hash fencing where applicable. Administrator and enrollment bearer credentials are separate from node identity.
+Workloads use Trellis's node-local DNS resolver on the reserved internal address `198.18.0.53:53`; it is not intended to be exposed on external interfaces. Node and Raft transports require mutually authenticated TLS. Possession of the CA key is not API or leader authorization: requests still need the durably bound certificate for one immutable node ID, and leader work is executed only by the current Raft leader with control-epoch, generation, revision, and execution-hash fencing where applicable. Followers preserve that certificate identity by redirecting node-authenticated control-plane requests, and Raft streams verify the peer's joined advertised address. Administrator and enrollment bearer credentials are separate from node identity; managed enrollment receives the CA key only after certificate-bound Raft admission.
 
 Ports and WireGuard settings needed between nodes are described in [Multi-node clusters](multi-node.md#prepare-the-network-and-configuration).
 

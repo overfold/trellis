@@ -99,3 +99,11 @@ func (a *AdministratorAuthenticator) Verify(publicKey ed25519.PublicKey, epoch u
 	}
 	return ed25519.Verify(publicKey, payload, rawSignature)
 }
+
+// Consume invalidates a supplied challenge when an authentication attempt
+// fails before signature verification can run.
+func (a *AdministratorAuthenticator) Consume(challenge string) {
+	a.mu.Lock()
+	delete(a.challenges, challenge)
+	a.mu.Unlock()
+}
