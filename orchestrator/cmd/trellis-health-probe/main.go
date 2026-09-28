@@ -115,11 +115,10 @@ func probeClient(port int) *http.Client {
 		if err != nil {
 			return nil, err
 		}
-		ip, ok := loopbackIP(host)
-		if !ok {
+		if !loopbackHost(host) {
 			return nil, fmt.Errorf("refusing %s: not the probed loopback address", address)
 		}
-		return dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), targetPort))
+		return dialer.DialContext(ctx, network, net.JoinHostPort(loopback, targetPort))
 	}
 	return &http.Client{
 		Transport: &http.Transport{Proxy: nil, DialContext: dial, DisableKeepAlives: true},
@@ -148,19 +147,14 @@ func loopbackTarget(target *url.URL, port int) bool {
 			return false
 		}
 	}
-	_, ok := loopbackIP(target.Hostname())
-	return ok && targetPort == port
+	return loopbackHost(target.Hostname()) && targetPort == port
 }
 
-// loopbackIP maps localhost to 127.0.0.1 without consulting a resolver and
-// refuses every host other than 127.0.0.1, so the probe only ever dials the
-// probed loopback address.
-func loopbackIP(host string) (net.IP, bool) {
-	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
-		host = loopback
-	}
-	ip := net.ParseIP(host)
-	return ip, ip != nil && ip.Equal(net.ParseIP(loopback))
+// loopbackHost reports whether host is 127.0.0.1 or localhost. localhost is
+// matched by name without consulting a resolver, and other spellings of the
+// loopback address (including IPv4-mapped IPv6) are refused.
+func loopbackHost(host string) bool {
+	return host == loopback || strings.EqualFold(strings.TrimSuffix(host, "."), "localhost")
 }
 
 func runEnvExec(args []string) int {

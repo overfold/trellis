@@ -107,6 +107,8 @@ func TestHTTPProbeFollowsOnlyLoopbackRedirects(t *testing.T) {
 			http.Redirect(w, r, "/hops-then-external/9", http.StatusFound)
 		case "/to-localhost-dot-ok":
 			http.Redirect(w, r, "http://localhost.:"+requestPort(r)+"/ok", http.StatusFound)
+		case "/to-mapped-loopback":
+			http.Redirect(w, r, "http://[::ffff:7f00:1]:"+requestPort(r)+"/failing", http.StatusFound)
 		case "/to-ipv6-loopback":
 			http.Redirect(w, r, "http://[::1]:"+requestPort(r)+"/ok", http.StatusFound)
 		case "/loop":
@@ -143,6 +145,7 @@ func TestHTTPProbeFollowsOnlyLoopbackRedirects(t *testing.T) {
 		"/to-localhost-dot-ok":    0,
 		"/to-padded-port-failing": 1,
 		"/to-ipv6-loopback":       0, // a different socket: not followed
+		"/to-mapped-loopback":     0,
 		"/hops/10":                0,
 		"/hops/11":                1,
 		"/to-external-after-hops": 0,
