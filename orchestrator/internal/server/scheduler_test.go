@@ -1,6 +1,7 @@
 package server
 
 import (
+	"math"
 	"testing"
 
 	"github.com/clofour/trellis/internal/spec"
@@ -55,8 +56,25 @@ func TestScheduleClaimsNewVolumeOnFirstPlacement(t *testing.T) {
 	if len(placements) != 2 || placements[0].NodeID != placements[1].NodeID {
 		t.Fatalf("volume-sharing replicas must stay on first owner: %#v", placements)
 	}
-	if owner := owners[volumeRegistrationKey("acme", "database")]; owner != placements[0].NodeID {
-		t.Fatalf("first placement did not claim durable owner: got %s want %s", owner, placements[0].NodeID)
+	if len(owners) != 0 {
+		t.Fatalf("Schedule mutated volume owners: %#v", owners)
+	}
+	wantClaim := VolumeClaim{Namespace: "acme", Name: "database", NodeID: placements[0].NodeID}
+	if len(placements[0].VolumeClaims) != 1 || placements[0].VolumeClaims[0] != wantClaim {
+		t.Fatalf("first placement claims = %#v, want %#v", placements[0].VolumeClaims, wantClaim)
+	}
+	if len(placements[1].VolumeClaims) != 0 {
+		t.Fatalf("second placement repeated volume claim: %#v", placements[1].VolumeClaims)
+	}
+}
+
+func TestScheduleDoesNotAssignNilVolumeOwners(t *testing.T) {
+	intent := &PlacementIntent{Count: 1, Nodes: []*Node{{ID: uuid.New(), Status: NodeStatusHealthy}}}
+	if placements := Schedule(intent); len(placements) != 1 {
+		t.Fatalf("placements = %#v, want one", placements)
+	}
+	if intent.VolumeOwners != nil {
+		t.Fatalf("Schedule assigned the nil volume owners map: %#v", intent.VolumeOwners)
 	}
 }
 
@@ -72,11 +90,98 @@ func TestScheduleIgnoresNodeAdvertisedVolumeWithoutDurableRegistration(t *testin
 	if placements[0].NodeID != a.ID {
 		// Deterministic node ordering chooses a here because of the fixed UUIDs;
 		// the assertion makes clear that the stale advertisement did not become
-		// authority. Ownership comes from the map populated by Schedule.
+		// authority. Ownership comes from the explicit placement claim.
 		t.Fatalf("unexpected deterministic first placement: %#v", placements)
 	}
-	if owners[volumeRegistrationKey("acme", "database")] != a.ID {
-		t.Fatalf("first placement was not recorded in ownership map: %#v", owners)
+	if len(owners) != 0 {
+		t.Fatalf("Schedule mutated volume owners: %#v", owners)
+	}
+	wantClaim := VolumeClaim{Namespace: "acme", Name: "database", NodeID: a.ID}
+	if len(placements[0].VolumeClaims) != 1 || placements[0].VolumeClaims[0] != wantClaim {
+		t.Fatalf("first placement claims = %#v, want %#v", placements[0].VolumeClaims, wantClaim)
+	}
+}
+
+func TestScheduleResourceCapacityAtIntegerBoundaries(t *testing.T) {
+	tests := []struct {
+		name       string
+		node       *Node
+		existing   *spec.ResourcesSpec
+		requested  *spec.ResourcesSpec
+		wantPlaced bool
+	}{
+		{
+			name:     "CPU exact MaxInt capacity",
+			node:     &Node{ID: uuid.New(), Status: NodeStatusHealthy, CPUAllocatable: math.MaxInt},
+			existing: &spec.ResourcesSpec{CPU: math.MaxInt - 1}, requested: &spec.ResourcesSpec{CPU: 1}, wantPlaced: true,
+		},
+		{
+			name:     "CPU above MaxInt capacity",
+			node:     &Node{ID: uuid.New(), Status: NodeStatusHealthy, CPUAllocatable: math.MaxInt},
+			existing: &spec.ResourcesSpec{CPU: math.MaxInt}, requested: &spec.ResourcesSpec{CPU: 1}, wantPlaced: false,
+		},
+		{
+			name:     "memory exact MaxInt64 capacity",
+			node:     &Node{ID: uuid.New(), Status: NodeStatusHealthy, MemoryAllocatable: math.MaxInt64},
+			existing: &spec.ResourcesSpec{Memory: spec.ByteSize(math.MaxInt64 - 1)}, requested: &spec.ResourcesSpec{Memory: 1}, wantPlaced: true,
+		},
+		{
+			name:     "memory above MaxInt64 capacity",
+			node:     &Node{ID: uuid.New(), Status: NodeStatusHealthy, MemoryAllocatable: math.MaxInt64},
+			existing: &spec.ResourcesSpec{Memory: spec.ByteSize(math.MaxInt64)}, requested: &spec.ResourcesSpec{Memory: 1}, wantPlaced: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			existing := &Allocation{Node: tt.node, Tasks: []spec.TaskSpec{{Resources: tt.existing}}}
+			placements := Schedule(&PlacementIntent{Count: 1, Nodes: []*Node{tt.node}, Allocations: []*Allocation{existing}, Tasks: []spec.TaskSpec{{Resources: tt.requested}}})
+			if gotPlaced := len(placements) == 1; gotPlaced != tt.wantPlaced {
+				t.Fatalf("placements = %#v, want placed %t", placements, tt.wantPlaced)
+			}
+		})
+	}
+}
+
+func TestScheduleRejectsOverflowingTaskGroupResources(t *testing.T) {
+	tests := []struct {
+		name  string
+		node  *Node
+		tasks []spec.TaskSpec
+	}{
+		{
+			name: "CPU",
+			node: &Node{ID: uuid.New(), Status: NodeStatusHealthy, CPUAllocatable: math.MaxInt},
+			tasks: []spec.TaskSpec{
+				{Resources: &spec.ResourcesSpec{CPU: math.MaxInt}},
+				{Resources: &spec.ResourcesSpec{CPU: 1}},
+			},
+		},
+		{
+			name: "memory",
+			node: &Node{ID: uuid.New(), Status: NodeStatusHealthy, MemoryAllocatable: math.MaxInt64},
+			tasks: []spec.TaskSpec{
+				{Resources: &spec.ResourcesSpec{Memory: spec.ByteSize(math.MaxInt64)}},
+				{Resources: &spec.ResourcesSpec{Memory: 1}},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if placements := Schedule(&PlacementIntent{Count: 1, Nodes: []*Node{tt.node}, Tasks: tt.tasks}); len(placements) != 0 {
+				t.Fatalf("placed a task group with overflowing resource total: %#v", placements)
+			}
+		})
+	}
+}
+
+func TestPlacementUtilizationDoesNotWrapAtIntegerBoundaries(t *testing.T) {
+	cpuNode := &Node{CPUAllocatable: math.MaxInt}
+	if utilization := placementUtilization(cpuNode, math.MaxInt, 1, 0, 0); !math.IsInf(utilization, 1) {
+		t.Fatalf("overflowing CPU utilization = %v, want +Inf", utilization)
+	}
+	memoryNode := &Node{MemoryAllocatable: math.MaxInt64}
+	if utilization := placementUtilization(memoryNode, 0, 0, math.MaxInt64, 1); !math.IsInf(utilization, 1) {
+		t.Fatalf("overflowing memory utilization = %v, want +Inf", utilization)
 	}
 }
 

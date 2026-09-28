@@ -563,6 +563,9 @@ func (s *Server) Reconcile(ctx context.Context) {
 			requiredCapabilities := spec.GroupRequiredCapabilities(&group)
 			placements := Schedule(&PlacementIntent{Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Count: deficit, Nodes: s.nodePointers(), Allocations: valid, Tasks: group.Tasks, Constraints: group.Constraints, RequiredCapabilities: requiredCapabilities, VolumeOwners: volumeOwners})
 			for i, placement := range placements {
+				for _, claim := range placement.VolumeClaims {
+					volumeOwners[volumeRegistrationKey(claim.Namespace, claim.Name)] = claim.NodeID
+				}
 				node := s.nodes[placement.NodeID]
 				if i < len(pending) {
 					allocation := pending[i]
