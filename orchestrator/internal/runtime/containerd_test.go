@@ -1,12 +1,15 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"syscall"
 	"testing"
 
 	containerd "github.com/containerd/containerd/v2/client"
@@ -419,6 +422,74 @@ func TestExecProcessSpecInheritsContainerContext(t *testing.T) {
 	}
 	if process.Terminal {
 		t.Fatal("non-interactive exec unexpectedly requested a terminal")
+	}
+}
+
+func TestManagedSecretsStayOutOfPersistedOCIEnvironmentAndUseProcessOwner(t *testing.T) {
+	dir := t.TempDir()
+	envDir := filepath.Join(dir, "env")
+	if err := os.Mkdir(envDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const sentinel = "persisted-oci-secret-sentinel"
+	envFile := filepath.Join(envDir, "PASSWORD")
+	fileSecret := filepath.Join(dir, "file-secret")
+	for _, path := range []string{envFile, fileSecret} {
+		if err := os.WriteFile(path, []byte(sentinel), 0o400); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(envDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	uid, gid := os.Geteuid(), os.Getegid()
+	targetUID, targetGID := uint32(uid), uint32(gid)
+	if uid == 0 {
+		targetUID, targetGID = 65534, 65534
+	}
+	t.Cleanup(func() {
+		for _, path := range []string{envDir, envFile, fileSecret} {
+			_ = os.Chown(path, uid, gid)
+		}
+		_ = os.Chmod(envDir, 0o700)
+	})
+	mounts := []*Mount{
+		{HostPath: envDir, ContainerPath: secretEnvContainerPath, ReadOnly: true, Secret: true, SecretEnv: true},
+		{HostPath: fileSecret, ContainerPath: "/run/trellis-secrets/token", ReadOnly: true, Secret: true},
+	}
+	spec := &oci.Spec{
+		Process: &specs.Process{Args: []string{"/app", "serve"}, Env: []string{"PATH=/usr/bin"}, User: specs.User{UID: targetUID, GID: targetGID}},
+		Mounts:  convertMounts(mounts),
+	}
+	if err := withManagedSecretMounts(mounts)(context.Background(), nil, nil, spec); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte(sentinel)) {
+		t.Fatal("persisted OCI spec contains secret plaintext")
+	}
+	wantArgs := secretEnvironmentCommand([]string{"/app", "serve"})
+	if !reflect.DeepEqual(spec.Process.Args, wantArgs) {
+		t.Fatalf("process args = %#v, want %#v", spec.Process.Args, wantArgs)
+	}
+	for _, path := range []string{envDir, envFile, fileSecret} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stat := info.Sys().(*syscall.Stat_t)
+		if stat.Uid != targetUID || stat.Gid != targetGID {
+			t.Fatalf("%s owner = %d:%d, want %d:%d", path, stat.Uid, stat.Gid, targetUID, targetGID)
+		}
+		if info.Mode().Perm()&0o077 != 0 {
+			t.Fatalf("%s mode = %o, accessible beyond owner", path, info.Mode().Perm())
+		}
+		if path == envDir && info.Mode().Perm()&0o200 != 0 {
+			t.Fatalf("environment secret directory mode = %o, writable by workload user", info.Mode().Perm())
+		}
 	}
 }
 

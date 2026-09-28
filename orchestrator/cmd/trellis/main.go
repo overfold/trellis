@@ -633,20 +633,33 @@ func loadSecretsKey(path, configuredID string) ([]byte, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("read secrets key: %w", err)
 	}
-	key := raw
-	if decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(raw))); err == nil && len(decoded) == 32 {
-		key = decoded
+	key, err := decodeSecretsKey(raw)
+	if err != nil {
+		return nil, "", err
 	}
-	if len(key) != 32 {
-		return nil, "", fmt.Errorf("secrets key must contain exactly 32 raw bytes or their base64 encoding")
-	}
-	key = append([]byte(nil), key...)
 	keyID := configuredID
 	if keyID == "" {
 		sum := sha256.Sum256(key)
 		keyID = hex.EncodeToString(sum[:8])
 	}
 	return key, keyID, nil
+}
+
+func decodeSecretsKey(raw []byte) ([]byte, error) {
+	defer clear(raw)
+	key := append([]byte(nil), raw...)
+	encoded := bytes.TrimSpace(raw)
+	decoded := make([]byte, base64.StdEncoding.DecodedLen(len(encoded)))
+	if n, decodeErr := base64.StdEncoding.Decode(decoded, encoded); decodeErr == nil && n == 32 {
+		clear(key)
+		key = append([]byte(nil), decoded[:n]...)
+	}
+	clear(decoded)
+	if len(key) != 32 {
+		clear(key)
+		return nil, fmt.Errorf("secrets key must contain exactly 32 raw bytes or their base64 encoding")
+	}
+	return key, nil
 }
 
 func loadOrBootstrapTLS(ctx context.Context, log *slog.Logger, cfg *config, local *storage.LocalStorage, nodeID uuid.UUID) (*tlsutil.Materials, uuid.UUID, error) {

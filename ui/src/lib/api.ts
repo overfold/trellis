@@ -149,6 +149,9 @@ export async function setSecret(
   namespace: string,
   expectedVersion?: number,
 ): Promise<SecretMetadata> {
+  if (new TextEncoder().encode(value).byteLength > 64 << 10) {
+    throw new Error("Secret exceeds 65536 bytes");
+  }
   const body = {
     value_base64: encodeUTF8Base64(value),
     expected_version: expectedVersion ?? 0,

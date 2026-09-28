@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -320,10 +321,22 @@ func (s *ServerClient) DeleteJob(ctx context.Context, name string) error {
 
 // SetSecret creates or updates a namespace secret.
 func (s *ServerClient) SetSecret(ctx context.Context, namespace, name string, value []byte, expected *uint64) (*api.SecretMetadata, error) {
-	request := api.SecretWriteRequest{ValueBase64: base64.StdEncoding.EncodeToString(value), ExpectedVersion: expected}
+	request := make([]byte, 0, base64.StdEncoding.EncodedLen(len(value))+64)
+	request = append(request, '{', '"')
+	request = append(request, "value_base64"...)
+	request = append(request, '"', ':', '"')
+	request = base64.StdEncoding.AppendEncode(request, value)
+	request = append(request, '"')
+	if expected != nil {
+		request = append(request, ',', '"')
+		request = append(request, "expected_version"...)
+		request = append(request, '"', ':')
+		request = strconv.AppendUint(request, *expected, 10)
+	}
+	request = append(request, '}')
 	var response api.SecretMetadata
 	path := fmt.Sprintf("%s/v1/namespaces/%s/secrets/%s", s.address(), url.PathEscape(namespace), url.PathEscape(name))
-	if err := s.client.request(ctx, http.MethodPut, path, &request, &response); err != nil {
+	if err := s.client.requestBody(ctx, http.MethodPut, path, request, &response); err != nil {
 		return nil, fmt.Errorf("set secret: %w", err)
 	}
 	return &response, nil
