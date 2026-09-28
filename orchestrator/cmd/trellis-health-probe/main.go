@@ -51,11 +51,10 @@ func run(args []string) int {
 		if err != nil {
 			return probepath.UsageExit
 		}
-		request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+target.Host, nil)
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
 		if err != nil {
 			return probepath.UsageExit
 		}
-		request.URL = target
 		response, err := probeClient(port).Do(request)
 		if err != nil {
 			return 1
@@ -137,12 +136,15 @@ func loopbackTarget(target *url.URL, port int) bool {
 	if target.Scheme != "http" {
 		return false
 	}
-	targetPort := target.Port()
-	if targetPort == "" {
-		targetPort = "80"
+	targetPort := 80
+	if target.Port() != "" {
+		var err error
+		if targetPort, err = strconv.Atoi(target.Port()); err != nil {
+			return false
+		}
 	}
 	_, ok := loopbackIP(target.Hostname())
-	return ok && targetPort == strconv.Itoa(port)
+	return ok && targetPort == port
 }
 
 // loopbackIP maps localhost to 127.0.0.1 without consulting a resolver and

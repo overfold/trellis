@@ -94,8 +94,8 @@ func TestScriptCheckExecutesUserCommandUnchanged(t *testing.T) {
 
 func TestProbeUsageExitIsAnError(t *testing.T) {
 	rt := &probeRuntime{exitCode: probepath.UsageExit}
-	healthy, err := CheckHTTP(context.Background(), rt, "container", 8080, "not-a-path", time.Second)
-	if healthy || err == nil || !strings.Contains(err.Error(), "not-a-path") {
+	healthy, err := CheckHTTP(context.Background(), rt, "container", 8080, "health?token=secret", time.Second)
+	if healthy || err == nil || !strings.Contains(err.Error(), "container") || strings.Contains(err.Error(), "secret") {
 		t.Fatalf("CheckHTTP() = %v, %v; want unhealthy with a configuration error", healthy, err)
 	}
 	rt.exitCode = 2 // A Go runtime panic or fatal error, not a refused configuration.

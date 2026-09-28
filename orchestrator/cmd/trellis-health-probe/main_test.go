@@ -98,6 +98,8 @@ func TestHTTPProbeFollowsOnlyLoopbackRedirects(t *testing.T) {
 			http.Redirect(w, r, "https://"+r.Host+"/ok", http.StatusFound)
 		case "/to-localhost-failing":
 			http.Redirect(w, r, "http://localhost:"+requestPort(r)+"/failing", http.StatusFound)
+		case "/to-padded-port-failing":
+			http.Redirect(w, r, "http://127.0.0.1:0"+requestPort(r)+"/failing", http.StatusFound)
 		case "/to-localhost-dot-ok":
 			http.Redirect(w, r, "http://localhost.:"+requestPort(r)+"/ok", http.StatusFound)
 		case "/to-ipv6-loopback":
@@ -118,17 +120,18 @@ func TestHTTPProbeFollowsOnlyLoopbackRedirects(t *testing.T) {
 	port := strings.TrimPrefix(server.URL, "http://127.0.0.1:")
 
 	for path, want := range map[string]int{
-		"/to-ok":                0,
-		"/to-failing":           1,
-		"/to-metadata":          0,
-		"/to-other-port":        0,
-		"/to-https":             0,
-		"/loop":                 1,
-		"/to-localhost-failing": 1,
-		"/to-localhost-dot-ok":  0,
-		"/to-ipv6-loopback":     1, // followed; the server listens only on 127.0.0.1
-		"/hops/10":              0,
-		"/hops/11":              1,
+		"/to-ok":                  0,
+		"/to-failing":             1,
+		"/to-metadata":            0,
+		"/to-other-port":          0,
+		"/to-https":               0,
+		"/loop":                   1,
+		"/to-localhost-failing":   1,
+		"/to-localhost-dot-ok":    0,
+		"/to-padded-port-failing": 1,
+		"/to-ipv6-loopback":       1, // followed; the server listens only on 127.0.0.1
+		"/hops/10":                0,
+		"/hops/11":                1,
 	} {
 		if code := run([]string{"http", port, path, "2s"}); code != want {
 			t.Errorf("probe of %s exit code = %d, want %d", path, code, want)
