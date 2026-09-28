@@ -9,52 +9,147 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"syscall"
 	"testing"
 
 	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/containers"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/errdefs"
 	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
-func TestContainerSpecDropsRawSocketCapability(t *testing.T) {
-	capabilities := []string{"CAP_CHOWN", "CAP_NET_RAW"}
-	s := oci.Spec{Process: &specs.Process{Capabilities: &specs.LinuxCapabilities{
-		Bounding:    append([]string(nil), capabilities...),
-		Effective:   append([]string(nil), capabilities...),
-		Permitted:   append([]string(nil), capabilities...),
-		Inheritable: append([]string(nil), capabilities...),
-	}}}
-	if err := withoutRawSocketCapability()(context.Background(), nil, nil, &s); err != nil {
+func buildWorkloadSpec(t *testing.T, runtimeName string, appArmorProfile func(string) oci.SpecOpts, mounts []specs.Mount) *oci.Spec {
+	t.Helper()
+	ctx := namespaces.WithNamespace(context.Background(), trellisNamespace)
+	opts := append([]oci.SpecOpts{oci.WithMounts(mounts)}, workloadSecurityOpts(runtimeName, appArmorProfile)...)
+	s, err := oci.GenerateSpecWithPlatform(ctx, nil, "linux/amd64", &containers.Container{ID: "allocation"}, opts...)
+	if err != nil {
 		t.Fatal(err)
 	}
-	for name, got := range map[string][]string{
-		"bounding": s.Process.Capabilities.Bounding, "effective": s.Process.Capabilities.Effective,
-		"permitted": s.Process.Capabilities.Permitted, "inheritable": s.Process.Capabilities.Inheritable,
-	} {
-		if !reflect.DeepEqual(got, []string{"CAP_CHOWN"}) {
-			t.Errorf("%s capabilities = %v, want CAP_NET_RAW removed", name, got)
+	return s
+}
+
+func stubAppArmorProfile(loaded *[]string) func(string) oci.SpecOpts {
+	return func(name string) oci.SpecOpts {
+		return func(_ context.Context, _ oci.Client, _ *containers.Container, s *specs.Spec) error {
+			*loaded = append(*loaded, name)
+			s.Process.ApparmorProfile = name
+			return nil
 		}
 	}
 }
 
-func TestRawSocketCapabilityDropIsLimitedToNamespaceNetworking(t *testing.T) {
+func TestWorkloadSpecDropsMknodAndRawSocketCapabilities(t *testing.T) {
+	for _, runtimeName := range []string{"", "runc", "runsc"} {
+		s := buildWorkloadSpec(t, runtimeName, nil, nil)
+		capabilities := s.Process.Capabilities
+		for name, got := range map[string][]string{
+			"bounding": capabilities.Bounding, "effective": capabilities.Effective,
+			"permitted": capabilities.Permitted, "inheritable": capabilities.Inheritable,
+			"ambient": capabilities.Ambient,
+		} {
+			for _, dropped := range []string{"CAP_MKNOD", "CAP_NET_RAW"} {
+				if slices.Contains(got, dropped) {
+					t.Errorf("runtime %q %s capabilities = %v, want %s removed", runtimeName, name, got, dropped)
+				}
+			}
+		}
+		if !slices.Contains(capabilities.Bounding, "CAP_CHOWN") {
+			t.Errorf("runtime %q bounding capabilities = %v, want other defaults kept", runtimeName, capabilities.Bounding)
+		}
+	}
+}
+
+func TestWorkloadSpecAppliesDefaultSeccompProfile(t *testing.T) {
+	for _, runtimeName := range []string{"", "runc", "runsc"} {
+		s := buildWorkloadSpec(t, runtimeName, nil, nil)
+		if s.Linux.Seccomp == nil || s.Linux.Seccomp.DefaultAction != specs.ActErrno || len(s.Linux.Seccomp.Syscalls) == 0 {
+			t.Fatalf("runtime %q seccomp = %#v, want containerd default profile", runtimeName, s.Linux.Seccomp)
+		}
+		// The profile is derived from the final capability set, so it must not
+		// allow syscalls gated on capabilities workloads are not granted.
+		var allowsRead bool
+		for _, rule := range s.Linux.Seccomp.Syscalls {
+			if rule.Action != specs.ActAllow {
+				continue
+			}
+			allowsRead = allowsRead || slices.Contains(rule.Names, "read")
+			if slices.Contains(rule.Names, "mount") {
+				t.Fatalf("runtime %q seccomp allows mount without CAP_SYS_ADMIN: %#v", runtimeName, rule)
+			}
+		}
+		if !allowsRead {
+			t.Fatalf("runtime %q seccomp does not allow ordinary syscalls", runtimeName)
+		}
+	}
+}
+
+func TestWorkloadSpecAppArmorProfileSelection(t *testing.T) {
 	for _, tc := range []struct {
-		name             string
-		networkNamespace string
-		want             bool
+		name      string
+		runtime   string
+		supported bool
+		want      string
 	}{
-		{name: "isolated"},
-		{name: "host", networkNamespace: "/proc/1/ns/net"},
-		{name: "namespace", networkNamespace: "/var/run/netns/allocation", want: true},
+		{name: "default runtime", supported: true, want: appArmorProfileName},
+		{name: "runc", runtime: "runc", supported: true, want: appArmorProfileName},
+		{name: "runsc ignores apparmor", runtime: "runsc", supported: true},
+		{name: "unsupported host", runtime: "runc"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := shouldDropRawSocketCapability(tc.networkNamespace); got != tc.want {
-				t.Fatalf("shouldDropRawSocketCapability(%q) = %t, want %t", tc.networkNamespace, got, tc.want)
+			var loaded []string
+			var profile func(string) oci.SpecOpts
+			if tc.supported {
+				profile = stubAppArmorProfile(&loaded)
+			}
+			s := buildWorkloadSpec(t, tc.runtime, profile, nil)
+			if s.Process.ApparmorProfile != tc.want {
+				t.Fatalf("apparmor profile = %q, want %q", s.Process.ApparmorProfile, tc.want)
+			}
+			if tc.want == "" && len(loaded) != 0 {
+				t.Fatalf("loaded apparmor profiles %v, want none", loaded)
 			}
 		})
+	}
+}
+
+func TestEnsureAppArmorProfileIgnoresOtherProfiles(t *testing.T) {
+	for _, s := range []*specs.Spec{
+		{},
+		{Process: &specs.Process{}},
+		{Process: &specs.Process{ApparmorProfile: "unconfined"}},
+	} {
+		if err := ensureAppArmorProfile(s); err != nil {
+			t.Fatalf("ensureAppArmorProfile(%#v) = %v, want nil", s.Process, err)
+		}
+	}
+}
+
+func TestConvertMountsAddsNosuidNodev(t *testing.T) {
+	mounts := convertMounts([]*Mount{
+		{HostPath: "/var/lib/trellis/volume-staging/a", ContainerPath: "/data"},
+		{HostPath: "/var/lib/trellis/probe", ContainerPath: "/run/trellis/probe", ReadOnly: true},
+	})
+	want := [][]string{
+		{"rbind", "rw", "nosuid", "nodev"},
+		{"rbind", "ro", "nosuid", "nodev"},
+	}
+	for i, m := range mounts {
+		if m.Type != "bind" || !reflect.DeepEqual(m.Options, want[i]) {
+			t.Fatalf("mount %d = %#v, want bind with options %v", i, m, want[i])
+		}
+		if slices.Contains(m.Options, "noexec") {
+			t.Fatalf("mount %d options %v must stay executable", i, m.Options)
+		}
+	}
+	s := buildWorkloadSpec(t, "runc", nil, mounts)
+	for _, m := range s.Mounts {
+		if m.Type == "bind" && (!slices.Contains(m.Options, "nosuid") || !slices.Contains(m.Options, "nodev")) {
+			t.Fatalf("spec bind mount %#v lacks nosuid,nodev", m)
+		}
 	}
 }
 
@@ -274,6 +369,29 @@ func TestExecProcessSpecInheritsContainerContext(t *testing.T) {
 	}
 	if process.Terminal {
 		t.Fatal("non-interactive exec unexpectedly requested a terminal")
+	}
+}
+
+func TestExecProcessSpecInheritsSecurityContext(t *testing.T) {
+	var loaded []string
+	containerSpec := buildWorkloadSpec(t, "runc", stubAppArmorProfile(&loaded), nil)
+	if len(loaded) != 1 {
+		t.Fatalf("loaded apparmor profiles %v, want one", loaded)
+	}
+	process := execProcessSpec(containerSpec, []string{"/bin/sh"}, true)
+
+	if !process.NoNewPrivileges {
+		t.Fatal("exec process dropped no_new_privs")
+	}
+	if process.ApparmorProfile != appArmorProfileName {
+		t.Fatalf("apparmor profile = %q, want %q", process.ApparmorProfile, appArmorProfileName)
+	}
+	if !reflect.DeepEqual(process.Capabilities, containerSpec.Process.Capabilities) {
+		t.Fatalf("capabilities = %#v, want %#v", process.Capabilities, containerSpec.Process.Capabilities)
+	}
+	process.Capabilities.Bounding[0] = "CAP_SYS_ADMIN"
+	if slices.Contains(containerSpec.Process.Capabilities.Bounding, "CAP_SYS_ADMIN") {
+		t.Fatal("exec capabilities alias the container spec")
 	}
 }
 

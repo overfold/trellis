@@ -18,7 +18,10 @@ import (
 	v1stats "github.com/containerd/cgroups/v3/cgroup1/stats"
 	v2stats "github.com/containerd/cgroups/v3/cgroup2/stats"
 	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/contrib/apparmor"
+	"github.com/containerd/containerd/v2/contrib/seccomp"
 	"github.com/containerd/containerd/v2/core/containers"
+	hostapparmor "github.com/containerd/containerd/v2/pkg/apparmor"
 	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/oci"
@@ -59,12 +62,62 @@ type Mount struct {
 	SecretEnv bool
 }
 
-func withoutRawSocketCapability() oci.SpecOpts {
-	return oci.WithDroppedCapabilities([]string{"CAP_NET_RAW"})
+// appArmorProfileName is the AppArmor profile Trellis generates from
+// containerd's default template and applies to runc workloads.
+const appArmorProfileName = "trellis-default"
+
+// droppedCapabilities are removed from containerd's default capability set for
+// every workload. CAP_NET_RAW would allow raw and packet sockets, which in host
+// networking can sniff and inject on every namespace bridge and WireGuard
+// interface. CAP_MKNOD would allow creating device nodes that persist in
+// volumes.
+var droppedCapabilities = []string{"CAP_MKNOD", "CAP_NET_RAW"}
+
+// hostAppArmorProfile returns the loader for Trellis's AppArmor profile, or nil
+// when the host does not support AppArmor.
+func hostAppArmorProfile() func(string) oci.SpecOpts {
+	if !hostapparmor.HostSupports() {
+		return nil
+	}
+	return apparmor.WithDefaultProfile
 }
 
-func shouldDropRawSocketCapability(networkNamespace string) bool {
-	return networkNamespace != "" && networkNamespace != "/proc/1/ns/net"
+// workloadSecurityOpts hardens containerd's default OCI spec, which applies no
+// seccomp filter and no AppArmor profile on its own. appArmorProfile loads and
+// applies the named profile; nil means the host does not support AppArmor.
+// These options must follow every other option that changes capabilities.
+func workloadSecurityOpts(runtimeName string, appArmorProfile func(string) oci.SpecOpts) []oci.SpecOpts {
+	opts := []oci.SpecOpts{
+		oci.WithDroppedCapabilities(droppedCapabilities),
+		// The default seccomp profile derives allowed syscalls from the
+		// capability set, so it must follow capability changes. runsc ignores
+		// OCI seccomp unless configured with --oci-seccomp, in which case the
+		// Sentry enforces it; either way it does not break gVisor workloads.
+		seccomp.WithDefaultProfile(),
+	}
+	// runsc ignores the OCI AppArmor profile, so loading one for it would only
+	// add a host dependency on apparmor_parser without confining anything.
+	if appArmorProfile != nil && runtimeName != "runsc" {
+		opts = append(opts, appArmorProfile(appArmorProfileName))
+	}
+	return opts
+}
+
+// bindMount returns a Trellis-generated bind mount. nosuid and nodev keep a
+// workload from using setuid binaries or device nodes planted in the source,
+// including host-persistent volumes. noexec is deliberately omitted because
+// volumes and the health probe must remain executable.
+func bindMount(source, destination string, readOnly bool) specs.Mount {
+	mode := "rw"
+	if readOnly {
+		mode = "ro"
+	}
+	return specs.Mount{
+		Source:      source,
+		Destination: destination,
+		Type:        "bind",
+		Options:     []string{"rbind", mode, "nosuid", "nodev"},
+	}
 }
 
 // NewContainerdRuntime connects to containerd at socketPath.
@@ -143,12 +196,7 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 			return "", fmt.Errorf("write resolv.conf for %s: %w", options.ID, err)
 		}
 		createdFiles = append(createdFiles, resolvPath)
-		allMounts = append(allMounts, specs.Mount{
-			Source:      resolvPath,
-			Destination: "/etc/resolv.conf",
-			Type:        "bind",
-			Options:     []string{"rbind", "ro"},
-		})
+		allMounts = append(allMounts, bindMount(resolvPath, "/etc/resolv.conf", true))
 	}
 	if len(options.ExtraHosts) > 0 {
 		hostsPath := filepath.Join(c.logDir, options.ID+"-hosts")
@@ -156,12 +204,7 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 			return "", fmt.Errorf("write hosts file for %s: %w", options.ID, err)
 		}
 		createdFiles = append(createdFiles, hostsPath)
-		allMounts = append(allMounts, specs.Mount{
-			Source:      hostsPath,
-			Destination: "/etc/hosts",
-			Type:        "bind",
-			Options:     []string{"rbind", "ro"},
-		})
+		allMounts = append(allMounts, bindMount(hostsPath, "/etc/hosts", true))
 	}
 	ociSpecOpts := []oci.SpecOpts{
 		oci.WithImageConfig(image),
@@ -173,10 +216,8 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 		ociSpecOpts = append(ociSpecOpts, oci.WithLinuxNamespace(specs.LinuxNamespace{
 			Type: specs.NetworkNamespace, Path: options.NetworkNamespace,
 		}))
-		if shouldDropRawSocketCapability(options.NetworkNamespace) {
-			ociSpecOpts = append(ociSpecOpts, withoutRawSocketCapability())
-		}
 	}
+	ociSpecOpts = append(ociSpecOpts, workloadSecurityOpts(options.Runtime, hostAppArmorProfile())...)
 	if options.CPU > 0 {
 		cpuQuota := int64(options.CPU) * 100
 		if cpuQuota/100 != int64(options.CPU) {
@@ -224,6 +265,13 @@ func (c *ContainerdRuntime) Start(ctx context.Context, containerID string) error
 		return fmt.Errorf("loading container %s: %w", containerID, err)
 	}
 
+	containerSpec, err := container.Spec(ctx)
+	if err != nil {
+		return fmt.Errorf("reading spec for %s: %w", containerID, err)
+	}
+	if err := ensureAppArmorProfile(containerSpec); err != nil {
+		return fmt.Errorf("loading AppArmor profile for %s: %w", containerID, err)
+	}
 	if err := ensureRuntimeDir(c.logDir); err != nil {
 		return fmt.Errorf("create log directory: %w", err)
 	}
@@ -239,6 +287,16 @@ func (c *ContainerdRuntime) Start(ctx context.Context, containerID string) error
 	}
 
 	return nil
+}
+
+// ensureAppArmorProfile reloads Trellis's AppArmor profile when a stored spec
+// names it, because the profile may have been unloaded since the container was
+// created and every new task, including in-place restarts, needs it.
+func ensureAppArmorProfile(containerSpec *specs.Spec) error {
+	if containerSpec.Process == nil || containerSpec.Process.ApparmorProfile != appArmorProfileName {
+		return nil
+	}
+	return apparmor.LoadDefaultProfile(appArmorProfileName)
 }
 
 func (c *ContainerdRuntime) logPath(containerID string) string {
@@ -518,7 +576,10 @@ func (c *ContainerdRuntime) Exec(ctx context.Context, containerID string, comman
 	}
 
 	execID := fmt.Sprintf("healthcheck-%d", time.Now().UnixNano())
-	containerSpec, _ := container.Spec(ctx)
+	containerSpec, err := container.Spec(ctx)
+	if err != nil {
+		return 1, fmt.Errorf("reading spec for %s: %w", containerID, err)
+	}
 	process := execProcessSpec(containerSpec, command, false)
 
 	taskExec, err := task.Exec(ctx, execID, process, cio.NullIO)
@@ -549,6 +610,20 @@ func execProcessSpec(containerSpec *specs.Spec, command []string, terminal bool)
 	}
 	process.Env = append([]string(nil), containerSpec.Process.Env...)
 	process.User = containerSpec.Process.User
+	// Carry the task's security context explicitly rather than relying on the
+	// OCI runtime to inherit it: runc, for example, takes no_new_privs from
+	// the exec process spec, so an unset field would disable it.
+	process.NoNewPrivileges = containerSpec.Process.NoNewPrivileges
+	process.ApparmorProfile = containerSpec.Process.ApparmorProfile
+	if capabilities := containerSpec.Process.Capabilities; capabilities != nil {
+		process.Capabilities = &specs.LinuxCapabilities{
+			Bounding:    append([]string(nil), capabilities.Bounding...),
+			Effective:   append([]string(nil), capabilities.Effective...),
+			Inheritable: append([]string(nil), capabilities.Inheritable...),
+			Permitted:   append([]string(nil), capabilities.Permitted...),
+			Ambient:     append([]string(nil), capabilities.Ambient...),
+		}
+	}
 	if containerSpec.Process.Cwd != "" {
 		process.Cwd = containerSpec.Process.Cwd
 	}
@@ -724,18 +799,7 @@ func convertMounts(mounts []*Mount) []specs.Mount {
 	result := make([]specs.Mount, len(mounts))
 
 	for i, m := range mounts {
-
-		mode := "rw"
-		if m.ReadOnly {
-			mode = "ro"
-		}
-		result[i] = specs.Mount{
-			Source:      m.HostPath,
-			Destination: m.ContainerPath,
-			Type:        "bind",
-			Options:     []string{"rbind", mode},
-		}
-
+		result[i] = bindMount(m.HostPath, m.ContainerPath, m.ReadOnly)
 	}
 
 	return result
@@ -803,7 +867,10 @@ func (c *ContainerdRuntime) ExecOutput(ctx context.Context, containerID string, 
 	}
 
 	execID := fmt.Sprintf("exec-%d", time.Now().UnixNano())
-	containerSpec, _ := container.Spec(ctx)
+	containerSpec, err := container.Spec(ctx)
+	if err != nil {
+		return nil, nil, 1, fmt.Errorf("reading spec for %s: %w", containerID, err)
+	}
 	process := execProcessSpec(containerSpec, command, false)
 
 	var outBuf, errBuf lockedBuffer
@@ -1079,7 +1146,10 @@ func (c *ContainerdRuntime) StartTerminal(ctx context.Context, containerID strin
 		return nil, fmt.Errorf("getting task for %s: %w", containerID, err)
 	}
 
-	containerSpec, _ := container.Spec(ctx)
+	containerSpec, err := container.Spec(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("reading spec for %s: %w", containerID, err)
+	}
 	processSpec := execProcessSpec(containerSpec, command, true)
 	if term != "" {
 		env := make([]string, 0, len(processSpec.Env)+1)
