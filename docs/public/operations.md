@@ -62,18 +62,18 @@ resources:
 ```
 
 Nodes require the `pids` cgroup controller, which systemd-based
-distributions enable by default; the node warns at startup when it is missing,
-and task creation fails without it rather than
-running tasks unbounded. This is node hardening policy, not part of a job: it is applied when the node
+distributions enable by default. The node warns at startup when it is missing,
+and task creation then fails rather than running tasks unbounded.
+
+This is node hardening policy, not part of a job: it is applied when the node
 creates a container and is not part of the execution hash, so changing it does
 not restart running allocations or their local restarts. The new value applies
 to containers created afterward, such as when a job update or reschedule
-replaces an allocation.
-The limit covers everything in the container's cgroup, including `trellisctl
-exec` sessions and script health checks, so a task at its limit also cannot
-start those. Raise it for workloads that legitimately run many threads or
-processes. Keep it
-consistent across nodes unless you deliberately want different per-node bounds.
+replaces an allocation. The limit covers everything in the container's cgroup,
+including `trellisctl exec` sessions and script health checks, so a task at its
+limit also cannot start those. Raise it for workloads that legitimately run
+many threads or processes. Keep it consistent across nodes unless you
+deliberately want different per-node bounds.
 
 Edit this file when changing persistent node configuration, then restart the service:
 
