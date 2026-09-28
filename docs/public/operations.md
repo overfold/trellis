@@ -61,7 +61,9 @@ resources:
   task_pids_limit: 8192
 ```
 
-This is node hardening policy, not part of a job: it is applied when the node
+Nodes require the `pids` cgroup controller, which systemd-based
+distributions enable by default; task creation fails without it rather than
+running tasks unbounded. This is node hardening policy, not part of a job: it is applied when the node
 creates a container and is not part of the execution hash, so changing it does
 not restart running allocations or their local restarts. The new value applies
 to containers created afterward, such as when a job update or reschedule

@@ -104,36 +104,29 @@ func TestResourceSpecOptsSkipsSwapWithoutSwapAccounting(t *testing.T) {
 }
 
 func TestSwapControllerAvailable(t *testing.T) {
-	write := func(t *testing.T, path, data string) {
-		t.Helper()
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
 	for _, tc := range []struct {
 		name  string
-		files map[string]string
-		self  string
+		files []string
 		want  bool
 	}{
-		{name: "v2 with swap", files: map[string]string{"cgroup.controllers": "memory", "system.slice/trellis.service/memory.swap.max": "max"}, self: "0::/system.slice/trellis.service\n", want: true},
-		{name: "v2 without swap accounting", files: map[string]string{"cgroup.controllers": "memory", "system.slice/trellis.service/memory.max": "max"}, self: "0::/system.slice/trellis.service\n"},
-		{name: "v2 root cgroup", files: map[string]string{"cgroup.controllers": "memory"}, self: "0::/\n"},
-		{name: "v2 root cgroup with swap in top-level cgroups", files: map[string]string{"cgroup.controllers": "memory", "system.slice/memory.swap.max": "max"}, self: "0::/\n", want: true},
-		{name: "v1 with memsw", files: map[string]string{"memory/memory.memsw.limit_in_bytes": "0"}, want: true},
-		{name: "v1 without memsw", files: map[string]string{"memory/memory.limit_in_bytes": "0"}},
+		{name: "v2 with swap", files: []string{"cgroup.controllers", "system.slice/memory.swap.max"}, want: true},
+		{name: "v2 without swap accounting", files: []string{"cgroup.controllers", "system.slice/memory.max"}},
+		{name: "v2 without memory controller", files: []string{"cgroup.controllers", "system.slice/cgroup.procs"}},
+		{name: "v1 with memsw", files: []string{"memory/memory.memsw.limit_in_bytes"}, want: true},
+		{name: "v1 without memsw", files: []string{"memory/memory.limit_in_bytes"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
-			for path, data := range tc.files {
-				write(t, filepath.Join(root, path), data)
+			for _, name := range tc.files {
+				path := filepath.Join(root, name)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
 			}
-			self := filepath.Join(t.TempDir(), "cgroup")
-			write(t, self, tc.self)
-			if got := swapControllerAvailable(root, self); got != tc.want {
+			if got := swapControllerAvailable(root); got != tc.want {
 				t.Fatalf("swapControllerAvailable = %t, want %t", got, tc.want)
 			}
 		})

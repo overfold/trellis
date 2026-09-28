@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -167,7 +166,7 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 			ociSpecOpts = append(ociSpecOpts, withoutRawSocketCapability())
 		}
 	}
-	resourceOpts, err := resourceSpecOpts(options, SwapLimitSupported())
+	resourceOpts, err := resourceSpecOpts(options, swapLimitSupported())
 	if err != nil {
 		return "", err
 	}
@@ -203,27 +202,23 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 // SwapLimitSupported reports whether this host's memory cgroup can enforce a
 // memory+swap limit. Without swap accounting, runc and runsc either ignore or
 // reject the limit, so the runtime omits it and tasks may swap.
-var SwapLimitSupported = sync.OnceValue(func() bool {
-	return swapControllerAvailable("/sys/fs/cgroup", "/proc/self/cgroup")
+func SwapLimitSupported() bool {
+	return swapLimitSupported()
+}
+
+var swapLimitSupported = sync.OnceValue(func() bool {
+	return swapControllerAvailable("/sys/fs/cgroup")
 })
 
-// swapControllerAvailable extends containerd CRI's probe. cgroup v2 exposes
-// memory.swap.max only in non-root cgroups with swap accounting, so it checks
-// the caller's own cgroup and the top-level cgroups where containerd places
-// tasks; cgroup v1 exposes memory.memsw.limit_in_bytes.
-func swapControllerAvailable(cgroupRoot, selfCgroup string) bool {
+// swapControllerAvailable probes swap accounting where containerd places
+// tasks. cgroup v2 exposes memory.swap.max only in non-root cgroups whose
+// parent enables the memory controller with swap accounting, so any
+// top-level cgroup carrying it proves support; cgroup v1 exposes
+// memory.memsw.limit_in_bytes.
+func swapControllerAvailable(cgroupRoot string) bool {
 	if _, err := os.Stat(filepath.Join(cgroupRoot, "cgroup.controllers")); err != nil {
 		_, err := os.Stat(filepath.Join(cgroupRoot, "memory", "memory.memsw.limit_in_bytes"))
 		return err == nil
-	}
-	if data, err := os.ReadFile(selfCgroup); err == nil {
-		for _, line := range strings.Split(string(data), "\n") {
-			if path, ok := strings.CutPrefix(line, "0::"); ok {
-				if _, err := os.Stat(filepath.Join(cgroupRoot, filepath.Clean("/"+path), "memory.swap.max")); err == nil {
-					return true
-				}
-			}
-		}
 	}
 	matches, _ := filepath.Glob(filepath.Join(cgroupRoot, "*", "memory.swap.max"))
 	return len(matches) > 0
