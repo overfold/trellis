@@ -65,6 +65,11 @@ func (m *WireGuardManager) recordAttachment(record attachmentRecord) error {
 	if err := writeAtomicFile(path, raw, 0o600); err != nil {
 		return fmt.Errorf("record network attachment: %w", err)
 	}
+	if m.namespaceCIDRsLoaded {
+		if prefix, err := netip.ParsePrefix(record.CIDR); err == nil {
+			m.namespaceCIDRs[prefix.Masked()] = record.Namespace
+		}
+	}
 	return nil
 }
 
@@ -143,6 +148,54 @@ func (m *WireGuardManager) Attachments(context.Context) ([]string, error) {
 		ids = append(ids, id)
 	}
 	return ids, errors.Join(errs...)
+}
+
+// NamespaceForIP returns the namespace whose locally attached network contains
+// address. Unreadable or inconsistent attachment state fails closed.
+func (m *WireGuardManager) NamespaceForIP(address netip.Addr) (string, bool) {
+	if !address.Is4() {
+		return "", false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.namespaceCIDRsLoaded {
+		m.loadNamespaceCIDRsLocked()
+	}
+	for prefix, namespace := range m.namespaceCIDRs {
+		if prefix.Contains(address) {
+			return namespace, true
+		}
+	}
+	return "", false
+}
+
+func (m *WireGuardManager) loadNamespaceCIDRsLocked() {
+	m.namespaceCIDRs = make(map[netip.Prefix]string)
+	m.namespaceCIDRsLoaded = true
+	entries, err := os.ReadDir(filepath.Join(m.stateDir, attachmentJournalDir))
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		id, ok := strings.CutSuffix(entry.Name(), ".json")
+		if !ok || !safeAllocation.MatchString(id) {
+			continue
+		}
+		record, err := m.readAttachmentRecord(id)
+		if err != nil {
+			m.namespaceCIDRs = make(map[netip.Prefix]string)
+			return
+		}
+		prefix, err := netip.ParsePrefix(record.CIDR)
+		if err == nil {
+			prefix = prefix.Masked()
+			if namespace, exists := m.namespaceCIDRs[prefix]; exists && namespace != record.Namespace {
+				m.namespaceCIDRs = make(map[netip.Prefix]string)
+				return
+			}
+			m.namespaceCIDRs[prefix] = record.Namespace
+		}
+	}
 }
 
 // detachLocked removes an allocation's veth and network namespace. When its
@@ -264,15 +317,26 @@ func (m *WireGuardManager) removeNamespacePathLocked(ctx context.Context, a Atta
 		cidr = address.Masked().String()
 	}
 	if cidr != "" {
+		if err := m.deleteFirewallRule(ctx, forwardChain, "-i", bridge, "!", "-s", cidr, "-j", "DROP"); err != nil {
+			return err
+		}
 		if err := m.deleteFirewallRule(ctx, "FORWARD", "-i", bridge, "!", "-s", cidr, "-j", "DROP"); err != nil {
 			return err
 		}
 	}
-	if err := m.deleteFirewallRule(ctx, "FORWARD", "-i", bridge, "!", "-o", wg, "-j", "DROP"); err != nil {
+	if err := m.deleteFirewallRule(ctx, forwardChain, "-i", bridge, "!", "-o", wg, "-j", "DROP"); err != nil {
 		return err
 	}
-	if err := m.deleteFirewallRule(ctx, "FORWARD", "-o", bridge, "!", "-i", wg, "-j", "DROP"); err != nil {
+	if err := m.deleteFirewallRule(ctx, forwardChain, "-o", bridge, "!", "-i", wg, "-j", "DROP"); err != nil {
 		return err
+	}
+	for _, legacy := range [][]string{
+		{"FORWARD", "-i", bridge, "!", "-o", wg, "-j", "DROP"},
+		{"FORWARD", "-o", bridge, "!", "-i", wg, "-j", "DROP"},
+	} {
+		if err := m.deleteFirewallRule(ctx, legacy...); err != nil {
+			return err
+		}
 	}
 	if m.dnsAddress != "" {
 		for _, protocol := range []string{"udp", "tcp"} {
@@ -299,6 +363,26 @@ func (m *WireGuardManager) removeNamespacePathLocked(ctx context.Context, a Atta
 	if err := m.deleteFirewallRule(ctx, "INPUT", "-i", bridge, "-j", "DROP"); err != nil {
 		return err
 	}
+	otherPath, err := m.hasOtherNamespacePath(a.Namespace, a.Network)
+	if err != nil {
+		return err
+	}
+	if !otherPath {
+		if err := m.deleteFirewallRule(ctx, "FORWARD", "-j", forwardChain); err != nil {
+			return err
+		}
+		if err := m.run.Run(ctx, "iptables", "-X", forwardChain); err != nil {
+			inspectErr := m.run.Run(ctx, "iptables", "-L", forwardChain, "-n")
+			absent := explicitAbsence(err, "No chain/target/match by that name") ||
+				explicitAbsence(inspectErr, "No chain/target/match by that name")
+			if ctx.Err() != nil || !absent {
+				if inspectErr != nil {
+					return fmt.Errorf("delete Trellis forwarding chain: %w (verify absence: %v)", err, inspectErr)
+				}
+				return fmt.Errorf("delete Trellis forwarding chain: %w", err)
+			}
+		}
+	}
 	if err := m.deleteLink(ctx, wg, "WireGuard interface"); err != nil {
 		return err
 	}
@@ -308,7 +392,34 @@ func (m *WireGuardManager) removeNamespacePathLocked(ctx context.Context, a Atta
 	if err := os.Remove(m.planPath(a.Namespace, a.Network)); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove applied network plan: %w", err)
 	}
+	if prefix, err := netip.ParsePrefix(a.Address); err == nil && m.namespaceCIDRsLoaded {
+		delete(m.namespaceCIDRs, prefix.Masked())
+	}
 	return nil
+}
+
+func (m *WireGuardManager) hasOtherNamespacePath(namespace, network string) (bool, error) {
+	entries, err := os.ReadDir(filepath.Join(m.stateDir, attachmentJournalDir))
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("list network attachment records: %w", err)
+	}
+	for _, entry := range entries {
+		id, ok := strings.CutSuffix(entry.Name(), ".json")
+		if !ok || !safeAllocation.MatchString(id) {
+			continue
+		}
+		record, err := m.readAttachmentRecord(id)
+		if err != nil {
+			return false, err
+		}
+		if record.Namespace != namespace || record.Network != network {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func explicitAbsence(err error, messages ...string) bool {

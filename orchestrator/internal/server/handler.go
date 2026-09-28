@@ -558,12 +558,13 @@ func (h *Handler) handleListDiscovery(c *echo.Context) error {
 	if err := requireNode(c, uuid.Nil, "internal discovery requires an authenticated node"); err != nil {
 		return err
 	}
+	nodeID := c.Request().Context().Value(NodeContextKey).(uuid.UUID)
 	var filter *catalog.ListFilter
 	job, label := c.QueryParam("job"), c.QueryParam("label")
 	if job != "" || label != "" {
 		filter = &catalog.ListFilter{Job: job, Label: label}
 	}
-	entries := h.server.ListServices("", filter)
+	entries := h.server.ListServicesForNode(nodeID, filter)
 	if entries == nil {
 		entries = api.ServiceListResponse{}
 	}

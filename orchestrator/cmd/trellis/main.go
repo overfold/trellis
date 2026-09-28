@@ -427,7 +427,7 @@ func run(parent context.Context, cfg *config) error {
 		}
 		filteredUpstreams = append(filteredUpstreams, upstream)
 	}
-	dnsResolver := trellisdns.NewResolver(log, leaderClient, trellisdns.DefaultDomain, filteredUpstreams...)
+	dnsResolver := trellisdns.NewResolver(log, leaderClient, networkManager, trellisdns.DefaultDomain, filteredUpstreams...)
 	go func() {
 		if err := dnsResolver.Run(ctx, cfg.DNSListen); err != nil && ctx.Err() == nil {
 			log.Error("dns resolver stopped", "error", err)

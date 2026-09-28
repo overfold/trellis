@@ -58,7 +58,7 @@ Enable and configure WireGuard consistently on every node that may run the workl
 group.job.namespace.trellis
 ```
 
-Use DNS for locating healthy service instances, not for leader election, distributed locking, or application consensus. Namespace discovery is an availability mechanism; applications that require a single writer or elected primary still need their own coordination protocol.
+Use DNS for locating healthy service instances in the caller's own namespace, not for leader election, distributed locking, or application consensus. A namespace-networked workload receives no records when it puts another namespace in the name. Namespace discovery is an availability mechanism; applications that require a single writer or elected primary still need their own coordination protocol.
 
 Use `host` networking instead when a task deliberately needs the node network or a fixed host-port listener. Leave networking omitted for work that needs no external routes. Networking is selected per task, so colocated tasks do not need to share the same exposure model.
 
