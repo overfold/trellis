@@ -12,12 +12,15 @@ import (
 // PlacementIntent describes an allocation placement request.
 // Placement associates a task group index with a node.
 type PlacementIntent struct {
-	Namespace            string
-	JobName              string
-	TaskGroupName        string
-	Count                int
-	Nodes                []*Node
-	Allocations          []*Allocation
+	Namespace     string
+	JobName       string
+	TaskGroupName string
+	Count         int
+	Nodes         []*Node
+	// Allocations contains every allocation occupying node resources or ports.
+	Allocations []*Allocation
+	// DesiredAllocations contains allocations counted for replica spreading.
+	DesiredAllocations   []*Allocation
 	Tasks                []spec.TaskSpec
 	Constraints          []spec.ConstraintSpec
 	RequiredCapabilities []spec.NodeCapability
@@ -59,6 +62,11 @@ func Schedule(intent *PlacementIntent) []Placement {
 	usedMemory := make(map[uuid.UUID]int64)
 	usedMemoryOverflow := make(map[uuid.UUID]bool)
 	usedPorts := make(map[uuid.UUID]map[int]bool)
+	for _, alloc := range intent.DesiredAllocations {
+		if alloc.Node != nil && alloc.Namespace == intent.Namespace && alloc.JobName == intent.JobName && alloc.TaskGroupName == intent.TaskGroupName {
+			replicaCounts[alloc.Node.ID]++
+		}
+	}
 	for _, alloc := range intent.Allocations {
 		if alloc.Node != nil {
 			if usedPorts[alloc.Node.ID] == nil {
@@ -68,9 +76,6 @@ func Schedule(intent *PlacementIntent) []Placement {
 				if port.HostPort > 0 {
 					usedPorts[alloc.Node.ID][port.HostPort] = true
 				}
-			}
-			if alloc.Namespace == intent.Namespace && alloc.JobName == intent.JobName && alloc.TaskGroupName == intent.TaskGroupName {
-				replicaCounts[alloc.Node.ID]++
 			}
 			for _, task := range alloc.Tasks {
 				if task.Networking != nil {
