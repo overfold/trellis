@@ -1,7 +1,10 @@
 package spec
 
 import (
+	"strings"
 	"testing"
+
+	"github.com/clofour/trellis/internal/probepath"
 )
 
 func healthCheckJob(check *HealthCheckSpec) *JobSpec {
@@ -27,6 +30,14 @@ func TestValidateHTTPHealthCheckPath(t *testing.T) {
 		if want := "task_groups[api].tasks[server].health_check.path"; issues[0].Path != want || issues[0].Code != "invalid" {
 			t.Fatalf("path %q: issue = %+v, want invalid %s", path, issues[0], want)
 		}
+	}
+}
+
+func TestValidateReportsLongHTTPHealthCheckPath(t *testing.T) {
+	path := "/" + strings.Repeat("a", probepath.MaxLength)
+	issues, ok := Validate(healthCheckJob(&HealthCheckSpec{Type: HealthCheckHTTP, Port: 8080, Path: path})).(ValidationErrors)
+	if !ok || len(issues) != 1 || issues[0].Code != "too_long" {
+		t.Fatalf("issues = %+v, want one too_long issue", issues)
 	}
 }
 

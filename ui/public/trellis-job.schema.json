@@ -77,7 +77,10 @@
               "type": {
                 "const": "http"
               }
-            }
+            },
+            "required": [
+              "type"
+            ]
           },
           "then": {
             "properties": {

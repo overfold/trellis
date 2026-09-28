@@ -30,7 +30,7 @@ func checkProbe(ctx context.Context, c runtime.ContainerRuntime, containerID str
 		return false, fmt.Errorf("executing health probe: %w", err)
 	}
 	if code == probepath.UsageExit {
-		// The HTTP path is left out: its query may carry credentials.
+		// Name the check rather than echo its full argv.
 		return false, fmt.Errorf("health probe in %s rejected its %s check configuration for port %s", containerID, command[1], command[2])
 	}
 	return code == 0, nil

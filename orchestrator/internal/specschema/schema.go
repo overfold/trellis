@@ -232,7 +232,7 @@ func addHealthCheckConditions(check schema) {
 			},
 		},
 		{
-			"if": schema{"properties": schema{"type": schema{"const": "http"}}},
+			"if": schema{"required": []string{"type"}, "properties": schema{"type": schema{"const": "http"}}},
 			"then": schema{
 				"properties": schema{"path": schema{
 					"pattern":   probepath.Pattern,
