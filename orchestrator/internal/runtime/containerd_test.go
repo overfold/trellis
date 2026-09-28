@@ -122,6 +122,7 @@ func TestSwapControllerAvailable(t *testing.T) {
 		{name: "v2 with swap", files: map[string]string{"cgroup.controllers": "memory", "system.slice/trellis.service/memory.swap.max": "max"}, self: "0::/system.slice/trellis.service\n", want: true},
 		{name: "v2 without swap accounting", files: map[string]string{"cgroup.controllers": "memory", "system.slice/trellis.service/memory.max": "max"}, self: "0::/system.slice/trellis.service\n"},
 		{name: "v2 root cgroup", files: map[string]string{"cgroup.controllers": "memory"}, self: "0::/\n"},
+		{name: "v2 root cgroup with swap in top-level cgroups", files: map[string]string{"cgroup.controllers": "memory", "system.slice/memory.swap.max": "max"}, self: "0::/\n", want: true},
 		{name: "v1 with memsw", files: map[string]string{"memory/memory.memsw.limit_in_bytes": "0"}, want: true},
 		{name: "v1 without memsw", files: map[string]string{"memory/memory.limit_in_bytes": "0"}},
 	} {

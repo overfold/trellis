@@ -207,25 +207,26 @@ var SwapLimitSupported = sync.OnceValue(func() bool {
 	return swapControllerAvailable("/sys/fs/cgroup", "/proc/self/cgroup")
 })
 
-// swapControllerAvailable mirrors containerd CRI's probe: cgroup v2 exposes
+// swapControllerAvailable extends containerd CRI's probe. cgroup v2 exposes
 // memory.swap.max only in non-root cgroups with swap accounting, so it checks
-// the caller's own cgroup; cgroup v1 exposes memory.memsw.limit_in_bytes.
+// the caller's own cgroup and the top-level cgroups where containerd places
+// tasks; cgroup v1 exposes memory.memsw.limit_in_bytes.
 func swapControllerAvailable(cgroupRoot, selfCgroup string) bool {
 	if _, err := os.Stat(filepath.Join(cgroupRoot, "cgroup.controllers")); err != nil {
 		_, err := os.Stat(filepath.Join(cgroupRoot, "memory", "memory.memsw.limit_in_bytes"))
 		return err == nil
 	}
-	data, err := os.ReadFile(selfCgroup)
-	if err != nil {
-		return false
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		if path, ok := strings.CutPrefix(line, "0::"); ok {
-			_, err := os.Stat(filepath.Join(cgroupRoot, filepath.Clean("/"+path), "memory.swap.max"))
-			return err == nil
+	if data, err := os.ReadFile(selfCgroup); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if path, ok := strings.CutPrefix(line, "0::"); ok {
+				if _, err := os.Stat(filepath.Join(cgroupRoot, filepath.Clean("/"+path), "memory.swap.max")); err == nil {
+					return true
+				}
+			}
 		}
 	}
-	return false
+	matches, _ := filepath.Glob(filepath.Join(cgroupRoot, "*", "memory.swap.max"))
+	return len(matches) > 0
 }
 
 // resourceSpecOpts converts task resource limits into cgroup settings. The
