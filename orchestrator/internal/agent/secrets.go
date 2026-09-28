@@ -18,6 +18,7 @@ import (
 const defaultSecretBase = "/dev/shm"
 
 const secretRootPrefix = "trellis-secrets-"
+const tmpfsMagic = 0x01021994
 
 // secretRootKey durably records this agent's secret root. The root name is
 // random so other local users cannot predict it before first use and agents
@@ -27,9 +28,9 @@ const secretRootPrefix = "trellis-secrets-"
 // recorded path is untrusted until checked again.
 const secretRootKey = "agent/secret-root"
 
-func taskHasFileSecrets(taskName string, delivered []api.DeliveredSecret) bool {
+func taskHasSecrets(taskName string, delivered []api.DeliveredSecret) bool {
 	for _, secret := range delivered {
-		if secret.Task == taskName && secret.Target == spec.SecretTargetFile {
+		if secret.Task == taskName {
 			return true
 		}
 	}
@@ -56,6 +57,13 @@ func (a *Agent) secretDirFor(allocID string) (string, error) {
 // secretRootDir returns this agent's private secret root, reusing the
 // recorded root and otherwise creating and recording a new one before use.
 func (a *Agent) secretRootDir() (string, error) {
+	statfs := a.secretStatfs
+	if statfs == nil {
+		statfs = syscall.Statfs
+	}
+	if err := verifyMemoryBackedFilesystem(a.secretBaseDir(), statfs); err != nil {
+		return "", err
+	}
 	a.secretMu.Lock()
 	defer a.secretMu.Unlock()
 	if a.secretRoot != "" && checkSecretRoot(a.secretRoot) == nil {
@@ -85,6 +93,17 @@ func (a *Agent) secretRootDir() (string, error) {
 	}
 	a.secretRoot = root
 	return root, nil
+}
+
+func verifyMemoryBackedFilesystem(path string, statfs func(string, *syscall.Statfs_t) error) error {
+	var stat syscall.Statfs_t
+	if err := statfs(path, &stat); err != nil {
+		return fmt.Errorf("inspect secret filesystem: %w", err)
+	}
+	if stat.Type != tmpfsMagic {
+		return fmt.Errorf("secret base %s must be backed by tmpfs", path)
+	}
+	return nil
 }
 
 // recordedSecretRoot returns the recorded secret root and whether it is this
@@ -144,6 +163,12 @@ func removeSecretDir(dir string) error {
 	if !info.IsDir() {
 		return fmt.Errorf("refuse to remove %s: %s is not a directory", dir, parent)
 	}
+	// Environment directories are read/execute-only while mounted so the
+	// workload UID cannot replace entries. Restore owner write access only as
+	// part of cleanup; the agent-owned parent prevents an unprivileged swap.
+	if err := os.Chmod(filepath.Join(dir, "env"), 0o700); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("prepare environment secret cleanup: %w", err)
+	}
 	return os.RemoveAll(dir)
 }
 
@@ -193,11 +218,11 @@ func createSecretDir(dir string) error {
 	return nil
 }
 
-// materializeSecrets returns the task's environment secrets and writes its
-// file secrets into dir, which createSecretDir must already have created.
+// materializeSecrets writes the task's secrets into dir, which createSecretDir
+// must already have created. Environment values remain files and are loaded by
+// the runtime wrapper immediately before the image process is executed.
 // The caller removes dir if this fails.
-func materializeSecrets(dir, taskName string, delivered []api.DeliveredSecret) (map[string]string, []*runtime.Mount, error) {
-	env := map[string]string{}
+func materializeSecrets(dir, taskName string, delivered []api.DeliveredSecret) ([]*runtime.Mount, error) {
 	var taskSecrets []api.DeliveredSecret
 	for _, secret := range delivered {
 		if secret.Task == taskName {
@@ -205,39 +230,55 @@ func materializeSecrets(dir, taskName string, delivered []api.DeliveredSecret) (
 		}
 	}
 	var mounts []*runtime.Mount
+	hasEnv := false
+	envDir := filepath.Join(dir, "env")
 	for i, secret := range taskSecrets {
+		hostPath := filepath.Join(dir, fmt.Sprintf("secret-%d", i))
 		switch secret.Target {
 		case spec.SecretTargetEnv:
-			env[secret.Env] = string(secret.Value)
+			if !hasEnv {
+				if err := os.Mkdir(envDir, 0o700); err != nil {
+					return nil, fmt.Errorf("create environment secret directory: %w", err)
+				}
+			}
+			hostPath = filepath.Join(envDir, secret.Env)
+			hasEnv = true
 		case spec.SecretTargetFile:
-			if dir == "" {
-				return nil, nil, fmt.Errorf("secret directory is required for file secrets")
-			}
-			hostPath := filepath.Join(dir, fmt.Sprintf("secret-%d", i))
-			mode := os.FileMode(secret.Mode)
-			if mode == 0 {
-				mode = 0o400
-			}
-			file, err := os.OpenFile(hostPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, mode)
-			if err != nil {
-				return nil, nil, fmt.Errorf("create secret file: %w", err)
-			}
-			if _, err = file.Write(secret.Value); err == nil {
-				err = file.Sync()
-			}
-			closeErr := file.Close()
-			if err == nil {
-				err = closeErr
-			}
-			if err != nil {
-				return nil, nil, fmt.Errorf("write secret file: %w", err)
-			}
-			mounts = append(mounts, &runtime.Mount{HostPath: hostPath, ContainerPath: secret.Path, ReadOnly: true})
 		default:
-			return nil, nil, fmt.Errorf("unsupported secret target %q", secret.Target)
+			return nil, fmt.Errorf("unsupported secret target %q", secret.Target)
+		}
+		if dir == "" {
+			return nil, fmt.Errorf("secret directory is required")
+		}
+		mode := os.FileMode(secret.Mode)
+		if mode == 0 || secret.Target == spec.SecretTargetEnv {
+			mode = 0o400
+		}
+		file, err := os.OpenFile(hostPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, mode)
+		if err != nil {
+			return nil, fmt.Errorf("create secret file: %w", err)
+		}
+		if _, err = file.Write(secret.Value); err == nil {
+			err = file.Sync()
+		}
+		closeErr := file.Close()
+		if err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			return nil, fmt.Errorf("write secret file: %w", err)
+		}
+		if secret.Target == spec.SecretTargetFile {
+			mounts = append(mounts, &runtime.Mount{HostPath: hostPath, ContainerPath: secret.Path, ReadOnly: true, Secret: true})
 		}
 	}
-	return env, mounts, nil
+	if hasEnv {
+		if err := os.Chmod(envDir, 0o500); err != nil {
+			return nil, fmt.Errorf("restrict environment secret directory: %w", err)
+		}
+		mounts = append(mounts, &runtime.Mount{HostPath: envDir, ContainerPath: "/run/trellis/env-secrets", ReadOnly: true, Secret: true, SecretEnv: true})
+	}
+	return mounts, nil
 }
 
 // recoveredSecretDir returns where an allocation known only from runtime

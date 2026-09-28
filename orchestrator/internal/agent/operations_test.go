@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -339,6 +340,10 @@ func newOperationTestAgent(t *testing.T, rt runtime.ContainerRuntime) *Agent {
 	reconciler := NewAllocationReconciler(rt, nil)
 	agent := NewAgent(log, rt, health.NewHealthManager(log, rt, nil), reconciler, NewPortManager(rt, 0, 0, 0), NewVolumeManager(t.TempDir()), nil, uuid.New())
 	agent.secretBase = t.TempDir()
+	agent.secretStatfs = func(_ string, stat *syscall.Statfs_t) error {
+		stat.Type = tmpfsMagic
+		return nil
+	}
 	return agent
 }
 

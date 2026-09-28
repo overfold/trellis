@@ -3,7 +3,9 @@ package secrets
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"net/url"
 	"path/filepath"
 	"testing"
 
@@ -70,6 +72,9 @@ func TestStoreRejectsWrongKeyAndOversizedValues(t *testing.T) {
 	defer func() { _ = bolt.Close() }()
 	ctx := context.Background()
 	store, _ := NewStore(bolt, "cluster", "key-1", bytes.Repeat([]byte{1}, 32))
+	if _, err := store.Set(ctx, "acme", "boundary", make([]byte, MaxValueSize), nil); err != nil {
+		t.Fatalf("exact size boundary: %v", err)
+	}
 	if _, err := store.Set(ctx, "acme", "secret", make([]byte, MaxValueSize+1), nil); err == nil {
 		t.Fatal("expected size error")
 	}
@@ -79,5 +84,41 @@ func TestStoreRejectsWrongKeyAndOversizedValues(t *testing.T) {
 	other, _ := NewStore(bolt, "cluster", "key-2", bytes.Repeat([]byte{2}, 32))
 	if _, _, err := other.Resolve(ctx, "acme", "secret"); err == nil {
 		t.Fatal("expected unavailable key error")
+	}
+}
+
+func TestStoreAADPreventsReplayAcrossSecretIdentity(t *testing.T) {
+	bolt, err := state.NewBoltStore(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = bolt.Close() }()
+	ctx := context.Background()
+	store, _ := NewStore(bolt, "cluster", "key-1", bytes.Repeat([]byte{1}, 32))
+	if _, err := store.Set(ctx, "source", "token", []byte("source-value"), nil); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := bolt.Get(ctx, store.key("source", "token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []struct{ namespace, name string }{{"other", "token"}, {"source", "other"}} {
+		var replay record
+		if err := json.Unmarshal(raw, &replay); err != nil {
+			t.Fatal(err)
+		}
+		replay.Namespace, replay.Name = target.namespace, target.name
+		encoded, _ := json.Marshal(replay)
+		key := "trellis/cluster/secrets/" + url.PathEscape(target.namespace) + "/" + url.PathEscape(target.name)
+		if err := bolt.Put(ctx, key, encoded); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := store.Resolve(ctx, target.namespace, target.name); err == nil {
+			t.Fatalf("replayed ciphertext resolved as %s/%s", target.namespace, target.name)
+		}
+	}
+	value, _, err := store.Resolve(ctx, "source", "token")
+	if err != nil || string(value) != "source-value" {
+		t.Fatalf("matching identity resolution = %q, %v", value, err)
 	}
 }

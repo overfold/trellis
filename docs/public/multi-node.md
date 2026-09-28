@@ -12,7 +12,7 @@ Every machine runs the same `trellis` daemon. There are no separate server and w
 - every node is a **Raft voter** that replicates desired state and takes part in leader election;
 - one elected node, the **leader**, serves the control-plane API, schedules, and reconciles jobs.
 
-Any node accepts control-plane requests. Followers proxy them to the current leader, so `trellisctl` contexts, the dashboard, and in-cluster `TRELLIS_ADDR` clients can point at any reachable node and do not need reconfiguring when leadership moves. `trellisctl` also retries administrator-signed requests automatically if leadership changes mid-request.
+Any node accepts control-plane requests. Followers proxy ordinary operator and administrator requests to the current leader, so `trellisctl` contexts, the dashboard, and in-cluster `TRELLIS_ADDR` clients can point at any reachable node and do not need reconfiguring when leadership moves. Certificate-authenticated node requests are redirected instead, preserving the caller's node certificate end to end. `trellisctl` also retries administrator-signed requests automatically if leadership changes mid-request.
 
 ## Choose a cluster size
 
@@ -97,7 +97,7 @@ After the daemon starts, verify membership from any operator context:
 trellisctl nodes list
 ```
 
-The enrollment credential is accepted only by the managed enrollment endpoint and is never administrator API authority. Enrollment sends it only over TLS authenticated by the pinned CA. After enrollment, node registration, heartbeats, Raft joins, and node-to-agent traffic use the node's unique certificate-bound UUID instead of a shared bearer token. Administrator requests are checked by the current leader against the replicated public key, so followers do not need or retain the administrator private key. Managed mode deliberately trusts every Trellis node and makes the CA signing key available to every leader-capable member so failover does not disable enrollment. Treat compromise of any node in managed mode as compromise of the cluster.
+The enrollment credential is accepted only by the managed enrollment endpoint and is never administrator API authority. Enrollment sends it only over TLS authenticated by the pinned CA. The leader assigns the new UUID rather than accepting a caller-selected identity and initially returns only that node's certificate and private key. The managed CA signing key is delivered only after the node proves that certificate and is admitted under the assigned UUID as a Raft voter. This keeps managed signing available after failover without allowing the enrollment credential alone to duplicate an existing node identity. After enrollment, node registration, heartbeats, Raft joins, and node-to-agent traffic use the node's unique certificate-bound UUID instead of a shared bearer token. Administrator requests are checked by the current leader against the replicated public key, so followers do not need or retain the administrator private key. Managed mode deliberately trusts every admitted Trellis node and makes the CA signing key available to every leader-capable member so failover does not disable enrollment. Treat compromise of any admitted node in managed mode as compromise of the cluster.
 
 To grow a single node into a fault-tolerant cluster, repeat this for two more machines.
 

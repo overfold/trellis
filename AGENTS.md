@@ -123,7 +123,7 @@ go build ./cmd/trellis ./cmd/trellisctl ./cmd/trellis-proxy-sync
 For distributed behavior that crosses server/agent/node boundaries, also run when relevant:
 
 ```sh
-go test -tags=integration ./integration -count=1 -timeout=6m
+go test -tags=integration ./cmd/trellis ./integration -count=1 -timeout=6m
 ```
 
 For containerd-specific allocation adoption/runtime behavior, run the containerd E2E test on a suitable Linux host with containerd and the required privileges:

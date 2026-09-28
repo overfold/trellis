@@ -20,6 +20,7 @@ import (
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/contrib/apparmor"
 	"github.com/containerd/containerd/v2/contrib/seccomp"
+	"github.com/containerd/containerd/v2/core/containers"
 	hostapparmor "github.com/containerd/containerd/v2/pkg/apparmor"
 	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
@@ -31,6 +32,8 @@ import (
 
 const trellisNamespace = "trellis"
 const gracePeriod = 10 * time.Second
+const secretEnvContainerPath = "/run/trellis/env-secrets"
+const healthProbeContainerPath = "/run/trellis/health-probe"
 
 // ContainerdRuntime implements container lifecycle operations with containerd.
 type ContainerdRuntime struct {
@@ -50,6 +53,13 @@ type Mount struct {
 	HostPath      string
 	ContainerPath string
 	ReadOnly      bool
+	// Secret marks a memory-backed mount whose source must be made readable
+	// only by the image-configured process user before container creation.
+	Secret bool
+	// SecretEnv marks the private directory containing environment-secret
+	// files. The runtime wraps the configured process so these values never
+	// enter the container's persisted OCI environment.
+	SecretEnv bool
 }
 
 // appArmorProfileName is the AppArmor profile Trellis generates from
@@ -200,6 +210,7 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 		oci.WithImageConfig(image),
 		oci.WithEnv(convertEnv(options.Env)),
 		oci.WithMounts(allMounts),
+		withManagedSecretMounts(options.Mounts),
 	}
 	if options.NetworkNamespace != "" {
 		ociSpecOpts = append(ociSpecOpts, oci.WithLinuxNamespace(specs.LinuxNamespace{
@@ -616,7 +627,59 @@ func execProcessSpec(containerSpec *specs.Spec, command []string, terminal bool)
 	if containerSpec.Process.Cwd != "" {
 		process.Cwd = containerSpec.Process.Cwd
 	}
+	if hasSecretEnvironment(containerSpec) {
+		process.Args = secretEnvironmentCommand(command)
+	}
 	return process
+}
+
+func hasSecretEnvironment(containerSpec *specs.Spec) bool {
+	if containerSpec == nil {
+		return false
+	}
+	for _, mount := range containerSpec.Mounts {
+		if mount.Destination == secretEnvContainerPath {
+			return true
+		}
+	}
+	return false
+}
+
+func secretEnvironmentCommand(command []string) []string {
+	wrapped := []string{healthProbeContainerPath, "env-exec", secretEnvContainerPath, "--"}
+	return append(wrapped, command...)
+}
+
+func withManagedSecretMounts(mounts []*Mount) oci.SpecOpts {
+	return func(_ context.Context, _ oci.Client, _ *containers.Container, spec *oci.Spec) error {
+		if spec.Process == nil {
+			return fmt.Errorf("container process is missing")
+		}
+		uid, gid := int(spec.Process.User.UID), int(spec.Process.User.GID)
+		for _, mount := range mounts {
+			if !mount.Secret {
+				continue
+			}
+			if mount.SecretEnv {
+				entries, err := os.ReadDir(mount.HostPath)
+				if err != nil {
+					return fmt.Errorf("list environment secrets: %w", err)
+				}
+				for _, entry := range entries {
+					if err := os.Chown(filepath.Join(mount.HostPath, entry.Name()), uid, gid); err != nil {
+						return fmt.Errorf("set environment secret ownership: %w", err)
+					}
+				}
+			}
+			if err := os.Chown(mount.HostPath, uid, gid); err != nil {
+				return fmt.Errorf("set secret ownership: %w", err)
+			}
+		}
+		if hasSecretEnvironment(spec) {
+			spec.Process.Args = secretEnvironmentCommand(spec.Process.Args)
+		}
+		return nil
+	}
 }
 
 // Inspect returns the current state of a container.

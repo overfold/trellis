@@ -1,4 +1,10 @@
 version: "2"
+run:
+  # The integration build is a superset of the default build, so linting it
+  # covers the multi-process suite and the integration-only runtime wiring too.
+  # Avoid `!integration` files: they would not be linted.
+  build-tags:
+    - integration
 linters:
   default: standard
   enable:

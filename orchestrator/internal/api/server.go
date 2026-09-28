@@ -231,20 +231,25 @@ type RaftJoinRequest struct {
 	ServerAddress string `json:"server_address"`
 }
 
+// RaftJoinResponse returns managed signing material only after the node's
+// certificate-bound identity has been admitted as a Raft voter.
+type RaftJoinResponse struct {
+	CAKey string `json:"ca_key,omitempty"`
+}
+
 // NodeEnrollmentRequest asks a managed cluster to issue one node identity.
 type NodeEnrollmentRequest struct {
-	NodeID          uuid.UUID `json:"node_id"`
-	ServerAdvertise string    `json:"server_advertise"`
-	AgentAdvertise  string    `json:"agent_advertise"`
-	RaftAdvertise   string    `json:"raft_advertise"`
+	ServerAdvertise string `json:"server_advertise"`
+	AgentAdvertise  string `json:"agent_advertise"`
+	RaftAdvertise   string `json:"raft_advertise"`
 }
 
 // NodeEnrollmentResponse returns managed node signing materials.
 type NodeEnrollmentResponse struct {
-	CACert string `json:"ca_cert"`
-	CAKey  string `json:"ca_key"`
-	Cert   string `json:"cert"`
-	Key    string `json:"key"`
+	NodeID uuid.UUID `json:"node_id"`
+	CACert string    `json:"ca_cert"`
+	Cert   string    `json:"cert"`
+	Key    string    `json:"key"`
 }
 
 // JobRevisionResponse describes one persisted revision of a job.
