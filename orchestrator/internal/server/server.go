@@ -3,10 +3,14 @@ package server
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -607,6 +611,46 @@ func (s *Server) NodeServerAddress(ctx context.Context, id string) (string, erro
 	return s.state.GetNodeServerAddress(ctx, id)
 }
 
+// BindNodeCertificate durably associates a node UUID with exactly one
+// certificate. Repeating the same binding is safe; replacing it is forbidden.
+func (s *Server) BindNodeCertificate(ctx context.Context, id uuid.UUID, certificate *x509.Certificate) error {
+	if id == uuid.Nil || certificate == nil {
+		return fmt.Errorf("node ID and certificate are required")
+	}
+	certificateID, err := tlsutil.NodeID(certificate)
+	if err != nil || certificateID != id {
+		return fmt.Errorf("node certificate identity does not match %s", id)
+	}
+	s.mutationMu.Lock()
+	defer s.mutationMu.Unlock()
+	fingerprint := nodeCertificateFingerprint(certificate)
+	existing, found, err := s.state.GetNodeCertificateFingerprint(ctx, id.String())
+	if err != nil {
+		return err
+	}
+	if found {
+		if subtle.ConstantTimeCompare([]byte(existing), []byte(fingerprint)) != 1 {
+			return fmt.Errorf("node identity %s is already bound to another certificate", id)
+		}
+		return nil
+	}
+	return s.state.PutNodeCertificateFingerprint(ctx, id.String(), fingerprint)
+}
+
+// AuthorizeNodeCertificate checks the durable UUID-to-certificate binding.
+func (s *Server) AuthorizeNodeCertificate(ctx context.Context, id uuid.UUID, certificate *x509.Certificate) bool {
+	if id == uuid.Nil || certificate == nil {
+		return false
+	}
+	existing, found, err := s.state.GetNodeCertificateFingerprint(ctx, id.String())
+	return err == nil && found && subtle.ConstantTimeCompare([]byte(existing), []byte(nodeCertificateFingerprint(certificate))) == 1
+}
+
+func nodeCertificateFingerprint(certificate *x509.Certificate) string {
+	digest := sha256.Sum256(certificate.Raw)
+	return hex.EncodeToString(digest[:])
+}
+
 // ClusterCA returns the cluster certificate authority materials.
 func (s *Server) ClusterCA() (certPEM, keyPEM string, err error) {
 	if err := s.storage.Get("tls/ca-cert", &certPEM); err != nil {
@@ -621,23 +665,33 @@ func (s *Server) ClusterCA() (certPEM, keyPEM string, err error) {
 	return certPEM, keyPEM, nil
 }
 
-// EnrollNode issues a unique node certificate in managed signing mode. An
-// external-signing node has no local CA key, so enrollment is unavailable.
-func (s *Server) EnrollNode(nodeID uuid.UUID, advertised ...string) (*api.NodeEnrollmentResponse, error) {
-	if nodeID == uuid.Nil {
-		return nil, fmt.Errorf("node_id is required")
-	}
+// EnrollNode issues a server-assigned node identity and certificate in managed
+// signing mode. The CA key is withheld until the identity joins Raft, so an
+// enrollment credential alone cannot mint or duplicate an existing identity.
+func (s *Server) EnrollNode(ctx context.Context, advertised ...string) (*api.NodeEnrollmentResponse, error) {
 	caCert, caKey, err := s.ClusterCA()
 	if err != nil || caKey == "" {
 		return nil, fmt.Errorf("managed node signer is unavailable")
 	}
+	nodeID := uuid.New()
 	cert, key, err := tlsutil.GenerateNodeCert([]byte(caCert), []byte(caKey), nodeID, advertised...)
 	if err != nil {
 		return nil, fmt.Errorf("sign node certificate: %w", err)
 	}
+	block, _ := pem.Decode(cert)
+	if block == nil {
+		return nil, fmt.Errorf("decode signed node certificate")
+	}
+	certificate, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse signed node certificate: %w", err)
+	}
+	if err := s.BindNodeCertificate(ctx, nodeID, certificate); err != nil {
+		return nil, fmt.Errorf("reserve node identity: %w", err)
+	}
 	return &api.NodeEnrollmentResponse{
+		NodeID: nodeID,
 		CACert: caCert,
-		CAKey:  caKey,
 		Cert:   string(cert),
 		Key:    string(key),
 	}, nil

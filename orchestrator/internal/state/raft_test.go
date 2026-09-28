@@ -11,6 +11,7 @@ import (
 
 	"github.com/clofour/trellis/internal/tlsutil"
 	"github.com/google/uuid"
+	"github.com/hashicorp/raft"
 )
 
 var (
@@ -68,6 +69,63 @@ func newTestRaftStore(t *testing.T) *RaftStore {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	return store
+}
+
+func TestRaftTLSStreamBindsPeerToAdvertisedAddress(t *testing.T) {
+	clientCert, clientKey, err := tlsutil.GenerateNodeCert(testCACert, testCAKey, uuid.New(), "client.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientTLS, err := tlsutil.PeerTLSConfig(&tlsutil.Materials{CACert: testCACert, Cert: clientCert, Key: clientKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dial := func(t *testing.T, serverSAN string) error {
+		t.Helper()
+		serverCert, serverKey, err := tlsutil.GenerateNodeCert(testCACert, testCAKey, uuid.New(), serverSAN)
+		if err != nil {
+			t.Fatal(err)
+		}
+		serverTLS, err := tlsutil.ServerTLSConfig(&tlsutil.Materials{CACert: testCACert, Cert: serverCert, Key: serverKey})
+		if err != nil {
+			t.Fatal(err)
+		}
+		listener, err := tls.Listen("tcp", "127.0.0.1:0", serverTLS)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = listener.Close() }()
+		serverDone := make(chan struct{})
+		go func() {
+			defer close(serverDone)
+			conn, acceptErr := listener.Accept()
+			if acceptErr == nil {
+				if tlsConn, ok := conn.(*tls.Conn); ok {
+					_ = tlsConn.Handshake()
+				}
+				_ = conn.Close()
+			}
+		}()
+		_, port, err := net.SplitHostPort(listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		stream := &tlsStreamLayer{tlsCfg: clientTLS}
+		conn, dialErr := stream.Dial(raft.ServerAddress(net.JoinHostPort("localhost", port)), time.Second)
+		if conn != nil {
+			_ = conn.Close()
+		}
+		<-serverDone
+		return dialErr
+	}
+
+	if err := dial(t, "localhost"); err != nil {
+		t.Fatalf("certificate for advertised host was rejected: %v", err)
+	}
+	if err := dial(t, "other.example"); err == nil {
+		t.Fatal("Raft stream accepted a cluster certificate not bound to the advertised host")
+	}
 }
 
 func waitLeader(t *testing.T, store *RaftStore) {

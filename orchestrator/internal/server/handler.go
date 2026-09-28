@@ -592,6 +592,9 @@ func (h *Handler) handleRaftJoin(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusForbidden, "Raft join identity does not match certificate")
 	}
 	nodeID = certificateNodeID
+	if err := h.server.BindNodeCertificate(c.Request().Context(), nodeID, certificate); err != nil {
+		return echo.NewHTTPError(http.StatusForbidden, err.Error())
+	}
 	for _, address := range []string{request.RaftAddress, request.ServerAddress} {
 		host, _, err := net.SplitHostPort(address)
 		if err != nil || host == "" {
@@ -610,7 +613,12 @@ func (h *Handler) handleRaftJoin(c *echo.Context) error {
 	if err := h.server.joiner.AddVoter(nodeID.String(), request.RaftAddress); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
-	return c.NoContent(http.StatusNoContent)
+	_, caKey, err := h.server.ClusterCA()
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "load managed signing material")
+	}
+	c.Response().Header().Set("Cache-Control", "no-store")
+	return c.JSON(http.StatusOK, api.RaftJoinResponse{CAKey: caKey})
 }
 
 func (h *Handler) handleEnrollNode(c *echo.Context) error {
@@ -621,7 +629,7 @@ func (h *Handler) handleEnrollNode(c *echo.Context) error {
 	if err := c.Bind(&request); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 	}
-	response, err := h.server.EnrollNode(request.NodeID, request.ServerAdvertise, request.AgentAdvertise, request.RaftAdvertise)
+	response, err := h.server.EnrollNode(c.Request().Context(), request.ServerAdvertise, request.AgentAdvertise, request.RaftAdvertise)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error())
 	}
