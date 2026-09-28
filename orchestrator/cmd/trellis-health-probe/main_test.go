@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -26,6 +27,62 @@ func TestHTTPProbe(t *testing.T) {
 	}
 	if code := run([]string{"http", port, "/missing", "1s"}); code != 1 {
 		t.Fatalf("unhealthy HTTP probe exit code = %d, want 1", code)
+	}
+}
+
+func TestHTTPProbeKeepsRequestOnLoopback(t *testing.T) {
+	var got []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.Host+" "+r.RequestURI)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	port := strings.TrimPrefix(server.URL, "http://127.0.0.1:")
+
+	for _, path := range []string{"", "/@169.254.169.254/latest", "//169.254.169.254/latest", "/a%2Fb?x=1&y=%20"} {
+		if code := run([]string{"http", port, path, "1s"}); code != 0 {
+			t.Fatalf("probe of %q exit code = %d, want 0", path, code)
+		}
+	}
+	want := []string{
+		"127.0.0.1:" + port + " /",
+		"127.0.0.1:" + port + " /@169.254.169.254/latest",
+		"127.0.0.1:" + port + " //169.254.169.254/latest",
+		"127.0.0.1:" + port + " /a%2Fb?x=1&y=%20",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("requests = %q, want %q", got, want)
+	}
+}
+
+func TestHTTPProbeRejectsNonOriginPaths(t *testing.T) {
+	for _, path := range []string{"@169.254.169.254/latest", "http://169.254.169.254/latest", "health", "/%zz"} {
+		t.Run(path, func(t *testing.T) {
+			if code := run([]string{"http", "8080", path, "1s"}); code != 2 {
+				t.Fatalf("probe of %q exit code = %d, want 2", path, code)
+			}
+		})
+	}
+}
+
+func TestHTTPProbeDoesNotFollowRedirects(t *testing.T) {
+	var followed atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/target" {
+			followed.Store(true)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		http.Redirect(w, r, "/target", http.StatusFound)
+	}))
+	defer server.Close()
+	port := strings.TrimPrefix(server.URL, "http://127.0.0.1:")
+
+	if code := run([]string{"http", port, "/health", "1s"}); code != 0 {
+		t.Fatalf("redirecting HTTP probe exit code = %d, want 0 for the unfollowed 3xx", code)
+	}
+	if followed.Load() {
+		t.Fatal("probe followed a redirect")
 	}
 }
 

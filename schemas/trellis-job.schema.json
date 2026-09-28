@@ -75,6 +75,23 @@
           "if": {
             "properties": {
               "type": {
+                "const": "http"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "path": {
+                "maxLength": 1024,
+                "pattern": "^(?:/[!\"$-~]*)?$"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
                 "const": "script"
               }
             }
@@ -114,7 +131,7 @@
           ]
         },
         "path": {
-          "description": "HTTP request path; ignored by TCP and script checks.",
+          "description": "HTTP request path and optional query on task-local loopback, beginning with /; ignored by TCP and script checks.",
           "type": "string"
         },
         "port": {
