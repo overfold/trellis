@@ -18,10 +18,10 @@ import (
 	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
-func buildWorkloadSpec(t *testing.T, runtimeName string, appArmorSupported bool, mounts []specs.Mount) *oci.Spec {
+func buildWorkloadSpec(t *testing.T, runtimeName string, appArmorProfile func(string) oci.SpecOpts, mounts []specs.Mount) *oci.Spec {
 	t.Helper()
 	ctx := namespaces.WithNamespace(context.Background(), trellisNamespace)
-	opts := append([]oci.SpecOpts{oci.WithMounts(mounts)}, workloadSecurityOpts(runtimeName, appArmorSupported)...)
+	opts := append([]oci.SpecOpts{oci.WithMounts(mounts)}, workloadSecurityOpts(runtimeName, appArmorProfile)...)
 	s, err := oci.GenerateSpecWithPlatform(ctx, nil, "linux/amd64", &containers.Container{ID: "allocation"}, opts...)
 	if err != nil {
 		t.Fatal(err)
@@ -29,24 +29,19 @@ func buildWorkloadSpec(t *testing.T, runtimeName string, appArmorSupported bool,
 	return s
 }
 
-func stubAppArmorProfile(t *testing.T) *[]string {
-	t.Helper()
-	var loaded []string
-	previous := defaultAppArmorProfile
-	defaultAppArmorProfile = func(name string) oci.SpecOpts {
+func stubAppArmorProfile(loaded *[]string) func(string) oci.SpecOpts {
+	return func(name string) oci.SpecOpts {
 		return func(_ context.Context, _ oci.Client, _ *containers.Container, s *specs.Spec) error {
-			loaded = append(loaded, name)
+			*loaded = append(*loaded, name)
 			s.Process.ApparmorProfile = name
 			return nil
 		}
 	}
-	t.Cleanup(func() { defaultAppArmorProfile = previous })
-	return &loaded
 }
 
 func TestWorkloadSpecDropsMknodAndRawSocketCapabilities(t *testing.T) {
 	for _, runtimeName := range []string{"", "runc", "runsc"} {
-		s := buildWorkloadSpec(t, runtimeName, false, nil)
+		s := buildWorkloadSpec(t, runtimeName, nil, nil)
 		capabilities := s.Process.Capabilities
 		for name, got := range map[string][]string{
 			"bounding": capabilities.Bounding, "effective": capabilities.Effective,
@@ -67,7 +62,7 @@ func TestWorkloadSpecDropsMknodAndRawSocketCapabilities(t *testing.T) {
 
 func TestWorkloadSpecAppliesDefaultSeccompProfile(t *testing.T) {
 	for _, runtimeName := range []string{"", "runc", "runsc"} {
-		s := buildWorkloadSpec(t, runtimeName, false, nil)
+		s := buildWorkloadSpec(t, runtimeName, nil, nil)
 		if s.Linux.Seccomp == nil || s.Linux.Seccomp.DefaultAction != specs.ActErrno || len(s.Linux.Seccomp.Syscalls) == 0 {
 			t.Fatalf("runtime %q seccomp = %#v, want containerd default profile", runtimeName, s.Linux.Seccomp)
 		}
@@ -102,15 +97,31 @@ func TestWorkloadSpecAppArmorProfileSelection(t *testing.T) {
 		{name: "unsupported host", runtime: "runc"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			loaded := stubAppArmorProfile(t)
-			s := buildWorkloadSpec(t, tc.runtime, tc.supported, nil)
+			var loaded []string
+			var profile func(string) oci.SpecOpts
+			if tc.supported {
+				profile = stubAppArmorProfile(&loaded)
+			}
+			s := buildWorkloadSpec(t, tc.runtime, profile, nil)
 			if s.Process.ApparmorProfile != tc.want {
 				t.Fatalf("apparmor profile = %q, want %q", s.Process.ApparmorProfile, tc.want)
 			}
-			if tc.want == "" && len(*loaded) != 0 {
-				t.Fatalf("loaded apparmor profiles %v, want none", *loaded)
+			if tc.want == "" && len(loaded) != 0 {
+				t.Fatalf("loaded apparmor profiles %v, want none", loaded)
 			}
 		})
+	}
+}
+
+func TestEnsureAppArmorProfileIgnoresOtherProfiles(t *testing.T) {
+	for _, s := range []*specs.Spec{
+		{},
+		{Process: &specs.Process{}},
+		{Process: &specs.Process{ApparmorProfile: "unconfined"}},
+	} {
+		if err := ensureAppArmorProfile(s); err != nil {
+			t.Fatalf("ensureAppArmorProfile(%#v) = %v, want nil", s.Process, err)
+		}
 	}
 }
 
@@ -131,7 +142,7 @@ func TestConvertMountsAddsNosuidNodev(t *testing.T) {
 			t.Fatalf("mount %d options %v must stay executable", i, m.Options)
 		}
 	}
-	s := buildWorkloadSpec(t, "runc", false, mounts)
+	s := buildWorkloadSpec(t, "runc", nil, mounts)
 	for _, m := range s.Mounts {
 		if m.Type == "bind" && (!slices.Contains(m.Options, "nosuid") || !slices.Contains(m.Options, "nodev")) {
 			t.Fatalf("spec bind mount %#v lacks nosuid,nodev", m)
@@ -359,10 +370,10 @@ func TestExecProcessSpecInheritsContainerContext(t *testing.T) {
 }
 
 func TestExecProcessSpecInheritsSecurityContext(t *testing.T) {
-	loaded := stubAppArmorProfile(t)
-	containerSpec := buildWorkloadSpec(t, "runc", true, nil)
-	if len(*loaded) != 1 {
-		t.Fatalf("loaded apparmor profiles %v, want one", *loaded)
+	var loaded []string
+	containerSpec := buildWorkloadSpec(t, "runc", stubAppArmorProfile(&loaded), nil)
+	if len(loaded) != 1 {
+		t.Fatalf("loaded apparmor profiles %v, want one", loaded)
 	}
 	process := execProcessSpec(containerSpec, []string{"/bin/sh"}, true)
 

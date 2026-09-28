@@ -63,13 +63,20 @@ const appArmorProfileName = "trellis-default"
 // volumes.
 var droppedCapabilities = []string{"CAP_MKNOD", "CAP_NET_RAW"}
 
-// defaultAppArmorProfile loads the named profile and applies it. It is a
-// variable so tests can observe selection without invoking apparmor_parser.
-var defaultAppArmorProfile = apparmor.WithDefaultProfile
+// hostAppArmorProfile returns the loader for Trellis's AppArmor profile, or nil
+// when the host does not support AppArmor.
+func hostAppArmorProfile() func(string) oci.SpecOpts {
+	if !hostapparmor.HostSupports() {
+		return nil
+	}
+	return apparmor.WithDefaultProfile
+}
 
 // workloadSecurityOpts hardens containerd's default OCI spec, which applies no
-// seccomp filter and no AppArmor profile on its own.
-func workloadSecurityOpts(runtimeName string, appArmorSupported bool) []oci.SpecOpts {
+// seccomp filter and no AppArmor profile on its own. appArmorProfile loads and
+// applies the named profile; nil means the host does not support AppArmor.
+// These options must follow every other option that changes capabilities.
+func workloadSecurityOpts(runtimeName string, appArmorProfile func(string) oci.SpecOpts) []oci.SpecOpts {
 	opts := []oci.SpecOpts{
 		oci.WithDroppedCapabilities(droppedCapabilities),
 		// The default seccomp profile derives allowed syscalls from the
@@ -80,8 +87,8 @@ func workloadSecurityOpts(runtimeName string, appArmorSupported bool) []oci.Spec
 	}
 	// runsc ignores the OCI AppArmor profile, so loading one for it would only
 	// add a host dependency on apparmor_parser without confining anything.
-	if appArmorSupported && runtimeName != "runsc" {
-		opts = append(opts, defaultAppArmorProfile(appArmorProfileName))
+	if appArmorProfile != nil && runtimeName != "runsc" {
+		opts = append(opts, appArmorProfile(appArmorProfileName))
 	}
 	return opts
 }
@@ -199,7 +206,7 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 			Type: specs.NetworkNamespace, Path: options.NetworkNamespace,
 		}))
 	}
-	ociSpecOpts = append(ociSpecOpts, workloadSecurityOpts(options.Runtime, hostapparmor.HostSupports())...)
+	ociSpecOpts = append(ociSpecOpts, workloadSecurityOpts(options.Runtime, hostAppArmorProfile())...)
 	if options.CPU > 0 {
 		cpuQuota := int64(options.CPU) * 100
 		if cpuQuota/100 != int64(options.CPU) {
@@ -247,6 +254,13 @@ func (c *ContainerdRuntime) Start(ctx context.Context, containerID string) error
 		return fmt.Errorf("loading container %s: %w", containerID, err)
 	}
 
+	containerSpec, err := container.Spec(ctx)
+	if err != nil {
+		return fmt.Errorf("reading spec for %s: %w", containerID, err)
+	}
+	if err := ensureAppArmorProfile(containerSpec); err != nil {
+		return fmt.Errorf("loading AppArmor profile for %s: %w", containerID, err)
+	}
 	if err := ensureRuntimeDir(c.logDir); err != nil {
 		return fmt.Errorf("create log directory: %w", err)
 	}
@@ -262,6 +276,16 @@ func (c *ContainerdRuntime) Start(ctx context.Context, containerID string) error
 	}
 
 	return nil
+}
+
+// ensureAppArmorProfile reloads Trellis's AppArmor profile when a stored spec
+// names it, because the profile may have been unloaded since the container was
+// created and every new task, including in-place restarts, needs it.
+func ensureAppArmorProfile(containerSpec *specs.Spec) error {
+	if containerSpec.Process == nil || containerSpec.Process.ApparmorProfile != appArmorProfileName {
+		return nil
+	}
+	return apparmor.LoadDefaultProfile(appArmorProfileName)
 }
 
 func (c *ContainerdRuntime) logPath(containerID string) string {
@@ -541,7 +565,10 @@ func (c *ContainerdRuntime) Exec(ctx context.Context, containerID string, comman
 	}
 
 	execID := fmt.Sprintf("healthcheck-%d", time.Now().UnixNano())
-	containerSpec, _ := container.Spec(ctx)
+	containerSpec, err := container.Spec(ctx)
+	if err != nil {
+		return 1, fmt.Errorf("reading spec for %s: %w", containerID, err)
+	}
 	process := execProcessSpec(containerSpec, command, false)
 
 	taskExec, err := task.Exec(ctx, execID, process, cio.NullIO)
@@ -777,7 +804,10 @@ func (c *ContainerdRuntime) ExecOutput(ctx context.Context, containerID string, 
 	}
 
 	execID := fmt.Sprintf("exec-%d", time.Now().UnixNano())
-	containerSpec, _ := container.Spec(ctx)
+	containerSpec, err := container.Spec(ctx)
+	if err != nil {
+		return nil, nil, 1, fmt.Errorf("reading spec for %s: %w", containerID, err)
+	}
 	process := execProcessSpec(containerSpec, command, false)
 
 	var outBuf, errBuf lockedBuffer
@@ -1053,7 +1083,10 @@ func (c *ContainerdRuntime) StartTerminal(ctx context.Context, containerID strin
 		return nil, fmt.Errorf("getting task for %s: %w", containerID, err)
 	}
 
-	containerSpec, _ := container.Spec(ctx)
+	containerSpec, err := container.Spec(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("reading spec for %s: %w", containerID, err)
+	}
 	processSpec := execProcessSpec(containerSpec, command, true)
 	if term != "" {
 		env := make([]string, 0, len(processSpec.Env)+1)
