@@ -257,7 +257,7 @@ func TestRaftStore_Replication(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = follower.Close() })
 
-	if err := leader.AddVoter(followerBind, follower.LocalAddr()); err != nil {
+	if err := leader.AddNonvoter(followerBind, follower.LocalAddr()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -309,7 +309,7 @@ func TestRaftStore_Snapshot(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = follower.Close() })
 
-	if err := store.AddVoter(followerBind, follower.LocalAddr()); err != nil {
+	if err := store.AddNonvoter(followerBind, follower.LocalAddr()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -361,4 +361,105 @@ func TestRaftStore_RejoinExistingState(t *testing.T) {
 	if len(files) < 2 {
 		t.Fatalf("expected raft db files in %s, found %d", raftDir, len(files))
 	}
+}
+
+func newTestRaftFollower(t *testing.T) (*RaftStore, string) {
+	t.Helper()
+	bind := fmt.Sprintf("127.0.0.1:%d", freePort(t))
+	follower, err := NewRaftStore(RaftConfig{DataDir: t.TempDir(), BindAddr: bind, Advertise: bind, ServerID: bind, TLS: testTLSConfig(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = follower.Close() })
+	return follower, bind
+}
+
+func memberVoter(t *testing.T, store *RaftStore, id string) (voter, found bool) {
+	t.Helper()
+	members, err := store.Membership()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, member := range members {
+		if member.ID == id {
+			return member.Voter, true
+		}
+	}
+	return false, false
+}
+
+func TestRaftStore_NonvoterPromotionAndDemotion(t *testing.T) {
+	leader := newTestRaftStore(t)
+	waitLeader(t, leader)
+	follower, id := newTestRaftFollower(t)
+
+	if err := leader.AddNonvoter(id, follower.LocalAddr()); err != nil {
+		t.Fatal(err)
+	}
+	if voter, found := memberVoter(t, leader, id); !found || voter {
+		t.Fatalf("joined member voter=%v found=%v, want a non-voter", voter, found)
+	}
+	if err := leader.PromoteVoter(id, follower.LocalAddr()); err != nil {
+		t.Fatal(err)
+	}
+	if voter, _ := memberVoter(t, leader, id); !voter {
+		t.Fatal("promoted member is not a voter")
+	}
+	// Rejoining must never take away an existing vote.
+	if err := leader.AddNonvoter(id, follower.LocalAddr()); err != nil {
+		t.Fatal(err)
+	}
+	if voter, _ := memberVoter(t, leader, id); !voter {
+		t.Fatal("rejoin demoted a voter")
+	}
+	if err := leader.DemoteVoter(id); err != nil {
+		t.Fatal(err)
+	}
+	if voter, found := memberVoter(t, leader, id); !found || voter {
+		t.Fatalf("demoted member voter=%v found=%v, want a non-voter", voter, found)
+	}
+}
+
+func TestRaftStore_LeadershipTransferTargetsVotersOnly(t *testing.T) {
+	leader := newTestRaftStore(t)
+	waitLeader(t, leader)
+	nonvoter, nonvoterID := newTestRaftFollower(t)
+	if err := leader.AddNonvoter(nonvoterID, nonvoter.LocalAddr()); err != nil {
+		t.Fatal(err)
+	}
+	if err := leader.LeadershipTransfer(); err == nil {
+		t.Fatal("leadership transfer succeeded with only a non-voter to receive it")
+	}
+	if leader.Raft().State() != raft.Leader {
+		t.Fatalf("leader state = %s after refused transfer", leader.Raft().State())
+	}
+
+	voter, voterID := newTestRaftFollower(t)
+	if err := leader.AddNonvoter(voterID, voter.LocalAddr()); err != nil {
+		t.Fatal(err)
+	}
+	if err := leader.PromoteVoter(voterID, voter.LocalAddr()); err != nil {
+		t.Fatal(err)
+	}
+	// Let the new voter catch up so the transfer has an eligible target.
+	if err := leader.Put(context.Background(), "k", []byte("v")); err != nil {
+		t.Fatal(err)
+	}
+	if err := leader.LeadershipTransfer(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, id := leader.Raft().LeaderWithID(); id != "" && string(id) != leader.LocalAddr() {
+			if string(id) != voterID {
+				t.Fatalf("leadership moved to %s, want voter %s", id, voterID)
+			}
+			if nonvoter.Raft().State() == raft.Leader {
+				t.Fatal("non-voter became leader")
+			}
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("leadership did not move to the voter")
 }

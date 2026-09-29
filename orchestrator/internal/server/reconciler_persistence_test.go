@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -209,6 +210,62 @@ func TestReconcileCommitsVolumeRegistrationWithAllocation(t *testing.T) {
 	}
 }
 
+func TestReconcileCommitsNetworkPortRegistrationWithAllocation(t *testing.T) {
+	store := &failingBatchStore{memoryStore: memoryStore{}}
+	controller := NewStateController(store, "test")
+	s := NewServer(slog.Default(), nil, controller, store, "test", "")
+	s.wireGuardPortCount = 8
+	s.networkPorts = map[string]int{"existing": 7}
+	node := &Node{ID: uuid.New(), Status: NodeStatusHealthy, LastHeartbeat: time.Now(), Capabilities: []spec.NodeCapability{spec.CapabilityNamespaceNetworking}}
+	s.nodes[node.ID] = node
+	s.jobs[jobKey("acme", "web")] = &Job{
+		Spec: &spec.JobSpec{
+			Namespace: "acme",
+			Name:      "web",
+			TaskGroups: []spec.TaskGroupSpec{{
+				Name:  "api",
+				Count: 1,
+				Tasks: []spec.TaskSpec{{Name: "server", Image: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard}}},
+			}},
+		},
+		Revision: 1,
+	}
+
+	s.Reconcile(context.Background())
+
+	if len(s.allocations) != 0 {
+		t.Fatalf("in-memory allocations after failed commit = %d, want 0", len(s.allocations))
+	}
+	if !reflect.DeepEqual(s.networkPorts, map[string]int{"existing": 7}) {
+		t.Fatalf("in-memory network ports after failed commit = %v, want unchanged", s.networkPorts)
+	}
+	registrations, err := controller.ListNetworkPortRegistrations(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(registrations) != 0 {
+		t.Fatalf("network port registrations after failed commit = %v, want none", registrations)
+	}
+	allocations, err := controller.ListAllocations(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(allocations) != 0 {
+		t.Fatalf("persisted allocations after failed commit = %v, want none", allocations)
+	}
+	if len(store.batches) != 1 {
+		t.Fatalf("batch count = %d, want 1", len(store.batches))
+	}
+	var allocationMutation, networkPortMutation bool
+	for _, mutation := range store.batches[0] {
+		allocationMutation = allocationMutation || strings.Contains(mutation.Key, "/allocations/")
+		networkPortMutation = networkPortMutation || strings.Contains(mutation.Key, "/network-port-registrations/")
+	}
+	if !allocationMutation || !networkPortMutation {
+		t.Fatalf("reconciliation batch = %#v, want allocation and network port registration", store.batches[0])
+	}
+}
+
 func TestReconcileAppliesVolumeClaimsAcrossTaskGroups(t *testing.T) {
 	store := memoryStore{}
 	controller := NewStateController(store, "test")
@@ -234,8 +291,15 @@ func TestReconcileAppliesVolumeClaimsAcrossTaskGroups(t *testing.T) {
 
 	s.Reconcile(context.Background())
 
-	if len(s.allocations) != 1 || s.allocations[0].Node != a {
-		t.Fatalf("allocations = %#v, want only first task group on volume owner", s.allocations)
+	if len(s.allocations) != 2 || s.allocations[0].Node != a || s.allocations[1].Phase != lifecycle.PhasePending || s.allocations[1].Reason != "volume_owner_unavailable" {
+		t.Fatalf("allocations = %#v, want first task group placed and second pending on volume ownership", s.allocations)
+	}
+	persisted, err := controller.ListAllocations(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending := persisted[s.allocations[1].ID]; pending == nil || pending.Phase != lifecycle.PhasePending || pending.Reason != "volume_owner_unavailable" {
+		t.Fatalf("persisted pending allocation = %#v", pending)
 	}
 	registrations, err := controller.ListVolumeRegistrations(context.Background())
 	if err != nil {

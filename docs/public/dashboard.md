@@ -2,6 +2,8 @@
 
 The `ui/` directory is a deliberately thin Next.js operations client for Trellis. It exposes the same jobs, nodes, allocations, diagnostics, logs, namespaces, and YAML manifests as `trellisctl`; it does not add application-platform abstractions or choose reverse proxies, ingress models, or deployment architecture for you.
 
+When a desired replica cannot be scheduled, the job page and Operations view show the pending allocation's placement reason and message. The diagnostic distinguishes node health, constraints, volume ownership, required capabilities, host-port availability, and CPU or memory capacity; it reports the scheduler's existing filters rather than introducing a separate deployment abstraction.
+
 The Operations page prioritizes failures and changing state. Job creation/editing uses the same YAML authoring representation as `trellisctl`, while the dashboard sends only canonical JSON to the Trellis API. **Review Plan** calls the control plane for the semantic plan; the browser does not maintain an independent implementation of Trellis diff semantics.
 
 A job's page shows each task group in **Replacement backoff** with its consecutive failure count, the latest failed allocation and its reason, and when the next replacement of a failed allocation is allowed. With writes enabled, **Reset backoff** clears a group's backoff through the same operation as `trellisctl jobs reset-backoff`, so the failed allocations are replaced without waiting.
@@ -65,7 +67,7 @@ The dashboard manifest editor is still deliberately YAML-first rather than a for
 - schema-driven completion for enum and boolean values such as network mode, runtime, update strategy, API scope/access, and true/false fields;
 - field explanations from the generated authoring schema alongside completion choices;
 - formatting through **Format YAML**;
-- server-owned semantic review through **Review Plan** before apply.
+- server-owned semantic review through **Review Plan** before apply. Apply is conditioned on the job version the plan was reviewed against; if the job changed meanwhile, the dashboard applies nothing, discards the stale plan, and asks you to review the plan again.
 
 The editor accepts the same first-party YAML conveniences as `trellisctl`, including durations such as `10s` and memory such as `64MiB`. Those are consumer-side representation details. The generated authoring schema identifies fields whose human representation differs from canonical JSON; before an API call, the dashboard follows that schema to convert durations to nanoseconds and memory sizes to bytes.
 

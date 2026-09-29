@@ -2,8 +2,11 @@ package server
 
 import (
 	"bytes"
+	"fmt"
 	"math"
 	"slices"
+	"sort"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/overfold/trellis/internal/spec"
@@ -43,8 +46,23 @@ type VolumeClaim struct {
 	NodeID    uuid.UUID
 }
 
+// placementDiagnostic explains why Schedule could not satisfy an intent.
+// It describes the deepest placement filter reached by at least one healthy
+// node, so the reason remains stable while the same eligibility facts hold.
+type placementDiagnostic struct {
+	Reason  string
+	Message string
+}
+
 // Schedule selects placements for an intent without mutating it.
 func Schedule(intent *PlacementIntent) []Placement {
+	placements, _ := schedule(intent)
+	return placements
+}
+
+// schedule selects placements and explains any unsatisfied count without
+// changing the placement decision itself.
+func schedule(intent *PlacementIntent) ([]Placement, *placementDiagnostic) {
 	result := make([]Placement, 0, intent.Count)
 
 	nodes := slices.Clone(intent.Nodes)
@@ -156,7 +174,7 @@ func Schedule(intent *PlacementIntent) []Placement {
 			}
 		}
 		if target == nil {
-			break
+			return result, diagnosePlacement(nodes, intent, volumeOwners, usedPorts, usedCPU, usedCPUOverflow, usedMemory, usedMemoryOverflow, requestedPorts, reqCPU, reqCPUOverflow, reqMemory, reqMemoryOverflow)
 		}
 
 		volumeClaims := claimTaskVolumes(target.ID, intent.Namespace, intent.Tasks, volumeOwners)
@@ -182,6 +200,70 @@ func Schedule(intent *PlacementIntent) []Placement {
 		}
 	}
 
+	return result, nil
+}
+
+func diagnosePlacement(nodes []*Node, intent *PlacementIntent, volumeOwners map[string]uuid.UUID, usedPorts map[uuid.UUID]map[int]bool, usedCPU map[uuid.UUID]int, usedCPUOverflow map[uuid.UUID]bool, usedMemory map[uuid.UUID]int64, usedMemoryOverflow map[uuid.UUID]bool, requestedPorts map[int]bool, reqCPU int, reqCPUOverflow bool, reqMemory int64, reqMemoryOverflow bool) *placementDiagnostic {
+	candidates := make([]*Node, 0, len(nodes))
+	for _, node := range nodes {
+		if node.Status == NodeStatusHealthy {
+			candidates = append(candidates, node)
+		}
+	}
+	if len(candidates) == 0 {
+		return &placementDiagnostic{Reason: "no_healthy_nodes", Message: "no healthy nodes are available for placement"}
+	}
+	candidates = filterNodes(candidates, func(node *Node) bool { return nodeMatchesConstraints(node, intent.Constraints) })
+	if len(candidates) == 0 {
+		return &placementDiagnostic{Reason: "constraint_mismatch", Message: "no healthy node satisfies the task group constraints"}
+	}
+	candidates = filterNodes(candidates, func(node *Node) bool {
+		return nodeHasTaskVolumes(node.ID, intent.Namespace, intent.Tasks, volumeOwners)
+	})
+	if len(candidates) == 0 {
+		return &placementDiagnostic{Reason: "volume_owner_unavailable", Message: "no eligible node owns all required volumes"}
+	}
+	candidates = filterNodes(candidates, func(node *Node) bool { return nodeHasCapabilities(node, intent.RequiredCapabilities) })
+	if len(candidates) == 0 {
+		return &placementDiagnostic{Reason: "missing_capability", Message: fmt.Sprintf("no eligible node supports required capabilities: %s", strings.Join(capabilityNames(intent.RequiredCapabilities), ", "))}
+	}
+	candidates = filterNodes(candidates, func(node *Node) bool {
+		for port := range requestedPorts {
+			if usedPorts[node.ID][port] {
+				return false
+			}
+		}
+		return true
+	})
+	if len(candidates) == 0 {
+		ports := make([]int, 0, len(requestedPorts))
+		for port := range requestedPorts {
+			ports = append(ports, port)
+		}
+		sort.Ints(ports)
+		values := make([]string, len(ports))
+		for i, port := range ports {
+			values[i] = fmt.Sprint(port)
+		}
+		return &placementDiagnostic{Reason: "host_port_conflict", Message: fmt.Sprintf("requested host ports are unavailable on eligible nodes: %s", strings.Join(values, ", "))}
+	}
+	candidates = filterNodes(candidates, func(node *Node) bool {
+		return fitsIntCapacity(node.CPUAllocatable, usedCPU[node.ID], usedCPUOverflow[node.ID], reqCPU, reqCPUOverflow) &&
+			fitsInt64Capacity(node.MemoryAllocatable, usedMemory[node.ID], usedMemoryOverflow[node.ID], reqMemory, reqMemoryOverflow)
+	})
+	if len(candidates) == 0 {
+		return &placementDiagnostic{Reason: "insufficient_capacity", Message: "eligible nodes lack the requested CPU or memory capacity"}
+	}
+	panic("placement diagnosis found an eligible node")
+}
+
+func filterNodes(nodes []*Node, keep func(*Node) bool) []*Node {
+	result := make([]*Node, 0, len(nodes))
+	for _, node := range nodes {
+		if keep(node) {
+			result = append(result, node)
+		}
+	}
 	return result
 }
 

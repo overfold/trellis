@@ -45,7 +45,8 @@ type workloadGrant struct {
 }
 
 // revokeStaleWorkloadCredentials revokes workload credentials whose
-// allocation record is gone, whose job or task group was deleted, or whose
+// allocation record is gone, whose job or task group was deleted (including a
+// job deleted and recreated under the same name), or whose
 // task group no longer grants the same api_access.
 func (s *Server) revokeStaleWorkloadCredentials(ctx context.Context) {
 	if s.tokenManager == nil {
@@ -55,10 +56,10 @@ func (s *Server) revokeStaleWorkloadCredentials(ctx context.Context) {
 	grants := make(map[string]workloadGrant)
 	for _, allocation := range s.allocations {
 		allocation.mu.Lock()
-		id, namespace, jobName, groupName := allocation.ID, allocation.Namespace, allocation.JobName, allocation.TaskGroupName
+		id, namespace, jobName, groupName, incarnation := allocation.ID, allocation.Namespace, allocation.JobName, allocation.TaskGroupName, allocation.JobIncarnation
 		allocation.mu.Unlock()
 		job := s.jobs[jobKey(namespace, jobName)]
-		if job == nil {
+		if job == nil || job.Incarnation != incarnation {
 			continue
 		}
 		for i := range job.Spec.TaskGroups {

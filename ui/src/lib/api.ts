@@ -1,6 +1,7 @@
 import type {
   AllocationEvent,
   Job,
+  JobRegistration,
   JobSpec,
   Node,
   SecretMetadata,
@@ -28,6 +29,18 @@ function errorMessage(data: unknown, fallback: string): string {
   return typeof record.error === "string" ? record.error : fallback;
 }
 
+// ApiError carries the HTTP status of a failed dashboard API request so
+// callers can react to specific outcomes such as a 409 version conflict.
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 async function apiFetch<T>(path: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`);
   if (!res.ok) {
@@ -47,7 +60,10 @@ async function apiMutation(
   const res = await fetch(`${API_BASE}${path}`, { ...init, headers });
   if (!res.ok) {
     const data: unknown = await res.json().catch(() => null);
-    throw new Error(errorMessage(data, `API error: ${res.status} ${res.statusText}`));
+    throw new ApiError(
+      errorMessage(data, `API error: ${res.status} ${res.statusText}`),
+      res.status,
+    );
   }
   return res;
 }
@@ -100,16 +116,23 @@ export async function fetchAllocationLogs(
   return res.text();
 }
 
-export async function submitJob(spec: JobSpec): Promise<void> {
-  await apiMutation(
+// submitJob applies spec only if the job is still at expectedVersion (0
+// requires that it does not exist). A concurrent change rejects the apply
+// with an ApiError whose status is 409.
+export async function submitJob(
+  spec: JobSpec,
+  expectedVersion: number,
+): Promise<JobRegistration> {
+  const res = await apiMutation(
     "/api/v1/jobs",
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ spec }),
+      body: JSON.stringify({ spec, expected_version: expectedVersion }),
     },
     spec.namespace,
   );
+  return res.json();
 }
 
 export async function deleteJob(name: string, namespace: string): Promise<void> {

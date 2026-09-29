@@ -2,7 +2,7 @@
 
 A **job manifest** is the first-party human-authored representation of one Trellis job. The CLI, dashboard, documentation, and examples use YAML because it is pleasant to edit, but the control-plane API does not process YAML. Consumers convert their representation into the canonical JSON `JobSpec` before calling Trellis.
 
-> **Consumers own representation; Trellis owns meaning.** YAML, HCL, Python, forms, or another frontend may provide their own authoring conveniences. Consumers are responsible for converting those conveniences into canonical JSON. Trellis remains authoritative for validation, defaults, planning, revision semantics, and reconciliation.
+> **Consumers own representation; Trellis owns meaning.** YAML, HCL, Python, forms, or another frontend may provide their own authoring conveniences. Consumers are responsible for converting those conveniences into canonical JSON. Trellis remains authoritative for validation, defaults, planning, version and revision semantics, and reconciliation.
 
 The repository publishes two schemas:
 
@@ -144,7 +144,7 @@ Replacements of failed allocations are delayed by a per-task-group backoff so th
 
 When a node stops sending heartbeats for longer than the allocation loss timeout (45 seconds by default), its allocations become `lost` and are replaced like failed ones. Lost is terminal: if the node returns, its lost allocations are never adopted again. While a lost allocation record is retained, containers the returning node still runs for it keep running until the group has `count` running replacements, and are then stopped. If an older pruned allocation is later reported, Trellis stops it as an observed orphan. They are stopped earlier when they block a replacement, for example by holding a host port the replacement needs on the same node. The loss timeout is server configuration (`allocation_loss_timeout`), not a manifest field. See [lost allocations](user-model.md#lost-allocations).
 
-`update.strategy` is `recreate` (the default) or `rolling`. For rolling updates, `max_parallel` limits how many not-yet-healthy replacements may be in flight; zero uses the effective default of one.
+`update.strategy` is `recreate` (the default) or `rolling`. For rolling updates, `max_parallel` limits both the number of not-yet-healthy replacements in flight and temporary live capacity above `count`. A stop frees capacity only after it succeeds, so a failed stop cannot admit an excess replacement. Zero uses the effective default of one.
 
 Task groups are the unit of placement, scaling, updates, restart behavior, and draining. Every task in a group is coupled to that lifecycle.
 

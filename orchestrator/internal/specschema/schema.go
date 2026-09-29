@@ -315,7 +315,7 @@ func describeAuthoringFields(root schema) {
 	describeDef(root, "RestartPolicySpec", "max_restarts", "Maximum failures allowed inside the restart window. Zero disables retries.")
 	describeDef(root, "RestartPolicySpec", "window", "Time window used to count restart attempts.")
 	describeDef(root, "UpdateSpec", "strategy", "Replacement strategy. Omit for recreate; rolling starts healthy replacement capacity incrementally.")
-	describeDef(root, "UpdateSpec", "max_parallel", "Maximum not-yet-healthy rolling replacements in flight. Zero uses Trellis's effective default of one.")
+	describeDef(root, "UpdateSpec", "max_parallel", "Maximum not-yet-healthy rolling replacements in flight and temporary live capacity above count. Zero uses Trellis's effective default of one.")
 
 	describeDef(root, "TaskSpec", "name", "Task identifier, unique within this task group.")
 	describeDef(root, "TaskSpec", "image", "Pullable OCI image reference. Pin a version or digest for reproducible deployments.")

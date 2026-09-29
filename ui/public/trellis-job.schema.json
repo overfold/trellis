@@ -486,7 +486,7 @@
       "additionalProperties": false,
       "properties": {
         "max_parallel": {
-          "description": "Maximum not-yet-healthy rolling replacements in flight. Zero uses Trellis's effective default of one.",
+          "description": "Maximum not-yet-healthy rolling replacements in flight and temporary live capacity above count. Zero uses Trellis's effective default of one.",
           "minimum": 0,
           "type": "integer"
         },

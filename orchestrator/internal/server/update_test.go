@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/overfold/trellis/internal/api"
 	"github.com/overfold/trellis/internal/lifecycle"
 	"github.com/overfold/trellis/internal/spec"
 )
@@ -28,6 +29,28 @@ func newTestServerWithAgent() (*Server, *testAgent) {
 	return s, agent
 }
 
+// observeStarted sends a heartbeat for a node that reports every task of its
+// starting and running allocations running and healthy, as an agent does once
+// its background starts complete.
+func observeStarted(t *testing.T, s *Server, nodeID uuid.UUID) {
+	t.Helper()
+	var statuses []api.AllocationStatus
+	s.mu.RLock()
+	for _, allocation := range s.allocations {
+		allocation.mu.Lock()
+		if allocation.Node != nil && allocation.Node.ID == nodeID && (allocation.Phase == lifecycle.PhaseStarting || allocation.Phase == lifecycle.PhaseRunning) {
+			for _, task := range allocation.Tasks {
+				statuses = append(statuses, api.AllocationStatus{ID: allocation.ID, Generation: allocation.Generation, Task: task.Name, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy})
+			}
+		}
+		allocation.mu.Unlock()
+	}
+	s.mu.RUnlock()
+	if err := s.Heartbeat(context.Background(), nodeID, statuses, "test", nil, nil, nodeResourceObservation{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestReconcileDoesNotCreateAllocationsForInvalidJob(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()
@@ -36,9 +59,7 @@ func TestReconcileDoesNotCreateAllocationsForInvalidJob(t *testing.T) {
 	limits.MaxTaskGroupsPerJob = 1
 	limits.MaxTasksPerTaskGroup = 1
 	limits.MaxDesiredAllocations = 1
-	if err := s.SetJobLimits(limits); err != nil {
-		t.Fatal(err)
-	}
+	s.jobLimits = limits
 	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
 	s.nodes[node.ID] = node
 	s.jobs[jobKey("default", "oversized")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "oversized", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 2, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}, Revision: 1}
@@ -69,13 +90,13 @@ func TestReconcileContinuesAfterWireGuardPortExhaustion(t *testing.T) {
 	if old.Phase != lifecycle.PhaseStopped {
 		t.Fatalf("deleted allocation phase = %s, want stopped", old.Phase)
 	}
-	if len(s.allocations) != 2 || s.allocations[1].Namespace != "plain" || s.allocations[1].Phase != lifecycle.PhaseRunning {
-		t.Fatalf("allocations after exhaustion = %+v, want stopped old and running plain", s.allocations)
+	if len(s.allocations) != 2 || s.allocations[1].Namespace != "plain" || s.allocations[1].Phase != lifecycle.PhaseStarting {
+		t.Fatalf("allocations after exhaustion = %+v, want stopped old and starting plain", s.allocations)
 	}
 
 	s.Reconcile(context.Background())
-	if len(s.allocations) != 3 || s.allocations[2].Namespace != "new" || s.allocations[2].Phase != lifecycle.PhaseRunning {
-		t.Fatalf("allocations after slot release = %+v, want new network allocation running", s.allocations)
+	if len(s.allocations) != 3 || s.allocations[2].Namespace != "new" || s.allocations[2].Phase != lifecycle.PhaseStarting {
+		t.Fatalf("allocations after slot release = %+v, want new network allocation starting", s.allocations)
 	}
 }
 
@@ -114,9 +135,7 @@ func TestNamespaceDesiredAllocationLimitIncludesOtherJobs(t *testing.T) {
 	defer agent.server.Close()
 	limits := spec.DefaultLimits()
 	limits.MaxDesiredAllocationsPerNamespace = 2
-	if err := s.SetJobLimits(limits); err != nil {
-		t.Fatal(err)
-	}
+	s.jobLimits = limits
 	s.jobs[jobKey("default", "first")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "first", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 2, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}}}
 	candidate := &spec.JobSpec{Namespace: "default", Name: "second", TaskGroups: []spec.TaskGroupSpec{{Name: "worker", Count: 1, Tasks: []spec.TaskSpec{{Name: "worker", Image: "worker"}}}}}
 	if err := s.CanonicalizeJob(candidate); err != nil {
@@ -132,9 +151,7 @@ func TestReconcileEnforcesNamespaceDesiredAllocationLimit(t *testing.T) {
 	defer agent.server.Close()
 	limits := spec.DefaultLimits()
 	limits.MaxDesiredAllocationsPerNamespace = 2
-	if err := s.SetJobLimits(limits); err != nil {
-		t.Fatal(err)
-	}
+	s.jobLimits = limits
 	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
 	s.nodes[node.ID] = node
 	for _, name := range []string{"first", "second", "third"} {
@@ -391,7 +408,7 @@ func TestLabelOnlyRevisionSkipsDrain(t *testing.T) {
 			Tasks:  []spec.TaskSpec{{Name: "server", Image: "app:v1"}},
 		}},
 	}
-	if err := s.RegisterJob(context.Background(), "default", jobSpec); err != nil {
+	if _, err := s.RegisterJob(context.Background(), "default", jobSpec, nil); err != nil {
 		t.Fatal(err)
 	}
 	job := s.jobs[jobKey("default", "web")]
@@ -408,7 +425,7 @@ func TestLabelOnlyRevisionSkipsDrain(t *testing.T) {
 			Tasks:  []spec.TaskSpec{{Name: "server", Image: "app:v1"}},
 		}},
 	}
-	if err := s.RegisterJob(context.Background(), "default", updatedSpec); err != nil {
+	if _, err := s.RegisterJob(context.Background(), "default", updatedSpec, nil); err != nil {
 		t.Fatal(err)
 	}
 	job = s.jobs[jobKey("default", "web")]
@@ -427,7 +444,7 @@ func TestTaskChangeBumpsRevision(t *testing.T) {
 			Tasks: []spec.TaskSpec{{Name: "server", Image: "app:v1"}},
 		}},
 	}
-	if err := s.RegisterJob(context.Background(), "default", jobSpec); err != nil {
+	if _, err := s.RegisterJob(context.Background(), "default", jobSpec, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -438,7 +455,7 @@ func TestTaskChangeBumpsRevision(t *testing.T) {
 			Tasks: []spec.TaskSpec{{Name: "server", Image: "app:v2"}},
 		}},
 	}
-	if err := s.RegisterJob(context.Background(), "default", updated); err != nil {
+	if _, err := s.RegisterJob(context.Background(), "default", updated, nil); err != nil {
 		t.Fatal(err)
 	}
 	job := s.jobs[jobKey("default", "web")]
@@ -457,7 +474,7 @@ func TestCountChangeIsLabelOnly(t *testing.T) {
 			Tasks: []spec.TaskSpec{{Name: "server", Image: "app:v1"}},
 		}},
 	}
-	if err := s.RegisterJob(context.Background(), "default", jobSpec); err != nil {
+	if _, err := s.RegisterJob(context.Background(), "default", jobSpec, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -469,7 +486,7 @@ func TestCountChangeIsLabelOnly(t *testing.T) {
 			Tasks: []spec.TaskSpec{{Name: "server", Image: "app:v1"}},
 		}},
 	}
-	if err := s.RegisterJob(context.Background(), "default", updated); err != nil {
+	if _, err := s.RegisterJob(context.Background(), "default", updated, nil); err != nil {
 		t.Fatal(err)
 	}
 	job := s.jobs[jobKey("default", "web")]

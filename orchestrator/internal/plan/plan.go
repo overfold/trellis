@@ -23,13 +23,15 @@ type Result struct {
 	Action             string   `json:"action"`
 	Namespace          string   `json:"namespace"`
 	Job                string   `json:"job"`
+	BaseVersion        int      `json:"base_version,omitempty"`
 	BaseRevision       int      `json:"base_revision,omitempty"`
 	DesiredAllocations int      `json:"desired_allocations"`
 	Changes            []Change `json:"changes"`
 }
 
 // Build returns the canonical semantic plan for desired. current may be nil when the job does not exist.
-func Build(current *spec.JobSpec, currentRevision int, desired *spec.JobSpec) Result {
+// currentVersion is the version an apply of this plan should expect.
+func Build(current *spec.JobSpec, currentVersion, currentRevision int, desired *spec.JobSpec) Result {
 	result := Result{
 		Action:             "create",
 		Namespace:          desired.Namespace,
@@ -41,6 +43,7 @@ func Build(current *spec.JobSpec, currentRevision int, desired *spec.JobSpec) Re
 		return result
 	}
 
+	result.BaseVersion = currentVersion
 	result.BaseRevision = currentRevision
 	result.Changes = Diff(current, desired)
 	if len(result.Changes) == 0 {

@@ -33,7 +33,8 @@ cluster
 | **Namespace** | Tenant, authorization, discovery, and workload-isolation boundary for Trellis-owned resources; named by jobs rather than managed through create/delete lifecycle. |
 | **Job** | Named desired workload in a namespace. |
 | **Job manifest** | The YAML document humans author and apply to create or update a job. |
-| **Revision** | The version of a job produced by an apply. |
+| **Version** | The job specification produced by an accepted apply. Every change advances it, including scaling and label changes. |
+| **Revision** | The execution content of a job. It advances only when a change replaces allocations, such as a new image or command. |
 | **Task group** | Placement, scaling, restart, and update unit inside a job. |
 | **Task** | One container definition, including its network attachment, inside a task group. |
 | **Allocation** | Runtime instance created by Trellis to satisfy desired task-group capacity. |
@@ -51,14 +52,14 @@ The HTTP API uses JSON because it is a transport API. JSON field names intention
 This distinction keeps the workflow simple:
 
 ```text
-write YAML manifest → apply → Trellis creates a revision → inspect job → inspect allocations when needed
+write YAML manifest → apply → Trellis creates a version (and a revision when execution changes) → inspect job → inspect allocations when needed
 ```
 
 ## Desired state and runtime state
 
 The interfaces should keep desired and runtime state visibly separate:
 
-- A **job manifest** and **revision** describe desired state.
+- A **job manifest**, its **version**, and its **revision** describe desired state.
 - An **allocation lifecycle** describes whether Trellis has placed, started, stopped, failed, or lost runtime work.
 - **Health** describes whether running work is ready/healthy.
 
@@ -66,7 +67,7 @@ For example, an allocation can be `running` and `unhealthy`. Interfaces should n
 
 ### Lost allocations
 
-An allocation becomes **lost** when its node stops sending heartbeats for longer than the allocation loss timeout (45 seconds by default, set by the operator with `allocation_loss_timeout`), and the current leader has itself been leader for at least 30 seconds. The second condition gives nodes time to report to a newly elected leader before anything is declared lost. A lost allocation no longer counts toward its task group's `count`, so Trellis places a replacement.
+An allocation becomes **lost** when its node stops sending heartbeats for longer than the allocation loss timeout (45 seconds by default, set by the operator with `allocation_loss_timeout`), and the current leader has itself been leader for at least 30 seconds. The second condition gives nodes time to report to a newly elected leader before anything is declared lost. A newly elected leader counts a node's silence from the start of its own leadership, so a failover can delay, but never hasten, an allocation becoming lost. A lost allocation no longer counts toward its task group's `count`, so Trellis places a replacement.
 
 Lost is terminal, like `stopped` and `failed`. If the node comes back and still runs the lost allocation's containers, Trellis does not adopt them again: the allocation stays `lost` and never counts toward the group. While its allocation record is retained, the containers are not stopped right away: Trellis keeps them running until the group has enough `running` replacements, then stops them. Older records beyond the per-task-group terminal retention limit are pruned; if that container is later reported, Trellis stops it as an observed orphan. The kept containers are not part of service discovery. They are stopped sooner if they stand in the way of a replacement: for example, when a replacement needs the same host port on the same node, or when the group can only be placed on that node (such as a volume bound to it) and would not otherwise fit.
 
@@ -74,14 +75,16 @@ Lost is terminal, like `stopped` and `failed`. If the node comes back and still 
 
 Use the same verbs across interfaces:
 
-- **Apply** a job manifest to create a job or advance its revision.
-- **Delete** a job to remove its desired state and retained revision history, and stop its allocations.
+- **Apply** a job manifest to create a job or advance its version.
+- **Delete** a job to remove its desired state and retained version history, and stop its allocations.
 - **Drain** / **undrain** a node for maintenance.
 - **Inspect** a job for desired-versus-observed state.
 - **Inspect an allocation** for placement, lifecycle, health, events, and task logs.
 - **Set**, **describe**, and **delete** secrets.
 
-Trellis keeps the 10 newest substantive revisions of each live job for inspection and backup. Applying execution changes advances the revision and drops older history beyond that window; metadata, scaling, and update-policy-only changes do not add a revision. Deleting a job removes its history, so applying the same name later starts again at revision 1.
+Every apply that changes the job specification advances the job's **version** and records the new specification in its history. Changes to execution content (for example an image, command, environment, resources, or networking) also advance the **revision** and roll allocations according to the update policy; label, `count`, and update-policy-only changes keep the revision, so scaling does not restart running allocations but still appears in history. Applying an unchanged manifest creates neither. Trellis keeps the 10 newest versions of each live job for inspection and backup. Deleting a job removes its history, so applying the same name later starts again at version 1 and revision 1.
+
+Applies are fenced by version. `trellisctl jobs apply` and the dashboard send the version their plan was computed against, and Trellis rejects the apply with a conflict when the job was changed, created, or deleted in between, so two concurrent pipelines cannot silently overwrite each other. Plan again to review the current state and apply that. Because a recreated job starts again at version 1, a delete followed by a recreation that reaches the same version before the stale apply arrives is not detected.
 
 Documentation and UI copy use these canonical terms; CLI aliases are convenience spellings rather than a second vocabulary.
 

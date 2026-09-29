@@ -1,8 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"text/tabwriter"
 	"time"
 
@@ -80,7 +82,7 @@ func NewJobsApplyCmd() *cobra.Command {
 				return printJobPlan(cmd.OutOrStdout(), jobPlan)
 			}
 			if jobPlan.Action == "none" {
-				if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Job %s/%s already matches the manifest (revision %d).\n", job.Namespace, job.Name, jobPlan.BaseRevision); err != nil {
+				if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Job %s/%s already matches the manifest (version %d, revision %d).\n", job.Namespace, job.Name, jobPlan.BaseVersion, jobPlan.BaseRevision); err != nil {
 					return err
 				}
 				if wait {
@@ -88,21 +90,23 @@ func NewJobsApplyCmd() *cobra.Command {
 				}
 				return nil
 			}
-			if err := serverClient.SubmitJob(cmd.Context(), job); err != nil {
+			// Apply only if the job is still at the version this plan was
+			// computed against; a concurrent apply makes the server reject it.
+			expectedVersion := jobPlan.BaseVersion
+			applied, err := serverClient.SubmitJob(cmd.Context(), job, &expectedVersion)
+			if err != nil {
+				var httpErr *client.HTTPError
+				if errors.As(err, &httpErr) && httpErr.Status == http.StatusConflict {
+					return fmt.Errorf("apply job %s/%s: the job changed after it was planned (%s); run apply again to review the new plan", job.Namespace, job.Name, httpErr.Message())
+				}
 				return fmt.Errorf("apply job: %w", err)
 			}
-			after, getErr := serverClient.GetJob(cmd.Context(), job.Name)
-			switch {
-			case getErr != nil:
-				if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Applied job %s/%s.\n", job.Namespace, job.Name); err != nil {
+			if jobPlan.Action == "update" {
+				if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Applied job %s/%s: version %d -> %d, %s.\n", job.Namespace, job.Name, jobPlan.BaseVersion, applied.Version, revisionTransition(jobPlan.BaseRevision, applied.Revision)); err != nil {
 					return err
 				}
-			case jobPlan.Action == "update":
-				if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Applied job %s/%s: revision %d -> %d.\n", job.Namespace, job.Name, jobPlan.BaseRevision, after.Revision); err != nil {
-					return err
-				}
-			default:
-				if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Created job %s/%s at revision %d.\n", job.Namespace, job.Name, after.Revision); err != nil {
+			} else {
+				if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Created job %s/%s at version %d, revision %d.\n", job.Namespace, job.Name, applied.Version, applied.Revision); err != nil {
 					return err
 				}
 			}
@@ -120,6 +124,13 @@ func NewJobsApplyCmd() *cobra.Command {
 	flags.DurationVar(&timeout, "timeout", 5*time.Minute, "Maximum time to wait (0 means no timeout)")
 	flags.DurationVar(&interval, "interval", 2*time.Second, "Polling interval while waiting")
 	return cmd
+}
+
+func revisionTransition(before, after int) string {
+	if before == after {
+		return fmt.Sprintf("revision %d unchanged", after)
+	}
+	return fmt.Sprintf("revision %d -> %d", before, after)
 }
 
 func NewJobsListCmd() *cobra.Command {
@@ -316,7 +327,7 @@ func jobClient(namespace string) (*client.ServerClient, error) {
 }
 
 func printJobStatus(w io.Writer, status *api.JobStatusResponse) error {
-	if _, err := fmt.Fprintf(w, "Job: %s\nRevision: %d\nState: %s\nDesired: %d\nRunning: %d\nHealthy: %d\n", status.Name, status.Revision, jobState(status), status.Desired, status.Running, status.Healthy); err != nil {
+	if _, err := fmt.Fprintf(w, "Job: %s\nVersion: %d\nRevision: %d\nState: %s\nDesired: %d\nRunning: %d\nHealthy: %d\n", status.Name, status.Version, status.Revision, jobState(status), status.Desired, status.Running, status.Healthy); err != nil {
 		return err
 	}
 	if len(status.Allocations) == 0 {

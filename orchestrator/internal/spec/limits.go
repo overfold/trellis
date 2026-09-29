@@ -6,15 +6,15 @@ import "fmt"
 // persisted or reconciled. It is deliberately absent from JobSpec so authors
 // cannot relax cluster safety bounds.
 type Limits struct {
-	MaxReplicasPerTaskGroup           int
-	MaxTaskGroupsPerJob               int
-	MaxTasksPerTaskGroup              int
-	MaxDesiredAllocations             int
-	MaxDesiredAllocationsPerNamespace int
-	DefaultTaskCPU                    int
-	DefaultTaskMemory                 ByteSize
-	MaxTaskCPU                        int
-	MaxTaskMemory                     ByteSize
+	MaxReplicasPerTaskGroup           int      `json:"max_replicas_per_task_group"`
+	MaxTaskGroupsPerJob               int      `json:"max_task_groups_per_job"`
+	MaxTasksPerTaskGroup              int      `json:"max_tasks_per_task_group"`
+	MaxDesiredAllocations             int      `json:"max_desired_allocations"`
+	MaxDesiredAllocationsPerNamespace int      `json:"max_desired_allocations_per_namespace"`
+	DefaultTaskCPU                    int      `json:"default_task_cpu"`
+	DefaultTaskMemory                 ByteSize `json:"default_task_memory"`
+	MaxTaskCPU                        int      `json:"max_task_cpu"`
+	MaxTaskMemory                     ByteSize `json:"max_task_memory"`
 }
 
 // DefaultLimits provides bounded, useful defaults for small clusters.
@@ -64,6 +64,24 @@ func Canonicalize(job *JobSpec, limits Limits) error {
 		}
 	}
 	return ValidateWithLimits(job, limits)
+}
+
+// Canonical returns a canonical copy of job and leaves job unchanged. The copy
+// owns its task groups and tasks; other nested values are shared with job and
+// must be treated as read-only.
+func Canonical(job *JobSpec, limits Limits) (*JobSpec, error) {
+	if job == nil {
+		return nil, Canonicalize(nil, limits)
+	}
+	copied := *job
+	copied.TaskGroups = append([]TaskGroupSpec(nil), job.TaskGroups...)
+	for i := range copied.TaskGroups {
+		copied.TaskGroups[i].Tasks = append([]TaskSpec(nil), copied.TaskGroups[i].Tasks...)
+	}
+	if err := Canonicalize(&copied, limits); err != nil {
+		return nil, err
+	}
+	return &copied, nil
 }
 
 // ValidateWithLimits validates a resolved canonical job against its operator

@@ -292,19 +292,58 @@ func (r *RaftStore) Delete(_ context.Context, key string) error {
 	return nil
 }
 
-// AddVoter adds a voting server to Raft.
-func (r *RaftStore) AddVoter(id, address string) error {
-	fut := r.raft.AddVoter(raft.ServerID(id), raft.ServerAddress(address), 0, 30*time.Second)
-	return fut.Error()
+// RaftMember is one server in the latest, possibly uncommitted, Raft
+// configuration.
+type RaftMember struct {
+	ID      string
+	Address string
+	Voter   bool
 }
 
-// RemoveServer removes a server from Raft.
+// Membership returns the latest Raft configuration known to this server.
+// hashicorp/raft does not expose that configuration's log index, so callers
+// that plan changes from it must serialize their own reads and changes.
+func (r *RaftStore) Membership() ([]RaftMember, error) {
+	fut := r.raft.GetConfiguration()
+	if err := fut.Error(); err != nil {
+		return nil, err
+	}
+	servers := fut.Configuration().Servers
+	members := make([]RaftMember, 0, len(servers))
+	for _, server := range servers {
+		members = append(members, RaftMember{ID: string(server.ID), Address: string(server.Address), Voter: server.Suffrage == raft.Voter})
+	}
+	return members, nil
+}
+
+// AddNonvoter adds a server that replicates the log without voting. An
+// existing voter with the same ID keeps its vote and only has its address
+// updated, so a rejoin never demotes a member.
+func (r *RaftStore) AddNonvoter(id, address string) error {
+	return r.raft.AddNonvoter(raft.ServerID(id), raft.ServerAddress(address), 0, 10*time.Second).Error()
+}
+
+// PromoteVoter gives a member a vote.
+func (r *RaftStore) PromoteVoter(id, address string) error {
+	return r.raft.AddVoter(raft.ServerID(id), raft.ServerAddress(address), 0, 10*time.Second).Error()
+}
+
+// DemoteVoter removes a member's vote, keeping it as a non-voter.
+func (r *RaftStore) DemoteVoter(id string) error {
+	return r.raft.DemoteVoter(raft.ServerID(id), 0, 10*time.Second).Error()
+}
+
+// AppliedIndex returns the last log index applied to the local FSM.
+func (r *RaftStore) AppliedIndex() uint64 { return r.raft.AppliedIndex() }
+
+// RemoveServer removes a member from Raft.
 func (r *RaftStore) RemoveServer(id string) error {
 	fut := r.raft.RemoveServer(raft.ServerID(id), 0, 10*time.Second)
 	return fut.Error()
 }
 
-// LeadershipTransfer asks Raft to hand leadership to another voter.
+// LeadershipTransfer asks Raft to hand leadership to the most up-to-date
+// voter. Non-voters are never chosen; with no other voter it fails.
 func (r *RaftStore) LeadershipTransfer() error {
 	return r.raft.LeadershipTransfer().Error()
 }

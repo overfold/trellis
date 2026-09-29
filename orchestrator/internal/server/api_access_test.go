@@ -172,6 +172,14 @@ func TestRevokeStaleWorkloadCredentials(t *testing.T) {
 
 	s.jobs[jobKey("default", "web")].Spec.TaskGroups[0].APIAccess = access
 	kept = issue("kept")
+	s.jobs[jobKey("default", "web")].Incarnation = "recreated"
+	s.revokeStaleWorkloadCredentials(ctx)
+	if valid(kept) {
+		t.Fatal("recreating the job left the previous incarnation's workload token valid")
+	}
+
+	s.jobs[jobKey("default", "web")].Incarnation = ""
+	kept = issue("kept")
 	delete(s.jobs, jobKey("default", "web"))
 	s.revokeStaleWorkloadCredentials(ctx)
 	if valid(kept) {

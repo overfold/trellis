@@ -183,8 +183,8 @@ func TestReconcileKeepsLostOriginalUntilReplacementRuns(t *testing.T) {
 		if operations := recordedOperations(t, f.agent); len(operations) != 0 {
 			t.Fatalf("operations = %#v, want none: the original is kept and nothing fits", operations)
 		}
-		if replacements := f.replacements(); len(replacements) != 0 {
-			t.Fatalf("replacements = %#v, want none placed", replacements)
+		if replacements := f.replacements(); len(replacements) != 1 || replacements[0].Phase != lifecycle.PhasePending || replacements[0].Reason != "insufficient_capacity" {
+			t.Fatalf("replacements = %#v, want one pending capacity diagnostic", replacements)
 		}
 	})
 	t.Run("original reported starting is not retained", func(t *testing.T) {
@@ -374,7 +374,11 @@ func TestReconcileAllocationLossTimeout(t *testing.T) {
 		{name: "configured before timeout", timeout: 5 * time.Minute, silentFor: 4 * time.Minute, leaderFor: time.Hour, wantNodeState: NodeStatusUnhealthy},
 		{name: "configured at timeout", timeout: 5 * time.Minute, silentFor: 5 * time.Minute, leaderFor: time.Hour, wantLost: true, wantNodeState: NodeStatusUnhealthy},
 		{name: "leader recovery grace", silentFor: time.Hour, leaderFor: leaderRecoveryGrace - time.Second, wantNodeState: NodeStatusUnhealthy},
-		{name: "after leader recovery grace", silentFor: time.Hour, leaderFor: leaderRecoveryGrace, wantLost: true, wantNodeState: NodeStatusUnhealthy},
+		// Heartbeat times are leader observations that are not replicated, so a
+		// new leader measures a node's silence from the start of its own term.
+		{name: "silence counted from term start", silentFor: time.Hour, leaderFor: DefaultAllocationLossTimeout - time.Second, wantNodeState: NodeStatusUnhealthy},
+		{name: "silent for timeout since term start", silentFor: time.Hour, leaderFor: DefaultAllocationLossTimeout, wantLost: true, wantNodeState: NodeStatusUnhealthy},
+		{name: "never heartbeated to this leader", silentFor: -1, leaderFor: DefaultAllocationLossTimeout, wantLost: true, wantNodeState: NodeStatusUnhealthy},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, agent := newTestServerWithAgent()
@@ -386,7 +390,10 @@ func TestReconcileAllocationLossTimeout(t *testing.T) {
 			}
 			now := s.now()
 			s.leaderSince = now.Add(-tc.leaderFor)
-			node := &Node{ID: lostNodeAID, Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: now.Add(-tc.silentFor)}
+			node := &Node{ID: lostNodeAID, Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
+			if tc.silentFor >= 0 {
+				node.LastHeartbeat = now.Add(-tc.silentFor)
+			}
 			s.nodes[node.ID] = node
 			tasks := []spec.TaskSpec{{Name: "app", Image: "app"}}
 			s.jobs[jobKey("default", "web")] = &Job{Spec: &spec.JobSpec{

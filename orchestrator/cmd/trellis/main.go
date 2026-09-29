@@ -77,6 +77,10 @@ type config struct {
 	MaxTaskMemory                                                                  string
 	TaskPidsLimit                                                                  int64
 	AllocationLossTimeout                                                          time.Duration
+	// Explicit records which cluster settings the operator set on this node,
+	// through flags or the configuration file. Cluster settings initialize a
+	// new cluster; on an existing cluster the replicated values win.
+	Explicit explicitClusterSettings
 }
 
 func main() {
@@ -91,6 +95,7 @@ func main() {
 					return err
 				}
 			}
+			recordExplicitClusterSettingFlags(cfg, cmd.Flags())
 			return run(cmd.Context(), cfg)
 		},
 	}
@@ -119,10 +124,10 @@ func main() {
 	if buildTestRuntime != nil {
 		buildTestRuntime.addFlags(f)
 	}
-	f.StringVar(&cfg.WireGuardPool, "wireguard-pool", "10.64.0.0/10", "Cluster address pool used for automatic namespace networking")
+	f.StringVar(&cfg.WireGuardPool, "wireguard-pool", server.DefaultWireGuardPool, "Namespace network address pool of a new cluster (existing clusters use their replicated pool)")
 	f.StringVar(&cfg.WireGuardEndpoint, "wireguard-endpoint", "", "Externally reachable WireGuard host or base host:port")
 	f.IntVar(&cfg.WireGuardPort, "wireguard-port", 51820, "First UDP port in the per-namespace WireGuard range")
-	f.IntVar(&cfg.WireGuardPortCount, "wireguard-port-count", 256, "Number of consecutive UDP ports available for namespace WireGuard networks")
+	f.IntVar(&cfg.WireGuardPortCount, "wireguard-port-count", server.DefaultWireGuardPortCount, "Number of consecutive UDP ports for namespace WireGuard networks; must match the cluster's replicated count")
 	f.StringVar(&cfg.DNSListen, "dns-listen", net.JoinHostPort(network.WorkloadDNSAddress, "53"), "Workload DNS resolver listen address")
 	f.StringVar(&cfg.CACert, "ca-cert", "", "Path to cluster CA certificate (PEM)")
 	f.StringVar(&cfg.CAKey, "ca-key", "", "Path to cluster CA private key (PEM)")
@@ -190,6 +195,11 @@ func run(parent context.Context, cfg *config) error {
 	if err := spec.ValidateLimits(limits); err != nil {
 		return fmt.Errorf("job limits: %w", err)
 	}
+	pool, err := server.ParseWireGuardPool(cfg.WireGuardPool)
+	if err != nil {
+		return fmt.Errorf("wireguard_pool or --wireguard-pool: %w", err)
+	}
+	bootstrapSettings := server.ClusterSettings{JobLimits: limits, WireGuardPool: pool, WireGuardPortCount: cfg.WireGuardPortCount}
 	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
 		return fmt.Errorf("create data dir: %w", err)
 	}
@@ -304,9 +314,6 @@ func run(parent context.Context, cfg *config) error {
 
 	stateCtl := server.NewStateController(raftStore, cfg.Cluster)
 	control := server.NewServer(log, local, stateCtl, raftStore, cfg.Cluster, cfg.ServerAdvertise)
-	if err := control.SetJobLimits(limits); err != nil {
-		return err
-	}
 	if err := control.SetAllocationLossTimeout(cfg.AllocationLossTimeout); err != nil {
 		return err
 	}
@@ -326,17 +333,11 @@ func run(parent context.Context, cfg *config) error {
 	control.SetClusterJoiner(raftStore)
 	control.SetNodeID(id)
 	control.SetClientTLS(clientTLS)
-	if err := control.SetNetworkPool(cfg.WireGuardPool); err != nil {
-		return err
-	}
-	if err := control.SetWireGuardPortCount(cfg.WireGuardPortCount); err != nil {
-		return err
-	}
 
 	server.RegisterMetrics(control, prometheus.DefaultRegisterer)
 
 	for i := 0; ; i++ {
-		if err := control.Init(ctx, cfg.AdminPublicKey); err == nil {
+		if err := control.Init(ctx, server.ClusterBootstrap{AdministratorPublicKey: cfg.AdminPublicKey, Settings: bootstrapSettings}); err == nil {
 			break
 		} else if i >= 30 {
 			return fmt.Errorf("initialize control plane: %w", err)
@@ -346,6 +347,9 @@ func run(parent context.Context, cfg *config) error {
 			return ctx.Err()
 		case <-time.After(500 * time.Millisecond):
 		}
+	}
+	if err := applyClusterSettings(log, cfg, bootstrapSettings, control.ClusterSettings()); err != nil {
+		return err
 	}
 	if cfg.Join == "" {
 		localCertificate, err := x509.ParseCertificate(peerTLS.Certificates[0].Certificate[0])
@@ -377,6 +381,7 @@ func run(parent context.Context, cfg *config) error {
 	volumeManager := agent.NewVolumeManager(cfg.DataDir)
 	ag := agent.NewAgent(log, runtimeClient, healthMgr, restartCtl, agent.NewPortManager(runtimeClient, 0, 0, 0), volumeManager, leaderClient, id)
 	ag.SetVersion(version.Current())
+	ag.SetRaftAppliedIndex(raftStore.AppliedIndex)
 	if err := ag.SetTaskPidsLimit(cfg.TaskPidsLimit); err != nil {
 		return fmt.Errorf("resources.task_pids_limit or --task-pids-limit: %w", err)
 	}

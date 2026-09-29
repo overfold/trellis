@@ -2,13 +2,18 @@ package server
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/overfold/trellis/internal/api"
 	"github.com/overfold/trellis/internal/network"
+	"github.com/overfold/trellis/internal/spec"
 	"github.com/overfold/trellis/internal/state"
 )
 
@@ -52,6 +57,57 @@ func TestAcquireLeadershipAdvancesDurableEpoch(t *testing.T) {
 	}
 	if s.cluster.ControlEpoch != 4 {
 		t.Fatalf("cached cluster control epoch = %d, want 4", s.cluster.ControlEpoch)
+	}
+}
+
+func TestAcquireLeadershipCompactionFailureLeavesEpochAndMemoryUnchanged(t *testing.T) {
+	ctx := context.Background()
+	store := &failingBatchStore{memoryStore: memoryStore{}}
+	stateCtl := NewStateController(store, "test-cluster")
+	if err := stateCtl.PutCluster(ctx, &Cluster{AdministratorPublicKey: "key", ControlEpoch: 3}); err != nil {
+		t.Fatal(err)
+	}
+	identity := jobKey("default", "web")
+	job := &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "web"}, Revision: 12}
+	prefix := "trellis/test-cluster/job-revisions/" + url.QueryEscape(identity) + "/"
+	for version := 1; version <= 12; version++ {
+		raw, err := json.Marshal(&JobRevisionRecord{Version: version, Revision: version, Spec: job.Spec, CreatedAt: time.Unix(int64(version), 0).UTC()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		store.memoryStore[prefix+fmt.Sprint(version)] = raw
+	}
+	s := &Server{
+		state:        stateCtl,
+		cluster:      &Cluster{AdministratorPublicKey: "key", ControlEpoch: 3},
+		controlEpoch: 3,
+		jobs:         map[string]*Job{identity: job},
+		now:          time.Now,
+	}
+
+	err := s.AcquireLeadership(ctx)
+	if err == nil || !strings.Contains(err.Error(), "storage unavailable") {
+		t.Fatalf("AcquireLeadership error = %v, want storage failure", err)
+	}
+	persisted, getErr := stateCtl.GetCluster(ctx)
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if persisted.ControlEpoch != 3 || s.cluster.ControlEpoch != 3 || s.controlEpoch != 3 {
+		t.Fatalf("epoch after failed activation: durable=%d cluster=%d active=%d; want 3", persisted.ControlEpoch, s.cluster.ControlEpoch, s.controlEpoch)
+	}
+	revisions, listErr := store.List(ctx, "trellis/test-cluster/job-revisions/")
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if len(revisions) != 12 {
+		t.Fatalf("revision count after failed activation = %d, want 12", len(revisions))
+	}
+	if len(store.batches) != 1 {
+		t.Fatalf("batch count = %d, want one epoch and compaction batch", len(store.batches))
+	}
+	if store.batches[0][0].Key != "trellis/test-cluster/meta" || store.batches[0][1].DeletePrefix != "trellis/test-cluster/job-revisions/" {
+		t.Fatalf("leadership batch = %#v, want cluster update followed by revision compaction", store.batches[0])
 	}
 }
 

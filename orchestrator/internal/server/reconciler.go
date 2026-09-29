@@ -157,6 +157,12 @@ func cloneAllocationForReconcile(allocation *Allocation) (*Allocation, error) {
 	if err := json.Unmarshal(raw, &clone); err != nil {
 		return nil, err
 	}
+	// The record stores only the node ID. Plan against a copy of the node so
+	// planning sees its current status without sharing the canonical node.
+	if allocation.Node != nil {
+		node := *allocation.Node
+		clone.Node = &node
+	}
 	if allocation.Events != nil {
 		clone.Events = &lifecycle.RingBuffer{}
 		for _, event := range allocation.Events.Entries() {
@@ -213,9 +219,21 @@ func sameAllocationState(a, b *Allocation) (bool, error) {
 	return bytes.Equal(aRaw, bRaw), nil
 }
 
-// Reconcile converges the in-memory allocation set on the latest job specs.
+// Reconcile converges the in-memory allocation set on the latest job specs and
+// waits for the pass's agent actions.
 func (s *Server) Reconcile(ctx context.Context) {
+	<-s.reconcile(ctx, true)
+}
+
+// reconcile runs one reconciliation pass. Planning and its durable commit are
+// serialized with other passes; the agent actions run after reconcileMu is
+// released, so a slow node delays neither later passes nor other nodes. A
+// queueing pass waits for a node busy with an earlier pass instead of skipping
+// its actions. The returned channel closes once the pass's actions finish.
+func (s *Server) reconcile(ctx context.Context, queue bool) (finished <-chan struct{}) {
 	start := time.Now()
+	var executable []Action
+	planned := false
 	s.reconcileMu.Lock()
 	s.mutationMu.Lock()
 	mutationLocked := true
@@ -227,6 +245,13 @@ func (s *Server) Reconcile(ctx context.Context) {
 		if s.metrics != nil {
 			s.metrics.ReconcileDuration.Observe(time.Since(start).Seconds())
 		}
+		if !planned {
+			closed := make(chan struct{})
+			close(closed)
+			finished = closed
+			return
+		}
+		finished = s.dispatchReconcileActions(ctx, executable, queue)
 	}()
 	s.mu.RLock()
 	registeredNodes := make(map[uuid.UUID]struct{}, len(s.nodes))
@@ -262,37 +287,194 @@ func (s *Server) Reconcile(ctx context.Context) {
 	}
 	for _, allocation := range s.allocations {
 		allocation.mu.Lock()
-		active := allocation.Phase != lifecycle.PhaseStopped && allocation.Phase != lifecycle.PhaseFailed && allocation.Phase != lifecycle.PhaseLost
-		if active && tasksUseWireGuard(allocation.Tasks) {
+		if activeAllocationPhase(allocation.Phase) && tasksUseWireGuard(allocation.Tasks) {
 			addNetworkNamespace(allocation.Namespace)
 		}
 		allocation.mu.Unlock()
 	}
 	s.mu.RUnlock()
-	networkPorts, err := s.ensureNetworkPortRegistrations(ctx, networkNamespaces)
+	networkPorts, networkPortRegistrations, deleteNetworkPortNamespaces, err := s.planNetworkPortRegistrations(ctx, networkNamespaces)
 	if err != nil {
 		s.log.Error("prepare namespace WireGuard ports", "error", err)
 		if !errors.Is(err, errNetworkPortExhausted) {
 			return
 		}
 	}
-	persistedVolumeOwners := make(map[string]uuid.UUID, len(volumeOwners))
-	for key, owner := range volumeOwners {
-		persistedVolumeOwners[key] = owner
-	}
-	var newAllocations []*Allocation
 	s.mu.Lock()
-	s.networkPorts = networkPorts
 	for _, node := range s.nodes {
 		if node.Status == NodeStatusHealthy && now.Sub(node.LastHeartbeat) > 3*heartbeatInterval {
 			node.Status = NodeStatusUnhealthy
 		}
 	}
-	jobKeys := make([]string, 0, len(s.jobs))
-	for key := range s.jobs {
-		jobKeys = append(jobKeys, key)
+	input, originals, err := s.reconcilePlanInputLocked(now, volumeOwners, networkPorts)
+	if err != nil {
+		s.mu.Unlock()
+		s.log.Error("snapshot reconciliation state", "error", err)
+		return
 	}
-	sort.Strings(jobKeys)
+	plan, err := planReconciliation(input)
+	if err != nil {
+		s.mu.Unlock()
+		s.log.Error("plan reconciliation", "error", err)
+		return
+	}
+	plan.Commit.NetworkPortRegistrations = networkPortRegistrations
+	plan.Commit.DeleteNetworkPortNamespaces = deleteNetworkPortNamespaces
+	for _, diagnostic := range plan.Diagnostics {
+		s.log.Error(diagnostic.Message, diagnostic.Args...)
+	}
+	originalOf := func(planned *Allocation) *Allocation {
+		return originals[plan.Source[planned]]
+	}
+	lockedUpdates, canonicalNodes, ok := s.lockReconcileTargetsLocked(plan, originals)
+	if !ok {
+		s.mu.Unlock()
+		return
+	}
+	unlockUpdates := func() {
+		for _, allocation := range lockedUpdates {
+			allocation.mu.Unlock()
+		}
+	}
+	s.mu.Unlock()
+
+	if err := s.state.CommitReconciliation(ctx, &plan.Commit); err != nil {
+		s.log.Error("persist reconciliation allocation updates", "error", err)
+		unlockUpdates()
+		return
+	}
+	for _, allocation := range plan.Updated {
+		applyReconciledAllocation(originalOf(allocation), allocation, canonicalNodes[allocation])
+	}
+	unlockUpdates()
+	actions := plan.Actions
+	for i := range actions {
+		if original := originalOf(actions[i].Allocation); original != nil {
+			actions[i].Allocation = original
+		}
+	}
+	s.mu.Lock()
+	s.networkPorts = networkPorts
+	if !plan.empty() {
+		if len(plan.Pruned) > 0 {
+			removed := make(map[*Allocation]bool, len(plan.Pruned))
+			for _, allocation := range plan.Pruned {
+				removed[originalOf(allocation)] = true
+			}
+			kept := s.allocations[:0:0]
+			for _, allocation := range s.allocations {
+				if !removed[allocation] {
+					kept = append(kept, allocation)
+				}
+			}
+			s.allocations = kept
+		}
+		s.allocations = append(s.allocations, plan.NewAllocations...)
+		s.rebuildAllocationNodeIndexLocked()
+		if len(plan.Commit.Backoffs) > 0 || len(plan.Commit.DeleteBackoffs) > 0 {
+			backoffs := make(map[string]*ReplacementBackoff, len(s.replacementBackoffs)+len(plan.Commit.Backoffs))
+			for key, backoff := range s.replacementBackoffs {
+				backoffs[key] = backoff
+			}
+			for _, backoff := range plan.Commit.Backoffs {
+				backoffs[backoff.key()] = backoff
+			}
+			for _, backoff := range plan.Commit.DeleteBackoffs {
+				delete(backoffs, backoff.key())
+			}
+			s.replacementBackoffs = backoffs
+		}
+	}
+	s.mu.Unlock()
+	s.mutationMu.Unlock()
+	mutationLocked = false
+	s.revokeStaleWorkloadCredentials(ctx)
+	for _, event := range plan.Events {
+		s.log.Info("delaying task group replacement after failed allocations", "namespace", event.Namespace, "job", event.JobName, "group", event.Group, "failures", event.Failures, "next_replacement_at", *event.NextReplacementAt, "last_allocation", event.AllocationID)
+		s.events.publish(event)
+	}
+
+	executableActions := make([]Action, 0, len(actions))
+	for i := range actions {
+		if actions[i].Type == ActionStart && tasksUseWireGuard(actions[i].Allocation.Tasks) {
+			if _, assigned := networkPorts[actions[i].Allocation.Namespace]; !assigned {
+				continue
+			}
+		}
+		executableActions = append(executableActions, actions[i])
+	}
+	executable, planned = executableActions, true
+	return
+}
+
+// lockReconcileTargetsLocked locks every stored allocation the plan rewrites
+// or prunes, in allocation ID order, after confirming each still matches the
+// snapshot the plan was made from. It also resolves the canonical node of each
+// updated allocation. When anything changed it unlocks, records the aborted
+// pass, and returns false; a later pass replans from the newer state. The
+// caller must hold s.mu and, on success, unlock the returned allocations.
+func (s *Server) lockReconcileTargetsLocked(plan *reconcilePlan, originals map[*Allocation]*Allocation) ([]*Allocation, map[*Allocation]*Node, bool) {
+	updatedSet := make(map[*Allocation]bool, len(plan.Updated))
+	for _, allocation := range plan.Updated {
+		updatedSet[allocation] = true
+	}
+	targets := make([]*Allocation, 0, len(plan.Updated)+len(plan.Pruned))
+	targets = append(targets, plan.Updated...)
+	for _, allocation := range plan.Pruned {
+		if !updatedSet[allocation] {
+			targets = append(targets, allocation)
+		}
+	}
+	sort.Slice(targets, func(i, j int) bool { return targets[i].ID < targets[j].ID })
+	locked := make([]*Allocation, 0, len(targets))
+	release := func() {
+		for _, allocation := range locked {
+			allocation.mu.Unlock()
+		}
+	}
+	canonicalNodes := make(map[*Allocation]*Node, len(plan.Updated))
+	for _, allocation := range targets {
+		snapshot := plan.Source[allocation]
+		original := originals[snapshot]
+		original.mu.Lock()
+		same, err := sameAllocationState(original, snapshot)
+		if err != nil || !same {
+			original.mu.Unlock()
+			release()
+			if err != nil {
+				s.log.Error("compare allocation reconciliation snapshot", "allocation", allocation.ID, "error", err)
+			}
+			s.abortReconcile("allocation_changed", "abort reconciliation: allocation changed during planning", "allocation", allocation.ID)
+			return nil, nil, false
+		}
+		if updatedSet[allocation] && allocation.Node != nil {
+			canonicalNodes[allocation] = s.nodes[allocation.Node.ID]
+			if canonicalNodes[allocation] == nil {
+				original.mu.Unlock()
+				release()
+				s.abortReconcile("node_removed", "abort reconciliation: allocation node was removed during planning", "allocation", allocation.ID, "node", allocation.Node.ID)
+				return nil, nil, false
+			}
+		}
+		locked = append(locked, original)
+	}
+	return locked, canonicalNodes, true
+}
+
+// abortReconcile records a pass abandoned before its commit because the state
+// it planned from changed. The next pass replans from the newer state.
+func (s *Server) abortReconcile(reason, message string, args ...any) {
+	s.log.Warn(message, append([]any{"reason", reason}, args...)...)
+	if s.metrics != nil {
+		s.metrics.ReconcileAborted.WithLabelValues(reason).Inc()
+	}
+}
+
+// reconcilePlanInputLocked snapshots the state a reconciliation pass plans
+// from. It returns the input and a map from each allocation snapshot to the
+// stored allocation it copies. The caller must hold s.mu and keep holding it
+// while planning, because jobs, nodes, and backoffs are borrowed.
+func (s *Server) reconcilePlanInputLocked(now time.Time, volumeOwners map[string]uuid.UUID, networkPorts map[string]int) (*reconcilePlanInput, map[*Allocation]*Allocation, error) {
 	limits := s.jobLimits
 	if limits == (spec.Limits{}) {
 		limits = spec.DefaultLimits()
@@ -305,623 +487,47 @@ func (s *Server) Reconcile(ctx context.Context) {
 	if allocationLossTimeout == 0 {
 		allocationLossTimeout = DefaultAllocationLossTimeout
 	}
-	admittedJobs := make(map[string]bool, len(jobKeys))
-	namespaceDesired := make(map[string]int64)
-	for _, key := range jobKeys {
-		job := s.jobs[key]
-		if err := spec.Canonicalize(job.Spec, limits); err != nil {
-			s.log.Error("skip invalid job during reconciliation", "job", key, "error", err)
-			continue
-		}
-		namespace := job.Spec.Namespace
-		desired := desiredAllocations(job.Spec)
-		if namespaceDesired[namespace]+desired > int64(limits.MaxDesiredAllocationsPerNamespace) {
-			s.log.Error("skip job exceeding namespace allocation limit during reconciliation", "job", key, "namespace", namespace, "limit", limits.MaxDesiredAllocationsPerNamespace)
-			continue
-		}
-		namespaceDesired[namespace] += desired
-		admittedJobs[key] = true
-	}
-	allocations := make([]*Allocation, len(s.allocations))
-	originalByPlan := make(map[*Allocation]*Allocation, len(s.allocations))
-	baseByPlan := make(map[*Allocation]*Allocation, len(s.allocations))
+	snapshots := make([]*Allocation, len(s.allocations))
+	originals := make(map[*Allocation]*Allocation, len(s.allocations))
 	for i, allocation := range s.allocations {
 		allocation.mu.Lock()
-		base, err := cloneAllocationForReconcile(allocation)
+		snapshot, err := cloneAllocationForReconcile(allocation)
 		allocation.mu.Unlock()
 		if err != nil {
-			s.mu.Unlock()
-			s.log.Error("snapshot allocation for reconciliation", "allocation", allocation.ID, "error", err)
-			return
+			return nil, nil, fmt.Errorf("snapshot allocation %s: %w", allocation.ID, err)
 		}
-		planned, err := cloneAllocationForReconcile(base)
-		if err != nil {
-			s.mu.Unlock()
-			s.log.Error("copy allocation reconciliation snapshot", "allocation", allocation.ID, "error", err)
-			return
-		}
-		allocations[i] = planned
-		originalByPlan[planned] = allocation
-		baseByPlan[planned] = base
+		snapshots[i] = snapshot
+		originals[snapshot] = allocation
 	}
-	sort.Slice(allocations, func(i, j int) bool { return allocations[i].ID < allocations[j].ID })
-	allocationsByGroup := make(map[string][]*Allocation)
-	for _, allocation := range allocations {
-		key := replacementBackoffKey(allocation.Namespace, allocation.JobName, allocation.TaskGroupName)
-		allocationsByGroup[key] = append(allocationsByGroup[key], allocation)
-	}
-	plannedUpdates := make(map[*Allocation]bool)
-	markUpdated := func(allocation *Allocation) {
-		plannedUpdates[allocation] = true
-	}
-	var actions []Action
-	// Lost allocations whose returning node still runs their container. The
-	// group loop decides whether each is kept until replacements run or
-	// released; any it does not keep is stopped after the loop.
-	var retained []*retainedOriginal
-	// retainedStops release retained originals. They run before every other
-	// action so a replacement never starts while an original it conflicts
-	// with still holds its node's ports.
-	var retainedStops []Action
-	if !s.leaderSince.IsZero() && now.Sub(s.leaderSince) >= leaderRecoveryGrace {
-		type observationKey struct {
-			nodeID     uuid.UUID
-			allocation string
-			generation uint64
-		}
-		desired := make(map[observationKey]bool)
-		lost := make(map[observationKey]*Allocation)
-		for _, allocation := range allocations {
-			allocation.mu.Lock()
-			if allocation.Node != nil && allocation.Phase != lifecycle.PhaseStopped && allocation.Phase != lifecycle.PhaseFailed && allocation.Phase != lifecycle.PhaseLost {
-				desired[observationKey{nodeID: allocation.Node.ID, allocation: allocation.ID, generation: allocation.Generation}] = true
-			}
-			if allocation.Node != nil && allocation.Phase == lifecycle.PhaseLost {
-				lost[observationKey{nodeID: allocation.Node.ID, allocation: allocation.ID, generation: allocation.Generation}] = allocation
-			}
-			allocation.mu.Unlock()
-		}
-		for _, node := range s.nodes {
-			if node.Status != NodeStatusHealthy && node.Status != NodeStatusDraining {
-				continue
-			}
-			for _, observed := range node.observedAllocations {
-				key := observationKey{nodeID: node.ID, allocation: observed.ID, generation: observed.Generation}
-				if desired[key] {
-					continue
-				}
-				if original := lost[key]; original != nil && observed.Phase == lifecycle.PhaseRunning {
-					retained = append(retained, &retainedOriginal{allocation: original, node: node})
-					continue
-				}
-				actions = append(actions, Action{Type: ActionStopObserved, Node: node, ID: observed.ID, Generation: observed.Generation})
-			}
-		}
-		sortRetainedOriginals(retained)
-	}
-	valid := make([]*Allocation, 0, len(allocations))
-	validByGroup := make(map[string][]*Allocation)
-	for _, allocation := range allocations {
-		allocation.mu.Lock()
-		key := jobKey(allocation.Namespace, allocation.JobName)
-		job := s.jobs[key]
-		if !admittedJobs[key] {
-			if allocation.Phase != lifecycle.PhaseStopped && allocation.Phase != lifecycle.PhaseFailed && allocation.Phase != lifecycle.PhaseLost && allocation.Node != nil {
-				actions = append(actions, Action{Type: ActionStop, Allocation: allocation})
-			} else if allocation.Phase == lifecycle.PhasePending {
-				_ = allocation.Transition(lifecycle.PhaseStopping, now, "namespace_limit", "job exceeds the namespace desired-allocation limit")
-				_ = allocation.Transition(lifecycle.PhaseStopped, now, "namespace_limit", "job exceeds the namespace desired-allocation limit")
-				markUpdated(allocation)
-			}
-			allocation.mu.Unlock()
-			continue
-		}
-		if allocation.Phase == lifecycle.PhasePending {
-			groupExists := false
-			for _, group := range job.Spec.TaskGroups {
-				if group.Name == allocation.TaskGroupName {
-					groupExists = true
-					break
-				}
-			}
-			if !groupExists || allocation.JobRevision != job.Revision {
-				_ = allocation.Transition(lifecycle.PhaseStopping, now, "job_changed", "pending allocation is obsolete")
-				_ = allocation.Transition(lifecycle.PhaseStopped, now, "job_changed", "pending allocation is obsolete")
-				markUpdated(allocation)
-				allocation.mu.Unlock()
-				continue
-			}
-			valid = append(valid, allocation)
-			allocation.mu.Unlock()
-			continue
-		}
-		if allocation.Phase == lifecycle.PhaseStopped || allocation.Phase == lifecycle.PhaseFailed || allocation.Phase == lifecycle.PhaseLost {
-			allocation.mu.Unlock()
-			continue
-		}
-		if allocation.NextRetryAt != nil && now.Before(*allocation.NextRetryAt) {
-			valid = append(valid, allocation)
-			allocation.mu.Unlock()
-			continue
-		}
-		if job == nil {
-			actions = append(actions, Action{Type: ActionStop, Allocation: allocation})
-			allocation.mu.Unlock()
-			continue
-		}
-		if allocation.Draining && allocation.Node != nil && (allocation.Node.Status == NodeStatusHealthy || allocation.Node.Status == NodeStatusDraining) {
-			actions = append(actions, Action{Type: ActionDrain, Allocation: allocation})
-		}
-		if allocation.Node != nil && allocation.Node.Status == NodeStatusDraining {
-			if now.Sub(s.leaderSince) >= leaderRecoveryGrace && !allocation.Node.LastHeartbeat.IsZero() && now.Sub(allocation.Node.LastHeartbeat) >= allocationLossTimeout {
-				_ = allocation.Transition(lifecycle.PhaseLost, now, "node_unavailable", "node did not re-register before the allocation loss timeout")
-				markUpdated(allocation)
-				allocation.mu.Unlock()
-				continue
-			}
-			groupExists := false
-			for _, group := range job.Spec.TaskGroups {
-				if group.Name == allocation.TaskGroupName {
-					groupExists = true
-					break
-				}
-			}
-			if !groupExists {
-				actions = append(actions, Action{Type: ActionStop, Allocation: allocation})
-				allocation.mu.Unlock()
-				continue
-			}
-			if !allocation.Draining {
-				allocation.Draining = true
-				allocation.DrainSequence++
-				allocation.DrainReason = "node"
-				markUpdated(allocation)
-				actions = append(actions, Action{Type: ActionDrain, Allocation: allocation})
-			}
-			valid = append(valid, allocation)
-			allocation.mu.Unlock()
-			continue
-		}
-		if allocation.JobRevision < job.Revision {
-			strategy := updateStrategy(job, allocation.TaskGroupName)
-			switch strategy {
-			case spec.UpdateRolling:
-				if !allocation.Draining {
-					allocation.Draining = true
-					allocation.DrainSequence++
-					allocation.DrainReason = "update"
-					markUpdated(allocation)
-					if allocation.Node != nil && (allocation.Node.Status == NodeStatusHealthy || allocation.Node.Status == NodeStatusDraining) {
-						actions = append(actions, Action{Type: ActionDrain, Allocation: allocation})
-					}
-				}
-				if allocation.Node == nil || allocation.Node.Status != NodeStatusHealthy {
-					if now.Sub(s.leaderSince) >= leaderRecoveryGrace && allocation.Node != nil && !allocation.Node.LastHeartbeat.IsZero() && now.Sub(allocation.Node.LastHeartbeat) >= allocationLossTimeout {
-						_ = allocation.Transition(lifecycle.PhaseLost, now, "node_unavailable", "node did not re-register before the allocation loss timeout")
-						markUpdated(allocation)
-					}
-					allocation.mu.Unlock()
-					continue
-				}
-				valid = append(valid, allocation)
-				allocation.mu.Unlock()
-				continue
-			default:
-				actions = append(actions, Action{Type: ActionStop, Allocation: allocation})
-				allocation.mu.Unlock()
-				continue
-			}
-		}
-		if allocation.Node == nil || allocation.Node.Status != NodeStatusHealthy {
-			if now.Sub(s.leaderSince) >= leaderRecoveryGrace && allocation.Node != nil && !allocation.Node.LastHeartbeat.IsZero() && now.Sub(allocation.Node.LastHeartbeat) >= allocationLossTimeout {
-				_ = allocation.Transition(lifecycle.PhaseLost, now, "node_unavailable", "node did not re-register before the allocation loss timeout")
-				markUpdated(allocation)
-			}
-			allocation.mu.Unlock()
-			continue
-		}
-		// A start request carries the drain state itself, so only a running
-		// allocation needs a separate resume redelivery.
-		if allocation.Phase == lifecycle.PhaseRunning && !allocation.Draining && allocation.DrainSequence > 0 &&
-			!s.resumeDelivered(s.controlEpoch, allocation.ID, allocation.Generation, allocation.DrainSequence) {
-			actions = append(actions, Action{Type: ActionResume, Allocation: allocation})
-		}
-		if allocation.Phase == lifecycle.PhasePlaced || allocation.Phase == lifecycle.PhaseStarting || allocation.Phase == lifecycle.PhaseStopping {
-			actionType := ActionStart
-			if allocation.Phase == lifecycle.PhaseStopping {
-				actionType = ActionStop
-			}
-			actions = append(actions, Action{Type: actionType, Allocation: allocation})
-		}
-		valid = append(valid, allocation)
-		allocation.mu.Unlock()
-	}
-	for _, allocation := range valid {
-		key := replacementBackoffKey(allocation.Namespace, allocation.JobName, allocation.TaskGroupName)
-		validByGroup[key] = append(validByGroup[key], allocation)
-	}
-	occupied := make([]*Allocation, 0, len(allocations))
-	occupiedSet := make(map[*Allocation]bool, len(allocations))
-	for _, allocation := range allocations {
-		if allocation.Node != nil && allocation.Phase != lifecycle.PhaseStopped && allocation.Phase != lifecycle.PhaseFailed && allocation.Phase != lifecycle.PhaseLost {
-			occupied = append(occupied, allocation)
-			occupiedSet[allocation] = true
-		}
-	}
-
-	plannedBackoffs := make(map[string]*ReplacementBackoff)
-	for _, key := range jobKeys {
-		job := s.jobs[key]
-		if !admittedJobs[key] {
-			continue
-		}
-		jobName := job.Spec.Name
-		namespace := job.Spec.Namespace
-		for _, group := range job.Spec.TaskGroups {
-			backoffKey := replacementBackoffKey(namespace, jobName, group.Name)
-			backoff := planReplacementBackoff(policy, s.replacementBackoffs[backoffKey], namespace, jobName, group.Name, job.Revision, allocationsByGroup[backoffKey], now)
-			plannedBackoffs[backoffKey] = backoff
-			var current []*Allocation
-			var pending []*Allocation
-			var draining []*Allocation
-			for _, alloc := range validByGroup[backoffKey] {
-				if alloc.Draining {
-					draining = append(draining, alloc)
-				} else if alloc.Phase == lifecycle.PhasePending {
-					pending = append(pending, alloc)
-				} else {
-					current = append(current, alloc)
-				}
-			}
-			for len(current) > group.Count {
-				actions = append(actions, Action{Type: ActionStop, Allocation: current[len(current)-1]})
-				current = current[:len(current)-1]
-			}
-			// Keep a lost original's container running while the group has
-			// fewer running replacements than it needs, unless it holds a host
-			// port an already placed allocation on its node needs.
-			missing := group.Count
-			for _, alloc := range current {
-				if alloc.Phase == lifecycle.PhaseRunning {
-					missing--
-				}
-			}
-			for _, original := range retained {
-				if original.released || original.kept || !original.inGroup(namespace, jobName, group.Name) {
-					continue
-				}
-				if missing > 0 && (original.allocation.JobRevision == job.Revision || updateStrategy(job, group.Name) == spec.UpdateRolling) && !original.blocksPlacedAllocation(occupied) {
-					original.kept = true
-					missing--
-					continue
-				}
-				retainedStops = append(retainedStops, original.release())
-			}
-			if len(draining) > 0 {
-				healthyNew := 0
-				for _, alloc := range current {
-					if alloc.Phase == lifecycle.PhaseRunning && alloc.Health == lifecycle.HealthHealthy {
-						healthyNew++
-					}
-				}
-				drainsToStop := min(max(healthyNew+len(draining)-group.Count, 0), len(draining))
-				for i := 0; i < drainsToStop; i++ {
-					actions = append(actions, Action{Type: ActionStop, Allocation: draining[i]})
-				}
-			}
-			deficit := group.Count - len(current)
-			if backoff != nil && backoff.DelayedReplacements > max(deficit, 0) {
-				// Failed allocations whose capacity is no longer missing have
-				// nothing left to replace.
-				backoff.DelayedReplacements = max(deficit, 0)
-			}
-			if deficit > 0 {
-				strategy := updateStrategy(job, group.Name)
-				if strategy == spec.UpdateRolling && len(draining) > 0 {
-					parallel := maxParallel(job, group.Name)
-					inFlight := 0
-					for _, alloc := range current {
-						if alloc.Phase != lifecycle.PhaseRunning || alloc.Health != lifecycle.HealthHealthy {
-							inFlight++
-						}
-					}
-					allowed := parallel - inFlight
-					if allowed < deficit {
-						deficit = allowed
-					}
-					if deficit < 0 {
-						deficit = 0
-					}
-				}
-			}
-			for len(pending) > deficit {
-				allocation := pending[len(pending)-1]
-				pending = pending[:len(pending)-1]
-				_ = allocation.Transition(lifecycle.PhaseStopping, now, "scaled_down", "pending allocation exceeds the desired count")
-				_ = allocation.Transition(lifecycle.PhaseStopped, now, "scaled_down", "pending allocation exceeds the desired count")
-				markUpdated(allocation)
-			}
-			if spec.GroupUsesWireGuard(&group) {
-				if _, assigned := networkPorts[namespace]; !assigned {
-					continue
-				}
-			}
-			// Replacements of failed allocations wait until the backoff
-			// elapses; the rest of the deficit is placed now.
-			placeable := deficit - backoff.withheld(deficit, now)
-			if placeable <= 0 {
-				continue
-			}
-			requiredCapabilities := spec.GroupRequiredCapabilities(&group)
-			placements, released := scheduleAroundRetained(PlacementIntent{Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Count: placeable, Nodes: s.nodePointers(), Allocations: occupied, DesiredAllocations: valid, Tasks: group.Tasks, Constraints: group.Constraints, RequiredCapabilities: requiredCapabilities, VolumeOwners: volumeOwners}, retained)
-			for _, original := range released {
-				retainedStops = append(retainedStops, original.stopAction())
-			}
-			for i, placement := range placements {
-				for _, claim := range placement.VolumeClaims {
-					volumeOwners[volumeRegistrationKey(claim.Namespace, claim.Name)] = claim.NodeID
-				}
-				node := s.nodes[placement.NodeID]
-				if i < len(pending) {
-					allocation := pending[i]
-					allocation.Node = node
-					_ = allocation.Transition(lifecycle.PhasePlaced, now, "", "")
-					markUpdated(allocation)
-					actions = append(actions, Action{Type: ActionStart, Allocation: allocation})
-					if !occupiedSet[allocation] {
-						occupied = append(occupied, allocation)
-						occupiedSet[allocation] = true
-					}
-					continue
-				}
-				name := fmt.Sprintf("%s-%s-%s-%s", namespace, jobName, group.Name, uuid.NewString()[:8])
-				allocation := &Allocation{ID: name, Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Tasks: group.Tasks, Node: node, Generation: 1, JobRevision: job.Revision, Phase: lifecycle.PhasePlaced, Health: lifecycle.HealthUnknown, Diagnostic: lifecycle.Diagnostic{CreatedAt: now, TransitionedAt: now}}
-				actions = append(actions, Action{Type: ActionStart, Allocation: allocation})
-				newAllocations = append(newAllocations, allocation)
-				valid = append(valid, allocation)
-				occupied = append(occupied, allocation)
-				occupiedSet[allocation] = true
-			}
-			if len(placements) == 0 && len(pending) == 0 && len(requiredCapabilities) > 0 && noCompatibleCapabilityNode(s.nodePointers(), group.Constraints, group.Tasks, volumeOwners, namespace, requiredCapabilities) {
-				for i := 0; i < placeable; i++ {
-					name := fmt.Sprintf("%s-%s-%s-%s", namespace, jobName, group.Name, uuid.NewString()[:8])
-					allocation := &Allocation{ID: name, Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Tasks: group.Tasks, Generation: 1, JobRevision: job.Revision, Phase: lifecycle.PhasePending, Health: lifecycle.HealthUnknown, Diagnostic: lifecycle.Diagnostic{CreatedAt: now, TransitionedAt: now, Reason: "missing_capability", Message: fmt.Sprintf("no eligible node supports required capabilities: %s", strings.Join(capabilityNames(requiredCapabilities), ", "))}}
-					newAllocations = append(newAllocations, allocation)
-					valid = append(valid, allocation)
-				}
-			}
-		}
-	}
-	for _, original := range retained {
-		if !original.kept && !original.released {
-			retainedStops = append(retainedStops, original.release())
-		}
-	}
-	actions = append(retainedStops, actions...)
-	pruned := planTerminalPruning(policy.RetainTerminal, allocations, plannedUpdates)
-	prunedSet := make(map[*Allocation]bool, len(pruned))
-	for _, allocation := range pruned {
-		prunedSet[allocation] = true
-	}
-	retainedGroups := make(map[string]bool)
-	for _, allocation := range allocations {
-		if !prunedSet[allocation] {
-			retainedGroups[replacementBackoffKey(allocation.Namespace, allocation.JobName, allocation.TaskGroupName)] = true
-		}
-	}
-	for _, allocation := range newAllocations {
-		retainedGroups[replacementBackoffKey(allocation.Namespace, allocation.JobName, allocation.TaskGroupName)] = true
-	}
-	var backoffPuts, backoffDeletes []*ReplacementBackoff
-	var delayed []*ReplacementBackoff
-	for key, previous := range s.replacementBackoffs {
-		if _, planned := plannedBackoffs[key]; planned {
-			continue
-		}
-		job := s.jobs[jobKey(previous.Namespace, previous.JobName)]
-		if job != nil && !admittedJobs[jobKey(previous.Namespace, previous.JobName)] {
-			continue
-		}
-		if !retainedGroups[key] {
-			backoffDeletes = append(backoffDeletes, previous)
-			continue
-		}
-		// The group is no longer desired: forget its failures but keep the
-		// record, and with it the failed allocations already seen, while the
-		// group's allocation records remain.
-		plannedBackoffs[key] = planReplacementBackoff(policy, previous, previous.Namespace, previous.JobName, previous.TaskGroupName, 0, allocations, now)
-	}
-	backoffKeys := make([]string, 0, len(plannedBackoffs))
-	for key := range plannedBackoffs {
-		backoffKeys = append(backoffKeys, key)
-	}
-	sort.Strings(backoffKeys)
-	for _, key := range backoffKeys {
-		next, previous := plannedBackoffs[key], s.replacementBackoffs[key]
-		if next == nil || next.equal(previous) {
-			continue
-		}
-		backoffPuts = append(backoffPuts, next)
-		if previous == nil || next.Failures > previous.Failures {
-			delayed = append(delayed, next)
-		}
-	}
-	sort.Slice(backoffDeletes, func(i, j int) bool { return backoffDeletes[i].key() < backoffDeletes[j].key() })
-
-	lockedUpdates := make([]*Allocation, 0, len(plannedUpdates)+len(pruned))
-	canonicalNodes := make(map[*Allocation]*Node, len(plannedUpdates))
-	for _, allocation := range allocations {
-		if !plannedUpdates[allocation] && !prunedSet[allocation] {
-			continue
-		}
-		original := originalByPlan[allocation]
-		original.mu.Lock()
-		same, err := sameAllocationState(original, baseByPlan[allocation])
-		if err != nil || !same {
-			original.mu.Unlock()
-			for _, locked := range lockedUpdates {
-				locked.mu.Unlock()
-			}
-			s.mu.Unlock()
-			if err != nil {
-				s.log.Error("compare allocation reconciliation snapshot", "allocation", allocation.ID, "error", err)
-			}
-			return
-		}
-		if plannedUpdates[allocation] && allocation.Node != nil {
-			canonicalNodes[allocation] = s.nodes[allocation.Node.ID]
-			if canonicalNodes[allocation] == nil {
-				original.mu.Unlock()
-				for _, locked := range lockedUpdates {
-					locked.mu.Unlock()
-				}
-				s.mu.Unlock()
-				return
-			}
-		}
-		lockedUpdates = append(lockedUpdates, original)
-	}
-	persistedNewAllocations := make([]*Allocation, len(newAllocations))
-	for i, allocation := range newAllocations {
-		persisted, err := cloneAllocationForReconcile(allocation)
-		if err != nil {
-			for _, locked := range lockedUpdates {
-				locked.mu.Unlock()
-			}
-			s.mu.Unlock()
-			s.log.Error("snapshot new allocation for persistence", "allocation", allocation.ID, "error", err)
-			return
-		}
-		persistedNewAllocations[i] = persisted
-	}
-	s.mu.Unlock()
-	unlockUpdates := func() {
-		for _, allocation := range lockedUpdates {
-			allocation.mu.Unlock()
-		}
-	}
-
-	volumeKeys := make([]string, 0, len(volumeOwners))
-	for key := range volumeOwners {
-		if _, exists := persistedVolumeOwners[key]; exists {
-			continue
-		}
-		volumeKeys = append(volumeKeys, key)
-	}
-	sort.Strings(volumeKeys)
-	volumeRegistrations := make([]*VolumeRegistration, 0, len(volumeKeys))
-	for _, key := range volumeKeys {
-		owner := volumeOwners[key]
-		namespace, name, ok := strings.Cut(key, "/")
-		if !ok || namespace == "" || name == "" {
-			s.log.Error("invalid volume registration key", "key", key)
-			unlockUpdates()
-			return
-		}
-		volumeRegistrations = append(volumeRegistrations, &VolumeRegistration{Namespace: namespace, Name: name, NodeID: owner})
-	}
-	updates := make([]*Allocation, 0, len(plannedUpdates)+len(newAllocations))
-	for _, allocation := range allocations {
-		if plannedUpdates[allocation] {
-			updates = append(updates, allocation)
-		}
-	}
-	updates = append(updates, persistedNewAllocations...)
-	prunedIDs := make([]string, len(pruned))
-	for i, allocation := range pruned {
-		prunedIDs[i] = allocation.ID
-	}
-	if err := s.state.CommitReconciliation(ctx, &ReconciliationCommit{Allocations: updates, DeleteAllocations: prunedIDs, VolumeRegistrations: volumeRegistrations, Backoffs: backoffPuts, DeleteBackoffs: backoffDeletes}); err != nil {
-		s.log.Error("persist reconciliation allocation updates", "error", err)
-		unlockUpdates()
-		return
-	}
-	for _, allocation := range allocations {
-		if plannedUpdates[allocation] {
-			applyReconciledAllocation(originalByPlan[allocation], allocation, canonicalNodes[allocation])
-		}
-	}
-	unlockUpdates()
-	for i := range actions {
-		if original := originalByPlan[actions[i].Allocation]; original != nil {
-			actions[i].Allocation = original
-		}
-	}
-	if len(plannedUpdates) > 0 || len(newAllocations) > 0 || len(pruned) > 0 || len(backoffPuts) > 0 || len(backoffDeletes) > 0 {
-		s.mu.Lock()
-		if len(pruned) > 0 {
-			removed := make(map[*Allocation]bool, len(pruned))
-			for _, allocation := range pruned {
-				removed[originalByPlan[allocation]] = true
-			}
-			kept := s.allocations[:0:0]
-			for _, allocation := range s.allocations {
-				if !removed[allocation] {
-					kept = append(kept, allocation)
-				}
-			}
-			s.allocations = kept
-		}
-		s.allocations = append(s.allocations, newAllocations...)
-		s.rebuildAllocationNodeIndexLocked()
-		if len(backoffPuts) > 0 || len(backoffDeletes) > 0 {
-			backoffs := make(map[string]*ReplacementBackoff, len(s.replacementBackoffs)+len(backoffPuts))
-			for key, backoff := range s.replacementBackoffs {
-				backoffs[key] = backoff
-			}
-			for _, backoff := range backoffPuts {
-				backoffs[backoff.key()] = backoff
-			}
-			for _, backoff := range backoffDeletes {
-				delete(backoffs, backoff.key())
-			}
-			s.replacementBackoffs = backoffs
-		}
-		s.mu.Unlock()
-	}
-	s.mutationMu.Unlock()
-	mutationLocked = false
-	s.revokeStaleWorkloadCredentials(ctx)
-	for _, backoff := range delayed {
-		next := backoff.NextReplacementAt
-		s.log.Info("delaying task group replacement after failed allocations", "namespace", backoff.Namespace, "job", backoff.JobName, "group", backoff.TaskGroupName, "failures", backoff.Failures, "next_replacement_at", next, "last_allocation", backoff.LastAllocationID)
-		s.events.publish(api.ClusterEvent{
-			Type:              api.EventJobReplacementDelayed,
-			Namespace:         backoff.Namespace,
-			JobName:           backoff.JobName,
-			Group:             backoff.TaskGroupName,
-			AllocationID:      backoff.LastAllocationID,
-			Revision:          backoff.JobRevision,
-			Failures:          backoff.Failures,
-			NextReplacementAt: &next,
-			At:                now,
-		})
-	}
-
-	executableActions := make([]Action, 0, len(actions))
-	for i := range actions {
-		if actions[i].Type == ActionStart && tasksUseWireGuard(actions[i].Allocation.Tasks) {
-			if _, assigned := networkPorts[actions[i].Allocation.Namespace]; !assigned {
-				continue
-			}
-		}
-		executableActions = append(executableActions, actions[i])
-	}
-	// Retained originals must release their conflicting resources before their
-	// replacements start on the same node. Actions remain ordered per node, while
-	// independent nodes run concurrently so an unreachable peer delays only its
-	// own queue.
-	s.executeReconcileActions(ctx, executableActions)
-	s.refreshNetworkPlans()
-	s.refreshCatalog()
+	return &reconcilePlanInput{
+		Now:                   now,
+		LeaderSince:           s.leaderSince,
+		Limits:                limits,
+		Policy:                policy,
+		AllocationLossTimeout: allocationLossTimeout,
+		Jobs:                  s.jobs,
+		Nodes:                 s.nodes,
+		Allocations:           snapshots,
+		Backoffs:              s.replacementBackoffs,
+		VolumeOwners:          volumeOwners,
+		NetworkPorts:          networkPorts,
+		DeliveredResumes:      s.deliveredResumes(s.controlEpoch),
+	}, originals, nil
 }
 
-func (s *Server) executeReconcileActions(ctx context.Context, actions []Action) {
-	type nodeActions struct {
-		actions []Action
-	}
-	groupByNode := make(map[uuid.UUID]int)
-	groups := make([]nodeActions, 0, len(actions))
+// dispatchReconcileActions runs a pass's actions. Retained originals must
+// release their conflicting resources before their replacements start on the
+// same node, so each node's actions run in order, and a node runs one pass's
+// actions at a time. A node still busy with an earlier pass delays only its
+// own actions: a queueing pass (one an API mutation waits for) runs them once
+// the node is free, and a periodic pass skips them for the next pass to plan
+// again. Independent nodes run
+// concurrently, bounded by maxConcurrentReconcileActions across all passes, so
+// an unreachable agent delays only its own queue. The returned channel closes
+// once the dispatched actions finish and the catalog is refreshed.
+func (s *Server) dispatchReconcileActions(ctx context.Context, actions []Action, queue bool) <-chan struct{} {
+	var nodes []uuid.UUID
+	byNode := make(map[uuid.UUID][]Action)
 	for _, action := range actions {
 		var nodeID uuid.UUID
 		if action.Allocation != nil {
@@ -929,43 +535,95 @@ func (s *Server) executeReconcileActions(ctx context.Context, actions []Action) 
 		} else {
 			nodeID = action.Node.ID
 		}
-		index, exists := groupByNode[nodeID]
-		if !exists {
-			index = len(groups)
-			groupByNode[nodeID] = index
-			groups = append(groups, nodeActions{})
+		if _, exists := byNode[nodeID]; !exists {
+			nodes = append(nodes, nodeID)
 		}
-		groups[index].actions = append(groups[index].actions, action)
+		byNode[nodeID] = append(byNode[nodeID], action)
 	}
-	workers := min(len(groups), maxConcurrentReconcileActions)
-	if workers == 0 {
-		return
-	}
-	work := make(chan []Action)
 	var group sync.WaitGroup
-	group.Add(workers)
-	for range workers {
-		go func() {
+	for _, nodeID := range nodes {
+		slots, busy := s.claimActionNode(nodeID)
+		if busy != nil && !queue {
+			s.log.Debug("node is still running earlier reconcile actions; deferring", "node", nodeID, "actions", len(byNode[nodeID]))
+			continue
+		}
+		group.Add(1)
+		go func(nodeID uuid.UUID, batch []Action) {
 			defer group.Done()
-			for nodeBatch := range work {
-				for i := range nodeBatch {
-					action := &nodeBatch[i]
-					if err := s.Execute(ctx, action); err != nil {
-						allocationID := action.ID
-						if action.Allocation != nil {
-							allocationID = action.Allocation.ID
-						}
-						s.log.Error("reconcile action failed", "action", action.Type, "allocation", allocationID, "error", err)
+			slots, ok := s.awaitActionNode(ctx, nodeID, slots, busy)
+			if !ok {
+				return
+			}
+			defer s.releaseActionNode(nodeID)
+			defer func() { <-slots }()
+			for i := range batch {
+				action := &batch[i]
+				if err := s.Execute(ctx, action); err != nil {
+					allocationID := action.ID
+					if action.Allocation != nil {
+						allocationID = action.Allocation.ID
 					}
+					s.log.Error("reconcile action failed", "action", action.Type, "allocation", allocationID, "error", err)
 				}
 			}
-		}()
+		}(nodeID, byNode[nodeID])
 	}
-	for _, nodeBatch := range groups {
-		work <- nodeBatch.actions
+	done := make(chan struct{})
+	go func() {
+		group.Wait()
+		s.refreshMu.Lock()
+		s.refreshNetworkPlans()
+		s.refreshCatalog()
+		s.refreshMu.Unlock()
+		close(done)
+	}()
+	return done
+}
+
+// claimActionNode reserves a node for one pass's actions and returns the
+// global action slots. When the node is busy it returns the channel that
+// closes when the node is released instead.
+func (s *Server) claimActionNode(nodeID uuid.UUID) (chan struct{}, <-chan struct{}) {
+	s.actionMu.Lock()
+	defer s.actionMu.Unlock()
+	if s.actionSlots == nil {
+		s.actionSlots = make(chan struct{}, maxConcurrentReconcileActions)
+		s.actionNodes = make(map[uuid.UUID]chan struct{})
 	}
-	close(work)
-	group.Wait()
+	if released := s.actionNodes[nodeID]; released != nil {
+		return nil, released
+	}
+	s.actionNodes[nodeID] = make(chan struct{})
+	return s.actionSlots, nil
+}
+
+// awaitActionNode completes a claim started by claimActionNode: it waits for
+// an earlier pass to release the node, claims it, and then takes a global
+// action slot. On success the caller must return the slot and then call
+// releaseActionNode. It reports false, holding nothing, when ctx ends first.
+func (s *Server) awaitActionNode(ctx context.Context, nodeID uuid.UUID, slots chan struct{}, busy <-chan struct{}) (chan struct{}, bool) {
+	for busy != nil {
+		select {
+		case <-busy:
+		case <-ctx.Done():
+			return nil, false
+		}
+		slots, busy = s.claimActionNode(nodeID)
+	}
+	select {
+	case slots <- struct{}{}:
+		return slots, true
+	case <-ctx.Done():
+		s.releaseActionNode(nodeID)
+		return nil, false
+	}
+}
+
+func (s *Server) releaseActionNode(nodeID uuid.UUID) {
+	s.actionMu.Lock()
+	close(s.actionNodes[nodeID])
+	delete(s.actionNodes, nodeID)
+	s.actionMu.Unlock()
 }
 
 type networkPlanKey struct {
@@ -1233,20 +891,6 @@ func tasksUseWireGuard(tasks []spec.TaskSpec) bool {
 	return false
 }
 
-func noCompatibleCapabilityNode(nodes []*Node, constraints []spec.ConstraintSpec, tasks []spec.TaskSpec, volumeOwners map[string]uuid.UUID, namespace string, required []spec.NodeCapability) bool {
-	hasCandidate := false
-	for _, node := range nodes {
-		if node.Status != NodeStatusHealthy || !nodeMatchesConstraints(node, constraints) || !nodeHasTaskVolumes(node.ID, namespace, tasks, volumeOwners) {
-			continue
-		}
-		hasCandidate = true
-		if nodeHasCapabilities(node, required) {
-			return false
-		}
-	}
-	return hasCandidate
-}
-
 func capabilityNames(capabilities []spec.NodeCapability) []string {
 	names := make([]string, len(capabilities))
 	for i, capability := range capabilities {
@@ -1255,12 +899,31 @@ func capabilityNames(capabilities []spec.NodeCapability) []string {
 	return names
 }
 
-func (s *Server) nodePointers() []*Node {
-	nodes := make([]*Node, 0, len(s.nodes))
-	for _, node := range s.nodes {
-		nodes = append(nodes, node)
+// recordStartFailure counts one failed start attempt of an allocation: it
+// schedules the retry, or fails the allocation once attempts are exhausted.
+func recordStartFailure(next *Allocation, now time.Time, message string) error {
+	next.Attempt++
+	next.Reason, next.Message = "agent_start_failed", message
+	if next.Attempt >= maxExecutionAttempts {
+		if err := next.Transition(lifecycle.PhaseFailed, now, "retry_limit", message); err != nil {
+			return err
+		}
+		next.NextRetryAt = nil
+		return nil
 	}
-	return nodes
+	retryAt := now.Add(retryDelay(next.ID, next.Attempt))
+	next.NextRetryAt = &retryAt
+	return nil
+}
+
+// terminalStartFailureCode reports whether code may accompany a reported start
+// failure.
+func terminalStartFailureCode(code api.OperationCode) bool {
+	switch code {
+	case "", api.OperationStaleGeneration, api.OperationConflict, api.OperationRestartExhausted:
+		return true
+	}
+	return false
 }
 
 // Execute performs a reconciliation action.
@@ -1319,12 +982,13 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 	epoch := s.controlEpoch
 	serverAddr := s.serverAddr
 	nodeStatus := alloc.Node.Status
+	attempt := alloc.Attempt
 
 	switch action.Type {
 	case ActionStart:
 		job := s.jobs[jobKey(alloc.Namespace, alloc.JobName)]
-		if job == nil {
-			return fmt.Errorf("job %s was deleted before allocation start", alloc.JobName)
+		if job == nil || job.Incarnation != alloc.JobIncarnation {
+			return fmt.Errorf("job %s was deleted or recreated before allocation start", alloc.JobName)
 		}
 		var groupRuntime string
 		var groupAPIAccess *spec.APIAccessSpec
@@ -1339,7 +1003,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 				break
 			}
 		}
-		request := &api.AllocationRequest{AllocationID: alloc.ID, Generation: alloc.Generation, JobRevision: alloc.JobRevision, Epoch: epoch, Namespace: alloc.Namespace, JobName: alloc.JobName, GroupName: alloc.TaskGroupName, Tasks: alloc.Tasks, Runtime: groupRuntime, Restart: groupRestart, Draining: alloc.Draining, DrainSequence: alloc.DrainSequence}
+		request := &api.AllocationRequest{AllocationID: alloc.ID, Generation: alloc.Generation, JobRevision: alloc.JobRevision, Epoch: epoch, Namespace: alloc.Namespace, JobName: alloc.JobName, GroupName: alloc.TaskGroupName, Tasks: alloc.Tasks, Runtime: groupRuntime, Restart: groupRestart, Draining: alloc.Draining, DrainSequence: alloc.DrainSequence, Attempt: attempt}
 		if groupUsesWireGuard {
 			plan, err := s.networkPlan(alloc.Namespace, alloc.Node)
 			if err != nil {
@@ -1399,7 +1063,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 			}
 		}
 		hashInput := *request
-		hashInput.Epoch, hashInput.ExecutionHash = 0, ""
+		hashInput.Epoch, hashInput.ExecutionHash, hashInput.Attempt = 0, "", 0
 		// Drain state changes while an execution is unchanged.
 		hashInput.Draining, hashInput.DrainSequence = false, 0
 		if request.NetworkPlan != nil {
@@ -1452,35 +1116,19 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 				return err
 			}
 			if persistErr := s.persistAllocationUpdate(context.WithoutCancel(ctx), alloc, func(next *Allocation) error {
-				if next.Phase != lifecycle.PhaseStarting && next.Phase != lifecycle.PhaseRunning {
+				// A heartbeat may have observed the start complete meanwhile.
+				if next.Phase != lifecycle.PhaseStarting {
 					return nil
 				}
-				next.Attempt++
-				next.Reason, next.Message = "agent_start_failed", err.Error()
-				if next.Attempt >= maxExecutionAttempts {
-					if transitionErr := next.Transition(lifecycle.PhaseFailed, now, "retry_limit", err.Error()); transitionErr != nil {
-						return transitionErr
-					}
-					next.NextRetryAt = nil
-				} else {
-					retryAt := now.Add(retryDelay(next.ID, next.Attempt))
-					next.NextRetryAt = &retryAt
-				}
-				return nil
+				return recordStartFailure(next, now, err.Error())
 			}); persistErr != nil {
 				return fmt.Errorf("%w (persist allocation failure: %v)", err, persistErr)
 			}
 			return err
 		}
-		if err := s.persistAllocationUpdate(ctx, alloc, func(next *Allocation) error {
-			if next.Phase != lifecycle.PhaseStarting && next.Phase != lifecycle.PhaseRunning {
-				return nil
-			}
-			next.Attempt, next.NextRetryAt = 0, nil
-			return next.Transition(lifecycle.PhaseRunning, now, "", "")
-		}); err != nil {
-			return fmt.Errorf("persist running allocation: %w", err)
-		}
+		// The agent accepted the start and pulls and creates the tasks in the
+		// background. Heartbeats report the allocation running, or report a
+		// failure of this attempt, which recordStartFailure counts.
 	case ActionDrain:
 		unlockState()
 		if nodeStatus != NodeStatusHealthy && nodeStatus != NodeStatusDraining {

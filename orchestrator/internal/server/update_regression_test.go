@@ -210,12 +210,10 @@ func TestReconcileChargesAllocationsQueuedForStop(t *testing.T) {
 		},
 		{
 			name: "namespace-unadmitted memory",
-			setup: func(t *testing.T, s *Server, node *Node, tasks []spec.TaskSpec) *Allocation {
+			setup: func(_ *testing.T, s *Server, node *Node, tasks []spec.TaskSpec) *Allocation {
 				limits := spec.DefaultLimits()
 				limits.MaxDesiredAllocationsPerNamespace = 1
-				if err := s.SetJobLimits(limits); err != nil {
-					t.Fatal(err)
-				}
+				s.jobLimits = limits
 				s.jobs[jobKey("default", "admitted")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "admitted", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: tasks}}}, Revision: 1}
 				s.jobs[jobKey("default", "unadmitted")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "unadmitted", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: tasks}}}, Revision: 1}
 				return &Allocation{ID: "obsolete", Namespace: "default", JobName: "unadmitted", TaskGroupName: "app", Tasks: tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning}
@@ -253,8 +251,8 @@ func TestReconcileChargesAllocationsQueuedForStop(t *testing.T) {
 			if obsolete.Phase != lifecycle.PhaseStopping || obsolete.NextRetryAt == nil {
 				t.Fatalf("obsolete allocation after failed stop: phase=%s retry=%v", obsolete.Phase, obsolete.NextRetryAt)
 			}
-			if len(s.allocations) != 1 {
-				t.Fatalf("allocations = %d, want only the still-occupying obsolete allocation", len(s.allocations))
+			if len(s.allocations) != 2 || s.allocations[1].Phase != lifecycle.PhasePending || s.allocations[1].Reason == "" {
+				t.Fatalf("allocations = %#v, want the obsolete allocation and one pending placement diagnostic", s.allocations)
 			}
 			var starts, stops int
 			for _, call := range agent.recordedCalls() {
@@ -274,11 +272,12 @@ func TestReconcileChargesAllocationsQueuedForStop(t *testing.T) {
 			agent.mu.Unlock()
 			obsolete.NextRetryAt = nil
 			s.Reconcile(context.Background())
-			if obsolete.Phase != lifecycle.PhaseStopped || len(s.allocations) != 1 {
+			if obsolete.Phase != lifecycle.PhaseStopped || len(s.allocations) != 2 || s.allocations[1].Phase != lifecycle.PhasePending {
 				t.Fatalf("successful stop pass: phase=%s allocations=%d, want stopped without same-pass replacement", obsolete.Phase, len(s.allocations))
 			}
 
 			s.Reconcile(context.Background())
+			observeStarted(t, s, node.ID)
 			var replacement *Allocation
 			for _, allocation := range s.allocations {
 				if allocation.ID != obsolete.ID {
@@ -344,7 +343,7 @@ func TestDrainNodeStopsAllocationAfterReplacementHealthy(t *testing.T) {
 	if replacement.Node != replacementNode {
 		t.Fatalf("replacement node = %v, want %v", replacement.Node, replacementNode)
 	}
-	replacement.Health = lifecycle.HealthHealthy
+	observeStarted(t, s, replacementNode.ID)
 	s.Reconcile(context.Background())
 	if original.Phase != lifecycle.PhaseStopped {
 		t.Fatalf("original phase after replacement healthy = %s, want stopped", original.Phase)
@@ -370,7 +369,7 @@ func TestUndrainNodeRetainsCurrentAllocation(t *testing.T) {
 	if err := s.UndrainNode(context.Background(), node.ID); err != nil {
 		t.Fatal(err)
 	}
-	if allocation.Draining || allocation.Phase != lifecycle.PhaseRunning || len(s.allocations) != 1 {
+	if allocation.Draining || allocation.Phase != lifecycle.PhaseRunning || len(s.allocations) != 2 || s.allocations[1].Phase != lifecycle.PhaseStopped {
 		t.Fatalf("allocation after undrain: draining=%t phase=%s count=%d", allocation.Draining, allocation.Phase, len(s.allocations))
 	}
 	resumed := false
@@ -410,7 +409,7 @@ func TestUndrainNodeRetriesRecoveredStartingAllocation(t *testing.T) {
 	if err := s.UndrainNode(context.Background(), node.ID); err != nil {
 		t.Fatalf("undrain starting allocation: %v", err)
 	}
-	if node.Status != NodeStatusHealthy || allocation.Draining || allocation.Phase != lifecycle.PhaseRunning {
+	if node.Status != NodeStatusHealthy || allocation.Draining || allocation.Phase != lifecycle.PhaseStarting {
 		t.Fatalf("after undrain: node=%s draining=%t phase=%s", node.Status, allocation.Draining, allocation.Phase)
 	}
 	var resumed, started bool
@@ -554,8 +553,8 @@ func TestUndrainNodeRedeliversResumeAfterDeliveryFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if nodes[node.ID.String()].Status != NodeStatusHealthy || allocations[allocation.ID].Draining || allocations[allocation.ID].DrainSequence != 2 {
-		t.Fatalf("persisted undrain: node=%s allocation=%#v", nodes[node.ID.String()].Status, allocations[allocation.ID])
+	if nodes[node.ID.String()].Draining || allocations[allocation.ID].Draining || allocations[allocation.ID].DrainSequence != 2 {
+		t.Fatalf("persisted undrain: node draining=%t allocation=%#v", nodes[node.ID.String()].Draining, allocations[allocation.ID])
 	}
 
 	agent.mu.Lock()

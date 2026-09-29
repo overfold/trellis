@@ -78,6 +78,7 @@ export function NodesTable() {
             <tr className="border-b border-border bg-muted/50">
               <th className="px-4 py-3 text-left font-medium text-muted-foreground">Host</th>
               <th className="px-4 py-3 text-left font-medium text-muted-foreground">Status</th>
+              <th className="px-4 py-3 text-left font-medium text-muted-foreground">Control plane</th>
               <th className="px-4 py-3 text-left font-medium text-muted-foreground">Capacity</th>
               <th className="px-4 py-3 text-left font-medium text-muted-foreground">Placement</th>
               <th className="px-4 py-3 text-left font-medium text-muted-foreground">Heartbeat</th>
@@ -101,6 +102,9 @@ export function NodesTable() {
                   </td>
                   <td className="px-4 py-3">
                     <StatusBadge status={node.status} />
+                  </td>
+                  <td className="px-4 py-3 text-card-foreground">
+                    {node.control_plane ?? <span className="text-muted-foreground">—</span>}
                   </td>
                   <td className="px-4 py-3 text-card-foreground">
                     <p className="tabular-nums">{formatCPU(node.cpu)}</p>
@@ -133,8 +137,11 @@ export function NodesTable() {
                       </div>
                     )}
                   </td>
-                  <td className="whitespace-nowrap px-4 py-3 text-muted-foreground" title={new Date(node.last_heartbeat).toLocaleString()}>
-                    {timeAgo(node.last_heartbeat)}
+                  <td
+                    className="whitespace-nowrap px-4 py-3 text-muted-foreground"
+                    title={node.last_heartbeat ? new Date(node.last_heartbeat).toLocaleString() : "No heartbeat to the current leader yet"}
+                  >
+                    {node.last_heartbeat ? timeAgo(node.last_heartbeat) : "—"}
                   </td>
                   {allowWrites && (
                     <td className="px-4 py-3 text-right">

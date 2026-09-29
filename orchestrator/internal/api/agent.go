@@ -7,7 +7,9 @@ import (
 )
 
 // AllocationRequest describes an allocation for an agent to start. Generation
-// and Epoch must both be greater than zero.
+// and Epoch must both be greater than zero. The agent accepts a fenced start
+// and pulls images and creates tasks in the background; heartbeats report the
+// outcome.
 type AllocationRequest struct {
 	AllocationID  string                  `json:"allocation_id"`
 	Generation    uint64                  `json:"generation"`
@@ -28,6 +30,10 @@ type AllocationRequest struct {
 	// They are excluded from the execution hash.
 	Draining      bool   `json:"draining,omitempty"`
 	DrainSequence uint64 `json:"drain_sequence,omitempty"`
+	// Attempt is the control plane's start attempt count for this generation.
+	// A background start that fails reports it back in StartFailure, so each
+	// failure is counted once. It is excluded from the execution hash.
+	Attempt int `json:"attempt,omitempty"`
 }
 
 // StopAllocationRequest identifies an allocation generation to stop. Generation
