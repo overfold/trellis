@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -53,6 +55,7 @@ type execTestRuntime struct {
 	execTargets []string
 	metricIDs   []string
 	terminals   map[string][]*execTestTerminal
+	terminalErr error
 	onTerminal  func(containerID string)
 }
 
@@ -73,6 +76,9 @@ func (r *execTestRuntime) ExecOutput(_ context.Context, containerID string, _ []
 func (r *execTestRuntime) StartTerminal(_ context.Context, containerID string, _ []string, _ string, _, _ uint32) (runtime.TerminalSession, error) {
 	if r.onTerminal != nil {
 		r.onTerminal(containerID)
+	}
+	if r.terminalErr != nil {
+		return nil, r.terminalErr
 	}
 	terminal := &execTestTerminal{}
 	r.mu.Lock()
@@ -99,6 +105,11 @@ func addExecTestTask(agent *Agent, id, taskName string, generation uint64, statu
 	alloc := &Allocation{ID: id, ContainerID: id, AllocationID: "allocation", Generation: generation, TaskName: taskName, Status: status}
 	agent.allocations[id] = alloc
 	return alloc
+}
+
+func addExecTestAllocation(agent *Agent, allocID string) {
+	id := allocID + "-web"
+	agent.allocations[id] = &Allocation{ID: id, ContainerID: id, AllocationID: allocID, Generation: 1, TaskName: "web", Status: "running"}
 }
 
 func TestExecTargetsOnlyRunningVerifiedCurrentGenerationTask(t *testing.T) {
@@ -276,6 +287,138 @@ func TestReapExecSessionsReleasesExitedAndIdleSessions(t *testing.T) {
 	}
 	if _, err := agent.ReadExecSession("allocation", ids["exited"], 0); !errors.Is(err, ErrExecSessionNotFound) {
 		t.Fatalf("reaped session read error = %v, want not found", err)
+	}
+}
+
+func TestReapExecSessionsEnforcesMaximumLifetimeDespiteActivity(t *testing.T) {
+	rt := newExecTestRuntime()
+	agent := newOperationTestAgent(t, rt)
+	addExecTestTask(agent, "allocation-g1-web", "web", 1, "running")
+	response, err := agent.CreateExecSession(context.Background(), "allocation", "web", []string{"sh"}, "", 80, 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := agent.execSessions[response.ID]
+	expires := session.createdAt.Add(execSessionMaxLifetime)
+	session.lastActive.Store(execClockNanos(expires))
+
+	agent.reapExecSessions(context.Background(), expires)
+	if len(agent.execSessions) != 0 || agent.execSessionCount != 0 {
+		t.Fatalf("sessions after maximum lifetime = %d tracked, %d reserved; want none", len(agent.execSessions), agent.execSessionCount)
+	}
+	if rt.terminal("allocation-g1-web").closeCount() != 1 {
+		t.Fatal("maximum-lifetime session was not terminated")
+	}
+}
+
+func TestExecSessionPerAllocationLimitReturnsTooManyRequests(t *testing.T) {
+	rt := newExecTestRuntime()
+	agent := newOperationTestAgent(t, rt)
+	addExecTestTask(agent, "allocation-g1-web", "web", 1, "running")
+	for i := 0; i < execSessionPerAllocationLimit; i++ {
+		if _, err := agent.CreateExecSession(context.Background(), "allocation", "web", []string{"sh"}, "", 80, 24); err != nil {
+			t.Fatalf("create session %d: %v", i, err)
+		}
+	}
+
+	e := echo.New()
+	NewHandler(agent).Register(e)
+	body := bytes.NewBufferString(`{"task":"web","command":["sh"]}`)
+	request := httptest.NewRequest(http.MethodPost, "/v1/allocations/allocation/exec/sessions", body)
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	e.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429; body = %s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "allocation allocation has 8 interactive sessions (maximum 8)") {
+		t.Fatalf("overload response is not actionable: %s", recorder.Body.String())
+	}
+}
+
+func TestFailedExecSessionStartReleasesCapacity(t *testing.T) {
+	rt := newExecTestRuntime()
+	rt.terminalErr = errors.New("runtime refused terminal")
+	agent := newOperationTestAgent(t, rt)
+	addExecTestTask(agent, "allocation-g1-web", "web", 1, "running")
+
+	if _, err := agent.CreateExecSession(context.Background(), "allocation", "web", []string{"sh"}, "", 80, 24); !errors.Is(err, rt.terminalErr) {
+		t.Fatalf("create error = %v, want runtime failure", err)
+	}
+	if agent.execSessionCount != 0 || len(agent.execSessionsByAllocation) != 0 {
+		t.Fatalf("failed start left %d reserved with counts %v", agent.execSessionCount, agent.execSessionsByAllocation)
+	}
+}
+
+func TestExecSessionGlobalLimitIsAtomicAndFailedClosesRetainCapacity(t *testing.T) {
+	rt := newExecTestRuntime()
+	agent := newOperationTestAgent(t, rt)
+	for i := 0; i <= execSessionGlobalLimit/execSessionPerAllocationLimit; i++ {
+		addExecTestAllocation(agent, fmt.Sprintf("allocation-%d", i))
+	}
+
+	type result struct {
+		allocation string
+		response   *api.ExecSessionResponse
+		err        error
+	}
+	results := make(chan result, execSessionGlobalLimit+1)
+	var wg sync.WaitGroup
+	for i := 0; i < execSessionGlobalLimit+1; i++ {
+		allocation := fmt.Sprintf("allocation-%d", i/execSessionPerAllocationLimit)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			response, err := agent.CreateExecSession(context.Background(), allocation, "web", []string{"sh"}, "", 80, 24)
+			results <- result{allocation: allocation, response: response, err: err}
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	created := make([]result, 0, execSessionGlobalLimit)
+	rejected := 0
+	for result := range results {
+		if result.err == nil {
+			created = append(created, result)
+			continue
+		}
+		if !errors.Is(result.err, ErrExecSessionLimit) || !strings.Contains(result.err.Error(), "node has 64 interactive sessions (maximum 64)") {
+			t.Fatalf("unexpected concurrent create error: %v", result.err)
+		}
+		rejected++
+	}
+	if len(created) != execSessionGlobalLimit || rejected != 1 || agent.execSessionCount != execSessionGlobalLimit {
+		t.Fatalf("created = %d, rejected = %d, reserved = %d; want 64, 1, 64", len(created), rejected, agent.execSessionCount)
+	}
+
+	for _, session := range agent.execSessions {
+		terminal := session.Terminal.(*execTestTerminal)
+		terminal.mu.Lock()
+		terminal.closeErr = errors.New("persistent kill failure")
+		terminal.mu.Unlock()
+	}
+	for _, session := range created {
+		if err := agent.CloseExecSession(context.Background(), session.allocation, session.response.ID); err == nil {
+			t.Fatal("close succeeded despite persistent kill failure")
+		}
+	}
+	if len(agent.execSessions) != execSessionGlobalLimit || agent.execSessionCount != execSessionGlobalLimit {
+		t.Fatalf("failed closes left %d tracked and %d reserved; want %d", len(agent.execSessions), agent.execSessionCount, execSessionGlobalLimit)
+	}
+	if _, err := agent.CreateExecSession(context.Background(), "allocation-8", "web", []string{"sh"}, "", 80, 24); !errors.Is(err, ErrExecSessionLimit) {
+		t.Fatalf("create after failed closes error = %v, want global limit", err)
+	}
+
+	for _, session := range agent.execSessions {
+		terminal := session.Terminal.(*execTestTerminal)
+		terminal.mu.Lock()
+		terminal.closeErr = nil
+		terminal.mu.Unlock()
+	}
+	agent.reapExecSessions(context.Background(), time.Now())
+	if len(agent.execSessions) != 0 || agent.execSessionCount != 0 || len(agent.execSessionsByAllocation) != 0 {
+		t.Fatalf("successful retry left %d tracked, %d reserved, counts %v", len(agent.execSessions), agent.execSessionCount, agent.execSessionsByAllocation)
 	}
 }
 

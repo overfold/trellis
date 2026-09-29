@@ -243,6 +243,8 @@ func execError(err error) error {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	case errors.Is(err, ErrExecutionConflict):
 		return echo.NewHTTPError(http.StatusConflict, err.Error())
+	case errors.Is(err, ErrExecSessionLimit):
+		return echo.NewHTTPError(http.StatusTooManyRequests, err.Error())
 	case errors.Is(err, ErrAgentShuttingDown):
 		return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error())
 	default:
