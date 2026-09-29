@@ -14,6 +14,22 @@ Heartbeat observations live in the leader's memory: the last heartbeat time, hea
 
 A new leader therefore starts with every non-draining node unhealthy, no heartbeat time (`last_heartbeat` is absent from `GET /v1/nodes` until the node reports to it), no metrics, and no observed allocations. It measures node silence from the later of the node's last heartbeat to it and the start of its term; see [lost allocations](#lost-allocations). Terminal-record pruning needs a heartbeat received after the allocation became terminal, which a new leader only has once the node reports to it, so pruning on a node waits for its first heartbeat in the term.
 
+## Control-plane membership
+
+Every node runs the same daemon and is a Raft member, but only a bounded set of members vote. The target voter count is the largest odd number not above the member count or five: one member votes in a one- or two-member cluster, three in a three- or four-member cluster, and five from five members up. Five voters tolerate two failures; more would only add write fan-out and quorum size. Even counts are avoided because they tolerate no more failures than one voter fewer.
+
+`POST /v1/raft/join` always adds the node as a non-voter (`AddNonvoter`); a rejoining voter keeps its vote. The leader moves the voter set toward its desired size, one configuration change at a time, every 10 seconds once it has led for the 30-second recovery grace; a removal also wakes it. Every configuration change is made by the leader while it holds `membershipMu`, planned from the configuration read under the same hold, so changes cannot interleave. (hashicorp/raft does not expose the configuration's log index, so its compare-and-set guard is unavailable; it does allow only one uncommitted configuration change at a time and fails in-flight changes on leadership loss, and a new leader re-reads the configuration.) The planner (`planMembership`) is a pure function of the configuration and the leader's node observations and breaks ties by node ID:
+
+- a non-voter is eligible when its node is `healthy` (not draining or unhealthy) and its latest heartbeat, at most 30 seconds old, reported a Raft applied index within 256 entries of the leader's applied index at receipt. Only eligible non-voters are promoted;
+- a voter is gone when its node has sent no heartbeat for 5 minutes, measured from no earlier than the current leader's election (a voter that has not registered with this leader counts from its election). Gone is judged from agent heartbeats, not Raft contact;
+- promotions move toward the desired count, the largest odd number not above the target or the members that could vote now (voters that are not gone plus eligible non-voters), so a promotion never creates an even voter set;
+- a gone voter is swapped for an eligible non-voter by promoting first; the resulting surplus then demotes the gone voter, so the number of reachable voters never shrinks. Without a replacement, a gone voter is still demoted; that never raises the number of voters that must be reachable. The gone node stays a member and can vote again later;
+- a voter that is not gone is demoted only when voters exceed the target (after a removal shrinks the membership, or on a cluster whose voters predate the target), never the leader, preferring unreachable voters, then ineligible ones. A reachable voter therefore keeps its vote, and its copy of every commit, while no replacement is eligible, even if that briefly leaves an even voter set.
+
+Removal (`DELETE /v1/raft/members/{id}`) of a voter promotes an eligible non-voter before removing it. The removal is refused before changing anything with `ErrMembershipUnsafe` (`409`) when the reachable remaining voters (the leader, the replacement, and voters whose nodes heartbeated within 30 seconds) are not a majority of the remaining voters, because such a configuration would leave the leader unable to commit, including the removal itself. Raft leadership transfer only selects voters.
+
+Heartbeat progress is a leader-local renewable observation; nothing about eligibility is persisted. Configuration changes are ordinary Raft configuration entries, so every member applies the same membership.
+
 ## Scheduling algorithm
 
 For each task-group deficit, `Schedule`:

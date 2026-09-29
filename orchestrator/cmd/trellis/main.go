@@ -381,6 +381,7 @@ func run(parent context.Context, cfg *config) error {
 	volumeManager := agent.NewVolumeManager(cfg.DataDir)
 	ag := agent.NewAgent(log, runtimeClient, healthMgr, restartCtl, agent.NewPortManager(runtimeClient, 0, 0, 0), volumeManager, leaderClient, id)
 	ag.SetVersion(version.Current())
+	ag.SetRaftAppliedIndex(raftStore.AppliedIndex)
 	if err := ag.SetTaskPidsLimit(cfg.TaskPidsLimit); err != nil {
 		return fmt.Errorf("resources.task_pids_limit or --task-pids-limit: %w", err)
 	}

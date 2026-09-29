@@ -14,6 +14,7 @@ export interface Node {
   labels?: Record<string, string>;
   volumes?: string[];
   capabilities?: string[];
+  control_plane?: "voter" | "nonvoter";
 }
 
 export interface PortMapping {
