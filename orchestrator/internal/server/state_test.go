@@ -108,8 +108,8 @@ func TestJobRevisionRetentionAndDeletion(t *testing.T) {
 	controller := NewStateController(store, "test")
 	identity := jobKey("default", "web")
 	for revision := 1; revision <= jobRevisionRetention+3; revision++ {
-		job := &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "web"}, Revision: revision}
-		record := &JobRevisionRecord{Revision: revision, Spec: job.Spec, CreatedAt: time.Unix(int64(revision), 0).UTC()}
+		job := &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "web"}, Revision: revision, Version: revision}
+		record := &JobRevisionRecord{Version: revision, Revision: revision, Spec: job.Spec, CreatedAt: time.Unix(int64(revision), 0).UTC()}
 		if err := controller.PutJobWithRevision(ctx, identity, job, record); err != nil {
 			t.Fatal(err)
 		}
@@ -135,7 +135,7 @@ func TestListJobRevisionsBoundsLegacyHistory(t *testing.T) {
 	controller := NewStateController(store, "test")
 	prefix := "trellis/test/job-revisions/" + url.QueryEscape(jobKey("default", "web")) + "/"
 	for revision := 1; revision <= 25; revision++ {
-		raw, err := json.Marshal(&JobRevisionRecord{Revision: revision, Spec: &spec.JobSpec{Namespace: "default", Name: "web"}, CreatedAt: time.Unix(int64(revision), 0).UTC()})
+		raw, err := json.Marshal(&JobRevisionRecord{Version: revision, Revision: revision, Spec: &spec.JobSpec{Namespace: "default", Name: "web"}, CreatedAt: time.Unix(int64(revision), 0).UTC()})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -162,7 +162,7 @@ func TestCompactJobRevisionsBoundsLegacyHistoryAndRemovesOrphans(t *testing.T) {
 			if identity != liveIdentity {
 				name = "deleted"
 			}
-			raw, err := json.Marshal(&JobRevisionRecord{Revision: revision, Spec: &spec.JobSpec{Namespace: "default", Name: name}, CreatedAt: time.Unix(int64(revision), 0).UTC()})
+			raw, err := json.Marshal(&JobRevisionRecord{Version: revision, Revision: revision, Spec: &spec.JobSpec{Namespace: "default", Name: name}, CreatedAt: time.Unix(int64(revision), 0).UTC()})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -231,13 +231,13 @@ func TestStateControllerRoundTripsDurableLeaderState(t *testing.T) {
 func TestBackupRestoreRoundTripsPersistedJob(t *testing.T) {
 	ctx := context.Background()
 	store := &backupStore{data: memoryStore{}, snapshot: &state.DesiredSnapshot{Jobs: map[string][]byte{}, JobRevisions: map[string][]byte{}, Secrets: map[string][]byte{}, VolumeRegistrations: map[string][]byte{}, NetworkPortRegistrations: map[string][]byte{}}}
-	job := &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}}, Revision: 1}
+	job := &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}}, Revision: 1, Version: 1}
 	raw, err := json.Marshal(job)
 	if err != nil {
 		t.Fatal(err)
 	}
 	store.snapshot.Jobs["default%00web"] = raw
-	historical := &JobRevisionRecord{Revision: 1, Spec: &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 2000, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}}, CreatedAt: time.Now()}
+	historical := &JobRevisionRecord{Version: 1, Revision: 1, Spec: &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 2000, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}}, CreatedAt: time.Now()}
 	historicalRaw, err := json.Marshal(historical)
 	if err != nil {
 		t.Fatal(err)
@@ -266,6 +266,7 @@ func TestRetainedJobRevisionEntriesBoundsHistoryAndDropsOrphans(t *testing.T) {
 		identity := jobKey("default", name)
 		for revision := 1; revision <= jobRevisionRetention+2; revision++ {
 			raw, err := json.Marshal(&JobRevisionRecord{
+				Version:   revision,
 				Revision:  revision,
 				Spec:      &spec.JobSpec{Namespace: "default", Name: name},
 				CreatedAt: time.Unix(int64(revision), 0).UTC(),

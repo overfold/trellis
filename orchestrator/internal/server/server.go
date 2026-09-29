@@ -29,6 +29,7 @@ import (
 	"github.com/overfold/trellis/internal/catalog"
 	"github.com/overfold/trellis/internal/client"
 	"github.com/overfold/trellis/internal/lifecycle"
+	"github.com/overfold/trellis/internal/plan"
 	secretstore "github.com/overfold/trellis/internal/secrets"
 	"github.com/overfold/trellis/internal/spec"
 	"github.com/overfold/trellis/internal/state"
@@ -215,7 +216,7 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 		if err := json.Unmarshal(value, &record); err != nil {
 			return fmt.Errorf("validate job revision %q: %w", key, err)
 		}
-		if record.Spec == nil || record.Revision < 1 || record.CreatedAt.IsZero() {
+		if record.Spec == nil || record.Version < 1 || record.Revision < 1 || record.CreatedAt.IsZero() {
 			return fmt.Errorf("validate job revision %q: invalid revision record", key)
 		}
 		snapshot.JobRevisions[key] = value
@@ -261,9 +262,9 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 
 func retainedJobRevisionEntries(jobs, revisions map[string][]byte) (map[string][]byte, error) {
 	type entry struct {
-		key      string
-		revision int
-		raw      []byte
+		key     string
+		version int
+		raw     []byte
 	}
 	byJob := make(map[string][]entry)
 	for key, raw := range revisions {
@@ -275,8 +276,8 @@ func retainedJobRevisionEntries(jobs, revisions map[string][]byte) (map[string][
 		if jobs[url.QueryEscape(identity)] == nil {
 			continue
 		}
-		entries := append(byJob[identity], entry{key: key, revision: record.Revision, raw: raw})
-		sort.Slice(entries, func(i, j int) bool { return entries[i].revision < entries[j].revision })
+		entries := append(byJob[identity], entry{key: key, version: record.Version, raw: raw})
+		sort.Slice(entries, func(i, j int) bool { return entries[i].version < entries[j].version })
 		if len(entries) > jobRevisionRetention {
 			entries = entries[1:]
 		}
@@ -446,8 +447,14 @@ type NodeSummary struct {
 
 // Job contains a persisted job specification and revision.
 type Job struct {
-	Spec     *spec.JobSpec
+	Spec *spec.JobSpec
+	// Revision identifies the execution content of the job. It advances only
+	// when a task group's execution hash changes, which replaces allocations.
 	Revision int
+	// Version advances on every accepted change to the job specification,
+	// including label, count, and update-policy changes that keep the
+	// revision. It orders the job's history and fences concurrent applies.
+	Version int
 	// ContentHashes stores the content hash of each task group's non-label
 	// fields, keyed by group name. Set at registration time.
 	ContentHashes map[string]string `json:"content_hashes,omitempty"`
@@ -1173,21 +1180,37 @@ func jobKey(namespace, name string) string {
 }
 
 // RegisterJob creates or updates desired job state.
-func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spec.JobSpec) error {
+func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spec.JobSpec, expectedVersion *int) (*api.JobRegistrationResponse, error) {
 	if err := s.CanonicalizeJob(jobSpec); err != nil {
-		return fmt.Errorf("validate job: %w", err)
+		return nil, fmt.Errorf("validate job: %w", err)
+	}
+	if expectedVersion != nil && *expectedVersion < 0 {
+		return nil, fmt.Errorf("expected_version must not be negative")
+	}
+	if jobSpec.Namespace != namespace {
+		return nil, fmt.Errorf("job namespace does not match request namespace")
 	}
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
-	s.mu.Lock()
-	if jobSpec.Namespace != namespace {
-		s.mu.Unlock()
-		return fmt.Errorf("job namespace does not match request namespace")
-	}
 	key := jobKey(namespace, jobSpec.Name)
-	if err := s.validateNamespaceAllocationLimitLocked(nil, namespace, jobSpec, key); err != nil {
-		s.mu.Unlock()
-		return err
+	// The precondition is checked under mutationMu, which serializes every
+	// job mutation on the leader, so the job cannot change between this
+	// check and the commit below. Job records are replaced, never mutated,
+	// so existing can be compared without holding s.mu.
+	s.mu.RLock()
+	existing := s.jobs[key]
+	s.mu.RUnlock()
+	if err := checkJobVersion(existing, expectedVersion); err != nil {
+		return nil, err
+	}
+	if existing != nil && len(plan.Diff(existing.Spec, jobSpec)) == 0 {
+		return &api.JobRegistrationResponse{Namespace: namespace, Name: jobSpec.Name, Version: existing.Version, Revision: existing.Revision}, nil
+	}
+	s.mu.RLock()
+	err := s.validateNamespaceAllocationLimitLocked(nil, namespace, jobSpec, key)
+	s.mu.RUnlock()
+	if err != nil {
+		return nil, err
 	}
 
 	hashes := make(map[string]string, len(jobSpec.TaskGroups))
@@ -1195,9 +1218,10 @@ func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spe
 		hashes[jobSpec.TaskGroups[i].Name] = spec.TaskGroupContentHash(&jobSpec.TaskGroups[i])
 	}
 
-	revision := 1
+	revision, version := 1, 1
 	labelOnly := false
-	if existing := s.jobs[key]; existing != nil {
+	if existing != nil {
+		version = existing.Version + 1
 		revision = existing.Revision + 1
 		if isLabelOnlyChange(existing, jobSpec, hashes) {
 			revision = existing.Revision
@@ -1207,15 +1231,12 @@ func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spe
 	job := &Job{
 		Spec:          jobSpec,
 		Revision:      revision,
+		Version:       version,
 		ContentHashes: hashes,
 	}
-	s.mu.Unlock()
-	var revisionRecord *JobRevisionRecord
-	if !labelOnly {
-		revisionRecord = &JobRevisionRecord{Revision: revision, Spec: jobSpec, CreatedAt: s.now().UTC()}
-	}
+	revisionRecord := &JobRevisionRecord{Version: version, Revision: revision, Spec: jobSpec, CreatedAt: s.now().UTC()}
 	if err := s.state.PutJobWithRevision(ctx, key, job, revisionRecord); err != nil {
-		return fmt.Errorf("save job remotely: %w", err)
+		return nil, fmt.Errorf("save job remotely: %w", err)
 	}
 	s.mu.Lock()
 	s.jobs[key] = job
@@ -1223,16 +1244,60 @@ func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spe
 
 	if labelOnly {
 		s.refreshCatalog()
-	} else {
-		s.events.publish(api.ClusterEvent{
-			Type:      api.EventJobRegistered,
-			Namespace: namespace,
-			JobName:   jobSpec.Name,
-			Revision:  revision,
-			At:        s.now().UTC(),
-		})
 	}
+	s.events.publish(api.ClusterEvent{
+		Type:      api.EventJobRegistered,
+		Namespace: namespace,
+		JobName:   jobSpec.Name,
+		Version:   version,
+		Revision:  revision,
+		At:        s.now().UTC(),
+	})
 
+	return &api.JobRegistrationResponse{Namespace: namespace, Name: jobSpec.Name, Version: version, Revision: revision}, nil
+}
+
+// ErrJobVersionConflict indicates that a job apply's expected version did not
+// match the job's current version.
+var ErrJobVersionConflict = errors.New("job version conflict")
+
+// JobVersionConflictError describes a failed job apply precondition.
+type JobVersionConflictError struct {
+	Expected int
+	// Current is the job's current version, or 0 when the job does not exist.
+	Current int
+	Exists  bool
+}
+
+func (e *JobVersionConflictError) Error() string {
+	switch {
+	case e.Expected == 0:
+		return fmt.Sprintf("job version conflict: job already exists at version %d; plan the manifest again", e.Current)
+	case !e.Exists:
+		return fmt.Sprintf("job version conflict: expected version %d but the job does not exist; plan the manifest again", e.Expected)
+	default:
+		return fmt.Sprintf("job version conflict: expected version %d but the job is at version %d; plan the manifest again", e.Expected, e.Current)
+	}
+}
+
+// Is reports whether target is ErrJobVersionConflict.
+func (e *JobVersionConflictError) Is(target error) bool { return target == ErrJobVersionConflict }
+
+// checkJobVersion enforces an apply precondition. A nil expected version
+// applies unconditionally; 0 requires that the job does not exist.
+func checkJobVersion(existing *Job, expected *int) error {
+	if expected == nil {
+		return nil
+	}
+	if existing == nil {
+		if *expected == 0 {
+			return nil
+		}
+		return &JobVersionConflictError{Expected: *expected}
+	}
+	if *expected == 0 || existing.Version != *expected {
+		return &JobVersionConflictError{Expected: *expected, Current: existing.Version, Exists: true}
+	}
 	return nil
 }
 
@@ -1288,8 +1353,9 @@ func desiredAllocations(job *spec.JobSpec) int64 {
 }
 
 // isLabelOnlyChange returns true when the new job spec differs from the
-// existing one only in task group labels (and count/update policy). The
-// content hashes must have been computed from newSpec.
+// existing one only in task group labels (and count/update policy), so the
+// change keeps the execution revision. The content hashes must have been
+// computed from newSpec.
 func isLabelOnlyChange(existing *Job, newSpec *spec.JobSpec, newHashes map[string]string) bool {
 	if len(existing.Spec.TaskGroups) != len(newSpec.TaskGroups) {
 		return false
@@ -1519,7 +1585,7 @@ func (s *Server) ListJobs(namespace string) api.JobListResponse {
 			continue
 		}
 		name := job.Spec.Name
-		r := api.JobStatusResponse{Name: name, Revision: job.Revision}
+		r := api.JobStatusResponse{Name: name, Version: job.Version, Revision: job.Revision}
 		for _, g := range job.Spec.TaskGroups {
 			r.Desired += g.Count
 		}
@@ -1556,7 +1622,7 @@ func (s *Server) GetJob(namespace, name string) (*api.JobStatusResponse, bool) {
 		return nil, false
 	}
 	specCopy := *job.Spec
-	r := &api.JobStatusResponse{Name: name, Revision: job.Revision, Spec: &specCopy}
+	r := &api.JobStatusResponse{Name: name, Version: job.Version, Revision: job.Revision, Spec: &specCopy}
 	for _, g := range job.Spec.TaskGroups {
 		r.Desired += g.Count
 	}
@@ -1684,8 +1750,9 @@ func (s *Server) StopAllocationByID(ctx context.Context, namespace, id string) e
 	return s.Execute(ctx, &Action{Type: ActionStop, Allocation: found})
 }
 
-// ListJobRevisions returns the stored spec history for a job.
-func (s *Server) ListJobRevisions(ctx context.Context, namespace, name string) (api.JobRevisionListResponse, error) {
+// ListJobVersions returns the retained spec history for a job, one entry per
+// version in ascending order.
+func (s *Server) ListJobVersions(ctx context.Context, namespace, name string) (api.JobVersionListResponse, error) {
 	s.mu.RLock()
 	key := jobKey(namespace, name)
 	_, ok := s.jobs[key]
@@ -1697,9 +1764,10 @@ func (s *Server) ListJobRevisions(ctx context.Context, namespace, name string) (
 	if err != nil {
 		return nil, err
 	}
-	result := make(api.JobRevisionListResponse, 0, len(records))
+	result := make(api.JobVersionListResponse, 0, len(records))
 	for _, r := range records {
-		result = append(result, api.JobRevisionResponse{
+		result = append(result, api.JobVersionResponse{
+			Version:   r.Version,
 			Revision:  r.Revision,
 			Spec:      *r.Spec,
 			CreatedAt: r.CreatedAt,

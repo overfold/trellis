@@ -68,8 +68,18 @@ export interface AllocationEvent {
   at: string;
 }
 
+// JobRegistration is returned by an apply with the job's resulting version
+// and execution revision.
+export interface JobRegistration {
+  namespace: string;
+  name: string;
+  version: number;
+  revision: number;
+}
+
 export interface Job {
   name: string;
+  version: number;
   revision: number;
   desired: number;
   running: number;

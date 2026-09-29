@@ -34,7 +34,7 @@ func TestDiffTreatsTaskOrderAsSemantic(t *testing.T) {
 	if len(changes) == 0 {
 		t.Fatal("task reorder produced no semantic changes")
 	}
-	if result := Build(before, 4, after); result.Action != "update" {
+	if result := Build(before, 6, 4, after); result.Action != "update" {
 		t.Fatalf("plan action = %q, want update", result.Action)
 	}
 }
@@ -60,7 +60,7 @@ func TestDiffIgnoresTaskGroupOrder(t *testing.T) {
 	if changes := Diff(before, after); len(changes) != 0 {
 		t.Fatalf("task-group reorder produced changes: %#v", changes)
 	}
-	if result := Build(before, 4, after); result.Action != "none" {
+	if result := Build(before, 6, 4, after); result.Action != "none" {
 		t.Fatalf("plan action = %q, want none", result.Action)
 	}
 }
