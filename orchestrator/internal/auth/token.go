@@ -9,6 +9,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"sort"
 	"sync"
 	"time"
 
@@ -47,7 +49,7 @@ const (
 	CredentialWorkload CredentialKind = "workload"
 )
 
-// CredentialSubject optionally identifies the workload that owns an injected credential.
+// CredentialSubject identifies the workload that owns an injected credential.
 type CredentialSubject struct {
 	Namespace string `json:"namespace"`
 	Job       string `json:"job"`
@@ -88,6 +90,9 @@ func (p Principal) Validate() error {
 	}
 	if p.Kind == CredentialOperator && p.Subject != nil {
 		return fmt.Errorf("operator credential must not include a workload subject")
+	}
+	if p.Kind == CredentialWorkload && p.Subject == nil {
+		return fmt.Errorf("workload credential requires a workload subject")
 	}
 	if p.Subject != nil {
 		if p.Subject.Namespace == "" || p.Subject.Job == "" || p.Subject.TaskGroup == "" {
@@ -148,21 +153,17 @@ func (m *TokenManager) prepareToken(principal Principal) (string, string, []byte
 	}
 	token := prefix + base64.RawURLEncoding.EncodeToString(raw)
 	hash := sha256.Sum256([]byte(token))
-	hashHex := hex.EncodeToString(hash[:])
 	data, err := json.Marshal(&principal)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("marshal principal: %w", err)
 	}
-	key := fmt.Sprintf("trellis/%s/tokens/%s", m.cluster, hashHex)
-	return token, key, data, nil
+	return token, m.tokenKey(hex.EncodeToString(hash[:])), data, nil
 }
 
 // ValidateToken returns the principal for a valid generated token.
 func (m *TokenManager) ValidateToken(ctx context.Context, rawToken string) (*Principal, error) {
 	hash := sha256.Sum256([]byte(rawToken))
-	hashHex := hex.EncodeToString(hash[:])
-	key := fmt.Sprintf("trellis/%s/tokens/%s", m.cluster, hashHex)
-	data, err := m.store.Get(ctx, key)
+	data, err := m.store.Get(ctx, m.tokenKey(hex.EncodeToString(hash[:])))
 	if err != nil {
 		return nil, fmt.Errorf("lookup token: %w", err)
 	}
@@ -179,18 +180,74 @@ func (m *TokenManager) ValidateToken(ctx context.Context, rawToken string) (*Pri
 	return &principal, nil
 }
 
-// GetOrCreateWorkloadToken returns the persistent workload credential for a scope/access pair.
-func (m *TokenManager) GetOrCreateWorkloadToken(ctx context.Context, scope AccessScope, access AccessLevel, namespace string) (string, error) {
-	principal := Principal{Kind: CredentialWorkload, Scope: scope, Access: access, Namespace: namespace}
-	if scope == AccessCluster {
+// Sealer encrypts persisted workload credentials so replicated state never
+// contains a usable bearer token.
+type Sealer interface {
+	Seal(plaintext, associated []byte) ([]byte, error)
+	Open(sealed, associated []byte) ([]byte, error)
+}
+
+// WorkloadCredential binds an injected credential to one allocation generation.
+// Only the token hash and its sealed form are persisted.
+type WorkloadCredential struct {
+	AllocationID string    `json:"allocation_id"`
+	Generation   uint64    `json:"generation"`
+	TokenHash    string    `json:"token_hash"`
+	Principal    Principal `json:"principal"`
+	SealedToken  []byte    `json:"sealed_token"`
+}
+
+func (m *TokenManager) tokenKey(hashHex string) string {
+	return fmt.Sprintf("trellis/%s/tokens/%s", m.cluster, hashHex)
+}
+
+func (m *TokenManager) workloadCredentialPrefix() string {
+	return fmt.Sprintf("trellis/%s/workload-credentials/", m.cluster)
+}
+
+func (m *TokenManager) workloadCredentialKey(allocationID string) string {
+	return m.workloadCredentialPrefix() + url.PathEscape(allocationID)
+}
+
+func (m *TokenManager) workloadTokenAAD(allocationID string, generation uint64, tokenHash string) []byte {
+	return []byte(fmt.Sprintf("trellis-workload-token\x00%s\x00%s\x00%d\x00%s", m.cluster, allocationID, generation, tokenHash))
+}
+
+func samePrincipalGrant(a, b Principal) bool {
+	if a.Kind != b.Kind || a.Scope != b.Scope || a.Access != b.Access || a.Namespace != b.Namespace {
+		return false
+	}
+	if a.Subject == nil || b.Subject == nil {
+		return a.Subject == b.Subject
+	}
+	return *a.Subject == *b.Subject
+}
+
+// WorkloadToken returns the credential for one allocation generation, minting
+// it on first use. Retries of the same generation receive the same token, so
+// the allocation execution hash stays stable across retries and leader
+// changes. A new generation or a changed grant replaces and revokes the
+// previous credential.
+func (m *TokenManager) WorkloadToken(ctx context.Context, sealer Sealer, allocationID string, generation uint64, principal Principal) (string, error) {
+	if sealer == nil {
+		return "", fmt.Errorf("workload credentials require the secrets encryption key")
+	}
+	if allocationID == "" || generation == 0 {
+		return "", fmt.Errorf("workload credential requires an allocation identity and generation")
+	}
+	principal.Kind = CredentialWorkload
+	if principal.Scope == AccessCluster {
 		principal.Namespace = ""
 	}
+	principal.CreatedAt = time.Time{}
 	if err := principal.Validate(); err != nil {
 		return "", err
 	}
-	mapping := fmt.Sprintf("%s/%s/%s", scope, access, namespace)
-	mappingHash := sha256.Sum256([]byte(mapping))
-	rawKey := fmt.Sprintf("trellis/%s/workload-tokens/%s", m.cluster, hex.EncodeToString(mappingHash[:]))
+	atomic, ok := m.store.(state.AtomicStore)
+	if !ok {
+		return "", fmt.Errorf("state store does not support atomic workload tokens")
+	}
+	key := m.workloadCredentialKey(allocationID)
 
 	// The active leader owns one TokenManager. Serializing its read and batch
 	// prevents concurrent allocation starts from minting competing credentials;
@@ -199,26 +256,116 @@ func (m *TokenManager) GetOrCreateWorkloadToken(ctx context.Context, scope Acces
 	m.workloadTokensMu.Lock()
 	defer m.workloadTokensMu.Unlock()
 
-	existing, err := m.store.Get(ctx, rawKey)
+	existing, err := m.loadWorkloadCredential(ctx, key)
 	if err != nil {
-		return "", fmt.Errorf("lookup existing workload token: %w", err)
+		return "", err
 	}
-	if existing != nil {
-		token := string(existing)
-		if validated, err := m.ValidateToken(ctx, token); err == nil && validated != nil {
+	if existing != nil && existing.Generation == generation && samePrincipalGrant(existing.Principal, principal) {
+		if token, ok := m.openWorkloadToken(ctx, sealer, existing); ok {
 			return token, nil
 		}
 	}
+
 	token, tokenKey, tokenData, err := m.prepareToken(principal)
 	if err != nil {
 		return "", err
 	}
-	atomic, ok := m.store.(state.AtomicStore)
-	if !ok {
-		return "", fmt.Errorf("state store does not support atomic workload tokens")
+	stored := principal
+	if err := json.Unmarshal(tokenData, &stored); err != nil {
+		return "", fmt.Errorf("decode workload principal: %w", err)
 	}
-	if err := atomic.Batch(ctx, []state.Mutation{{Key: tokenKey, Value: tokenData}, {Key: rawKey, Value: []byte(token)}}); err != nil {
+	hash := sha256.Sum256([]byte(token))
+	hashHex := hex.EncodeToString(hash[:])
+	sealed, err := sealer.Seal([]byte(token), m.workloadTokenAAD(allocationID, generation, hashHex))
+	if err != nil {
+		return "", fmt.Errorf("seal workload token: %w", err)
+	}
+	record, err := json.Marshal(&WorkloadCredential{AllocationID: allocationID, Generation: generation, TokenHash: hashHex, Principal: stored, SealedToken: sealed})
+	if err != nil {
+		return "", fmt.Errorf("marshal workload credential: %w", err)
+	}
+	mutations := []state.Mutation{{Key: tokenKey, Value: tokenData}, {Key: key, Value: record}}
+	if existing != nil && existing.TokenHash != "" && existing.TokenHash != hashHex {
+		mutations = append(mutations, state.Mutation{Key: m.tokenKey(existing.TokenHash)})
+	}
+	if err := atomic.Batch(ctx, mutations); err != nil {
 		return "", fmt.Errorf("store workload token: %w", err)
 	}
 	return token, nil
+}
+
+func (m *TokenManager) loadWorkloadCredential(ctx context.Context, key string) (*WorkloadCredential, error) {
+	data, err := m.store.Get(ctx, key)
+	if err != nil {
+		return nil, fmt.Errorf("lookup workload credential: %w", err)
+	}
+	if data == nil {
+		return nil, nil
+	}
+	var credential WorkloadCredential
+	if err := json.Unmarshal(data, &credential); err != nil {
+		return nil, fmt.Errorf("decode workload credential: %w", err)
+	}
+	return &credential, nil
+}
+
+// openWorkloadToken recovers a persisted token. It reports false when the
+// token cannot be recovered or is no longer valid, so the caller replaces it.
+func (m *TokenManager) openWorkloadToken(ctx context.Context, sealer Sealer, credential *WorkloadCredential) (string, bool) {
+	raw, err := sealer.Open(credential.SealedToken, m.workloadTokenAAD(credential.AllocationID, credential.Generation, credential.TokenHash))
+	if err != nil {
+		return "", false
+	}
+	defer clear(raw)
+	hash := sha256.Sum256(raw)
+	if hex.EncodeToString(hash[:]) != credential.TokenHash {
+		return "", false
+	}
+	token := string(raw)
+	if validated, err := m.ValidateToken(ctx, token); err != nil || validated == nil {
+		return "", false
+	}
+	return token, true
+}
+
+// RevokeWorkloadCredentials deletes every workload credential for which keep
+// returns false and returns how many were revoked.
+func (m *TokenManager) RevokeWorkloadCredentials(ctx context.Context, keep func(WorkloadCredential) bool) (int, error) {
+	m.workloadTokensMu.Lock()
+	defer m.workloadTokensMu.Unlock()
+
+	records, err := m.store.List(ctx, m.workloadCredentialPrefix())
+	if err != nil {
+		return 0, fmt.Errorf("list workload credentials: %w", err)
+	}
+	keys := make([]string, 0, len(records))
+	for key := range records {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var mutations []state.Mutation
+	revoked := 0
+	for _, key := range keys {
+		var credential WorkloadCredential
+		if err := json.Unmarshal(records[key], &credential); err == nil && keep(credential) {
+			continue
+		}
+		// An undecodable record cannot be matched to a live allocation.
+		mutations = append(mutations, state.Mutation{Key: key})
+		if credential.TokenHash != "" {
+			mutations = append(mutations, state.Mutation{Key: m.tokenKey(credential.TokenHash)})
+		}
+		revoked++
+	}
+	if len(mutations) == 0 {
+		return 0, nil
+	}
+	atomic, ok := m.store.(state.AtomicStore)
+	if !ok {
+		return 0, fmt.Errorf("state store does not support atomic workload tokens")
+	}
+	if err := atomic.Batch(ctx, mutations); err != nil {
+		return 0, fmt.Errorf("revoke workload credentials: %w", err)
+	}
+	return revoked, nil
 }

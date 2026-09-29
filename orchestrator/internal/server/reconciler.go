@@ -881,6 +881,7 @@ func (s *Server) Reconcile(ctx context.Context) {
 	}
 	s.mutationMu.Unlock()
 	mutationLocked = false
+	s.revokeStaleWorkloadCredentials(ctx)
 	for _, backoff := range delayed {
 		next := backoff.NextReplacementAt
 		s.log.Info("delaying task group replacement after failed allocations", "namespace", backoff.Namespace, "job", backoff.JobName, "group", backoff.TaskGroupName, "failures", backoff.Failures, "next_replacement_at", next, "last_allocation", backoff.LastAllocationID)
@@ -1369,7 +1370,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 			}
 		}()
 		if groupAPIAccess != nil {
-			token, err := s.apiAccessToken(ctx, groupAPIAccess, request.Namespace)
+			token, err := s.apiAccessToken(ctx, groupAPIAccess, request)
 			if err != nil {
 				return err
 			}

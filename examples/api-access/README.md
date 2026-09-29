@@ -11,10 +11,10 @@ This example shows the normal least-privilege pattern: a trusted workload discov
 | Scope/access | Credential | Intended use |
 |---|---|---|
 | omitted | None | Ordinary application workloads |
-| `namespace/read` | Persistent read-only token restricted to the job's own namespace | Discovery, observers, and namespace-local read-only controllers |
-| `namespace/write` | Persistent read/write token restricted to the job's own namespace | Trusted namespace-local reconcilers |
-| `cluster/read` | Cluster-wide read-only operator token | Trusted cluster observers |
-| `cluster/write` | Cluster-wide read/write operator token | Trusted operator/control-plane workloads |
+| `namespace/read` | Read-only token restricted to the job's own namespace | Discovery, observers, and namespace-local read-only controllers |
+| `namespace/write` | Read/write token restricted to the job's own namespace | Trusted namespace-local reconcilers |
+| `cluster/read` | Cluster-wide read-only token | Trusted cluster observers |
+| `cluster/write` | Cluster-wide read/write token | Trusted operator/control-plane workloads |
 
 This example requests:
 
@@ -42,6 +42,8 @@ With API access enabled, Trellis adds these variables to every task in the group
 | `TRELLIS_CA_CERT` | Cluster CA certificate (inline PEM) for TLS verification when configured. |
 
 This is a group-level privilege boundary: every task in the group can read the injected environment and act with the token. Use a reviewed, pinned image and do not mix an untrusted sidecar into the group. This is especially important for cluster/write, because compromise of any task in that group exposes broad operator authority.
+
+Each allocation receives its own token, bound to the job and task group. Start retries re-deliver the same token, and Trellis revokes it when the allocation is replaced and pruned, when the job is deleted, or when `api_access` is removed or changed. API access requires the servers' secrets encryption key, which the installer configures.
 
 The bootstrap credential remains separate and is never injected into workloads.
 

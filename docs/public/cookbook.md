@@ -259,7 +259,7 @@ api_access:
   access: read
 ```
 
-Namespace scope cannot name or select some other namespace: Trellis creates a persistent bearer token restricted to the **job's own namespace**. It injects:
+Namespace scope cannot name or select some other namespace: Trellis creates a bearer token for each allocation, restricted to the **job's own namespace**. It injects:
 
 - `TRELLIS_ADDR` — workload-reachable control-plane address;
 - `TRELLIS_TOKEN` — bearer token restricted to the job namespace;

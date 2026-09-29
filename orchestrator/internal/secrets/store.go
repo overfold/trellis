@@ -244,3 +244,50 @@ func (s *Store) Delete(ctx context.Context, namespace, name string) error {
 	}
 	return s.state.Delete(ctx, s.key(namespace, name))
 }
+
+type sealedValue struct {
+	KeyID      string `json:"key_id"`
+	Nonce      string `json:"nonce"`
+	Ciphertext string `json:"ciphertext"`
+}
+
+// Seal encrypts a small control-plane value with the active secrets key and
+// binds it to associated. The result is safe to persist in replicated state.
+func (s *Store) Seal(plaintext, associated []byte) ([]byte, error) {
+	nonce := make([]byte, s.aead.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, fmt.Errorf("generate seal nonce: %w", err)
+	}
+	ciphertext := s.aead.Seal(nil, nonce, plaintext, sealAAD(associated))
+	return json.Marshal(&sealedValue{KeyID: s.keyID, Nonce: base64.RawStdEncoding.EncodeToString(nonce), Ciphertext: base64.RawStdEncoding.EncodeToString(ciphertext)})
+}
+
+// Open decrypts a value produced by Seal with the same associated data.
+func (s *Store) Open(sealed, associated []byte) ([]byte, error) {
+	var value sealedValue
+	if err := json.Unmarshal(sealed, &value); err != nil {
+		return nil, fmt.Errorf("decode sealed value: %w", err)
+	}
+	if value.KeyID != s.keyID {
+		return nil, fmt.Errorf("sealing key %q is unavailable", value.KeyID)
+	}
+	nonce, err := base64.RawStdEncoding.DecodeString(value.Nonce)
+	if err != nil {
+		return nil, fmt.Errorf("decode sealed nonce: %w", err)
+	}
+	ciphertext, err := base64.RawStdEncoding.DecodeString(value.Ciphertext)
+	if err != nil {
+		return nil, fmt.Errorf("decode sealed ciphertext: %w", err)
+	}
+	plaintext, err := s.aead.Open(nil, nonce, ciphertext, sealAAD(associated))
+	if err != nil {
+		return nil, fmt.Errorf("open sealed value: %w", err)
+	}
+	return plaintext, nil
+}
+
+// sealAAD separates sealed control-plane values from secret records, which
+// use their own associated-data format under the same key.
+func sealAAD(associated []byte) []byte {
+	return append([]byte("trellis-sealed\x00"), associated...)
+}
