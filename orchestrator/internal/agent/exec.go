@@ -24,8 +24,14 @@ const (
 	// execSessionExitRetention keeps an exited terminal's final output
 	// readable for this long before its buffer is released.
 	execSessionExitRetention = 2 * time.Minute
-	execSessionReapInterval  = 30 * time.Second
-	execSessionCloseTimeout  = 5 * time.Second
+	// execSessionMaxLifetime bounds a terminal even while it remains active.
+	execSessionMaxLifetime  = 8 * time.Hour
+	execSessionReapInterval = 30 * time.Second
+	execSessionCloseTimeout = 5 * time.Second
+	// A terminal retains up to 2 MiB of output in addition to its runtime
+	// process, so admission is bounded both per node agent and allocation.
+	execSessionGlobalLimit        = 64
+	execSessionPerAllocationLimit = 8
 )
 
 // execSession is an interactive terminal bound to one task record and container.
@@ -40,6 +46,7 @@ type execSession struct {
 	// closeFailed marks a session whose termination failed; the reaper
 	// retries it regardless of client activity.
 	closeFailed atomic.Bool
+	createdAt   time.Time
 	exitedAt    time.Time
 }
 
@@ -53,6 +60,9 @@ func execClockNanos(t time.Time) int64 { return int64(t.Sub(execClock)) }
 // with the agent lock held.
 func (s *execSession) expired(now time.Time) bool {
 	if s.closeFailed.Load() {
+		return true
+	}
+	if now.Sub(s.createdAt) >= execSessionMaxLifetime {
 		return true
 	}
 	if !s.exitedAt.IsZero() {
@@ -177,25 +187,25 @@ func (a *Agent) ExecAllocation(ctx context.Context, allocID, task string, comman
 
 // CreateExecSession starts a persistent interactive terminal in an allocation task.
 func (a *Agent) CreateExecSession(ctx context.Context, allocID, task string, command []string, term string, cols, rows uint32) (*api.ExecSessionResponse, error) {
-	a.mu.RLock()
-	closed := a.execSessionsClosed
-	a.mu.RUnlock()
-	if closed {
-		return nil, ErrAgentShuttingDown
-	}
 	target, err := a.selectRunningExecTarget(ctx, allocID, task)
 	if err != nil {
 		return nil, err
 	}
+	if err := a.reserveExecSession(allocID); err != nil {
+		return nil, err
+	}
 	terminal, err := a.runtime.StartTerminal(ctx, target.ContainerID, command, term, cols, rows)
 	if err != nil {
+		a.releaseExecSession(allocID)
 		return nil, fmt.Errorf("start terminal in container %s: %w", target.ContainerID, err)
 	}
 	sessionID := uuid.NewString()
+	now := time.Now()
 	session := &execSession{
 		AllocationID: allocID, TaskID: target.ID, ContainerID: target.ContainerID, Terminal: terminal,
+		createdAt: now,
 	}
-	session.lastActive.Store(execClockNanos(time.Now()))
+	session.lastActive.Store(execClockNanos(now))
 	// StartTerminal outlives the request; a caller that gave up never learns
 	// the session ID, so the terminal must not be kept.
 	if err := ctx.Err(); err != nil {
@@ -219,6 +229,36 @@ func (a *Agent) CreateExecSession(ctx context.Context, allocID, task string, com
 	a.execSessions[sessionID] = session
 	a.mu.Unlock()
 	return &api.ExecSessionResponse{ID: sessionID}, nil
+}
+
+// reserveExecSession claims capacity before a runtime process is created.
+// Sessions being started and sessions whose close is in progress or failed
+// remain counted even though they are temporarily absent from execSessions.
+func (a *Agent) reserveExecSession(allocID string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.execSessionsClosed {
+		return ErrAgentShuttingDown
+	}
+	if a.execSessionCount >= execSessionGlobalLimit {
+		return fmt.Errorf("%w: node has %d interactive sessions (maximum %d)", ErrExecSessionLimit, a.execSessionCount, execSessionGlobalLimit)
+	}
+	if count := a.execSessionsByAllocation[allocID]; count >= execSessionPerAllocationLimit {
+		return fmt.Errorf("%w: allocation %s has %d interactive sessions (maximum %d)", ErrExecSessionLimit, allocID, count, execSessionPerAllocationLimit)
+	}
+	a.execSessionCount++
+	a.execSessionsByAllocation[allocID]++
+	return nil
+}
+
+func (a *Agent) releaseExecSession(allocID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.execSessionCount--
+	a.execSessionsByAllocation[allocID]--
+	if a.execSessionsByAllocation[allocID] == 0 {
+		delete(a.execSessionsByAllocation, allocID)
+	}
 }
 
 // useExecSession returns a session addressed through allocID and records
@@ -344,6 +384,8 @@ func (a *Agent) closeTerminal(ctx context.Context, sessionID string, session *ex
 			a.execSessions[sessionID] = session
 		}
 		a.mu.Unlock()
+	} else {
+		a.releaseExecSession(session.AllocationID)
 	}
 	return err
 }

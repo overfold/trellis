@@ -875,7 +875,7 @@ func (h *Handler) agentRequestError(err error, notRunning string) error {
 				return echo.NewHTTPError(http.StatusConflict, notRunning)
 			}
 			return echo.NewHTTPError(http.StatusNotFound, agentErr.Message())
-		case http.StatusBadRequest, http.StatusConflict, http.StatusRequestEntityTooLarge:
+		case http.StatusBadRequest, http.StatusConflict, http.StatusRequestEntityTooLarge, http.StatusTooManyRequests:
 			return echo.NewHTTPError(agentErr.Status, agentErr.Message())
 		case http.StatusServiceUnavailable:
 			return echo.NewHTTPError(http.StatusServiceUnavailable, "node agent unavailable: "+agentErr.Message())

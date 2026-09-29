@@ -36,6 +36,10 @@ type Agent struct {
 	nodeID       uuid.UUID
 	allocations  map[string]*Allocation
 	execSessions map[string]*execSession
+	// execSessionCount includes sessions being started or closed as well as
+	// sessions in execSessions, so failed cleanup cannot free admission capacity.
+	execSessionCount         int
+	execSessionsByAllocation map[string]int
 	// execSessionsClosed refuses new exec sessions once the agent shuts down.
 	execSessionsClosed bool
 	healthProbe        string
@@ -192,6 +196,8 @@ var (
 	ErrExecutionConflict = errors.New("allocation execution metadata conflict")
 	// ErrExecSessionNotFound indicates that an interactive exec session does not exist.
 	ErrExecSessionNotFound = errors.New("exec session not found")
+	// ErrExecSessionLimit indicates that interactive exec admission is full.
+	ErrExecSessionLimit = errors.New("exec session limit reached")
 	// ErrAgentShuttingDown indicates that the agent refuses new work while it shuts down.
 	ErrAgentShuttingDown = errors.New("agent is shutting down")
 	// ErrExecTaskRequired indicates that an exec request must name one of several running tasks.
@@ -270,11 +276,12 @@ func (a *Agent) markAllocationStopping(id string) error {
 func NewAgent(log *slog.Logger, runtime runtime.ContainerRuntime, health *health.HealthManager, reconciler *AllocationReconciler, ports *PortManager, volumes *VolumeManager, server *client.ServerClient, nodeID uuid.UUID) *Agent {
 	executable, _ := os.Executable()
 	agent := &Agent{
-		nodeID:       nodeID,
-		allocations:  make(map[string]*Allocation),
-		execSessions: make(map[string]*execSession),
-		healthProbe:  filepath.Join(filepath.Dir(executable), "trellis-health-probe"),
-		operations:   make(map[string]*allocationOperation),
+		nodeID:                   nodeID,
+		allocations:              make(map[string]*Allocation),
+		execSessions:             make(map[string]*execSession),
+		execSessionsByAllocation: make(map[string]int),
+		healthProbe:              filepath.Join(filepath.Dir(executable), "trellis-health-probe"),
+		operations:               make(map[string]*allocationOperation),
 
 		log: log,
 

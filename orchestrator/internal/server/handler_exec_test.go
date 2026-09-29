@@ -99,6 +99,7 @@ func TestAgentExecErrorsMapToPublicStatus(t *testing.T) {
 	}{
 		{name: "task required", agentStatus: http.StatusBadRequest, agentBody: "exec task selection required: allocation alloc-1 has running tasks a, b; specify task", want: http.StatusBadRequest, wantMessage: "exec task selection required: allocation alloc-1 has running tasks a, b; specify task"},
 		{name: "execution conflict", agentStatus: http.StatusConflict, agentBody: "allocation execution metadata conflict", want: http.StatusConflict, wantMessage: "allocation execution metadata conflict"},
+		{name: "session limit", agentStatus: http.StatusTooManyRequests, agentBody: "exec session limit reached: node has 64 interactive sessions (maximum 64)", want: http.StatusTooManyRequests, wantMessage: "exec session limit reached: node has 64 interactive sessions (maximum 64)"},
 		{name: "agent shutting down", agentStatus: http.StatusServiceUnavailable, agentBody: "agent is shutting down", want: http.StatusServiceUnavailable, wantMessage: "node agent unavailable: agent is shutting down"},
 		{name: "agent not found", agentStatus: http.StatusNotFound, agentBody: "exec session not found: s-1"},
 		{name: "agent internal failure", agentStatus: http.StatusInternalServerError, agentBody: "exec in container c-1: runtime detail", want: http.StatusBadGateway, wantMessage: "node agent failed to handle the request"},
