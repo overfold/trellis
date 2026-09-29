@@ -35,6 +35,7 @@ The API uses the same resource vocabulary as the [Trellis user model](../public/
 | `POST` | `/v1/allocations/{id}/exec/sessions` | Start an ephemeral interactive TTY session; requires write access. |
 | `POST` / `GET` / `DELETE` | `/v1/allocations/{id}/exec/sessions/{session}/...` | Write input, read output, resize, or close an interactive TTY session; requires write access. |
 | `GET` | `/v1/allocations/{id}/metrics` | Current per-task CPU and memory usage. |
+| `GET` | `/v1/events` | Namespace-filtered or cluster-wide server-sent event stream. |
 | `PUT` | `/v1/namespaces/{ns}/secrets/{name}` | Set a secret; requires `cluster/write`. |
 | `GET` | `/v1/namespaces/{ns}/secrets[/{name}]` | List/get secret metadata only; requires cluster scope. |
 | `DELETE` | `/v1/namespaces/{ns}/secrets/{name}` | Delete a secret; requires `cluster/write`. |
@@ -80,6 +81,13 @@ Exec, exec-session, and allocation-metrics errors return a JSON `{"message":"...
 Secret write body: `{"value_base64":"...","expected_version":1}`; omit `expected_version` for unconditional update. Decoded values may contain at most 65,536 bytes; an oversized request returns `413` before base64 decoding. Lists are JSON arrays. Non-2xx responses are errors; clients must tolerate reconciliation-driven changes between reads.
 
 A namespace credential is authorized only for its stored namespace regardless of the namespace header supplied by the caller. A cluster credential may deliberately select different namespaces but receives only the read/write authority encoded in its principal.
+
+The control plane admits 256 simultaneous `/v1/events` subscribers per
+process. Additional requests receive `503 Service Unavailable` and
+`Retry-After: 1` without allocating a stream buffer. Subscriber admission does
+not alter authorization: namespace-scoped streams continue to receive only
+events for their authenticated namespace. Clients should reconnect with
+backoff after overload or a leader change.
 
 ## Administrator, enrollment, and cluster-internal endpoints
 

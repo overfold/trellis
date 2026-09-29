@@ -896,7 +896,11 @@ func noRunningTaskMessage(id, task string) string {
 }
 
 func (h *Handler) handleEvents(c *echo.Context) error {
-	ch := h.server.events.subscribe(requestNamespace(c))
+	ch, ok := h.server.events.subscribe(requestNamespace(c))
+	if !ok {
+		c.Response().Header().Set("Retry-After", "1")
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "event subscriber limit reached")
+	}
 	defer h.server.events.unsubscribe(ch)
 
 	c.Response().Header().Set("Content-Type", "text/event-stream")

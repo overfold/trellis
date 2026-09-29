@@ -22,8 +22,11 @@ const (
 	// DefaultDomain is the default DNS suffix for Trellis services.
 	DefaultDomain = "trellis"
 	// DefaultTTL is the default lifetime of DNS answers, in seconds.
-	DefaultTTL        = 5
-	maxDNSMessageSize = 65535
+	DefaultTTL = 5
+
+	defaultMaxConcurrentUDPQueries = 256
+	defaultMaxTCPConnections       = 128
+	maxDNSMessageSize              = 65535
 )
 
 // DiscoveryLookup lists service-discovery records.
@@ -47,6 +50,8 @@ type Resolver struct {
 	lookup     DiscoveryLookup
 	namespaces NamespaceLookup
 	upstreams  []string
+	udpSlots   chan struct{}
+	tcpSlots   chan struct{}
 
 	mu    sync.RWMutex
 	cache map[string]*record // "group.job.namespace" -> record
@@ -64,6 +69,8 @@ func NewResolver(log *slog.Logger, lookup DiscoveryLookup, namespaces NamespaceL
 		lookup:     lookup,
 		namespaces: namespaces,
 		upstreams:  append([]string(nil), upstreams...),
+		udpSlots:   make(chan struct{}, defaultMaxConcurrentUDPQueries),
+		tcpSlots:   make(chan struct{}, defaultMaxTCPConnections),
 		cache:      make(map[string]*record),
 	}
 }
@@ -107,6 +114,9 @@ func SystemResolvers(path string) ([]string, error) {
 
 // Run serves DNS over UDP and TCP on addr until ctx is canceled.
 func (r *Resolver) Run(ctx context.Context, addr string) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	udpAddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
 		return fmt.Errorf("resolve UDP listen address: %w", err)
@@ -125,16 +135,23 @@ func (r *Resolver) Run(ctx context.Context, addr string) error {
 		_ = udpConn.Close()
 		return fmt.Errorf("listen TCP: %w", err)
 	}
-	defer func() {
-		_ = udpConn.Close()
-		_ = tcpListener.Close()
-	}()
-
-	go r.refreshLoop(ctx)
+	var background sync.WaitGroup
+	background.Add(2)
 	go func() {
+		defer background.Done()
+		r.refreshLoop(ctx)
+	}()
+	go func() {
+		defer background.Done()
 		<-ctx.Done()
 		_ = udpConn.Close()
 		_ = tcpListener.Close()
+	}()
+	defer func() {
+		cancel()
+		_ = udpConn.Close()
+		_ = tcpListener.Close()
+		background.Wait()
 	}()
 
 	if r.log != nil {
@@ -144,16 +161,20 @@ func (r *Resolver) Run(ctx context.Context, addr string) error {
 	errCh := make(chan error, 2)
 	go func() { errCh <- r.serveUDP(ctx, udpConn) }()
 	go func() { errCh <- r.serveTCP(ctx, tcpListener) }()
+	var runErr error
 	for range 2 {
-		if err := <-errCh; err != nil && ctx.Err() == nil {
-			return err
+		if err := <-errCh; err != nil && ctx.Err() == nil && runErr == nil {
+			runErr = err
+			cancel()
 		}
 	}
-	return nil
+	return runErr
 }
 
 func (r *Resolver) serveUDP(ctx context.Context, conn *net.UDPConn) error {
 	buf := make([]byte, maxDNSMessageSize)
+	var workers sync.WaitGroup
+	defer workers.Wait()
 	for {
 		n, remote, err := conn.ReadFromUDP(buf)
 		if err != nil {
@@ -162,16 +183,33 @@ func (r *Resolver) serveUDP(ctx context.Context, conn *net.UDPConn) error {
 			}
 			return fmt.Errorf("read UDP DNS query: %w", err)
 		}
-		response := r.handleQueryNetwork(buf[:n], "udp", remote)
-		if response != nil {
-			if _, err := conn.WriteToUDP(response, remote); err != nil && ctx.Err() == nil && r.log != nil {
-				r.log.Error("dns UDP write error", "error", err)
-			}
+		packet := append([]byte(nil), buf[:n]...)
+		select {
+		case r.udpSlots <- struct{}{}:
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				defer func() { <-r.udpSlots }()
+				r.writeUDPResponse(ctx, conn, remote, r.handleQueryNetworkContext(ctx, packet, "udp", remote))
+			}()
+		default:
+			r.writeUDPResponse(ctx, conn, remote, buildErrorResponse(packet, 2))
 		}
 	}
 }
 
+func (r *Resolver) writeUDPResponse(ctx context.Context, conn *net.UDPConn, remote *net.UDPAddr, response []byte) {
+	if response == nil {
+		return
+	}
+	if _, err := conn.WriteToUDP(response, remote); err != nil && ctx.Err() == nil && r.log != nil {
+		r.log.Error("dns UDP write error", "error", err)
+	}
+}
+
 func (r *Resolver) serveTCP(ctx context.Context, listener *net.TCPListener) error {
+	var connections sync.WaitGroup
+	defer connections.Wait()
 	for {
 		conn, err := listener.AcceptTCP()
 		if err != nil {
@@ -180,12 +218,24 @@ func (r *Resolver) serveTCP(ctx context.Context, listener *net.TCPListener) erro
 			}
 			return fmt.Errorf("accept TCP DNS connection: %w", err)
 		}
-		go r.serveTCPConnection(ctx, conn)
+		select {
+		case r.tcpSlots <- struct{}{}:
+			connections.Add(1)
+			go func() {
+				defer connections.Done()
+				defer func() { <-r.tcpSlots }()
+				r.serveTCPConnection(ctx, conn)
+			}()
+		default:
+			_ = conn.Close()
+		}
 	}
 }
 
 func (r *Resolver) serveTCPConnection(ctx context.Context, conn net.Conn) {
 	defer func() { _ = conn.Close() }()
+	stopClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopClose()
 	for {
 		if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
 			return
@@ -202,7 +252,7 @@ func (r *Resolver) serveTCPConnection(ctx context.Context, conn net.Conn) {
 		if _, err := io.ReadFull(conn, packet); err != nil {
 			return
 		}
-		response := r.handleQueryNetwork(packet, "tcp", conn.RemoteAddr())
+		response := r.handleQueryNetworkContext(ctx, packet, "tcp", conn.RemoteAddr())
 		if response == nil || len(response) > maxDNSMessageSize {
 			return
 		}
@@ -293,6 +343,10 @@ func (r *Resolver) handleQuery(packet []byte) []byte {
 }
 
 func (r *Resolver) handleQueryNetwork(packet []byte, network string, remote net.Addr) []byte {
+	return r.handleQueryNetworkContext(context.Background(), packet, network, remote)
+}
+
+func (r *Resolver) handleQueryNetworkContext(ctx context.Context, packet []byte, network string, remote net.Addr) []byte {
 	if len(packet) < 12 {
 		return nil
 	}
@@ -310,7 +364,7 @@ func (r *Resolver) handleQueryNetwork(packet []byte, network string, remote net.
 		return nil
 	}
 	if !strings.HasSuffix(name, "."+r.domain+".") {
-		return r.forward(packet, network)
+		return r.forward(ctx, packet, network)
 	}
 
 	qtype := binary.BigEndian.Uint16(packet[offset : offset+2])
@@ -354,9 +408,9 @@ func queryNamespace(name, domain string) string {
 	return parts[2]
 }
 
-func (r *Resolver) forward(packet []byte, network string) []byte {
+func (r *Resolver) forward(ctx context.Context, packet []byte, network string) []byte {
 	for _, upstream := range r.upstreams {
-		response, err := exchangeDNS(network, upstream, packet)
+		response, err := exchangeDNS(ctx, network, upstream, packet)
 		if err == nil {
 			return response
 		}
@@ -367,12 +421,14 @@ func (r *Resolver) forward(packet []byte, network string) []byte {
 	return buildErrorResponse(packet, 2) // SERVFAIL
 }
 
-func exchangeDNS(network, upstream string, packet []byte) ([]byte, error) {
-	conn, err := net.DialTimeout(network, upstream, 2*time.Second)
+func exchangeDNS(ctx context.Context, network, upstream string, packet []byte) ([]byte, error) {
+	conn, err := (&net.Dialer{Timeout: 2 * time.Second}).DialContext(ctx, network, upstream)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = conn.Close() }()
+	stopClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopClose()
 	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		return nil, err
 	}

@@ -2,7 +2,9 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -16,7 +18,10 @@ import (
 func TestEventBusNamespaceSubscriptionSerializesOnlySelectedNamespace(t *testing.T) {
 	bus := newEventBus()
 	req := scopedRequest(t, http.MethodGet, "/v1/events", "", auth.AccessNamespace, auth.AccessRead, "alpha")
-	subscriber := bus.subscribe(requestNamespace(echo.New().NewContext(req, httptest.NewRecorder())))
+	subscriber, ok := bus.subscribe(requestNamespace(echo.New().NewContext(req, httptest.NewRecorder())))
+	if !ok {
+		t.Fatal("subscribe rejected")
+	}
 	defer bus.unsubscribe(subscriber)
 
 	bus.publish(api.ClusterEvent{Type: api.EventJobRegistered, Namespace: "alpha", JobName: "web", At: time.Now()})
@@ -47,7 +52,10 @@ func TestEventBusNamespaceSubscriptionSerializesOnlySelectedNamespace(t *testing
 func TestEventBusClusterSubscriptionReceivesAllNamespaces(t *testing.T) {
 	bus := newEventBus()
 	req := scopedRequest(t, http.MethodGet, "/v1/events", "", auth.AccessCluster, auth.AccessRead, "")
-	subscriber := bus.subscribe(requestNamespace(echo.New().NewContext(req, httptest.NewRecorder())))
+	subscriber, ok := bus.subscribe(requestNamespace(echo.New().NewContext(req, httptest.NewRecorder())))
+	if !ok {
+		t.Fatal("subscribe rejected")
+	}
 	defer bus.unsubscribe(subscriber)
 
 	bus.publish(api.ClusterEvent{Type: api.EventJobRegistered, Namespace: "alpha", At: time.Now()})
@@ -62,5 +70,98 @@ func TestEventBusClusterSubscriptionReceivesAllNamespaces(t *testing.T) {
 		default:
 			t.Fatalf("cluster subscription did not receive %q event", namespace)
 		}
+	}
+}
+
+func TestEventBusRejectsSubscribersAtLimitAndRecovers(t *testing.T) {
+	bus := newEventBusWithLimit(2)
+	alpha, ok := bus.subscribe("alpha")
+	if !ok {
+		t.Fatal("first subscribe rejected")
+	}
+	beta, ok := bus.subscribe("beta")
+	if !ok {
+		t.Fatal("second subscribe rejected")
+	}
+	if subscriber, ok := bus.subscribe(""); ok || subscriber != nil {
+		t.Fatal("subscriber above limit was admitted")
+	}
+
+	bus.publish(api.ClusterEvent{Namespace: "alpha"})
+	select {
+	case event := <-alpha:
+		if event.Namespace != "alpha" {
+			t.Fatalf("alpha received %#v", event)
+		}
+	default:
+		t.Fatal("alpha did not receive its event")
+	}
+	select {
+	case event := <-beta:
+		t.Fatalf("beta received alpha event: %#v", event)
+	default:
+	}
+
+	bus.unsubscribe(alpha)
+	replacement, ok := bus.subscribe("alpha")
+	if !ok {
+		t.Fatal("subscriber slot was not recovered")
+	}
+	bus.unsubscribe(replacement)
+	bus.unsubscribe(beta)
+}
+
+func TestEventHandlerRejectsOverloadAndReleasesCanceledSubscriber(t *testing.T) {
+	bus := newEventBusWithLimit(1)
+	handler := NewHandler(&Server{events: bus})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	req := httptest.NewRequest(http.MethodGet, "/v1/events", nil).WithContext(ctx)
+	c := echo.New().NewContext(req, httptest.NewRecorder())
+	done := make(chan error, 1)
+	go func() { done <- handler.handleEvents(c) }()
+	waitForSubscriberCount(t, bus, 1)
+
+	overload := echo.New().NewContext(httptest.NewRequest(http.MethodGet, "/v1/events", nil), httptest.NewRecorder())
+	err := handler.handleEvents(overload)
+	var httpErr *echo.HTTPError
+	if !errors.As(err, &httpErr) || httpErr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("overload error = %v, want HTTP 503", err)
+	}
+	if got := overload.Response().Header().Get("Retry-After"); got != "1" {
+		t.Fatalf("Retry-After = %q, want 1", got)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("canceled event handler: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("event handler did not stop after cancellation")
+	}
+	waitForSubscriberCount(t, bus, 0)
+	ch, ok := bus.subscribe("")
+	if !ok {
+		t.Fatal("canceled subscriber did not release admission slot")
+	}
+	bus.unsubscribe(ch)
+}
+
+func waitForSubscriberCount(t *testing.T, bus *EventBus, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		bus.mu.Lock()
+		got := len(bus.subscribers)
+		bus.mu.Unlock()
+		if got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("subscribers = %d, want %d", got, want)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }

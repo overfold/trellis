@@ -68,3 +68,9 @@ These decisions are derived each pass from the allocation snapshot and the lates
 ## Catalog and discovery
 
 Reconciliation refreshes the catalog from eligible allocation endpoints. Namespace-networked tasks advertise only their observed workload address from the agent; a missing namespace observation never falls back to the node address. Host-networked tasks use the node address. The allocation-level address remains available only when its routable task endpoints agree on one address; task-level endpoint data is retained separately, and ambiguous allocations are omitted from allocation-level catalog discovery. Catalog entries retain namespace, job/group, labels, address, ports, and status. Queries can be namespace scoped and label filtered (`key:value`). The node-authenticated internal discovery endpoint returns only namespaces with active allocations assigned to that node instead of distributing the cluster-wide catalog. The node resolver then binds each `*.trellis` query to the namespace network that owns the caller's source address, so a caller-selected DNS name cannot cross the namespace boundary. DNS maps authorized service-shaped names to IPv4 addresses with a short TTL. Proxy sync polls label-filtered allocations, keeps healthy endpoints, honors positive `trellis/weight`, atomically rewrites rendered output, and optionally reloads the proxy.
+
+The node resolver handles UDP queries concurrently so a slow forwarded query
+cannot block local discovery or unrelated forwarding. Admission is bounded at
+256 in-flight UDP queries and 128 active TCP connections. UDP overload receives
+`SERVFAIL`, TCP overload is closed, and cancellation closes listeners, accepted
+connections, and upstream exchanges before the resolver waits for its workers.

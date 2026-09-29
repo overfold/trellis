@@ -6,24 +6,34 @@ import (
 	"github.com/overfold/trellis/internal/api"
 )
 
+const defaultMaxEventSubscribers = 256
+
 // EventBus distributes cluster events to SSE subscribers.
 type EventBus struct {
 	mu          sync.Mutex
 	subscribers map[chan api.ClusterEvent]string
+	limit       int
 }
 
 func newEventBus() *EventBus {
-	return &EventBus{subscribers: make(map[chan api.ClusterEvent]string)}
+	return newEventBusWithLimit(defaultMaxEventSubscribers)
+}
+
+func newEventBusWithLimit(limit int) *EventBus {
+	return &EventBus{subscribers: make(map[chan api.ClusterEvent]string), limit: limit}
 }
 
 // subscribe registers a subscriber for namespace. An empty namespace receives
 // events for the entire cluster.
-func (b *EventBus) subscribe(namespace string) chan api.ClusterEvent {
-	ch := make(chan api.ClusterEvent, 64)
+func (b *EventBus) subscribe(namespace string) (chan api.ClusterEvent, bool) {
 	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.subscribers) >= b.limit {
+		return nil, false
+	}
+	ch := make(chan api.ClusterEvent, 64)
 	b.subscribers[ch] = namespace
-	b.mu.Unlock()
-	return ch
+	return ch, true
 }
 
 func (b *EventBus) unsubscribe(ch chan api.ClusterEvent) {
