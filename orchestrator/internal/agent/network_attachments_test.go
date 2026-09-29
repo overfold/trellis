@@ -126,7 +126,7 @@ func TestRunAllocationRecordsNetworkIntentBeforeAttach(t *testing.T) {
 		intent = recorded.NetworkIntent
 	}
 
-	if err := agent.RunGroup(context.Background(), wireGuardTestRequest()); err != nil {
+	if err := runGroup(context.Background(), agent, wireGuardTestRequest()); err != nil {
 		t.Fatal(err)
 	}
 	want := network.AttachmentIntent{AllocationID: id, Namespace: "default", Network: "default"}
@@ -146,7 +146,7 @@ func TestFailedAttachDetachesByIntent(t *testing.T) {
 	agent, local := newDurableNetworkTestAgent(t, &reconcilerRuntime{}, manager)
 	id := "allocation-g2-first"
 
-	if err := agent.RunGroup(context.Background(), wireGuardTestRequest()); !errors.Is(err, attachErr) {
+	if err := runGroup(context.Background(), agent, wireGuardTestRequest()); !errors.Is(err, attachErr) {
 		t.Fatalf("run error = %v, want attach failure", err)
 	}
 	if !slices.Equal(manager.byID, []string{id}) || manager.isAttached(id) {
@@ -168,7 +168,7 @@ func TestFailedIntentCleanupRetainsRecordUntilStopSucceeds(t *testing.T) {
 	agent, local := newDurableNetworkTestAgent(t, &reconcilerRuntime{}, manager)
 	id := "allocation-g2-first"
 
-	if err := agent.RunGroup(context.Background(), wireGuardTestRequest()); !errors.Is(err, detachErr) {
+	if err := runGroup(context.Background(), agent, wireGuardTestRequest()); !errors.Is(err, detachErr) {
 		t.Fatalf("run error = %v, want detach failure", err)
 	}
 	var recorded Allocation
@@ -222,7 +222,7 @@ func TestRunAllocationRetryDetachesIntentOnlyRecord(t *testing.T) {
 	agent, _ := newDurableNetworkTestAgent(t, &reconcilerRuntime{}, manager)
 	agent.allocations[record.ID] = record
 
-	if err := agent.RunGroup(context.Background(), wireGuardTestRequest()); err != nil {
+	if err := runGroup(context.Background(), agent, wireGuardTestRequest()); err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Equal(manager.byID, []string{record.ID}) {

@@ -162,9 +162,10 @@ func (h *Handler) handleRun(c *echo.Context) error {
 			clear(request.Secrets[i].Value)
 		}
 	}()
-	err = h.agent.RunGroup(ctx, &request)
-	if err != nil {
-		h.agent.log.Error("start allocation failed", "allocation", request.AllocationID, "error", err)
+	// The agent accepts a fenced start and pulls images and creates tasks in
+	// the background; heartbeats report progress and failure.
+	if err := h.agent.StartGroup(ctx, &request); err != nil {
+		h.agent.log.Error("accept allocation start failed", "allocation", request.AllocationID, "error", err)
 		return operationError(err)
 	}
 
