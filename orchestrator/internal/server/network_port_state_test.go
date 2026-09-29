@@ -10,22 +10,36 @@ import (
 	"github.com/google/uuid"
 )
 
+func commitNetworkPortPlan(t *testing.T, s *Server, namespaces []string) (map[string]int, error) {
+	t.Helper()
+	registrations, additions, deletions, planErr := s.planNetworkPortRegistrations(context.Background(), namespaces)
+	if planErr != nil && !errors.Is(planErr, errNetworkPortExhausted) {
+		return nil, planErr
+	}
+	if err := s.state.CommitReconciliation(context.Background(), &ReconciliationCommit{
+		NetworkPortRegistrations:    additions,
+		DeleteNetworkPortNamespaces: deletions,
+	}); err != nil {
+		return nil, err
+	}
+	return registrations, planErr
+}
+
 func TestEnsureNetworkPortRegistrationsAreStableAndUnique(t *testing.T) {
-	ctx := context.Background()
 	store := memoryStore{}
 	s := &Server{
 		state:              NewStateController(store, "test"),
 		wireGuardPortCount: 8,
 	}
 
-	first, err := s.ensureNetworkPortRegistrations(ctx, []string{"acme", "globex"})
+	first, err := commitNetworkPortPlan(t, s, []string{"acme", "globex"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if first["acme"] == first["globex"] {
 		t.Fatalf("namespaces share slot %d", first["acme"])
 	}
-	second, err := s.ensureNetworkPortRegistrations(ctx, []string{"globex", "acme"})
+	second, err := commitNetworkPortPlan(t, s, []string{"globex", "acme"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +53,7 @@ func TestEnsureNetworkPortRegistrationsRejectsExhaustion(t *testing.T) {
 		state:              NewStateController(memoryStore{}, "test"),
 		wireGuardPortCount: 1,
 	}
-	registrations, err := s.ensureNetworkPortRegistrations(context.Background(), []string{"acme", "globex"})
+	registrations, err := commitNetworkPortPlan(t, s, []string{"acme", "globex"})
 	if !errors.Is(err, errNetworkPortExhausted) || len(registrations) != 1 {
 		t.Fatalf("registrations = %v, error = %v; want one registration and exhaustion", registrations, err)
 	}
@@ -70,12 +84,12 @@ func TestEnsureNetworkPortRegistrationsReleasesUnusedNamespace(t *testing.T) {
 	state := NewStateController(store, "test")
 	s := &Server{state: state, wireGuardPortCount: 2}
 
-	first, err := s.ensureNetworkPortRegistrations(ctx, []string{"acme", "globex"})
+	first, err := commitNetworkPortPlan(t, s, []string{"acme", "globex"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	acmeSlot := first["acme"]
-	if _, err := s.ensureNetworkPortRegistrations(ctx, []string{"globex"}); err != nil {
+	if _, err := commitNetworkPortPlan(t, s, []string{"globex"}); err != nil {
 		t.Fatal(err)
 	}
 	registrations, err := state.ListNetworkPortRegistrations(ctx)
@@ -85,7 +99,7 @@ func TestEnsureNetworkPortRegistrationsReleasesUnusedNamespace(t *testing.T) {
 	if _, exists := registrations["acme"]; exists {
 		t.Fatalf("unused namespace registration was not released: %v", registrations)
 	}
-	third, err := s.ensureNetworkPortRegistrations(ctx, []string{"globex", "initech"})
+	third, err := commitNetworkPortPlan(t, s, []string{"globex", "initech"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +119,7 @@ func TestEnsureNetworkPortRegistrationsFailureIsAtomicAndDeterministic(t *testin
 	}
 	s := &Server{state: state, wireGuardPortCount: 2}
 
-	registrations, err := s.ensureNetworkPortRegistrations(ctx, []string{"gamma", "beta"})
+	registrations, err := commitNetworkPortPlan(t, s, []string{"gamma", "beta"})
 	if err == nil || registrations != nil {
 		t.Fatalf("registrations = %v, error = %v; want failed atomic commit", registrations, err)
 	}

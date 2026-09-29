@@ -101,8 +101,6 @@ type Server struct {
 	//     actions per node and bound them globally across passes.
 	//   - mutationMu serializes durable state mutations and is never acquired
 	//     while mu or allocation.mu is held.
-	//   - networkPortMu serializes durable namespace WireGuard port assignment
-	//     and is never acquired while mu or allocation.mu is held.
 	mu                 sync.RWMutex
 	reconcileMu        sync.Mutex
 	refreshMu          sync.Mutex
@@ -110,7 +108,6 @@ type Server struct {
 	actionNodes        map[uuid.UUID]chan struct{}
 	actionSlots        chan struct{}
 	mutationMu         sync.Mutex
-	networkPortMu      sync.Mutex
 	networkPlanMu      sync.Mutex
 	networkPlans       map[networkPlanKey]*networkPlanState
 	networkPlanWorkers map[uuid.UUID]uint64
@@ -731,17 +728,14 @@ func (s *Server) AcquireLeadership(ctx context.Context) error {
 	}
 	cluster.ControlEpoch++
 	epoch := cluster.ControlEpoch
-	if err := s.state.PutCluster(ctx, cluster); err != nil {
-		return fmt.Errorf("persist control-plane epoch: %w", err)
-	}
 	s.mu.RLock()
 	jobs := make(map[string]*Job, len(s.jobs))
 	for key, job := range s.jobs {
 		jobs[key] = job
 	}
 	s.mu.RUnlock()
-	if err := s.state.CompactJobRevisions(ctx, jobs); err != nil {
-		return fmt.Errorf("compact job revisions: %w", err)
+	if err := s.state.ActivateLeadership(ctx, cluster, jobs); err != nil {
+		return fmt.Errorf("persist leadership activation: %w", err)
 	}
 	s.mu.Lock()
 	s.cluster = cluster
