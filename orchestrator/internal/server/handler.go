@@ -361,6 +361,10 @@ func (h *Handler) handleAllocationLogs(c *echo.Context) error {
 	if errors.Is(err, ErrTaskSelection) {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
+	var upstreamError *client.HTTPError
+	if errors.As(err, &upstreamError) && upstreamError.Status == http.StatusTooManyRequests {
+		return echo.NewHTTPError(http.StatusTooManyRequests, "node log follower limit reached")
+	}
 	if err != nil {
 		return echo.NewHTTPError(http.StatusNotFound, "allocation or task logs not found")
 	}

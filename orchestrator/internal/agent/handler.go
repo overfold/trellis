@@ -10,6 +10,7 @@ import (
 
 	"github.com/labstack/echo/v5"
 	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/runtime"
 )
 
 // Handler exposes agent operations through HTTP.
@@ -115,6 +116,9 @@ func (h *Handler) handleLogs(c *echo.Context) error {
 	if err != nil {
 		if errors.Is(err, ErrAllocationNotFound) {
 			return echo.NewHTTPError(http.StatusNotFound, err.Error())
+		}
+		if errors.Is(err, runtime.ErrTooManyLogFollowers) {
+			return echo.NewHTTPError(http.StatusTooManyRequests, err.Error())
 		}
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}

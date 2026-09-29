@@ -190,6 +190,8 @@ Following needs exactly one task stream. Combine the short allocation reference 
 trellisctl jobs logs web --allocation a1b2c3d4 --task app --follow
 ```
 
+Logs are node-local, bounded diagnostics rather than durable history. Each task keeps at most four 8 MiB segments shared by stdout and stderr; once full, the retained window varies from 24 MiB to the 32 MiB cap as the active segment grows. Older output is discarded, and removing the allocation removes its logs. Tails span the retained segments, while follows continue through rotation. Each node supports 32 concurrent follows and returns HTTP `429` when that limit is full; disconnect an unused follower or retry later. Non-following log reads do not use those slots.
+
 ## Run commands and open an allocation terminal
 
 `trellisctl exec` targets a Trellis allocation directly. Without a TTY it runs one command, writes the remote stdout/stderr to the matching local streams, and returns the remote exit status:

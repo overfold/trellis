@@ -176,7 +176,7 @@ func (c *client) stream(ctx context.Context, url string) (io.ReadCloser, error) 
 	if checkStatusCode(response.StatusCode) {
 		defer func() { _ = response.Body.Close() }()
 		body, _ := io.ReadAll(io.LimitReader(response.Body, maxResponseBody))
-		return nil, fmt.Errorf("status %d: %s", response.StatusCode, bytes.TrimSpace(body))
+		return nil, &HTTPError{Status: response.StatusCode, Body: body}
 	}
 	return response.Body, nil
 }
