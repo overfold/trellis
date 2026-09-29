@@ -142,7 +142,7 @@ Replacements of failed allocations are delayed by a per-task-group backoff so th
 
 When a node stops sending heartbeats for longer than the allocation loss timeout (45 seconds by default), its allocations become `lost` and are replaced like failed ones. Lost is terminal: if the node returns, its lost allocations are never adopted again. While a lost allocation record is retained, containers the returning node still runs for it keep running until the group has `count` running replacements, and are then stopped. If an older pruned allocation is later reported, Trellis stops it as an observed orphan. They are stopped earlier when they block a replacement, for example by holding a host port the replacement needs on the same node. The loss timeout is server configuration (`allocation_loss_timeout`), not a manifest field. See [lost allocations](user-model.md#lost-allocations).
 
-`update.strategy` is `recreate` (the default) or `rolling`. For rolling updates, `max_parallel` limits how many not-yet-healthy replacements may be in flight; zero uses the effective default of one.
+`update.strategy` is `recreate` (the default) or `rolling`. For rolling updates, `max_parallel` limits both the number of not-yet-healthy replacements in flight and temporary live capacity above `count`. A stop frees capacity only after it succeeds, so a failed stop cannot admit an excess replacement. Zero uses the effective default of one.
 
 Task groups are the unit of placement, scaling, updates, restart behavior, and draining. Every task in a group is coupled to that lifecycle.
 

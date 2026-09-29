@@ -79,6 +79,19 @@ func activeAllocationPhase(phase lifecycle.Phase) bool {
 	return phase != lifecycle.PhaseStopped && phase != lifecycle.PhaseFailed && phase != lifecycle.PhaseLost
 }
 
+// potentiallyLiveAllocation reports whether an allocation may still have a
+// live container or may create one from an already accepted start. Pending
+// allocations have no node-side execution and therefore consume no rollout
+// surge capacity.
+func potentiallyLiveAllocation(phase lifecycle.Phase) bool {
+	switch phase {
+	case lifecycle.PhasePlaced, lifecycle.PhaseStarting, lifecycle.PhaseRunning, lifecycle.PhaseStopping:
+		return true
+	default:
+		return false
+	}
+}
+
 func jobHasGroup(job *Job, name string) bool {
 	for _, group := range job.Spec.TaskGroups {
 		if group.Name == name {
@@ -343,6 +356,20 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 			backoffKey := replacementBackoffKey(namespace, jobName, group.Name)
 			backoff := planReplacementBackoff(policy, in.Backoffs[backoffKey], namespace, jobName, group.Name, job.Revision, allocationsByGroup[backoffKey], now)
 			plannedBackoffs[backoffKey] = backoff
+			live := 0
+			for _, alloc := range allocationsByGroup[backoffKey] {
+				if potentiallyLiveAllocation(alloc.Phase) {
+					live++
+				}
+			}
+			for _, original := range retained {
+				if original.inGroup(namespace, jobName, group.Name) {
+					// A lost record is terminal, but a returned node may report
+					// its container still running. Keep charging that observed
+					// execution until a stop has actually completed.
+					live++
+				}
+			}
 			var current []*Allocation
 			var pending []*Allocation
 			var draining []*Allocation
@@ -394,19 +421,24 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 				}
 				drainsToStop := min(max(healthyNew+len(draining)-group.Count, 0), len(draining))
 				for i := 0; i < drainsToStop; i++ {
-					actions = append(actions, Action{Type: ActionStop, Allocation: draining[i]})
+					if draining[i].NextRetryAt == nil || !now.Before(*draining[i].NextRetryAt) {
+						actions = append(actions, Action{Type: ActionStop, Allocation: draining[i]})
+					}
 				}
 			}
 			deficit := group.Count - len(current) - unavailable
+			strategy := updateStrategy(job, group.Name)
+			parallel := 0
+			if strategy == spec.UpdateRolling {
+				parallel = maxParallel(job, group.Name)
+			}
 			if backoff != nil && backoff.DelayedReplacements > max(deficit, 0) {
 				// Failed allocations whose capacity is no longer missing have
 				// nothing left to replace.
 				backoff.DelayedReplacements = max(deficit, 0)
 			}
 			if deficit > 0 {
-				strategy := updateStrategy(job, group.Name)
 				if strategy == spec.UpdateRolling && len(draining) > 0 {
-					parallel := maxParallel(job, group.Name)
 					inFlight := 0
 					for _, alloc := range current {
 						if alloc.Phase != lifecycle.PhaseRunning || alloc.Health != lifecycle.HealthHealthy {
@@ -437,6 +469,15 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 			// Replacements of failed allocations wait until the backoff
 			// elapses; the rest of the deficit is placed now.
 			placeable := deficit - backoff.withheld(deficit, now)
+			if strategy == spec.UpdateRolling {
+				// A stop planned by this pass has not released capacity yet: it
+				// can run concurrently with starts on other nodes and can fail.
+				// Only a durably completed stop (or a terminal loss) frees a
+				// surge slot for a later pass. This keeps actual and accepted
+				// executions at or below count + max_parallel without imposing
+				// cross-node serialization on unrelated actions.
+				placeable = min(placeable, max(group.Count+parallel-live, 0))
+			}
 			if placeable <= 0 {
 				continue
 			}
