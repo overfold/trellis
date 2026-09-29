@@ -111,7 +111,7 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 	}
 	recoveryElapsed := now.Sub(in.LeaderSince) >= leaderRecoveryGrace
 	lossTimedOut := func(node *Node) bool {
-		return recoveryElapsed && node != nil && !node.LastHeartbeat.IsZero() && now.Sub(node.LastHeartbeat) >= in.AllocationLossTimeout
+		return recoveryElapsed && node != nil && now.Sub(nodeSilentSince(node, in.LeaderSince)) >= in.AllocationLossTimeout
 	}
 
 	jobKeys := make([]string, 0, len(in.Jobs))

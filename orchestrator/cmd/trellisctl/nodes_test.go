@@ -60,7 +60,7 @@ func TestPrintNodeStatusShowsPlacementMetadata(t *testing.T) {
 		Host:          "node-a",
 		Port:          8128,
 		Status:        api.StatusHealthy,
-		LastHeartbeat: time.Date(2026, 9, 2, 15, 0, 0, 0, time.UTC),
+		LastHeartbeat: new(time.Date(2026, 9, 2, 15, 0, 0, 0, time.UTC)),
 		CPU:           4000,
 		Memory:        8 << 30,
 		OS:            "linux",
@@ -69,6 +69,7 @@ func TestPrintNodeStatusShowsPlacementMetadata(t *testing.T) {
 		Volumes:       []string{"data", "cache"},
 		Capabilities:  []spec.NodeCapability{spec.CapabilityRunsc},
 		Version:       "v0.1.0",
+		ControlPlane:  api.ControlPlaneNonvoter,
 	}
 	var out bytes.Buffer
 	if err := printNodeStatus(&out, node); err != nil {
@@ -77,6 +78,7 @@ func TestPrintNodeStatusShowsPlacementMetadata(t *testing.T) {
 	text := out.String()
 	for _, want := range []string{
 		"Node: node-a:8128",
+		"Control plane: nonvoter",
 		"Platform: linux/amd64",
 		"CPU: 4000m",
 		"Memory: 8.0 GiB",

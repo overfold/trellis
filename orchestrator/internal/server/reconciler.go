@@ -157,6 +157,12 @@ func cloneAllocationForReconcile(allocation *Allocation) (*Allocation, error) {
 	if err := json.Unmarshal(raw, &clone); err != nil {
 		return nil, err
 	}
+	// The record stores only the node ID. Plan against a copy of the node so
+	// planning sees its current status without sharing the canonical node.
+	if allocation.Node != nil {
+		node := *allocation.Node
+		clone.Node = &node
+	}
 	if allocation.Events != nil {
 		clone.Events = &lifecycle.RingBuffer{}
 		for _, event := range allocation.Events.Entries() {
@@ -213,11 +219,21 @@ func sameAllocationState(a, b *Allocation) (bool, error) {
 	return bytes.Equal(aRaw, bRaw), nil
 }
 
-// Reconcile converges the in-memory allocation set on the latest job specs.
-// It snapshots the control-plane state, plans with planReconciliation, and
-// commits the plan only if every allocation it changes is still unchanged.
+// Reconcile converges the in-memory allocation set on the latest job specs and
+// waits for the pass's agent actions.
 func (s *Server) Reconcile(ctx context.Context) {
+	<-s.reconcile(ctx, true)
+}
+
+// reconcile runs one reconciliation pass. Planning and its durable commit are
+// serialized with other passes; the agent actions run after reconcileMu is
+// released, so a slow node delays neither later passes nor other nodes. A
+// queueing pass waits for a node busy with an earlier pass instead of skipping
+// its actions. The returned channel closes once the pass's actions finish.
+func (s *Server) reconcile(ctx context.Context, queue bool) (finished <-chan struct{}) {
 	start := time.Now()
+	var executable []Action
+	planned := false
 	s.reconcileMu.Lock()
 	s.mutationMu.Lock()
 	mutationLocked := true
@@ -229,6 +245,13 @@ func (s *Server) Reconcile(ctx context.Context) {
 		if s.metrics != nil {
 			s.metrics.ReconcileDuration.Observe(time.Since(start).Seconds())
 		}
+		if !planned {
+			closed := make(chan struct{})
+			close(closed)
+			finished = closed
+			return
+		}
+		finished = s.dispatchReconcileActions(ctx, executable, queue)
 	}()
 	s.mu.RLock()
 	registeredNodes := make(map[uuid.UUID]struct{}, len(s.nodes))
@@ -377,13 +400,8 @@ func (s *Server) Reconcile(ctx context.Context) {
 		}
 		executableActions = append(executableActions, actions[i])
 	}
-	// Retained originals must release their conflicting resources before their
-	// replacements start on the same node. Actions remain ordered per node, while
-	// independent nodes run concurrently so an unreachable peer delays only its
-	// own queue.
-	s.executeReconcileActions(ctx, executableActions)
-	s.refreshNetworkPlans()
-	s.refreshCatalog()
+	executable, planned = executableActions, true
+	return
 }
 
 // lockReconcileTargetsLocked locks every stored allocation the plan rewrites
@@ -494,12 +512,19 @@ func (s *Server) reconcilePlanInputLocked(now time.Time, volumeOwners map[string
 	}, originals, nil
 }
 
-func (s *Server) executeReconcileActions(ctx context.Context, actions []Action) {
-	type nodeActions struct {
-		actions []Action
-	}
-	groupByNode := make(map[uuid.UUID]int)
-	groups := make([]nodeActions, 0, len(actions))
+// dispatchReconcileActions runs a pass's actions. Retained originals must
+// release their conflicting resources before their replacements start on the
+// same node, so each node's actions run in order, and a node runs one pass's
+// actions at a time. A node still busy with an earlier pass delays only its
+// own actions: a queueing pass (one an API mutation waits for) runs them once
+// the node is free, and a periodic pass skips them for the next pass to plan
+// again. Independent nodes run
+// concurrently, bounded by maxConcurrentReconcileActions across all passes, so
+// an unreachable agent delays only its own queue. The returned channel closes
+// once the dispatched actions finish and the catalog is refreshed.
+func (s *Server) dispatchReconcileActions(ctx context.Context, actions []Action, queue bool) <-chan struct{} {
+	var nodes []uuid.UUID
+	byNode := make(map[uuid.UUID][]Action)
 	for _, action := range actions {
 		var nodeID uuid.UUID
 		if action.Allocation != nil {
@@ -507,43 +532,95 @@ func (s *Server) executeReconcileActions(ctx context.Context, actions []Action) 
 		} else {
 			nodeID = action.Node.ID
 		}
-		index, exists := groupByNode[nodeID]
-		if !exists {
-			index = len(groups)
-			groupByNode[nodeID] = index
-			groups = append(groups, nodeActions{})
+		if _, exists := byNode[nodeID]; !exists {
+			nodes = append(nodes, nodeID)
 		}
-		groups[index].actions = append(groups[index].actions, action)
+		byNode[nodeID] = append(byNode[nodeID], action)
 	}
-	workers := min(len(groups), maxConcurrentReconcileActions)
-	if workers == 0 {
-		return
-	}
-	work := make(chan []Action)
 	var group sync.WaitGroup
-	group.Add(workers)
-	for range workers {
-		go func() {
+	for _, nodeID := range nodes {
+		slots, busy := s.claimActionNode(nodeID)
+		if busy != nil && !queue {
+			s.log.Debug("node is still running earlier reconcile actions; deferring", "node", nodeID, "actions", len(byNode[nodeID]))
+			continue
+		}
+		group.Add(1)
+		go func(nodeID uuid.UUID, batch []Action) {
 			defer group.Done()
-			for nodeBatch := range work {
-				for i := range nodeBatch {
-					action := &nodeBatch[i]
-					if err := s.Execute(ctx, action); err != nil {
-						allocationID := action.ID
-						if action.Allocation != nil {
-							allocationID = action.Allocation.ID
-						}
-						s.log.Error("reconcile action failed", "action", action.Type, "allocation", allocationID, "error", err)
+			slots, ok := s.awaitActionNode(ctx, nodeID, slots, busy)
+			if !ok {
+				return
+			}
+			defer s.releaseActionNode(nodeID)
+			defer func() { <-slots }()
+			for i := range batch {
+				action := &batch[i]
+				if err := s.Execute(ctx, action); err != nil {
+					allocationID := action.ID
+					if action.Allocation != nil {
+						allocationID = action.Allocation.ID
 					}
+					s.log.Error("reconcile action failed", "action", action.Type, "allocation", allocationID, "error", err)
 				}
 			}
-		}()
+		}(nodeID, byNode[nodeID])
 	}
-	for _, nodeBatch := range groups {
-		work <- nodeBatch.actions
+	done := make(chan struct{})
+	go func() {
+		group.Wait()
+		s.refreshMu.Lock()
+		s.refreshNetworkPlans()
+		s.refreshCatalog()
+		s.refreshMu.Unlock()
+		close(done)
+	}()
+	return done
+}
+
+// claimActionNode reserves a node for one pass's actions and returns the
+// global action slots. When the node is busy it returns the channel that
+// closes when the node is released instead.
+func (s *Server) claimActionNode(nodeID uuid.UUID) (chan struct{}, <-chan struct{}) {
+	s.actionMu.Lock()
+	defer s.actionMu.Unlock()
+	if s.actionSlots == nil {
+		s.actionSlots = make(chan struct{}, maxConcurrentReconcileActions)
+		s.actionNodes = make(map[uuid.UUID]chan struct{})
 	}
-	close(work)
-	group.Wait()
+	if released := s.actionNodes[nodeID]; released != nil {
+		return nil, released
+	}
+	s.actionNodes[nodeID] = make(chan struct{})
+	return s.actionSlots, nil
+}
+
+// awaitActionNode completes a claim started by claimActionNode: it waits for
+// an earlier pass to release the node, claims it, and then takes a global
+// action slot. On success the caller must return the slot and then call
+// releaseActionNode. It reports false, holding nothing, when ctx ends first.
+func (s *Server) awaitActionNode(ctx context.Context, nodeID uuid.UUID, slots chan struct{}, busy <-chan struct{}) (chan struct{}, bool) {
+	for busy != nil {
+		select {
+		case <-busy:
+		case <-ctx.Done():
+			return nil, false
+		}
+		slots, busy = s.claimActionNode(nodeID)
+	}
+	select {
+	case slots <- struct{}{}:
+		return slots, true
+	case <-ctx.Done():
+		s.releaseActionNode(nodeID)
+		return nil, false
+	}
+}
+
+func (s *Server) releaseActionNode(nodeID uuid.UUID) {
+	s.actionMu.Lock()
+	close(s.actionNodes[nodeID])
+	delete(s.actionNodes, nodeID)
+	s.actionMu.Unlock()
 }
 
 type networkPlanKey struct {
@@ -833,6 +910,33 @@ func capabilityNames(capabilities []spec.NodeCapability) []string {
 	return names
 }
 
+// recordStartFailure counts one failed start attempt of an allocation: it
+// schedules the retry, or fails the allocation once attempts are exhausted.
+func recordStartFailure(next *Allocation, now time.Time, message string) error {
+	next.Attempt++
+	next.Reason, next.Message = "agent_start_failed", message
+	if next.Attempt >= maxExecutionAttempts {
+		if err := next.Transition(lifecycle.PhaseFailed, now, "retry_limit", message); err != nil {
+			return err
+		}
+		next.NextRetryAt = nil
+		return nil
+	}
+	retryAt := now.Add(retryDelay(next.ID, next.Attempt))
+	next.NextRetryAt = &retryAt
+	return nil
+}
+
+// terminalStartFailureCode reports whether code may accompany a reported start
+// failure.
+func terminalStartFailureCode(code api.OperationCode) bool {
+	switch code {
+	case "", api.OperationStaleGeneration, api.OperationConflict, api.OperationRestartExhausted:
+		return true
+	}
+	return false
+}
+
 // Execute performs a reconciliation action.
 func (s *Server) Execute(ctx context.Context, action *Action) error {
 	if action.Type == ActionStopObserved {
@@ -889,6 +993,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 	epoch := s.controlEpoch
 	serverAddr := s.serverAddr
 	nodeStatus := alloc.Node.Status
+	attempt := alloc.Attempt
 
 	switch action.Type {
 	case ActionStart:
@@ -909,7 +1014,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 				break
 			}
 		}
-		request := &api.AllocationRequest{AllocationID: alloc.ID, Generation: alloc.Generation, JobRevision: alloc.JobRevision, Epoch: epoch, Namespace: alloc.Namespace, JobName: alloc.JobName, GroupName: alloc.TaskGroupName, Tasks: alloc.Tasks, Runtime: groupRuntime, Restart: groupRestart, Draining: alloc.Draining, DrainSequence: alloc.DrainSequence}
+		request := &api.AllocationRequest{AllocationID: alloc.ID, Generation: alloc.Generation, JobRevision: alloc.JobRevision, Epoch: epoch, Namespace: alloc.Namespace, JobName: alloc.JobName, GroupName: alloc.TaskGroupName, Tasks: alloc.Tasks, Runtime: groupRuntime, Restart: groupRestart, Draining: alloc.Draining, DrainSequence: alloc.DrainSequence, Attempt: attempt}
 		if groupUsesWireGuard {
 			plan, err := s.networkPlan(alloc.Namespace, alloc.Node)
 			if err != nil {
@@ -969,7 +1074,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 			}
 		}
 		hashInput := *request
-		hashInput.Epoch, hashInput.ExecutionHash = 0, ""
+		hashInput.Epoch, hashInput.ExecutionHash, hashInput.Attempt = 0, "", 0
 		// Drain state changes while an execution is unchanged.
 		hashInput.Draining, hashInput.DrainSequence = false, 0
 		if request.NetworkPlan != nil {
@@ -1022,35 +1127,19 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 				return err
 			}
 			if persistErr := s.persistAllocationUpdate(context.WithoutCancel(ctx), alloc, func(next *Allocation) error {
-				if next.Phase != lifecycle.PhaseStarting && next.Phase != lifecycle.PhaseRunning {
+				// A heartbeat may have observed the start complete meanwhile.
+				if next.Phase != lifecycle.PhaseStarting {
 					return nil
 				}
-				next.Attempt++
-				next.Reason, next.Message = "agent_start_failed", err.Error()
-				if next.Attempt >= maxExecutionAttempts {
-					if transitionErr := next.Transition(lifecycle.PhaseFailed, now, "retry_limit", err.Error()); transitionErr != nil {
-						return transitionErr
-					}
-					next.NextRetryAt = nil
-				} else {
-					retryAt := now.Add(retryDelay(next.ID, next.Attempt))
-					next.NextRetryAt = &retryAt
-				}
-				return nil
+				return recordStartFailure(next, now, err.Error())
 			}); persistErr != nil {
 				return fmt.Errorf("%w (persist allocation failure: %v)", err, persistErr)
 			}
 			return err
 		}
-		if err := s.persistAllocationUpdate(ctx, alloc, func(next *Allocation) error {
-			if next.Phase != lifecycle.PhaseStarting && next.Phase != lifecycle.PhaseRunning {
-				return nil
-			}
-			next.Attempt, next.NextRetryAt = 0, nil
-			return next.Transition(lifecycle.PhaseRunning, now, "", "")
-		}); err != nil {
-			return fmt.Errorf("persist running allocation: %w", err)
-		}
+		// The agent accepted the start and pulls and creates the tasks in the
+		// background. Heartbeats report the allocation running, or report a
+		// failure of this attempt, which recordStartFailure counts.
 	case ActionDrain:
 		unlockState()
 		if nodeStatus != NodeStatusHealthy && nodeStatus != NodeStatusDraining {

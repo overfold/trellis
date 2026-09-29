@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
@@ -28,6 +29,7 @@ import (
 	"github.com/overfold/trellis/internal/catalog"
 	"github.com/overfold/trellis/internal/client"
 	"github.com/overfold/trellis/internal/lifecycle"
+	"github.com/overfold/trellis/internal/plan"
 	secretstore "github.com/overfold/trellis/internal/secrets"
 	"github.com/overfold/trellis/internal/spec"
 	"github.com/overfold/trellis/internal/state"
@@ -43,11 +45,15 @@ const heartbeatInterval = 10 * time.Second
 // ErrNodeNotFound indicates that a requested node is absent.
 var ErrNodeNotFound = errors.New("node not found")
 
-// ClusterJoiner adds and removes Raft cluster members.
+// ClusterJoiner reads and changes Raft cluster membership.
 type ClusterJoiner interface {
-	AddVoter(id, address string) error
+	Membership() ([]state.RaftMember, error)
+	AddNonvoter(id, address string) error
+	PromoteVoter(id, address string) error
+	DemoteVoter(id string) error
 	RemoveServer(id string) error
 	LeadershipTransfer() error
+	AppliedIndex() uint64
 }
 
 type desiredStore interface {
@@ -87,13 +93,22 @@ type Server struct {
 	//     leadership snapshots. It must never be held during network or storage I/O.
 	//   - allocation.mu protects lifecycle fields on that allocation. When both
 	//     locks are required, mu is always acquired before allocation.mu.
-	//   - reconcileMu serializes complete reconciliation passes.
+	//   - reconcileMu serializes reconciliation planning and its durable
+	//     commit; a pass's agent actions run after it is released.
+	//   - refreshMu serializes the network-plan and catalog refresh after a
+	//     pass's actions, so overlapping passes cannot apply an older snapshot.
+	//   - actionMu guards actionNodes and actionSlots, which serialize agent
+	//     actions per node and bound them globally across passes.
 	//   - mutationMu serializes durable state mutations and is never acquired
 	//     while mu or allocation.mu is held.
 	//   - networkPortMu serializes durable namespace WireGuard port assignment
 	//     and is never acquired while mu or allocation.mu is held.
 	mu                 sync.RWMutex
 	reconcileMu        sync.Mutex
+	refreshMu          sync.Mutex
+	actionMu           sync.Mutex
+	actionNodes        map[uuid.UUID]chan struct{}
+	actionSlots        chan struct{}
 	mutationMu         sync.Mutex
 	networkPortMu      sync.Mutex
 	networkPlanMu      sync.Mutex
@@ -124,6 +139,16 @@ type Server struct {
 	// before the leader marks its allocations lost; zero selects
 	// DefaultAllocationLossTimeout. Protected by mu.
 	allocationLossTimeout time.Duration
+
+	// membershipMu serializes Raft membership reads and changes made by this
+	// server so each change is applied to the configuration it was planned
+	// from. It is never acquired while mu is held.
+	membershipMu sync.Mutex
+	// raftProgress is each node's latest reported Raft applied index, a
+	// renewable observation used only to decide promotions. Protected by mu.
+	raftProgress map[uuid.UUID]raftProgress
+	// membershipWake asks the membership loop for an immediate pass.
+	membershipWake chan struct{}
 }
 
 // SetSecretStore configures encrypted secret storage.
@@ -214,7 +239,7 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 		if err := json.Unmarshal(value, &record); err != nil {
 			return fmt.Errorf("validate job revision %q: %w", key, err)
 		}
-		if record.Spec == nil || record.Revision < 1 || record.CreatedAt.IsZero() {
+		if record.Spec == nil || record.Version < 1 || record.Revision < 1 || record.CreatedAt.IsZero() {
 			return fmt.Errorf("validate job revision %q: invalid revision record", key)
 		}
 		snapshot.JobRevisions[key] = value
@@ -252,6 +277,21 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 	snapshot.JobRevisions = retainedRevisions
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
+	// Job limits can change between validation and this point.
+	restored := make(map[string]*Job, len(restoredJobs))
+	for _, job := range restoredJobs {
+		restored[jobKey(job.Spec.Namespace, job.Spec.Name)] = job
+	}
+	s.mu.RLock()
+	limits := s.jobLimits
+	s.mu.RUnlock()
+	if limits == (spec.Limits{}) {
+		limits = spec.DefaultLimits()
+	}
+	violations := jobLimitViolations(restored, limits)
+	if len(violations) > 0 {
+		return fmt.Errorf("restored jobs exceed the current job limits: %s", joinViolations(violations))
+	}
 	if err := s.backupStore.RestoreDesired(s.clusterName, snapshot); err != nil {
 		return err
 	}
@@ -260,9 +300,9 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 
 func retainedJobRevisionEntries(jobs, revisions map[string][]byte) (map[string][]byte, error) {
 	type entry struct {
-		key      string
-		revision int
-		raw      []byte
+		key     string
+		version int
+		raw     []byte
 	}
 	byJob := make(map[string][]entry)
 	for key, raw := range revisions {
@@ -274,8 +314,8 @@ func retainedJobRevisionEntries(jobs, revisions map[string][]byte) (map[string][
 		if jobs[url.QueryEscape(identity)] == nil {
 			continue
 		}
-		entries := append(byJob[identity], entry{key: key, revision: record.Revision, raw: raw})
-		sort.Slice(entries, func(i, j int) bool { return entries[i].revision < entries[j].revision })
+		entries := append(byJob[identity], entry{key: key, version: record.Version, raw: raw})
+		sort.Slice(entries, func(i, j int) bool { return entries[i].version < entries[j].version })
 		if len(entries) > jobRevisionRetention {
 			entries = entries[1:]
 		}
@@ -315,10 +355,19 @@ func (s *Server) AllocationLogsForNamespace(ctx context.Context, namespace, id s
 	return s.client.Logs(ctx, nodeID, address, id, follow, tail)
 }
 
-// Cluster contains persisted cluster identity and TLS state.
+// Cluster contains persisted cluster identity, leadership fencing, and
+// cluster-wide settings.
 type Cluster struct {
-	AdministratorPublicKey string `json:"administrator_public_key"`
-	ControlEpoch           uint64 `json:"control_epoch,omitempty"`
+	AdministratorPublicKey string          `json:"administrator_public_key"`
+	ControlEpoch           uint64          `json:"control_epoch,omitempty"`
+	Settings               ClusterSettings `json:"settings"`
+}
+
+// ClusterBootstrap is the initial replicated state of a new cluster. Only the
+// node that creates the cluster supplies it; existing clusters ignore it.
+type ClusterBootstrap struct {
+	AdministratorPublicKey string
+	Settings               ClusterSettings
 }
 
 // NodeRegistration contains the identity and capacity of a node.
@@ -415,33 +464,44 @@ const (
 	NodeStatusDraining NodeStatus = "draining"
 )
 
-// NodeSummary is the persisted representation of a node.
+// NodeSummary is the persisted representation of a node. It holds only
+// durable node facts: identity, address, capacity, platform, inventory, and
+// drain intent. Heartbeat observations (last heartbeat time, liveness, host
+// metrics, and observed allocations) live in the leader's memory, so a
+// heartbeat that changes none of these facts does not write to Raft.
 type NodeSummary struct {
-	ID                 uuid.UUID
-	Host               string
-	Port               int
-	CPUCapacity        int
-	MemoryCapacity     int64
-	CPUAllocatable     int
-	MemoryAllocatable  int64
-	OS                 string
-	Arch               string
-	Labels             map[string]string
-	Volumes            []string
-	Capabilities       []spec.NodeCapability
-	Status             NodeStatus
+	ID                uuid.UUID
+	Host              string
+	Port              int
+	CPUCapacity       int
+	MemoryCapacity    int64
+	CPUAllocatable    int
+	MemoryAllocatable int64
+	OS                string
+	Arch              string
+	Labels            map[string]string
+	Volumes           []string
+	Capabilities      []spec.NodeCapability
+	// Draining is the operator's durable drain intent. Liveness (healthy or
+	// unhealthy) is derived from heartbeats and is not persisted.
+	Draining           bool `json:"draining,omitempty"`
 	WireGuardPublicKey string
 	WireGuardEndpoint  string
 	WireGuardPortBase  int
 	WireGuardPortCount int
-	LastHeartbeat      time.Time
 	Version            string `json:"version,omitempty"`
 }
 
 // Job contains a persisted job specification and revision.
 type Job struct {
-	Spec     *spec.JobSpec
+	Spec *spec.JobSpec
+	// Revision identifies the execution content of the job. It advances only
+	// when a task group's execution hash changes, which replaces allocations.
 	Revision int
+	// Version advances on every accepted change to the job specification,
+	// including label, count, and update-policy changes that keep the
+	// revision. It orders the job's history and fences concurrent applies.
+	Version int
 	// ContentHashes stores the content hash of each task group's non-label
 	// fields, keyed by group name. Set at registration time.
 	ContentHashes map[string]string `json:"content_hashes,omitempty"`
@@ -460,7 +520,10 @@ type Allocation struct {
 	Phase         lifecycle.Phase  `json:"phase"`
 	Health        lifecycle.Health `json:"health"`
 	lifecycle.Diagnostic
-	Node      *Node
+	// Node is the canonical in-memory node the allocation is placed on. The
+	// persisted record stores only its ID (see MarshalJSON); Reload rebinds
+	// the pointer, so allocation records never carry node observations.
+	Node      *Node                    `json:"-"`
 	Endpoints []api.AllocationEndpoint `json:"endpoints,omitempty"`
 	Ports     []api.PortMapping        `json:"ports,omitempty"`
 	// Draining marks an allocation being replaced during a rolling update or
@@ -501,8 +564,67 @@ func (a *Allocation) SetHealth(health lifecycle.Health) error {
 	return nil
 }
 
+// allocationRecord has Allocation's fields without its methods, so the
+// custom JSON methods below can reuse the default encoding.
+type allocationRecord Allocation
+
+type persistedAllocation struct {
+	*allocationRecord
+	NodeID *uuid.UUID `json:"node_id,omitempty"`
+}
+
+// MarshalJSON encodes the durable allocation record. The placement node is
+// stored by ID only.
+func (a *Allocation) MarshalJSON() ([]byte, error) {
+	record := persistedAllocation{allocationRecord: (*allocationRecord)(a)}
+	if a.Node != nil {
+		id := a.Node.ID
+		record.NodeID = &id
+	}
+	return json.Marshal(record)
+}
+
+// UnmarshalJSON decodes a durable allocation record. A placed allocation gets
+// a node carrying only its ID; callers bind it to the canonical node.
+func (a *Allocation) UnmarshalJSON(raw []byte) error {
+	record := persistedAllocation{allocationRecord: (*allocationRecord)(a)}
+	if err := json.Unmarshal(raw, &record); err != nil {
+		return err
+	}
+	a.Node = nil
+	if record.NodeID != nil {
+		a.Node = &Node{ID: *record.NodeID}
+	}
+	return nil
+}
+
 func nodeSummary(node *Node) *NodeSummary {
-	return &NodeSummary{ID: node.ID, Host: node.Host, Port: node.Port, CPUCapacity: node.CPUCapacity, MemoryCapacity: node.MemoryCapacity, CPUAllocatable: node.CPUAllocatable, MemoryAllocatable: node.MemoryAllocatable, OS: node.OS, Arch: node.Arch, Labels: node.Labels, Volumes: node.Volumes, Capabilities: node.Capabilities, Status: node.Status, WireGuardPublicKey: node.WireGuardPublicKey, WireGuardEndpoint: node.WireGuardEndpoint, WireGuardPortBase: node.WireGuardPortBase, WireGuardPortCount: node.WireGuardPortCount, LastHeartbeat: node.LastHeartbeat, Version: node.Version}
+	return &NodeSummary{ID: node.ID, Host: node.Host, Port: node.Port, CPUCapacity: node.CPUCapacity, MemoryCapacity: node.MemoryCapacity, CPUAllocatable: node.CPUAllocatable, MemoryAllocatable: node.MemoryAllocatable, OS: node.OS, Arch: node.Arch, Labels: node.Labels, Volumes: node.Volumes, Capabilities: node.Capabilities, Draining: node.Status == NodeStatusDraining, WireGuardPublicKey: node.WireGuardPublicKey, WireGuardEndpoint: node.WireGuardEndpoint, WireGuardPortBase: node.WireGuardPortBase, WireGuardPortCount: node.WireGuardPortCount, Version: node.Version}
+}
+
+// sameNodeSummary reports whether two nodes have identical durable facts.
+func sameNodeSummary(a, b *Node) (bool, error) {
+	aRaw, err := json.Marshal(nodeSummary(a))
+	if err != nil {
+		return false, err
+	}
+	bRaw, err := json.Marshal(nodeSummary(b))
+	if err != nil {
+		return false, err
+	}
+	return bytes.Equal(aRaw, bRaw), nil
+}
+
+// nodeSilentSince returns when the leader last had evidence that a node was
+// alive: its latest heartbeat in this leadership term, or the start of the
+// term when the node has not heartbeated to this leader yet. Heartbeat times
+// are leader observations and are not replicated, so a new leader measures
+// allocation loss from the start of its own term.
+func nodeSilentSince(node *Node, leaderSince time.Time) time.Time {
+	if node.LastHeartbeat.Before(leaderSince) {
+		return leaderSince
+	}
+	return node.LastHeartbeat
 }
 
 func applyNodeSnapshot(node, snapshot *Node) {
@@ -542,7 +664,7 @@ func (s *Server) rebuildAllocationNodeIndexLocked() {
 
 // NewServer constructs an orchestrator server.
 func NewServer(log *slog.Logger, storage *storage.LocalStorage, state *StateController, store state.Store, cluster, serverAddr string) *Server {
-	pool := netip.MustParsePrefix("10.64.0.0/10")
+	settings := DefaultClusterSettings()
 	s := &Server{
 		log:                log.With("component", "server"),
 		storage:            storage,
@@ -550,34 +672,24 @@ func NewServer(log *slog.Logger, storage *storage.LocalStorage, state *StateCont
 		client:             &client.AgentClient{},
 		nodes:              make(map[uuid.UUID]*Node),
 		jobs:               make(map[string]*Job),
-		networkPool:        pool,
+		networkPool:        settings.WireGuardPool,
 		networkPorts:       make(map[string]int),
-		wireGuardPortCount: 256,
+		wireGuardPortCount: settings.WireGuardPortCount,
 		networkPlans:       make(map[networkPlanKey]*networkPlanState),
 		networkPlanWorkers: make(map[uuid.UUID]uint64),
 		networkPlanWake:    make(chan struct{}, 1),
+		membershipWake:     make(chan struct{}, 1),
 		tokenManager:       auth.NewTokenManager(store, cluster),
 		catalog:            catalog.New(),
 		serverAddr:         serverAddr,
 		clusterName:        cluster,
-		jobLimits:          spec.DefaultLimits(),
+		jobLimits:          settings.JobLimits,
 		replacementPolicy:  DefaultReplacementPolicy(),
 		now:                time.Now,
 	}
 	s.backupStore, _ = store.(desiredStore)
 	s.events = newEventBus()
 	return s
-}
-
-// SetJobLimits configures operator-owned job admission and resource defaults.
-func (s *Server) SetJobLimits(limits spec.Limits) error {
-	if err := spec.ValidateLimits(limits); err != nil {
-		return err
-	}
-	s.mu.Lock()
-	s.jobLimits = limits
-	s.mu.Unlock()
-	return nil
 }
 
 // SetAllocationLossTimeout configures how long a node must go without a
@@ -634,7 +746,13 @@ func (s *Server) AcquireLeadership(ctx context.Context) error {
 	s.mu.Lock()
 	s.cluster = cluster
 	s.controlEpoch = epoch
+	// Job limits may have changed under a previous leader. Network settings
+	// are fixed when the cluster is created and were loaded by Init.
+	s.jobLimits = cluster.Settings.JobLimits
 	s.leaderSince = s.now()
+	// Raft progress is measured against this server's own applied index;
+	// reports from an earlier term must not decide promotions in this one.
+	s.raftProgress = nil
 	s.mu.Unlock()
 
 	// Desired network plans are derived from the leader's in-memory topology.
@@ -650,29 +768,11 @@ func (s *Server) AcquireLeadership(ctx context.Context) error {
 	return nil
 }
 
-// SetNetworkPool configures the allocation address pool.
-func (s *Server) SetNetworkPool(pool string) error {
-	p, err := netip.ParsePrefix(pool)
-	if err != nil || !p.Addr().Is4() || p.Bits() > 16 {
-		return fmt.Errorf("WireGuard pool must be an IPv4 prefix of /16 or larger")
-	}
-	s.networkPool = p.Masked()
-	return nil
-}
-
-// SetWireGuardPortCount configures how many consecutive UDP ports are
-// available for namespace WireGuard pathways on every node.
-func (s *Server) SetWireGuardPortCount(count int) error {
-	if count < 1 || count > 65535 {
-		return fmt.Errorf("WireGuard port count must be between 1 and 65535")
-	}
-	s.wireGuardPortCount = count
-	return nil
-}
-
-// Init initializes cluster state from the replicated administrator public key.
-// Existing members do not need any administrator key material in node configuration.
-func (s *Server) Init(ctx context.Context, initialAdministratorPublicKey string) error {
+// Init loads the replicated cluster record, creating it from bootstrap when
+// the cluster does not exist yet. Existing members need neither administrator
+// key material nor cluster settings in node configuration: every member uses
+// the replicated values, whatever its local configuration says.
+func (s *Server) Init(ctx context.Context, bootstrap ClusterBootstrap) error {
 	cluster, err := s.state.GetCluster(ctx)
 	if err != nil {
 		return fmt.Errorf("get cluster: %w", err)
@@ -683,26 +783,30 @@ func (s *Server) Init(ctx context.Context, initialAdministratorPublicKey string)
 		if _, err := parseAdministratorPublicKey(cluster.AdministratorPublicKey); err != nil {
 			return fmt.Errorf("replicated administrator public key: %w", err)
 		}
-		s.cluster = cluster
-		s.client = client.NewAgentClient("", s.clientTLS)
-		s.controlEpoch = cluster.ControlEpoch
-		return nil
+		if err := cluster.Settings.Validate(); err != nil {
+			return fmt.Errorf("replicated cluster settings: %w", err)
+		}
+	} else {
+		if _, err := parseAdministratorPublicKey(bootstrap.AdministratorPublicKey); err != nil {
+			return fmt.Errorf("initial administrator public key: %w", err)
+		}
+		if err := bootstrap.Settings.Validate(); err != nil {
+			return fmt.Errorf("initial cluster settings: %w", err)
+		}
+		cluster = &Cluster{AdministratorPublicKey: bootstrap.AdministratorPublicKey, Settings: bootstrap.Settings}
+		if err := s.state.PutCluster(ctx, cluster); err != nil {
+			return fmt.Errorf("save cluster remotely: %w", err)
+		}
 	}
 
-	if _, err := parseAdministratorPublicKey(initialAdministratorPublicKey); err != nil {
-		return fmt.Errorf("initial administrator public key: %w", err)
-	}
-	cluster = &Cluster{AdministratorPublicKey: initialAdministratorPublicKey}
-
-	err = s.state.PutCluster(ctx, cluster)
-	if err != nil {
-		return fmt.Errorf("save cluster remotely: %w", err)
-	}
-
+	s.mu.Lock()
 	s.cluster = cluster
 	s.controlEpoch = cluster.ControlEpoch
+	s.jobLimits = cluster.Settings.JobLimits
+	s.networkPool = cluster.Settings.WireGuardPool
+	s.wireGuardPortCount = cluster.Settings.WireGuardPortCount
+	s.mu.Unlock()
 	s.client = client.NewAgentClient("", s.clientTLS)
-
 	return nil
 }
 
@@ -815,6 +919,7 @@ func (s *Server) EnrollNode(ctx context.Context, advertised ...string) (*api.Nod
 func (s *Server) Run(ctx context.Context) {
 	go s.runReconcileLoop(ctx)
 	go s.runNetworkPlanLoop(ctx)
+	go s.runMembershipLoop(ctx)
 }
 
 // ListNodes returns registered nodes.
@@ -906,6 +1011,7 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 		Endpoints     []api.AllocationEndpoint
 		Ports         []api.PortMapping
 		ObservedTasks map[string]bool
+		StartFailure  *api.StartFailure
 	}
 	statuses := make(map[string]statusInfo, len(actual))
 	for _, a := range actual {
@@ -914,6 +1020,9 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 		}
 		if a.Reason != "" && (a.Phase != lifecycle.PhaseFailed || a.Reason != api.OperationRestartExhausted) {
 			return fmt.Errorf("invalid failure reason for %s: phase=%q reason=%q", a.ID, a.Phase, a.Reason)
+		}
+		if a.StartFailure != nil && (a.Phase != lifecycle.PhaseStarting || a.StartFailure.Attempt < 0 || len(a.StartFailure.Message) > api.MaxStartFailureMessageBytes || !terminalStartFailureCode(a.StartFailure.Code)) {
+			return fmt.Errorf("invalid start failure for %s: phase=%q attempt=%d message bytes=%d", a.ID, a.Phase, a.StartFailure.Attempt, len(a.StartFailure.Message))
 		}
 		phase, health := a.Phase, a.Health
 		key := fmt.Sprintf("%s/%d", a.ID, a.Generation)
@@ -941,6 +1050,12 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 		// Keep the reason of a failed task whatever the report order.
 		if a.Reason != "" && (info.Reason == "" || a.Reason < info.Reason) {
 			info.Reason = a.Reason
+		}
+		// Every task of a failed start carries the same failure; choose one
+		// deterministically whatever the report order.
+		if failure := a.StartFailure; failure != nil && (info.StartFailure == nil || failure.Attempt > info.StartFailure.Attempt ||
+			failure.Attempt == info.StartFailure.Attempt && failure.Message < info.StartFailure.Message) {
+			info.StartFailure = failure
 		}
 		info.Ports = append(info.Ports, a.Ports...)
 		if a.Task != "" || a.Address != "" || len(a.Ports) > 0 {
@@ -975,7 +1090,7 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 	if nextNode.Status != NodeStatusDraining {
 		nextNode.Status = NodeStatusHealthy
 	}
-	heartbeatAt := time.Now().UTC()
+	heartbeatAt := s.now().UTC()
 	nextNode.LastHeartbeat = heartbeatAt
 	nextNode.Version = version
 	nextNode.CPUCapacity, nextNode.MemoryCapacity = resources.CPUCapacity, resources.MemoryCapacity
@@ -1035,12 +1150,30 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 				break
 			}
 		}
-		if info.Phase.Valid() && lifecycle.CanObserve(a.Phase, info.Phase) {
+		// An unchanged phase keeps its reason, such as a counted start failure.
+		if info.Phase.Valid() && info.Phase != a.Phase && lifecycle.CanObserve(a.Phase, info.Phase) {
 			var reason string
 			if info.Phase == lifecycle.PhaseFailed {
 				reason = string(info.Reason)
 			}
-			_ = a.Transition(info.Phase, time.Now().UTC(), reason, "")
+			if info.Phase == lifecycle.PhaseRunning && a.Phase != lifecycle.PhaseRunning {
+				// The start completed; later starts get a fresh attempt budget.
+				a.Attempt, a.NextRetryAt = 0, nil
+			}
+			_ = a.Transition(info.Phase, heartbeatAt, reason, "")
+		}
+		// Count the agent's failed background start once: the failure names
+		// the attempt it ran for, and counting advances the attempt.
+		if a.Phase == lifecycle.PhaseStarting && info.StartFailure != nil && info.StartFailure.Attempt == a.Attempt {
+			if code := info.StartFailure.Code; code != "" {
+				// Retrying the generation cannot fix it, as for the same
+				// operation code on a start request.
+				if a.Transition(lifecycle.PhaseFailed, heartbeatAt, string(code), info.StartFailure.Message) == nil {
+					a.NextRetryAt = nil
+				}
+			} else {
+				_ = recordStartFailure(a, heartbeatAt, info.StartFailure.Message)
+			}
 		}
 		_ = a.SetHealth(info.Health)
 		sort.Slice(info.Endpoints, func(i, j int) bool { return info.Endpoints[i].Task < info.Endpoints[j].Task })
@@ -1060,7 +1193,22 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 	for _, update := range changed {
 		persisted = append(persisted, update.next)
 	}
-	if err := s.state.PutNodeAndAllocations(ctx, nodeSummary(&nextNode), persisted); err != nil {
+	// Liveness, heartbeat time, host metrics, and observed allocations are
+	// leader observations. Only durable node facts and allocation changes
+	// reach Raft, so a steady-state heartbeat is not a write.
+	s.mu.RLock()
+	nodeUnchanged, err := sameNodeSummary(node, &nextNode)
+	s.mu.RUnlock()
+	if err != nil {
+		return fmt.Errorf("compare node %s: %w", nodeID, err)
+	}
+	switch {
+	case !nodeUnchanged:
+		err = s.state.PutNodeAndAllocations(ctx, nodeSummary(&nextNode), persisted)
+	case len(persisted) > 0:
+		err = s.state.PutAllocations(ctx, persisted)
+	}
+	if err != nil {
 		return fmt.Errorf("persist heartbeat: %w", err)
 	}
 	s.mu.Lock()
@@ -1090,21 +1238,47 @@ func jobKey(namespace, name string) string {
 }
 
 // RegisterJob creates or updates desired job state.
-func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spec.JobSpec) error {
+func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spec.JobSpec, expectedVersion *int) (*api.JobRegistrationResponse, error) {
 	if err := s.CanonicalizeJob(jobSpec); err != nil {
-		return fmt.Errorf("validate job: %w", err)
+		return nil, fmt.Errorf("validate job: %w", err)
+	}
+	if expectedVersion != nil && *expectedVersion < 0 {
+		return nil, fmt.Errorf("expected_version must not be negative")
+	}
+	if jobSpec.Namespace != namespace {
+		return nil, fmt.Errorf("job namespace does not match request namespace")
 	}
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
-	s.mu.Lock()
-	if jobSpec.Namespace != namespace {
-		s.mu.Unlock()
-		return fmt.Errorf("job namespace does not match request namespace")
-	}
 	key := jobKey(namespace, jobSpec.Name)
-	if err := s.validateNamespaceAllocationLimitLocked(nil, namespace, jobSpec, key); err != nil {
-		s.mu.Unlock()
-		return err
+	// The precondition is checked under mutationMu, which serializes every
+	// job mutation on the leader, so the job cannot change between this
+	// check and the commit below. Job records are replaced, never mutated,
+	// so existing can be compared without holding s.mu.
+	s.mu.RLock()
+	existing := s.jobs[key]
+	s.mu.RUnlock()
+	if err := checkJobVersion(existing, expectedVersion); err != nil {
+		return nil, err
+	}
+	if existing != nil && len(plan.Diff(existing.Spec, jobSpec)) == 0 {
+		return &api.JobRegistrationResponse{Namespace: namespace, Name: jobSpec.Name, Version: existing.Version, Revision: existing.Revision}, nil
+	}
+	s.mu.RLock()
+	// Job limits can change between canonicalization and this point.
+	limits := s.jobLimits
+	if limits == (spec.Limits{}) {
+		limits = spec.DefaultLimits()
+	}
+	err := spec.ValidateWithLimits(jobSpec, limits)
+	if err != nil {
+		err = fmt.Errorf("validate job: %w", err)
+	} else {
+		err = s.validateNamespaceAllocationLimitLocked(nil, namespace, jobSpec, key)
+	}
+	s.mu.RUnlock()
+	if err != nil {
+		return nil, err
 	}
 
 	hashes := make(map[string]string, len(jobSpec.TaskGroups))
@@ -1112,9 +1286,10 @@ func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spe
 		hashes[jobSpec.TaskGroups[i].Name] = spec.TaskGroupContentHash(&jobSpec.TaskGroups[i])
 	}
 
-	revision := 1
+	revision, version := 1, 1
 	labelOnly := false
-	if existing := s.jobs[key]; existing != nil {
+	if existing != nil {
+		version = existing.Version + 1
 		revision = existing.Revision + 1
 		if isLabelOnlyChange(existing, jobSpec, hashes) {
 			revision = existing.Revision
@@ -1124,15 +1299,12 @@ func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spe
 	job := &Job{
 		Spec:          jobSpec,
 		Revision:      revision,
+		Version:       version,
 		ContentHashes: hashes,
 	}
-	s.mu.Unlock()
-	var revisionRecord *JobRevisionRecord
-	if !labelOnly {
-		revisionRecord = &JobRevisionRecord{Revision: revision, Spec: jobSpec, CreatedAt: s.now().UTC()}
-	}
+	revisionRecord := &JobRevisionRecord{Version: version, Revision: revision, Spec: jobSpec, CreatedAt: s.now().UTC()}
 	if err := s.state.PutJobWithRevision(ctx, key, job, revisionRecord); err != nil {
-		return fmt.Errorf("save job remotely: %w", err)
+		return nil, fmt.Errorf("save job remotely: %w", err)
 	}
 	s.mu.Lock()
 	s.jobs[key] = job
@@ -1140,16 +1312,60 @@ func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spe
 
 	if labelOnly {
 		s.refreshCatalog()
-	} else {
-		s.events.publish(api.ClusterEvent{
-			Type:      api.EventJobRegistered,
-			Namespace: namespace,
-			JobName:   jobSpec.Name,
-			Revision:  revision,
-			At:        s.now().UTC(),
-		})
 	}
+	s.events.publish(api.ClusterEvent{
+		Type:      api.EventJobRegistered,
+		Namespace: namespace,
+		JobName:   jobSpec.Name,
+		Version:   version,
+		Revision:  revision,
+		At:        s.now().UTC(),
+	})
 
+	return &api.JobRegistrationResponse{Namespace: namespace, Name: jobSpec.Name, Version: version, Revision: revision}, nil
+}
+
+// ErrJobVersionConflict indicates that a job apply's expected version did not
+// match the job's current version.
+var ErrJobVersionConflict = errors.New("job version conflict")
+
+// JobVersionConflictError describes a failed job apply precondition.
+type JobVersionConflictError struct {
+	Expected int
+	// Current is the job's current version, or 0 when the job does not exist.
+	Current int
+	Exists  bool
+}
+
+func (e *JobVersionConflictError) Error() string {
+	switch {
+	case e.Expected == 0:
+		return fmt.Sprintf("job version conflict: job already exists at version %d; plan the manifest again", e.Current)
+	case !e.Exists:
+		return fmt.Sprintf("job version conflict: expected version %d but the job does not exist; plan the manifest again", e.Expected)
+	default:
+		return fmt.Sprintf("job version conflict: expected version %d but the job is at version %d; plan the manifest again", e.Expected, e.Current)
+	}
+}
+
+// Is reports whether target is ErrJobVersionConflict.
+func (e *JobVersionConflictError) Is(target error) bool { return target == ErrJobVersionConflict }
+
+// checkJobVersion enforces an apply precondition. A nil expected version
+// applies unconditionally; 0 requires that the job does not exist.
+func checkJobVersion(existing *Job, expected *int) error {
+	if expected == nil {
+		return nil
+	}
+	if existing == nil {
+		if *expected == 0 {
+			return nil
+		}
+		return &JobVersionConflictError{Expected: *expected}
+	}
+	if *expected == 0 || existing.Version != *expected {
+		return &JobVersionConflictError{Expected: *expected, Current: existing.Version, Exists: true}
+	}
 	return nil
 }
 
@@ -1205,8 +1421,9 @@ func desiredAllocations(job *spec.JobSpec) int64 {
 }
 
 // isLabelOnlyChange returns true when the new job spec differs from the
-// existing one only in task group labels (and count/update policy). The
-// content hashes must have been computed from newSpec.
+// existing one only in task group labels (and count/update policy), so the
+// change keeps the execution revision. The content hashes must have been
+// computed from newSpec.
 func isLabelOnlyChange(existing *Job, newSpec *spec.JobSpec, newHashes map[string]string) bool {
 	if len(existing.Spec.TaskGroups) != len(newSpec.TaskGroups) {
 		return false
@@ -1243,11 +1460,13 @@ func (s *Server) Reload(ctx context.Context) error {
 	}
 	nodes := make(map[uuid.UUID]*Node, len(nodeSummaries))
 	for _, summary := range nodeSummaries {
+		// A node is unhealthy until it heartbeats to this leader; heartbeat
+		// observations are not replicated.
 		status := NodeStatusUnhealthy
-		if summary.Status == NodeStatusDraining {
+		if summary.Draining {
 			status = NodeStatusDraining
 		}
-		nodes[summary.ID] = &Node{ID: summary.ID, Host: summary.Host, Port: summary.Port, CPUCapacity: summary.CPUCapacity, MemoryCapacity: summary.MemoryCapacity, CPUAllocatable: summary.CPUAllocatable, MemoryAllocatable: summary.MemoryAllocatable, OS: summary.OS, Arch: summary.Arch, Labels: summary.Labels, Volumes: summary.Volumes, Capabilities: summary.Capabilities, Status: status, WireGuardPublicKey: summary.WireGuardPublicKey, WireGuardEndpoint: summary.WireGuardEndpoint, WireGuardPortBase: summary.WireGuardPortBase, WireGuardPortCount: summary.WireGuardPortCount, LastHeartbeat: summary.LastHeartbeat, Version: summary.Version}
+		nodes[summary.ID] = &Node{ID: summary.ID, Host: summary.Host, Port: summary.Port, CPUCapacity: summary.CPUCapacity, MemoryCapacity: summary.MemoryCapacity, CPUAllocatable: summary.CPUAllocatable, MemoryAllocatable: summary.MemoryAllocatable, OS: summary.OS, Arch: summary.Arch, Labels: summary.Labels, Volumes: summary.Volumes, Capabilities: summary.Capabilities, Status: status, WireGuardPublicKey: summary.WireGuardPublicKey, WireGuardEndpoint: summary.WireGuardEndpoint, WireGuardPortBase: summary.WireGuardPortBase, WireGuardPortCount: summary.WireGuardPortCount, Version: summary.Version}
 	}
 	allocations := make([]*Allocation, 0, len(allocationMap))
 	for _, allocation := range allocationMap {
@@ -1435,33 +1654,37 @@ func (s *Server) ListJobs(namespace string) api.JobListResponse {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	result := make(api.JobListResponse, 0, len(s.jobs))
-	for key, job := range s.jobs {
+	jobs := make(map[string]*Job)
+	positions := make(map[string]int)
+	for _, job := range s.jobs {
 		if job.Spec.Namespace != namespace {
 			continue
 		}
 		name := job.Spec.Name
-		r := api.JobStatusResponse{Name: name, Revision: job.Revision}
+		r := api.JobStatusResponse{Name: name, Version: job.Version, Revision: job.Revision}
 		for _, g := range job.Spec.TaskGroups {
 			r.Desired += g.Count
 		}
-		for _, a := range s.allocations {
-			a.mu.Lock()
-			if jobKey(a.Namespace, a.JobName) != key {
-				a.mu.Unlock()
-				continue
-			}
-			ar := s.allocationResponseLocked(a)
-			r.Allocations = append(r.Allocations, ar)
-			if a.JobRevision == job.Revision && !a.Draining && a.Phase == lifecycle.PhaseRunning {
-				r.Running++
-			}
-			if a.JobRevision == job.Revision && !a.Draining && a.Phase == lifecycle.PhaseRunning && a.Health == lifecycle.HealthHealthy {
-				r.Healthy++
-			}
-			a.mu.Unlock()
-		}
 		r.ReplacementBackoff = s.replacementBackoffResponsesLocked(namespace, name)
+		jobs[name], positions[name] = job, len(result)
 		result = append(result, r)
+	}
+	for _, a := range s.allocations {
+		a.mu.Lock()
+		job := jobs[a.JobName]
+		if a.Namespace != namespace || job == nil {
+			a.mu.Unlock()
+			continue
+		}
+		r := &result[positions[a.JobName]]
+		r.Allocations = append(r.Allocations, s.allocationResponseLocked(a))
+		if a.JobRevision == job.Revision && !a.Draining && a.Phase == lifecycle.PhaseRunning {
+			r.Running++
+		}
+		if a.JobRevision == job.Revision && !a.Draining && a.Phase == lifecycle.PhaseRunning && a.Health == lifecycle.HealthHealthy {
+			r.Healthy++
+		}
+		a.mu.Unlock()
 	}
 	return result
 }
@@ -1475,7 +1698,7 @@ func (s *Server) GetJob(namespace, name string) (*api.JobStatusResponse, bool) {
 		return nil, false
 	}
 	specCopy := *job.Spec
-	r := &api.JobStatusResponse{Name: name, Revision: job.Revision, Spec: &specCopy}
+	r := &api.JobStatusResponse{Name: name, Version: job.Version, Revision: job.Revision, Spec: &specCopy}
 	for _, g := range job.Spec.TaskGroups {
 		r.Desired += g.Count
 	}
@@ -1592,10 +1815,10 @@ func (s *Server) persistJobRestart(ctx context.Context, namespace, name string) 
 }
 
 // StopAllocationByID stops a single allocation identified by namespace and ID.
-// The stop is serialized with reconciliation passes, and a pass follows it so
-// the task group converges on its desired count.
+// The stop runs on the reconciliation action path, so it waits for any pass's
+// actions on the same node, and a pass follows it so the task group converges
+// on its desired count.
 func (s *Server) StopAllocationByID(ctx context.Context, namespace, id string) error {
-	s.reconcileMu.Lock()
 	s.mu.RLock()
 	var found *Allocation
 	for _, alloc := range s.allocations {
@@ -1606,12 +1829,18 @@ func (s *Server) StopAllocationByID(ctx context.Context, namespace, id string) e
 	}
 	if found == nil || found.Node == nil {
 		s.mu.RUnlock()
-		s.reconcileMu.Unlock()
 		return fmt.Errorf("allocation not found")
 	}
+	nodeID := found.Node.ID
 	s.mu.RUnlock()
+	slots, busy := s.claimActionNode(nodeID)
+	slots, ok := s.awaitActionNode(ctx, nodeID, slots, busy)
+	if !ok {
+		return ctx.Err()
+	}
 	err := s.Execute(ctx, &Action{Type: ActionStop, Allocation: found})
-	s.reconcileMu.Unlock()
+	<-slots
+	s.releaseActionNode(nodeID)
 	if err != nil {
 		return err
 	}
@@ -1619,8 +1848,9 @@ func (s *Server) StopAllocationByID(ctx context.Context, namespace, id string) e
 	return nil
 }
 
-// ListJobRevisions returns the stored spec history for a job.
-func (s *Server) ListJobRevisions(ctx context.Context, namespace, name string) (api.JobRevisionListResponse, error) {
+// ListJobVersions returns the retained spec history for a job, one entry per
+// version in ascending order.
+func (s *Server) ListJobVersions(ctx context.Context, namespace, name string) (api.JobVersionListResponse, error) {
 	s.mu.RLock()
 	key := jobKey(namespace, name)
 	_, ok := s.jobs[key]
@@ -1632,9 +1862,10 @@ func (s *Server) ListJobRevisions(ctx context.Context, namespace, name string) (
 	if err != nil {
 		return nil, err
 	}
-	result := make(api.JobRevisionListResponse, 0, len(records))
+	result := make(api.JobVersionListResponse, 0, len(records))
 	for _, r := range records {
-		result = append(result, api.JobRevisionResponse{
+		result = append(result, api.JobVersionResponse{
+			Version:   r.Version,
 			Revision:  r.Revision,
 			Spec:      *r.Spec,
 			CreatedAt: r.CreatedAt,
@@ -1936,8 +2167,10 @@ func (s *Server) runReconcileLoop(ctx context.Context) {
 		return
 	}
 	// A newly elected leader must derive current network-plan state before
-	// waiting for the ordinary periodic reconciliation interval.
-	s.Reconcile(ctx)
+	// waiting for the ordinary periodic reconciliation interval. Periodic
+	// passes do not wait for their agent actions: a node still busy with an
+	// earlier pass is skipped while the other nodes proceed.
+	s.reconcile(ctx, false)
 
 	ticker := time.NewTicker(reconcileInterval)
 	defer ticker.Stop()
@@ -1947,7 +2180,7 @@ func (s *Server) runReconcileLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.Reconcile(ctx)
+			s.reconcile(ctx, false)
 		}
 	}
 }

@@ -20,10 +20,10 @@ func printJobPlan(w io.Writer, result *plan.Result) error {
 		_, err := fmt.Fprintf(w, "Plan: create %s/%s (%d desired allocations)\n", result.Namespace, result.Job, result.DesiredAllocations)
 		return err
 	case "none":
-		_, err := fmt.Fprintf(w, "Plan: no changes to %s/%s (revision %d)\n", result.Namespace, result.Job, result.BaseRevision)
+		_, err := fmt.Fprintf(w, "Plan: no changes to %s/%s (version %d, revision %d)\n", result.Namespace, result.Job, result.BaseVersion, result.BaseRevision)
 		return err
 	default:
-		if _, err := fmt.Fprintf(w, "Plan: update %s/%s from revision %d\n", result.Namespace, result.Job, result.BaseRevision); err != nil {
+		if _, err := fmt.Fprintf(w, "Plan: update %s/%s from version %d (revision %d)\n", result.Namespace, result.Job, result.BaseVersion, result.BaseRevision); err != nil {
 			return err
 		}
 		for _, change := range result.Changes {

@@ -46,7 +46,7 @@ func restartBudgetTestAgent(t *testing.T, rt runtime.ContainerRuntime, status st
 
 func runRestartBudgetTestTask(agent *Agent, policy *spec.RestartPolicySpec) error {
 	task := &spec.TaskSpec{Name: "task", Image: "image"}
-	return agent.RunAllocation(context.Background(), "task", "allocation", 1, 1, "hash", "default", "job", "group", "task", task, "", nil, nil, nil, policy, false, 0)
+	return agent.startTask(context.Background(), &taskStart{ID: "task", AllocationID: "allocation", Generation: 1, JobRevision: 1, ExecutionHash: "hash", Namespace: "default", JobName: "job", GroupName: "group", Spec: task, Restart: policy})
 }
 
 func TestStartRetryKeepsRestartAttemptsForSameGeneration(t *testing.T) {
@@ -146,7 +146,7 @@ func TestNewGenerationStartsWithFreshRestartBudget(t *testing.T) {
 		RestartAttempts: 1, RestartWindow: time.Now(),
 	}
 	agent.allocations[previous.ID] = previous
-	if err := agent.RunGroup(context.Background(), request); err != nil {
+	if err := runGroup(context.Background(), agent, request); err != nil {
 		t.Fatalf("run group: %v", err)
 	}
 	current := agent.allocations["allocation-g2-first"]

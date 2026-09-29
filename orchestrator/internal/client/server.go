@@ -170,6 +170,7 @@ type Heartbeat struct {
 	MemoryUsed        *int64
 	MemoryAvailable   *int64
 	MetricsAt         *time.Time
+	RaftAppliedIndex  uint64
 }
 
 // NewServerClient creates a client for cluster-scoped server APIs.
@@ -297,18 +298,21 @@ func (s *ServerClient) ListJobs(ctx context.Context) (*api.JobListResponse, erro
 	return &response, nil
 }
 
-// SubmitJob creates or updates a job.
-func (s *ServerClient) SubmitJob(ctx context.Context, spec *spec.JobSpec) error {
+// SubmitJob creates or updates a job. A non-nil expectedVersion makes the
+// apply conditional: 0 requires that the job does not exist and N requires
+// that it is at version N. A failed precondition returns an *HTTPError with
+// status 409 Conflict.
+func (s *ServerClient) SubmitJob(ctx context.Context, spec *spec.JobSpec, expectedVersion *int) (*api.JobRegistrationResponse, error) {
 	requestData := &api.JobRegistrationRequest{
-		Spec: *spec,
+		Spec:            *spec,
+		ExpectedVersion: expectedVersion,
 	}
 
-	err := s.client.request(ctx, http.MethodPost, s.address()+"/v1/jobs", requestData, nil)
-	if err != nil {
-		return fmt.Errorf("submit job: %w", err)
+	var response api.JobRegistrationResponse
+	if err := s.client.request(ctx, http.MethodPost, s.address()+"/v1/jobs", requestData, &response); err != nil {
+		return nil, fmt.Errorf("submit job: %w", err)
 	}
-
-	return nil
+	return &response, nil
 }
 
 // DeleteJob deletes a job.
@@ -423,6 +427,7 @@ func (s *ServerClient) SendHeartbeat(ctx context.Context, id uuid.UUID, heartbea
 		MemoryUsed:        heartbeat.MemoryUsed,
 		MemoryAvailable:   heartbeat.MemoryAvailable,
 		MetricsAt:         heartbeat.MetricsAt,
+		RaftAppliedIndex:  heartbeat.RaftAppliedIndex,
 	}
 	url := fmt.Sprintf("%s/v1/nodes/%s/heartbeat", s.address(), id)
 	if err := s.client.request(ctx, http.MethodPost, url, requestData, nil); err != nil {

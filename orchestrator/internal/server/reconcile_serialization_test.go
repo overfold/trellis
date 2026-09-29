@@ -131,7 +131,7 @@ func TestReconcileAbortsWhenPlannedNodeRemoved(t *testing.T) {
 	}
 }
 
-func TestStopAllocationByIDIsSerializedWithReconciliationAndReplaces(t *testing.T) {
+func TestStopAllocationByIDWaitsForNodeActionsAndReplaces(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()
 	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
@@ -141,20 +141,22 @@ func TestStopAllocationByIDIsSerializedWithReconciliationAndReplaces(t *testing.
 	original := &Allocation{ID: "original", Namespace: "default", JobName: "web", TaskGroupName: "api", Tasks: jobSpec.TaskGroups[0].Tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
 	s.allocations = []*Allocation{original}
 
-	s.reconcileMu.Lock()
+	if _, busy := s.claimActionNode(node.ID); busy != nil {
+		t.Fatal("setup: node already busy")
+	}
 	done := make(chan error, 1)
 	go func() { done <- s.StopAllocationByID(context.Background(), "default", "original") }()
 	select {
 	case err := <-done:
-		s.reconcileMu.Unlock()
-		t.Fatalf("stop completed during a reconciliation pass: %v", err)
+		s.releaseActionNode(node.ID)
+		t.Fatalf("stop completed while a pass's actions held the node: %v", err)
 	case <-time.After(50 * time.Millisecond):
 	}
 	if calls := agent.recordedCalls(); len(calls) != 0 {
-		s.reconcileMu.Unlock()
-		t.Fatalf("agent called during a reconciliation pass: %#v", calls)
+		s.releaseActionNode(node.ID)
+		t.Fatalf("agent called while a pass's actions held the node: %#v", calls)
 	}
-	s.reconcileMu.Unlock()
+	s.releaseActionNode(node.ID)
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +164,7 @@ func TestStopAllocationByIDIsSerializedWithReconciliationAndReplaces(t *testing.
 	if original.Phase != lifecycle.PhaseStopped {
 		t.Fatalf("original phase = %s, want stopped", original.Phase)
 	}
-	if len(s.allocations) != 2 || s.allocations[1].Phase != lifecycle.PhaseRunning {
+	if len(s.allocations) != 2 || s.allocations[1].Phase != lifecycle.PhaseStarting {
 		t.Fatalf("allocations = %d, want the stop followed by a replacement", len(s.allocations))
 	}
 }

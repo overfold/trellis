@@ -254,7 +254,7 @@ func TestRecoverUnknownStatusContainerIsPreservedAndStopFailsHonestly(t *testing
 	request := operationTestRequest()
 	request.AllocationID, request.Generation, request.JobRevision, request.ExecutionHash = "allocation", 1, 1, "hash"
 	request.Tasks = []spec.TaskSpec{{Name: "task", Image: "image"}}
-	if err := agent.RunAllocation(context.Background(), "task", "allocation", 1, 1, "hash", "default", "job", "group", "task", &request.Tasks[0], "", nil, nil, nil, nil, false, 0); err == nil {
+	if err := agent.startTask(context.Background(), &taskStart{ID: "task", AllocationID: "allocation", Generation: 1, JobRevision: 1, ExecutionHash: "hash", Namespace: "default", JobName: "job", GroupName: "group", Spec: &request.Tasks[0]}); err == nil {
 		t.Fatal("start retry acknowledged an allocation whose container state is unknown")
 	}
 
@@ -387,7 +387,7 @@ func TestRunAllocationObservesRecoveredAllocationOnDemand(t *testing.T) {
 
 	rt.status = runtime.StatusRunning
 	task := &spec.TaskSpec{Name: "task", Image: "image"}
-	if err := agent.RunAllocation(context.Background(), "task", "allocation", 1, 1, "hash", "default", "job", "group", "task", task, "", nil, nil, nil, nil, false, 0); err != nil {
+	if err := agent.startTask(context.Background(), &taskStart{ID: "task", AllocationID: "allocation", Generation: 1, JobRevision: 1, ExecutionHash: "hash", Namespace: "default", JobName: "job", GroupName: "group", Spec: task}); err != nil {
 		t.Fatalf("start retry for observed running allocation: %v", err)
 	}
 	recovered := agent.allocations["task"]
@@ -469,7 +469,7 @@ func TestRunAllocationReplacesRecoveredAllocationConfirmedMissing(t *testing.T) 
 
 	rt.listErr = nil
 	task := &spec.TaskSpec{Name: "task", Image: "image"}
-	if err := agent.RunAllocation(context.Background(), "task", "allocation", 1, 1, "hash", "default", "job", "group", "task", task, "", nil, nil, nil, nil, false, 0); err != nil {
+	if err := agent.startTask(context.Background(), &taskStart{ID: "task", AllocationID: "allocation", Generation: 1, JobRevision: 1, ExecutionHash: "hash", Namespace: "default", JobName: "job", GroupName: "group", Spec: task}); err != nil {
 		t.Fatalf("start retry after confirmed missing container: %v", err)
 	}
 	if rt.created != 1 || rt.stopCount != 0 {
@@ -616,7 +616,7 @@ func TestRecoverRetryKeepsExhaustedRestartBudgetTerminal(t *testing.T) {
 		t.Fatalf("recover with failed listing: %v", err)
 	}
 	task := &spec.TaskSpec{Name: "task", Image: "image"}
-	if err := agent.RunAllocation(context.Background(), "task", "allocation", 1, 1, "hash", "default", "job", "group", "task", task, "", nil, nil, nil, nil, false, 0); !errors.Is(err, ErrRestartBudgetExhausted) {
+	if err := agent.startTask(context.Background(), &taskStart{ID: "task", AllocationID: "allocation", Generation: 1, JobRevision: 1, ExecutionHash: "hash", Namespace: "default", JobName: "job", GroupName: "group", Spec: task}); !errors.Is(err, ErrRestartBudgetExhausted) {
 		t.Fatalf("start retry error = %v, want exhausted restart budget", err)
 	}
 

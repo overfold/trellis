@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
@@ -157,7 +158,7 @@ func (h *Handler) Register(e *echo.Echo) {
 	v1.DELETE("/jobs/:name", h.handleDeleteJob)
 	v1.POST("/jobs/:name/restart", h.handleRestartJob)
 	v1.POST("/jobs/:name/groups/:group/replacement-backoff/reset", h.handleResetReplacementBackoff)
-	v1.GET("/jobs/:name/revisions", h.handleListJobRevisions)
+	v1.GET("/jobs/:name/versions", h.handleListJobVersions)
 	v1.GET("/namespaces", h.handleListNamespaces)
 	v1.GET("/allocations", h.handleListAllocations)
 	v1.DELETE("/allocations/:id", h.handleStopAllocation)
@@ -175,6 +176,8 @@ func (h *Handler) Register(e *echo.Echo) {
 	v1.POST("/raft/join", h.handleRaftJoin)
 	v1.DELETE("/raft/members/:id", h.handleRaftMemberRemove)
 	v1.POST("/raft/leadership-transfer", h.handleRaftLeadershipTransfer)
+	v1.GET("/cluster/settings", h.handleGetClusterSettings)
+	v1.PUT("/cluster/settings/job-limits", h.handleUpdateJobLimits)
 	v1.GET("/backup", h.handleBackupCreate)
 	v1.POST("/backup/restore", h.handleBackupRestore)
 	v1.PUT("/namespaces/:namespace/secrets/:name", h.handleSetSecret)
@@ -212,6 +215,35 @@ func (h *Handler) handleCreateCredential(c *echo.Context) error {
 	}
 	c.Response().Header().Set("Cache-Control", "no-store")
 	return c.JSON(http.StatusCreated, api.CredentialCreateResponse{Token: token})
+}
+
+func (h *Handler) handleGetClusterSettings(c *echo.Context) error {
+	if err := requireClusterRead(c, "cluster settings require cluster/read authorization"); err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, h.server.ClusterSettings().API())
+}
+
+func (h *Handler) handleUpdateJobLimits(c *echo.Context) error {
+	if err := requireRoot(c, "changing cluster settings requires the administrator credential"); err != nil {
+		return err
+	}
+	var limits spec.Limits
+	decoder := json.NewDecoder(http.MaxBytesReader(c.Response(), c.Request().Body, 64<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&limits); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid job limits")
+	}
+	settings, err := h.server.UpdateJobLimits(c.Request().Context(), limits)
+	switch {
+	case errors.Is(err, ErrInvalidClusterSettings):
+		return echo.NewHTTPError(http.StatusUnprocessableEntity, err.Error())
+	case errors.Is(err, ErrClusterSettingsConflict):
+		return echo.NewHTTPError(http.StatusConflict, err.Error())
+	case err != nil:
+		return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error())
+	}
+	return c.JSON(http.StatusOK, settings.API())
 }
 
 func (h *Handler) handleBackupCreate(c *echo.Context) error {
@@ -412,9 +444,19 @@ func (h *Handler) handleListNodes(c *echo.Context) error {
 		return err
 	}
 	nodes := h.server.ListNodes()
+	// Membership only annotates the listing; node commands must keep working
+	// while the Raft configuration is briefly unreadable.
+	voters, _ := h.server.MemberVoters()
 	result := make(api.NodeListResponse, 0, len(nodes))
 	for _, node := range nodes {
-		result = append(result, *h.convertNode(&node))
+		response := h.convertNode(&node)
+		if voter, member := voters[node.ID.String()]; member {
+			response.ControlPlane = api.ControlPlaneNonvoter
+			if voter {
+				response.ControlPlane = api.ControlPlaneVoter
+			}
+		}
+		result = append(result, *response)
 	}
 	return c.JSON(http.StatusOK, result)
 }
@@ -483,6 +525,7 @@ func (h *Handler) handleHeartbeat(c *echo.Context) error {
 	if err := h.server.Heartbeat(c.Request().Context(), id, request.Allocations, request.Version, request.Volumes, request.Capabilities, resources); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "unable to process heartbeat")
 	}
+	h.server.RecordRaftProgress(id, request.RaftAppliedIndex)
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -535,11 +578,11 @@ func (h *Handler) handlePlanJob(c *echo.Context) error {
 		return err
 	}
 	var currentSpec *spec.JobSpec
-	var revision int
+	var version, revision int
 	if current, ok := h.server.GetJob(request.Spec.Namespace, request.Spec.Name); ok {
-		currentSpec, revision = current.Spec, current.Revision
+		currentSpec, version, revision = current.Spec, current.Version, current.Revision
 	}
-	return c.JSON(http.StatusOK, plan.Build(currentSpec, revision, &request.Spec))
+	return c.JSON(http.StatusOK, plan.Build(currentSpec, version, revision, &request.Spec))
 }
 
 func (h *Handler) handleRegisterJob(c *echo.Context) error {
@@ -560,10 +603,14 @@ func (h *Handler) handleRegisterJob(c *echo.Context) error {
 	if err := requireAPIAccessDelegation(c, &request.Spec); err != nil {
 		return err
 	}
-	if err := h.server.RegisterJob(c.Request().Context(), request.Spec.Namespace, &request.Spec); err != nil {
+	result, err := h.server.RegisterJob(c.Request().Context(), request.Spec.Namespace, &request.Spec, request.ExpectedVersion)
+	if errors.Is(err, ErrJobVersionConflict) {
+		return echo.NewHTTPError(http.StatusConflict, err.Error())
+	}
+	if err != nil {
 		return validationResponse(c, err)
 	}
-	return c.NoContent(http.StatusAccepted)
+	return c.JSON(http.StatusAccepted, result)
 }
 
 func (h *Handler) handleListAllocations(c *echo.Context) error {
@@ -635,7 +682,7 @@ func (h *Handler) handleRaftJoin(c *echo.Context) error {
 	if err := h.server.RecordNodeServerAddress(c.Request().Context(), nodeID, request.ServerAddress); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
-	if err := h.server.joiner.AddVoter(nodeID.String(), request.RaftAddress); err != nil {
+	if err := h.server.JoinMember(nodeID, request.RaftAddress); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 	_, caKey, err := h.server.ClusterCA()
@@ -673,7 +720,10 @@ func (h *Handler) handleRaftMemberRemove(c *echo.Context) error {
 	if h.server.joiner == nil {
 		return echo.NewHTTPError(http.StatusServiceUnavailable, "cluster membership changes not available")
 	}
-	if err := h.server.joiner.RemoveServer(id); err != nil {
+	if err := h.server.RemoveMember(c.Request().Context(), id); err != nil {
+		if errors.Is(err, ErrMembershipUnsafe) {
+			return echo.NewHTTPError(http.StatusConflict, err.Error())
+		}
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 	return c.NoContent(http.StatusNoContent)
@@ -698,9 +748,14 @@ func (h *Handler) handleMetrics(c *echo.Context) error {
 }
 
 func (h *Handler) convertNode(node *Node) *api.NodeResponse {
+	var lastHeartbeat *time.Time
+	if !node.LastHeartbeat.IsZero() {
+		heartbeat := node.LastHeartbeat
+		lastHeartbeat = &heartbeat
+	}
 	return &api.NodeResponse{
 		ID: node.ID, Host: node.Host, Port: node.Port, Status: api.NodeStatusResponse(node.Status),
-		LastHeartbeat: node.LastHeartbeat, CPU: node.CPUAllocatable, Memory: node.MemoryAllocatable,
+		LastHeartbeat: lastHeartbeat, CPU: node.CPUAllocatable, Memory: node.MemoryAllocatable,
 		CPUCapacity: node.CPUCapacity, MemoryCapacity: node.MemoryCapacity,
 		CPUAllocatable: node.CPUAllocatable, MemoryAllocatable: node.MemoryAllocatable,
 		CPUUsage: node.CPUUsage, MemoryUsed: node.MemoryUsed, MemoryAvailable: node.MemoryAvailable, MetricsAt: node.MetricsAt,
@@ -736,12 +791,12 @@ func (h *Handler) handleResetReplacementBackoff(c *echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
-func (h *Handler) handleListJobRevisions(c *echo.Context) error {
-	revisions, err := h.server.ListJobRevisions(c.Request().Context(), requestNamespace(c), c.Param("name"))
+func (h *Handler) handleListJobVersions(c *echo.Context) error {
+	versions, err := h.server.ListJobVersions(c.Request().Context(), requestNamespace(c), c.Param("name"))
 	if err != nil {
 		return echo.NewHTTPError(http.StatusNotFound, err.Error())
 	}
-	return c.JSON(http.StatusOK, revisions)
+	return c.JSON(http.StatusOK, versions)
 }
 
 func (h *Handler) handleStopAllocation(c *echo.Context) error {

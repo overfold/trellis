@@ -10,7 +10,7 @@ import (
 )
 
 // BackupFormatVersion is the current desired-state backup format.
-const BackupFormatVersion = 3
+const BackupFormatVersion = 4
 
 // BackupSnapshot contains desired state only. Secret values remain encrypted
 // exactly as stored in Raft and still require the separately managed KEK.
@@ -38,11 +38,13 @@ const (
 
 // NodeResponse contains the reported state and capacity of a node.
 type NodeResponse struct {
-	ID                uuid.UUID             `json:"id"`
-	Host              string                `json:"host"`
-	Port              int                   `json:"port"`
-	Status            NodeStatusResponse    `json:"status"`
-	LastHeartbeat     time.Time             `json:"last_heartbeat"`
+	ID     uuid.UUID          `json:"id"`
+	Host   string             `json:"host"`
+	Port   int                `json:"port"`
+	Status NodeStatusResponse `json:"status"`
+	// LastHeartbeat is when the current leader last received a heartbeat from
+	// the node. It is absent until the node heartbeats to that leader.
+	LastHeartbeat     *time.Time            `json:"last_heartbeat,omitempty"`
 	CPU               int                   `json:"cpu"`
 	Memory            int64                 `json:"memory"`
 	CPUCapacity       int                   `json:"cpu_capacity"`
@@ -59,7 +61,20 @@ type NodeResponse struct {
 	Volumes           []string              `json:"volumes,omitempty"`
 	Capabilities      []spec.NodeCapability `json:"capabilities,omitempty"`
 	Version           string                `json:"version,omitempty"`
+	// ControlPlane is the node's Raft membership: voter or nonvoter. It is
+	// empty for a registered node that is no longer a member.
+	ControlPlane ControlPlaneMembership `json:"control_plane,omitempty"`
 }
+
+// ControlPlaneMembership describes whether a node votes in the control plane.
+type ControlPlaneMembership string
+
+const (
+	// ControlPlaneVoter nodes vote in leader elections and commit changes.
+	ControlPlaneVoter ControlPlaneMembership = "voter"
+	// ControlPlaneNonvoter nodes replicate state and can be promoted to voters.
+	ControlPlaneNonvoter ControlPlaneMembership = "nonvoter"
+)
 
 // NodeListResponse is the response returned when listing nodes.
 type NodeListResponse = []NodeResponse
@@ -107,6 +122,9 @@ type HeartbeatRequest struct {
 	MemoryUsed        *int64                `json:"memory_used,omitempty"`
 	MemoryAvailable   *int64                `json:"memory_available,omitempty"`
 	MetricsAt         *time.Time            `json:"metrics_at,omitempty"`
+	// RaftAppliedIndex is the node's last applied Raft log index. The leader
+	// promotes only non-voters that are caught up.
+	RaftAppliedIndex uint64 `json:"raft_applied_index,omitempty"`
 }
 
 // AllocationStatus reports the observed state of an allocation.
@@ -121,6 +139,23 @@ type AllocationStatus struct {
 	// every other phase.
 	Reason OperationCode `json:"reason,omitempty"`
 	Ports  []PortMapping `json:"ports,omitempty"`
+	// StartFailure reports that the agent's background start of this
+	// generation failed. It is only set with phase starting.
+	StartFailure *StartFailure `json:"start_failure,omitempty"`
+}
+
+// MaxStartFailureMessageBytes bounds a reported start failure message.
+const MaxStartFailureMessageBytes = 1024
+
+// StartFailure describes a failed background allocation start. Attempt echoes
+// the start request's attempt; the agent reports the failure until a start
+// with a different attempt, a stop, or a newer generation replaces it. Code is
+// set for a failure that retrying the generation cannot fix:
+// OperationStaleGeneration, OperationConflict, or OperationRestartExhausted.
+type StartFailure struct {
+	Attempt int           `json:"attempt"`
+	Code    OperationCode `json:"code,omitempty"`
+	Message string        `json:"message"`
 }
 
 // PortMapping maps a host port to a container port.
@@ -139,11 +174,24 @@ type AllocationEndpoint struct {
 // JobRegistrationRequest contains the job specification to register.
 type JobRegistrationRequest struct {
 	Spec spec.JobSpec `json:"spec"`
+	// ExpectedVersion makes the apply conditional on the job's current
+	// version: 0 requires that the job does not exist, and N requires that
+	// the job is at version N. When omitted the apply is unconditional.
+	ExpectedVersion *int `json:"expected_version,omitempty"`
+}
+
+// JobRegistrationResponse reports the job version and revision after an apply.
+type JobRegistrationResponse struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	Version   int    `json:"version"`
+	Revision  int    `json:"revision"`
 }
 
 // JobStatusResponse summarizes the desired and observed state of a job.
 type JobStatusResponse struct {
 	Name        string               `json:"name"`
+	Version     int                  `json:"version"`
 	Revision    int                  `json:"revision"`
 	Desired     int                  `json:"desired"`
 	Running     int                  `json:"running"`
@@ -252,15 +300,17 @@ type NodeEnrollmentResponse struct {
 	Key    string    `json:"key"`
 }
 
-// JobRevisionResponse describes one persisted revision of a job.
-type JobRevisionResponse struct {
+// JobVersionResponse describes one retained version of a job and the execution
+// revision it ran.
+type JobVersionResponse struct {
+	Version   int          `json:"version"`
 	Revision  int          `json:"revision"`
 	Spec      spec.JobSpec `json:"spec"`
 	CreatedAt time.Time    `json:"created_at"`
 }
 
-// JobRevisionListResponse is the response returned when listing job revisions.
-type JobRevisionListResponse = []JobRevisionResponse
+// JobVersionListResponse is the response returned when listing job versions.
+type JobVersionListResponse = []JobVersionResponse
 
 // AllocationMetricsResponse reports current resource usage for an allocation task.
 type AllocationMetricsResponse struct {
@@ -328,7 +378,8 @@ const (
 	EventAllocationPhaseChanged EventType = "allocation.phase_changed"
 	// EventAllocationHealthChanged fires when an allocation's health changes.
 	EventAllocationHealthChanged EventType = "allocation.health_changed"
-	// EventJobRegistered fires when a job is applied.
+	// EventJobRegistered fires when an apply changes a job and carries the
+	// job's new version and revision.
 	EventJobRegistered EventType = "job.registered"
 	// EventJobDeleted fires when a job is deleted.
 	EventJobDeleted EventType = "job.deleted"
@@ -348,6 +399,7 @@ type ClusterEvent struct {
 	AllocationID string    `json:"allocation_id,omitempty"`
 	Phase        string    `json:"phase,omitempty"`
 	Health       string    `json:"health,omitempty"`
+	Version      int       `json:"version,omitempty"`
 	Revision     int       `json:"revision,omitempty"`
 	Group        string    `json:"group,omitempty"`
 	// Failures and NextReplacementAt describe a replacement backoff.
