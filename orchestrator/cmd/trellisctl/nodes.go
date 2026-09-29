@@ -131,7 +131,7 @@ func NewNodesListCmd() *cobra.Command {
 				return err
 			}
 			for _, node := range *nodes {
-				heartbeat := node.LastHeartbeat.Format(time.RFC3339)
+				heartbeat := formatHeartbeat(node.LastHeartbeat)
 				version := node.Version
 				if version == "" {
 					version = "unknown"
@@ -171,6 +171,15 @@ func controlPlaneDisplay(node api.NodeResponse) string {
 	return string(node.ControlPlane)
 }
 
+// formatHeartbeat renders the leader's last heartbeat observation. A node that
+// has not yet heartbeated to the current leader has none.
+func formatHeartbeat(heartbeat *time.Time) string {
+	if heartbeat == nil {
+		return "none"
+	}
+	return heartbeat.Format(time.RFC3339)
+}
+
 func printNodeStatus(w interface{ Write([]byte) (int, error) }, node api.NodeResponse) error {
 	version := node.Version
 	if version == "" {
@@ -180,7 +189,7 @@ func printNodeStatus(w interface{ Write([]byte) (int, error) }, node api.NodeRes
 	if node.OS != "" || node.Arch != "" {
 		platform = fmt.Sprintf("%s/%s", valueOrUnknown(node.OS), valueOrUnknown(node.Arch))
 	}
-	if _, err := fmt.Fprintf(w, "Node: %s\nID: %s\nStatus: %s\nControl plane: %s\nVersion: %s\nPlatform: %s\nCPU: %dm\nMemory: %s (%d bytes)\nHeartbeat: %s\n", nodeDisplay(node), node.ID, node.Status, controlPlaneDisplay(node), version, platform, node.CPU, formatByteCount(node.Memory), node.Memory, node.LastHeartbeat.Format(time.RFC3339)); err != nil {
+	if _, err := fmt.Fprintf(w, "Node: %s\nID: %s\nStatus: %s\nControl plane: %s\nVersion: %s\nPlatform: %s\nCPU: %dm\nMemory: %s (%d bytes)\nHeartbeat: %s\n", nodeDisplay(node), node.ID, node.Status, controlPlaneDisplay(node), version, platform, node.CPU, formatByteCount(node.Memory), node.Memory, formatHeartbeat(node.LastHeartbeat)); err != nil {
 		return err
 	}
 

@@ -11,6 +11,9 @@ export interface ManifestPlan {
   action: "create" | "update" | "none";
   namespace: string;
   job: string;
+  // base_version is the job version this plan was computed against. Applying
+  // the plan sends it as expected_version so a concurrent change is rejected.
+  base_version?: number;
   base_revision?: number;
   desired_allocations: number;
   changes: ManifestChange[];
@@ -21,10 +24,16 @@ export function planTitle(plan: ManifestPlan): string {
     case "create":
       return `Create ${plan.namespace}/${plan.job} (${plan.desired_allocations} desired allocation${plan.desired_allocations === 1 ? "" : "s"})`;
     case "none":
-      return `No changes to ${plan.namespace}/${plan.job} (revision ${plan.base_revision ?? 0})`;
+      return `No changes to ${plan.namespace}/${plan.job} (version ${plan.base_version ?? 0}, revision ${plan.base_revision ?? 0})`;
     case "update":
-      return `Update ${plan.namespace}/${plan.job} from revision ${plan.base_revision ?? 0}`;
+      return `Update ${plan.namespace}/${plan.job} from version ${plan.base_version ?? 0} (revision ${plan.base_revision ?? 0})`;
   }
+}
+
+// expectedVersionForPlan returns the expected_version an apply of plan must
+// send: 0 requires that the job still does not exist.
+export function expectedVersionForPlan(plan: ManifestPlan): number {
+  return plan.action === "create" ? 0 : plan.base_version ?? 0;
 }
 
 export function formatPlanValue(path: string, value: unknown): string {

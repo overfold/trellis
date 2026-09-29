@@ -65,7 +65,7 @@ The dashboard manifest editor is still deliberately YAML-first rather than a for
 - schema-driven completion for enum and boolean values such as network mode, runtime, update strategy, API scope/access, and true/false fields;
 - field explanations from the generated authoring schema alongside completion choices;
 - formatting through **Format YAML**;
-- server-owned semantic review through **Review Plan** before apply.
+- server-owned semantic review through **Review Plan** before apply. Apply is conditioned on the job version the plan was reviewed against; if the job changed meanwhile, the dashboard applies nothing, discards the stale plan, and asks you to review the plan again.
 
 The editor accepts the same first-party YAML conveniences as `trellisctl`, including durations such as `10s` and memory such as `64MiB`. Those are consumer-side representation details. The generated authoring schema identifies fields whose human representation differs from canonical JSON; before an API call, the dashboard follows that schema to convert durations to nanoseconds and memory sizes to bytes.
 

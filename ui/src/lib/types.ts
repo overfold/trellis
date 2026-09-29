@@ -5,7 +5,8 @@ export interface Node {
   host: string;
   port: number;
   status: NodeStatus;
-  last_heartbeat: string;
+  // Absent until the node heartbeats to the current leader.
+  last_heartbeat?: string;
   cpu: number;
   memory: number;
   os?: string;
@@ -68,8 +69,18 @@ export interface AllocationEvent {
   at: string;
 }
 
+// JobRegistration is returned by an apply with the job's resulting version
+// and execution revision.
+export interface JobRegistration {
+  namespace: string;
+  name: string;
+  version: number;
+  revision: number;
+}
+
 export interface Job {
   name: string;
+  version: number;
   revision: number;
   desired: number;
   running: number;
