@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -76,6 +77,7 @@ const (
 	networkPlanPeerTimeoutBudget  = 25 * time.Millisecond
 	networkPlanRouteTimeoutBudget = 100 * time.Millisecond
 	networkPlanRepairInterval     = 5 * time.Minute
+	maxConcurrentReconcileActions = 32
 )
 
 func networkPlanOperationTimeout(plan *network.Plan, attempt int) time.Duration {
@@ -226,6 +228,13 @@ func (s *Server) Reconcile(ctx context.Context) {
 			s.metrics.ReconcileDuration.Observe(time.Since(start).Seconds())
 		}
 	}()
+	s.mu.RLock()
+	registeredNodes := make(map[uuid.UUID]struct{}, len(s.nodes))
+	for nodeID := range s.nodes {
+		registeredNodes[nodeID] = struct{}{}
+	}
+	s.mu.RUnlock()
+	s.client.RetainNodes(registeredNodes)
 	now := s.now().UTC()
 	volumeOwners, err := s.state.ListVolumeRegistrations(ctx)
 	if err != nil {
@@ -879,22 +888,74 @@ func (s *Server) Reconcile(ctx context.Context) {
 		})
 	}
 
+	executableActions := make([]Action, 0, len(actions))
 	for i := range actions {
 		if actions[i].Type == ActionStart && tasksUseWireGuard(actions[i].Allocation.Tasks) {
 			if _, assigned := networkPorts[actions[i].Allocation.Namespace]; !assigned {
 				continue
 			}
 		}
-		if err := s.Execute(ctx, &actions[i]); err != nil {
-			allocationID := actions[i].ID
-			if actions[i].Allocation != nil {
-				allocationID = actions[i].Allocation.ID
-			}
-			s.log.Error("reconcile action failed", "action", actions[i].Type, "allocation", allocationID, "error", err)
-		}
+		executableActions = append(executableActions, actions[i])
 	}
+	// Retained originals must release their conflicting resources before their
+	// replacements start on the same node. Actions remain ordered per node, while
+	// independent nodes run concurrently so an unreachable peer delays only its
+	// own queue.
+	s.executeReconcileActions(ctx, executableActions)
 	s.refreshNetworkPlans()
 	s.refreshCatalog()
+}
+
+func (s *Server) executeReconcileActions(ctx context.Context, actions []Action) {
+	type nodeActions struct {
+		actions []Action
+	}
+	groupByNode := make(map[uuid.UUID]int)
+	groups := make([]nodeActions, 0, len(actions))
+	for _, action := range actions {
+		var nodeID uuid.UUID
+		if action.Allocation != nil {
+			nodeID = action.Allocation.Node.ID
+		} else {
+			nodeID = action.Node.ID
+		}
+		index, exists := groupByNode[nodeID]
+		if !exists {
+			index = len(groups)
+			groupByNode[nodeID] = index
+			groups = append(groups, nodeActions{})
+		}
+		groups[index].actions = append(groups[index].actions, action)
+	}
+	workers := min(len(groups), maxConcurrentReconcileActions)
+	if workers == 0 {
+		return
+	}
+	work := make(chan []Action)
+	var group sync.WaitGroup
+	group.Add(workers)
+	for range workers {
+		go func() {
+			defer group.Done()
+			for nodeBatch := range work {
+				for i := range nodeBatch {
+					action := &nodeBatch[i]
+					if err := s.Execute(ctx, action); err != nil {
+						allocationID := action.ID
+						if action.Allocation != nil {
+							allocationID = action.Allocation.ID
+						}
+						s.log.Error("reconcile action failed", "action", action.Type, "allocation", allocationID, "error", err)
+					}
+				}
+			}
+		}()
+	}
+	for _, nodeBatch := range groups {
+		work <- nodeBatch.actions
+	}
+	close(work)
+	group.Wait()
 }
 
 type networkPlanKey struct {

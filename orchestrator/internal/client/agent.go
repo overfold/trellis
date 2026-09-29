@@ -28,6 +28,8 @@ type AgentClient struct {
 	networkPlanClients map[uuid.UUID]*client
 }
 
+const agentOperationTimeout = 30 * time.Second
+
 // AgentOperationError reports a rejected agent operation.
 type AgentOperationError struct {
 	Response api.OperationResponse
@@ -83,6 +85,12 @@ func NewAgentClient(token string, tlsConfig *tls.Config) *AgentClient {
 func (s *AgentClient) clientFor(expectedNodeID uuid.UUID, responseHeaderTimeout time.Duration) *client {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.clients == nil {
+		s.clients = make(map[uuid.UUID]*client)
+	}
+	if s.networkPlanClients == nil {
+		s.networkPlanClients = make(map[uuid.UUID]*client)
+	}
 	clients := s.clients
 	if responseHeaderTimeout == 0 {
 		clients = s.networkPlanClients
@@ -118,10 +126,32 @@ func (s *AgentClient) clientFor(expectedNodeID uuid.UUID, responseHeaderTimeout 
 	return created
 }
 
+func (s *AgentClient) operationRequest(ctx context.Context, nodeID uuid.UUID, method, target string, requestData, responseData any) error {
+	ctx, cancel := context.WithTimeout(ctx, agentOperationTimeout)
+	defer cancel()
+	return s.clientFor(nodeID, 30*time.Second).request(ctx, method, target, requestData, responseData)
+}
+
+// RetainNodes evicts cached transports for nodes that are no longer registered.
+// Active requests keep their transport reference and are not interrupted.
+func (s *AgentClient) RetainNodes(nodes map[uuid.UUID]struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, clients := range []map[uuid.UUID]*client{s.clients, s.networkPlanClients} {
+		for nodeID, cached := range clients {
+			if _, keep := nodes[nodeID]; keep {
+				continue
+			}
+			cached.client.CloseIdleConnections()
+			delete(clients, nodeID)
+		}
+	}
+}
+
 // RunAllocation asks an agent to start an allocation.
 func (s *AgentClient) RunAllocation(ctx context.Context, nodeID uuid.UUID, address string, allocation *api.AllocationRequest) error {
 	var response api.OperationResponse
-	err := s.clientFor(nodeID, 30*time.Second).request(ctx, http.MethodPost, normalizeBaseURL(address)+"/v1/allocations", allocation, &response)
+	err := s.operationRequest(ctx, nodeID, http.MethodPost, normalizeBaseURL(address)+"/v1/allocations", allocation, &response)
 	if err != nil {
 		return fmt.Errorf("run allocation: %w", decodeOperationError(err))
 	}
@@ -131,7 +161,7 @@ func (s *AgentClient) RunAllocation(ctx context.Context, nodeID uuid.UUID, addre
 // DrainAllocation suppresses automatic restarts until the allocation is stopped.
 func (s *AgentClient) DrainAllocation(ctx context.Context, nodeID uuid.UUID, address string, request *api.DrainAllocationRequest) error {
 	var response api.OperationResponse
-	err := s.clientFor(nodeID, 30*time.Second).request(ctx, http.MethodPost, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(request.AllocationID)+"/drain", request, &response)
+	err := s.operationRequest(ctx, nodeID, http.MethodPost, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(request.AllocationID)+"/drain", request, &response)
 	if err != nil {
 		return fmt.Errorf("drain allocation: %w", decodeOperationError(err))
 	}
@@ -141,7 +171,7 @@ func (s *AgentClient) DrainAllocation(ctx context.Context, nodeID uuid.UUID, add
 // ResumeAllocation restores automatic restarts for a retained allocation.
 func (s *AgentClient) ResumeAllocation(ctx context.Context, nodeID uuid.UUID, address string, request *api.DrainAllocationRequest) error {
 	var response api.OperationResponse
-	err := s.clientFor(nodeID, 30*time.Second).request(ctx, http.MethodDelete, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(request.AllocationID)+"/drain", request, &response)
+	err := s.operationRequest(ctx, nodeID, http.MethodDelete, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(request.AllocationID)+"/drain", request, &response)
 	if err != nil {
 		return fmt.Errorf("resume allocation: %w", decodeOperationError(err))
 	}
@@ -151,7 +181,7 @@ func (s *AgentClient) ResumeAllocation(ctx context.Context, nodeID uuid.UUID, ad
 // StopAllocation asks an agent to stop an allocation.
 func (s *AgentClient) StopAllocation(ctx context.Context, nodeID uuid.UUID, address string, request *api.StopAllocationRequest) error {
 	var response api.OperationResponse
-	err := s.clientFor(nodeID, 30*time.Second).request(ctx, http.MethodDelete, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(request.AllocationID), request, &response)
+	err := s.operationRequest(ctx, nodeID, http.MethodDelete, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(request.AllocationID), request, &response)
 	if err != nil {
 		return fmt.Errorf("stop allocation: %w", decodeOperationError(err))
 	}
@@ -172,7 +202,7 @@ func (s *AgentClient) UpdateNetworkPlan(ctx context.Context, nodeID uuid.UUID, a
 func (s *AgentClient) ExecAllocation(ctx context.Context, nodeID uuid.UUID, address, allocID, task string, command []string) (*api.ExecResponse, error) {
 	request := api.AgentExecRequest{Task: task, Command: command}
 	var response api.AgentExecResponse
-	err := s.clientFor(nodeID, 30*time.Second).request(ctx, http.MethodPost, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(allocID)+"/exec", &request, &response)
+	err := s.operationRequest(ctx, nodeID, http.MethodPost, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(allocID)+"/exec", &request, &response)
 	if err != nil {
 		return nil, fmt.Errorf("exec allocation: %w", err)
 	}
@@ -186,7 +216,7 @@ func (s *AgentClient) ExecAllocation(ctx context.Context, nodeID uuid.UUID, addr
 // CreateExecSession starts an interactive terminal in an allocation task via an agent.
 func (s *AgentClient) CreateExecSession(ctx context.Context, nodeID uuid.UUID, address, allocID string, request *api.ExecSessionCreateRequest) (*api.ExecSessionResponse, error) {
 	var response api.ExecSessionResponse
-	err := s.clientFor(nodeID, 30*time.Second).request(ctx, http.MethodPost, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(allocID)+"/exec/sessions", request, &response)
+	err := s.operationRequest(ctx, nodeID, http.MethodPost, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(allocID)+"/exec/sessions", request, &response)
 	if err != nil {
 		return nil, fmt.Errorf("create exec session: %w", err)
 	}
@@ -195,7 +225,7 @@ func (s *AgentClient) CreateExecSession(ctx context.Context, nodeID uuid.UUID, a
 
 // WriteExecSession sends terminal input to an allocation task via an agent.
 func (s *AgentClient) WriteExecSession(ctx context.Context, nodeID uuid.UUID, address, allocID, sessionID string, request *api.ExecSessionInputRequest) error {
-	err := s.clientFor(nodeID, 30*time.Second).request(ctx, http.MethodPost, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(allocID)+"/exec/sessions/"+url.PathEscape(sessionID)+"/input", request, nil)
+	err := s.operationRequest(ctx, nodeID, http.MethodPost, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(allocID)+"/exec/sessions/"+url.PathEscape(sessionID)+"/input", request, nil)
 	if err != nil {
 		return fmt.Errorf("write exec session: %w", err)
 	}
@@ -206,7 +236,7 @@ func (s *AgentClient) WriteExecSession(ctx context.Context, nodeID uuid.UUID, ad
 func (s *AgentClient) ReadExecSession(ctx context.Context, nodeID uuid.UUID, address, allocID, sessionID string, offset int64) (*api.ExecSessionOutputResponse, error) {
 	var response api.ExecSessionOutputResponse
 	path := normalizeBaseURL(address) + "/v1/allocations/" + url.PathEscape(allocID) + "/exec/sessions/" + url.PathEscape(sessionID) + "/output?offset=" + strconv.FormatInt(offset, 10)
-	if err := s.clientFor(nodeID, 30*time.Second).request(ctx, http.MethodGet, path, nil, &response); err != nil {
+	if err := s.operationRequest(ctx, nodeID, http.MethodGet, path, nil, &response); err != nil {
 		return nil, fmt.Errorf("read exec session: %w", err)
 	}
 	return &response, nil
@@ -214,7 +244,7 @@ func (s *AgentClient) ReadExecSession(ctx context.Context, nodeID uuid.UUID, add
 
 // ResizeExecSession changes terminal dimensions via an agent.
 func (s *AgentClient) ResizeExecSession(ctx context.Context, nodeID uuid.UUID, address, allocID, sessionID string, request *api.ExecSessionResizeRequest) error {
-	err := s.clientFor(nodeID, 30*time.Second).request(ctx, http.MethodPost, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(allocID)+"/exec/sessions/"+url.PathEscape(sessionID)+"/resize", request, nil)
+	err := s.operationRequest(ctx, nodeID, http.MethodPost, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(allocID)+"/exec/sessions/"+url.PathEscape(sessionID)+"/resize", request, nil)
 	if err != nil {
 		return fmt.Errorf("resize exec session: %w", err)
 	}
@@ -223,7 +253,7 @@ func (s *AgentClient) ResizeExecSession(ctx context.Context, nodeID uuid.UUID, a
 
 // CloseExecSession terminates an interactive terminal via an agent.
 func (s *AgentClient) CloseExecSession(ctx context.Context, nodeID uuid.UUID, address, allocID, sessionID string) error {
-	err := s.clientFor(nodeID, 30*time.Second).request(ctx, http.MethodDelete, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(allocID)+"/exec/sessions/"+url.PathEscape(sessionID), nil, nil)
+	err := s.operationRequest(ctx, nodeID, http.MethodDelete, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(allocID)+"/exec/sessions/"+url.PathEscape(sessionID), nil, nil)
 	if err != nil {
 		return fmt.Errorf("close exec session: %w", err)
 	}
@@ -233,7 +263,7 @@ func (s *AgentClient) CloseExecSession(ctx context.Context, nodeID uuid.UUID, ad
 // AllocationMetrics fetches resource usage for an allocation's tasks from an agent.
 func (s *AgentClient) AllocationMetrics(ctx context.Context, nodeID uuid.UUID, address, allocID string) (api.AllocationMetricsListResponse, error) {
 	var response []api.AgentTaskMetrics
-	err := s.clientFor(nodeID, 30*time.Second).request(ctx, http.MethodGet, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(allocID)+"/metrics", nil, &response)
+	err := s.operationRequest(ctx, nodeID, http.MethodGet, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(allocID)+"/metrics", nil, &response)
 	if err != nil {
 		return nil, fmt.Errorf("allocation metrics: %w", err)
 	}
