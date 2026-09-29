@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -224,5 +227,70 @@ func TestJobsResetBackoffCommand(t *testing.T) {
 	}
 	if got := stdout.String(); got != "Reset replacement backoff of task group api in job web.\n" {
 		t.Fatalf("output = %q", got)
+	}
+}
+
+func TestJobsApplySendsPlannedVersionAndReportsConflict(t *testing.T) {
+	previousConfig := config
+	t.Cleanup(func() { config = previousConfig })
+	manifest := filepath.Join(t.TempDir(), "web.yaml")
+	if err := os.WriteFile(manifest, []byte("name: web\nnamespace: default\ntask_groups:\n  - name: api\n    count: 3\n    tasks:\n      - name: server\n        image: app:v1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name       string
+		status     int
+		body       string
+		wantOutput string
+		wantErr    string
+	}{
+		{name: "applied", status: http.StatusAccepted, body: `{"namespace":"default","name":"web","version":5,"revision":2}`, wantOutput: "Applied job default/web: version 4 -> 5, revision 2 unchanged.\n"},
+		{name: "conflict", status: http.StatusConflict, body: `{"message":"job version conflict: expected version 4 but the job is at version 5; plan the manifest again"}`, wantErr: "the job changed after it was planned (job version conflict: expected version 4 but the job is at version 5; plan the manifest again)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var expected *int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v1/jobs/plan":
+					_ = json.NewEncoder(w).Encode(plan.Result{Action: "update", Namespace: "default", Job: "web", BaseVersion: 4, BaseRevision: 2, Changes: []plan.Change{{Operation: "change", Path: "task_groups[api].count", Before: 1, After: 3}}})
+				case "/v1/jobs":
+					var request api.JobRegistrationRequest
+					if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+						t.Error(err)
+					}
+					expected = request.ExpectedVersion
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(tc.status)
+					_, _ = w.Write([]byte(tc.body))
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+				}
+			}))
+			defer server.Close()
+
+			config = CLIConfig{ServerAddr: server.URL, Namespace: "default"}
+			cmd := NewJobsApplyCmd()
+			cmd.SetArgs([]string{"--file", manifest})
+			var stdout bytes.Buffer
+			cmd.SetOut(&stdout)
+			cmd.SetErr(&bytes.Buffer{})
+			err := cmd.Execute()
+			if expected == nil || *expected != 4 {
+				t.Fatalf("submitted expected_version = %v, want 4", expected)
+			}
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := stdout.String(); got != tc.wantOutput {
+				t.Fatalf("output = %q, want %q", got, tc.wantOutput)
+			}
+		})
 	}
 }

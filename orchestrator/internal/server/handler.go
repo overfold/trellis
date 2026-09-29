@@ -158,7 +158,7 @@ func (h *Handler) Register(e *echo.Echo) {
 	v1.DELETE("/jobs/:name", h.handleDeleteJob)
 	v1.POST("/jobs/:name/restart", h.handleRestartJob)
 	v1.POST("/jobs/:name/groups/:group/replacement-backoff/reset", h.handleResetReplacementBackoff)
-	v1.GET("/jobs/:name/revisions", h.handleListJobRevisions)
+	v1.GET("/jobs/:name/versions", h.handleListJobVersions)
 	v1.GET("/namespaces", h.handleListNamespaces)
 	v1.GET("/allocations", h.handleListAllocations)
 	v1.DELETE("/allocations/:id", h.handleStopAllocation)
@@ -536,11 +536,11 @@ func (h *Handler) handlePlanJob(c *echo.Context) error {
 		return err
 	}
 	var currentSpec *spec.JobSpec
-	var revision int
+	var version, revision int
 	if current, ok := h.server.GetJob(request.Spec.Namespace, request.Spec.Name); ok {
-		currentSpec, revision = current.Spec, current.Revision
+		currentSpec, version, revision = current.Spec, current.Version, current.Revision
 	}
-	return c.JSON(http.StatusOK, plan.Build(currentSpec, revision, &request.Spec))
+	return c.JSON(http.StatusOK, plan.Build(currentSpec, version, revision, &request.Spec))
 }
 
 func (h *Handler) handleRegisterJob(c *echo.Context) error {
@@ -561,10 +561,14 @@ func (h *Handler) handleRegisterJob(c *echo.Context) error {
 	if err := requireAPIAccessDelegation(c, &request.Spec); err != nil {
 		return err
 	}
-	if err := h.server.RegisterJob(c.Request().Context(), request.Spec.Namespace, &request.Spec); err != nil {
+	result, err := h.server.RegisterJob(c.Request().Context(), request.Spec.Namespace, &request.Spec, request.ExpectedVersion)
+	if errors.Is(err, ErrJobVersionConflict) {
+		return echo.NewHTTPError(http.StatusConflict, err.Error())
+	}
+	if err != nil {
 		return validationResponse(c, err)
 	}
-	return c.NoContent(http.StatusAccepted)
+	return c.JSON(http.StatusAccepted, result)
 }
 
 func (h *Handler) handleListAllocations(c *echo.Context) error {
@@ -742,12 +746,12 @@ func (h *Handler) handleResetReplacementBackoff(c *echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
-func (h *Handler) handleListJobRevisions(c *echo.Context) error {
-	revisions, err := h.server.ListJobRevisions(c.Request().Context(), requestNamespace(c), c.Param("name"))
+func (h *Handler) handleListJobVersions(c *echo.Context) error {
+	versions, err := h.server.ListJobVersions(c.Request().Context(), requestNamespace(c), c.Param("name"))
 	if err != nil {
 		return echo.NewHTTPError(http.StatusNotFound, err.Error())
 	}
-	return c.JSON(http.StatusOK, revisions)
+	return c.JSON(http.StatusOK, versions)
 }
 
 func (h *Handler) handleStopAllocation(c *echo.Context) error {

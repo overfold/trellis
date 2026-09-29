@@ -10,7 +10,7 @@ import (
 )
 
 // BackupFormatVersion is the current desired-state backup format.
-const BackupFormatVersion = 3
+const BackupFormatVersion = 4
 
 // BackupSnapshot contains desired state only. Secret values remain encrypted
 // exactly as stored in Raft and still require the separately managed KEK.
@@ -158,11 +158,24 @@ type AllocationEndpoint struct {
 // JobRegistrationRequest contains the job specification to register.
 type JobRegistrationRequest struct {
 	Spec spec.JobSpec `json:"spec"`
+	// ExpectedVersion makes the apply conditional on the job's current
+	// version: 0 requires that the job does not exist, and N requires that
+	// the job is at version N. When omitted the apply is unconditional.
+	ExpectedVersion *int `json:"expected_version,omitempty"`
+}
+
+// JobRegistrationResponse reports the job version and revision after an apply.
+type JobRegistrationResponse struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	Version   int    `json:"version"`
+	Revision  int    `json:"revision"`
 }
 
 // JobStatusResponse summarizes the desired and observed state of a job.
 type JobStatusResponse struct {
 	Name        string               `json:"name"`
+	Version     int                  `json:"version"`
 	Revision    int                  `json:"revision"`
 	Desired     int                  `json:"desired"`
 	Running     int                  `json:"running"`
@@ -271,15 +284,17 @@ type NodeEnrollmentResponse struct {
 	Key    string    `json:"key"`
 }
 
-// JobRevisionResponse describes one persisted revision of a job.
-type JobRevisionResponse struct {
+// JobVersionResponse describes one retained version of a job and the execution
+// revision it ran.
+type JobVersionResponse struct {
+	Version   int          `json:"version"`
 	Revision  int          `json:"revision"`
 	Spec      spec.JobSpec `json:"spec"`
 	CreatedAt time.Time    `json:"created_at"`
 }
 
-// JobRevisionListResponse is the response returned when listing job revisions.
-type JobRevisionListResponse = []JobRevisionResponse
+// JobVersionListResponse is the response returned when listing job versions.
+type JobVersionListResponse = []JobVersionResponse
 
 // AllocationMetricsResponse reports current resource usage for an allocation task.
 type AllocationMetricsResponse struct {
@@ -347,7 +362,8 @@ const (
 	EventAllocationPhaseChanged EventType = "allocation.phase_changed"
 	// EventAllocationHealthChanged fires when an allocation's health changes.
 	EventAllocationHealthChanged EventType = "allocation.health_changed"
-	// EventJobRegistered fires when a job is applied.
+	// EventJobRegistered fires when an apply changes a job and carries the
+	// job's new version and revision.
 	EventJobRegistered EventType = "job.registered"
 	// EventJobDeleted fires when a job is deleted.
 	EventJobDeleted EventType = "job.deleted"
@@ -367,6 +383,7 @@ type ClusterEvent struct {
 	AllocationID string    `json:"allocation_id,omitempty"`
 	Phase        string    `json:"phase,omitempty"`
 	Health       string    `json:"health,omitempty"`
+	Version      int       `json:"version,omitempty"`
 	Revision     int       `json:"revision,omitempty"`
 	Group        string    `json:"group,omitempty"`
 	// Failures and NextReplacementAt describe a replacement backoff.

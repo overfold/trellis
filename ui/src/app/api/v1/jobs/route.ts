@@ -58,24 +58,55 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const expectedVersion: unknown = body.expected_version;
+    if (
+      expectedVersion !== undefined &&
+      (typeof expectedVersion !== "number" ||
+        !Number.isInteger(expectedVersion) ||
+        expectedVersion < 0)
+    ) {
+      return NextResponse.json(
+        { error: "expected_version must be a non-negative integer" },
+        { status: 400 },
+      );
+    }
+
     const res = await fetch(`${TRELLIS_URL}/v1/jobs`, {
       method: "POST",
       headers: {
         ...orchestratorHeaders(selected.namespace),
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ spec: body.spec, expected_version: expectedVersion }),
     });
 
+    const text = await res.text();
+    let data: unknown = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = null;
+    }
     if (!res.ok) {
-      const text = await res.text();
+      if (typeof data === "object" && data !== null) {
+        const record = data as Record<string, unknown>;
+        // The control plane reports plain errors, including 409 version
+        // conflicts, as {"message": ...}; validation failures carry issues.
+        if (typeof record.message === "string" && record.error === undefined) {
+          return NextResponse.json(
+            { error: record.message },
+            { status: res.status },
+          );
+        }
+        return NextResponse.json(data, { status: res.status });
+      }
       return NextResponse.json(
-        { error: text || `Upstream error: ${res.status}` },
+        { error: text.trim() || `Upstream error: ${res.status}` },
         { status: res.status },
       );
     }
 
-    return new NextResponse(null, { status: 202 });
+    return NextResponse.json(data, { status: 202 });
   } catch {
     return NextResponse.json(
       { error: "Failed to connect to orchestrator" },
