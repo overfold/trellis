@@ -183,8 +183,8 @@ func TestReconcileKeepsLostOriginalUntilReplacementRuns(t *testing.T) {
 		if operations := recordedOperations(t, f.agent); len(operations) != 0 {
 			t.Fatalf("operations = %#v, want none: the original is kept and nothing fits", operations)
 		}
-		if replacements := f.replacements(); len(replacements) != 0 {
-			t.Fatalf("replacements = %#v, want none placed", replacements)
+		if replacements := f.replacements(); len(replacements) != 1 || replacements[0].Phase != lifecycle.PhasePending || replacements[0].Reason != "insufficient_capacity" {
+			t.Fatalf("replacements = %#v, want one pending capacity diagnostic", replacements)
 		}
 	})
 	t.Run("original reported starting is not retained", func(t *testing.T) {

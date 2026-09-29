@@ -2,6 +2,8 @@
 
 The `ui/` directory is a deliberately thin Next.js operations client for Trellis. It exposes the same jobs, nodes, allocations, diagnostics, logs, namespaces, and YAML manifests as `trellisctl`; it does not add application-platform abstractions or choose reverse proxies, ingress models, or deployment architecture for you.
 
+When a desired replica cannot be scheduled, the job page and Operations view show the pending allocation's placement reason and message. The diagnostic distinguishes node health, constraints, volume ownership, required capabilities, host-port availability, and CPU or memory capacity; it reports the scheduler's existing filters rather than introducing a separate deployment abstraction.
+
 The Operations page prioritizes failures and changing state. Job creation/editing uses the same YAML authoring representation as `trellisctl`, while the dashboard sends only canonical JSON to the Trellis API. **Review Plan** calls the control plane for the semantic plan; the browser does not maintain an independent implementation of Trellis diff semantics.
 
 A job's page shows each task group in **Replacement backoff** with its consecutive failure count, the latest failed allocation and its reason, and when the next replacement of a failed allocation is allowed. With writes enabled, **Reset backoff** clears a group's backoff through the same operation as `trellisctl jobs reset-backoff`, so the failed allocations are replaced without waiting.

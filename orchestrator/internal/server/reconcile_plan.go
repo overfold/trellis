@@ -355,6 +355,12 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 					current = append(current, alloc)
 				}
 			}
+			unavailable := 0
+			for _, alloc := range allocationsByGroup[backoffKey] {
+				if activeAllocationPhase(alloc.Phase) && !alloc.Draining && alloc.Node != nil && alloc.Node.Status != NodeStatusHealthy && !lossTimedOut(alloc.Node) {
+					unavailable++
+				}
+			}
 			for len(current) > group.Count {
 				actions = append(actions, Action{Type: ActionStop, Allocation: current[len(current)-1]})
 				current = current[:len(current)-1]
@@ -391,7 +397,7 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 					actions = append(actions, Action{Type: ActionStop, Allocation: draining[i]})
 				}
 			}
-			deficit := group.Count - len(current)
+			deficit := group.Count - len(current) - unavailable
 			if backoff != nil && backoff.DelayedReplacements > max(deficit, 0) {
 				// Failed allocations whose capacity is no longer missing have
 				// nothing left to replace.
@@ -435,7 +441,8 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 				continue
 			}
 			requiredCapabilities := spec.GroupRequiredCapabilities(&group)
-			placements, released := scheduleAroundRetained(PlacementIntent{Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Count: placeable, Nodes: nodes, Allocations: occupied, DesiredAllocations: valid, Tasks: group.Tasks, Constraints: group.Constraints, RequiredCapabilities: requiredCapabilities, VolumeOwners: volumeOwners}, retained)
+			intent := PlacementIntent{Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Count: placeable, Nodes: nodes, Allocations: occupied, DesiredAllocations: valid, Tasks: group.Tasks, Constraints: group.Constraints, RequiredCapabilities: requiredCapabilities, VolumeOwners: volumeOwners}
+			placements, released := scheduleAroundRetained(intent, retained)
 			for _, original := range released {
 				retainedStops = append(retainedStops, original.stopAction())
 			}
@@ -464,10 +471,24 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 				occupied = append(occupied, allocation)
 				occupiedSet[allocation] = true
 			}
-			if len(placements) == 0 && len(pending) == 0 && len(requiredCapabilities) > 0 && noCompatibleCapabilityNode(nodes, group.Constraints, group.Tasks, volumeOwners, namespace, requiredCapabilities) {
-				for i := 0; i < placeable; i++ {
+			unplaced := placeable - len(placements)
+			if unplaced > 0 {
+				diagnosticIntent := intent
+				diagnosticIntent.Count = unplaced
+				diagnosticIntent.Allocations = occupied
+				_, diagnostic := schedule(&diagnosticIntent)
+				placedPending := min(len(placements), len(pending))
+				reusable := pending[placedPending:]
+				for i := 0; i < min(unplaced, len(reusable)); i++ {
+					allocation := reusable[i]
+					if allocation.Reason != diagnostic.Reason || allocation.Message != diagnostic.Message {
+						_ = allocation.Transition(lifecycle.PhasePending, now, diagnostic.Reason, diagnostic.Message)
+						markUpdated(allocation)
+					}
+				}
+				for i := len(reusable); i < unplaced; i++ {
 					name := fmt.Sprintf("%s-%s-%s-%s", namespace, jobName, group.Name, newSuffix())
-					allocation := &Allocation{ID: name, Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Tasks: group.Tasks, Generation: 1, JobRevision: job.Revision, Phase: lifecycle.PhasePending, Health: lifecycle.HealthUnknown, Diagnostic: lifecycle.Diagnostic{CreatedAt: now, TransitionedAt: now, Reason: "missing_capability", Message: fmt.Sprintf("no eligible node supports required capabilities: %s", strings.Join(capabilityNames(requiredCapabilities), ", "))}}
+					allocation := &Allocation{ID: name, Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Tasks: group.Tasks, Generation: 1, JobRevision: job.Revision, Phase: lifecycle.PhasePending, Health: lifecycle.HealthUnknown, Diagnostic: lifecycle.Diagnostic{CreatedAt: now, TransitionedAt: now, Reason: diagnostic.Reason, Message: diagnostic.Message}}
 					plan.NewAllocations = append(plan.NewAllocations, allocation)
 					valid = append(valid, allocation)
 				}
