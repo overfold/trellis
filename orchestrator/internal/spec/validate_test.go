@@ -98,9 +98,9 @@ func TestValidateRejectsDuplicateHostPortsInGroup(t *testing.T) {
 		path  string
 	}{
 		{
-			name: "same task",
+			name:  "same task",
 			tasks: []TaskSpec{{Name: "server", Image: "example/server:1", Networking: &TaskNetworkingSpec{Mode: TaskNetworkHost, Ports: []PortSpec{{Port: 8080}, {Port: 8080}}}}},
-			path: "task_groups[api].tasks[server].networking.ports[1].port",
+			path:  "task_groups[api].tasks[server].networking.ports[1].port",
 		},
 		{
 			name: "different tasks",

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-RAW_COMMON="https://raw.githubusercontent.com/clofour/trellis/main/scripts/common.sh"
+RAW_COMMON="https://raw.githubusercontent.com/overfold/trellis/main/scripts/common.sh"
 COMMON_TMP=""
 WORK_TMP=""
 STARTED=false
@@ -119,7 +119,7 @@ fi
 if [ "$STATE_COMPLETE" = true ] && [ -x "${INSTALL_DIR}/trellis" ] && [ -f "$CONFIG_FILE" ]; then
     ui_title "setup"
     ui_step "Trellis ${STATE_VERSION:-unknown} is already installed"
-    ui_detail "Upgrade: curl -fsSL https://raw.githubusercontent.com/clofour/trellis/main/scripts/upgrade.sh | sudo bash"
+    ui_detail "Upgrade: curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/upgrade.sh | sudo bash"
     exit 0
 fi
 
@@ -345,4 +345,4 @@ ui_done "Trellis ${RELEASE_TAG} is ready"
 ui_detail "Config   ${CONFIG_FILE}"
 ui_detail "Verify   trellisctl nodes list"
 ui_detail "Learn    docs/public/getting-started.md"
-ui_detail "Upgrade  curl -fsSL https://raw.githubusercontent.com/clofour/trellis/main/scripts/upgrade.sh | sudo bash"
+ui_detail "Upgrade  curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/upgrade.sh | sudo bash"

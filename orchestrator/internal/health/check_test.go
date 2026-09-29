@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/clofour/trellis/internal/probepath"
-	"github.com/clofour/trellis/internal/runtime"
+	"github.com/overfold/trellis/internal/probepath"
+	"github.com/overfold/trellis/internal/runtime"
 )
 
 type probeRuntime struct {

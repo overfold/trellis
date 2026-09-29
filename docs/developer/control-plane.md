@@ -2,7 +2,7 @@
 
 ## Registration and heartbeats
 
-Nodes register UUID, agent address, capacity, OS/architecture, labels, volume inventory, and optional WireGuard identity. Periodic heartbeats refresh node status and report allocation generation, task, phase, health, each task's observed namespace-network address when present, ports, capabilities, and version. The control plane retains endpoint observations per task rather than collapsing a multi-task allocation onto whichever task was reported first. A successful heartbeat is acknowledged without returning desired state. After three missed heartbeat intervals a healthy node is marked unhealthy.
+Nodes register UUID, agent address, capacity, OS/architecture, labels, volume inventory, and optional WireGuard identity. Periodic heartbeats refresh node status and report allocation generation, task, phase, health, each task's observed namespace-network address when present, ports, capabilities, and version. The control plane retains endpoint observations per task rather than collapsing a multi-task allocation onto whichever task was reported first. A successful heartbeat is acknowledged without returning desired state. After three missed heartbeat intervals a healthy node is marked unhealthy. The leader keeps each node's latest observed allocation generations and their aggregated phase for reconciliation.
 
 ## Scheduling algorithm
 
@@ -52,7 +52,18 @@ Allocation updates, new allocations, pruned records, and backoff changes from on
 
 Operators see the state as `replacement_backoff` in job status (`trellisctl jobs status` prints a **Replacement backoff** table), a `job.replacement_delayed` event on `/v1/events` whenever a failure is counted, and the `trellis_replacement_backoff_failures` and `trellis_replacement_backoff_remaining_seconds` gauges labelled by namespace, job, and group.
 
-After leader election there is a recovery grace period. A node that remains unavailable long enough causes its allocations to transition to lost, allowing replacement without prematurely duplicating work during transient leadership changes. Lost is terminal: if the node later returns and still reports the lost allocation's containers, the allocation stays lost and reconciliation stops those containers as unowned observations rather than re-adopting them.
+### Lost allocations
+
+A node is marked unhealthy after three missed heartbeat intervals (30s). Its non-terminal allocations become lost once the node's last heartbeat is at least the allocation loss timeout old (`DefaultAllocationLossTimeout`, 45s, configurable per server with `allocation_loss_timeout` / `--allocation-loss-timeout` between 30s and 24h) and the leader has held leadership for at least `leaderRecoveryGrace` (30s). The recovery grace applies to the orphan and stale-generation observation stops as well. It avoids duplicating work during transient leadership changes: a new leader first gives nodes a chance to heartbeat to it.
+
+Lost is terminal. Heartbeats never move a lost allocation to another phase, and it never counts toward its group again. When its node returns and reports the lost generation's container `running`, reconciliation treats it as a retained original rather than stopping it immediately as an unowned observation:
+
+- each group keeps up to `count` minus its running non-draining allocations of its retained originals, in allocation ID order. Originals are kept only while their job and group are desired, and only if they belong to the current revision or the group uses rolling updates. Once enough replacements are `running`, the remaining originals are stopped through the normal `stop_observed` action;
+- placement treats retained originals as occupying their node's host ports, CPU, and memory, so a replacement is not placed where it could not start beside them;
+- a retained original never blocks a replacement. If the originals are the only reason fewer replacements fit, such as a group pinned to the original's node by a host volume that needs the same host port, the originals on the nodes the unobstructed placement would use are released (same group first, then by ID) until the unobstructed count fits. A retained original that holds a host port an allocation already placed on its node needs is also released. Releasing trades a short gap for progress. Keeping the original would deadlock: the replacement could never start, so the original would never be stopped;
+- the stops of released originals run before every other action of the pass, so a replacement starts only after the original holding its port is stopped.
+
+These decisions are derived each pass from the allocation snapshot and the latest node observations. Nothing about them is persisted, and scheduler inputs are never mutated. Retained originals are added only to placement occupancy, never to the allocations counted for replica spreading. Any originals not kept by a group are stopped in the same pass.
 
 ## Catalog and discovery
 

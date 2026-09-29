@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/clofour/trellis/internal/api"
-	"github.com/clofour/trellis/internal/health"
-	"github.com/clofour/trellis/internal/runtime"
-	"github.com/clofour/trellis/internal/spec"
+	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/health"
+	"github.com/overfold/trellis/internal/runtime"
+	"github.com/overfold/trellis/internal/spec"
 )
 
 type reconcilerRuntime struct {

@@ -11,15 +11,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/clofour/trellis/internal/spec"
+	"github.com/overfold/trellis/internal/spec"
 )
 
 const maxRemoteManifestBytes int64 = 1 << 20
 
 var (
 	errRemoteManifestNotFound = errors.New("remote manifest not found")
-	githubAPIBaseURL           = "https://api.github.com"
-	remoteManifestHTTPClient   = &http.Client{Timeout: 15 * time.Second}
+	githubAPIBaseURL          = "https://api.github.com"
+	remoteManifestHTTPClient  = &http.Client{Timeout: 15 * time.Second}
 )
 
 type githubManifestSource struct {

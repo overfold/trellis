@@ -3,9 +3,10 @@ package main
 import (
 	"fmt"
 	"os"
+	"time"
 
-	"github.com/clofour/trellis/internal/nodecapacity"
-	"github.com/clofour/trellis/internal/spec"
+	"github.com/overfold/trellis/internal/nodecapacity"
+	"github.com/overfold/trellis/internal/spec"
 	"github.com/spf13/pflag"
 	"gopkg.in/yaml.v3"
 )
@@ -61,6 +62,8 @@ type nodeConfigFile struct {
 	Labels             *[]string            `yaml:"labels"`
 	Resources          *nodeResourcesConfig `yaml:"resources"`
 	JobLimits          *jobLimitsConfig     `yaml:"job_limits"`
+	// AllocationLossTimeout is a Go duration such as "45s" or "5m".
+	AllocationLossTimeout *string `yaml:"allocation_loss_timeout"`
 }
 
 func loadNodeConfig(path string, cfg *config, flags *pflag.FlagSet) error {
@@ -110,6 +113,13 @@ func loadNodeConfig(path string, cfg *config, flags *pflag.FlagSet) error {
 	}
 	if parsed.WireGuardPortCount != nil && !flags.Changed("wireguard-port-count") {
 		cfg.WireGuardPortCount = *parsed.WireGuardPortCount
+	}
+	if parsed.AllocationLossTimeout != nil && !flags.Changed("allocation-loss-timeout") {
+		timeout, err := time.ParseDuration(*parsed.AllocationLossTimeout)
+		if err != nil {
+			return fmt.Errorf("allocation_loss_timeout: %w", err)
+		}
+		cfg.AllocationLossTimeout = timeout
 	}
 	if parsed.Labels != nil && !flags.Changed("label") {
 		cfg.Labels = append([]string(nil), (*parsed.Labels)...)

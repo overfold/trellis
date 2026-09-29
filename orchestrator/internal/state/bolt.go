@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/clofour/trellis/internal/spec"
 	"github.com/google/uuid"
+	"github.com/overfold/trellis/internal/spec"
 	bolt "go.etcd.io/bbolt"
 )
 

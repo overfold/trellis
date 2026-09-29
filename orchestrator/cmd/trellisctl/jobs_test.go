@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/clofour/trellis/internal/api"
-	"github.com/clofour/trellis/internal/lifecycle"
-	"github.com/clofour/trellis/internal/plan"
+	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/lifecycle"
+	"github.com/overfold/trellis/internal/plan"
 )
 
 func TestJobsCommandSurface(t *testing.T) {

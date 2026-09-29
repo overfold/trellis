@@ -5,11 +5,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/clofour/trellis/internal/api"
-	"github.com/clofour/trellis/internal/catalog"
-	"github.com/clofour/trellis/internal/lifecycle"
-	"github.com/clofour/trellis/internal/spec"
 	"github.com/google/uuid"
+	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/catalog"
+	"github.com/overfold/trellis/internal/lifecycle"
+	"github.com/overfold/trellis/internal/spec"
 )
 
 func TestListAllocationsWithFilters(t *testing.T) {
@@ -170,7 +170,7 @@ func TestAllocationEvents(t *testing.T) {
 func TestAllocationEndpointUsesObservedNetworkAddress(t *testing.T) {
 	node := &Node{ID: uuid.MustParse("44444444-4444-4444-4444-444444444444"), Host: "node-a"}
 	tasks := []spec.TaskSpec{{
-		Name: "app",
+		Name:       "app",
 		Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard},
 	}}
 	allocation := &Allocation{
@@ -189,7 +189,7 @@ func TestAllocationEndpointUsesObservedNetworkAddress(t *testing.T) {
 	s := &Server{
 		jobs: map[string]*Job{
 			jobKey("demo", "web"): {
-				Spec: &spec.JobSpec{Namespace: "demo", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "web", Count: 1, Tasks: tasks}}},
+				Spec:     &spec.JobSpec{Namespace: "demo", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "web", Count: 1, Tasks: tasks}}},
 				Revision: 1,
 			},
 		},
@@ -221,7 +221,7 @@ func TestAllocationEndpointDoesNotFallBackForNamespaceNetworking(t *testing.T) {
 		ID:            "demo-web-1",
 		Node:          &Node{ID: uuid.MustParse("55555555-5555-5555-5555-555555555555"), Host: "node-a"},
 		Tasks: []spec.TaskSpec{{
-			Name: "app",
+			Name:       "app",
 			Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard},
 		}},
 		Generation: 1,
@@ -248,7 +248,7 @@ func TestAllocationEndpointFallsBackToNodeForHostNetworking(t *testing.T) {
 		ID:            "demo-web-1",
 		Node:          &Node{ID: uuid.MustParse("66666666-6666-6666-6666-666666666666"), Host: "node-a"},
 		Tasks: []spec.TaskSpec{{
-			Name: "app",
+			Name:       "app",
 			Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkHost, Ports: []spec.PortSpec{{Port: 8080}}},
 		}},
 		Generation: 1,
@@ -297,7 +297,6 @@ func TestAllocationEndpointKeepsDistinctTaskAddresses(t *testing.T) {
 		t.Fatalf("catalog = %#v, want ambiguous allocation omitted from allocation-level discovery", services)
 	}
 }
-
 
 func TestHeartbeatPreservesTaskEndpointIdentity(t *testing.T) {
 	nodeID := uuid.MustParse("88888888-8888-8888-8888-888888888888")
@@ -499,7 +498,7 @@ func TestHeartbeatEmptyTaskReportRetriesRunningAllocation(t *testing.T) {
 	s.nodes[node.ID] = node
 	tasks := []spec.TaskSpec{{Name: "app", Image: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkHost, Ports: []spec.PortSpec{{Port: 8080}}}}}
 	s.jobs[jobKey("default", "web")] = &Job{
-		Spec: &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "web", Count: 1, Tasks: tasks}}},
+		Spec:     &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "web", Count: 1, Tasks: tasks}}},
 		Revision: 1,
 	}
 	allocation := &Allocation{
@@ -507,7 +506,7 @@ func TestHeartbeatEmptyTaskReportRetriesRunningAllocation(t *testing.T) {
 		Node: node, Tasks: tasks, Generation: 1, JobRevision: 1,
 		Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy,
 		Endpoints: []api.AllocationEndpoint{{Task: "app", Address: node.Host, Ports: []api.PortMapping{{HostPort: 8080, ContainerPort: 8080}}}},
-		Ports: []api.PortMapping{{HostPort: 8080, ContainerPort: 8080}},
+		Ports:     []api.PortMapping{{HostPort: 8080, ContainerPort: 8080}},
 	}
 	s.allocations = []*Allocation{allocation}
 	s.refreshCatalog()

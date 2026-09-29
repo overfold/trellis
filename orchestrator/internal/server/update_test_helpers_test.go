@@ -7,11 +7,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 
-	"github.com/clofour/trellis/internal/api"
-	"github.com/clofour/trellis/internal/catalog"
-	"github.com/clofour/trellis/internal/client"
+	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/catalog"
+	"github.com/overfold/trellis/internal/client"
 )
 
 func newNopStateController() *StateController {
@@ -25,6 +26,7 @@ type testAgent struct {
 	mu         sync.Mutex
 	calls      []agentCall
 	failRun    bool
+	failStop   bool
 	failResume bool
 }
 
@@ -41,10 +43,15 @@ func newTestAgent() *testAgent {
 		agent.mu.Lock()
 		agent.calls = append(agent.calls, agentCall{method: r.Method, path: r.URL.Path, body: body})
 		failRun := agent.failRun
+		failStop := agent.failStop
 		failResume := agent.failResume
 		agent.mu.Unlock()
 		if failRun && r.Method == http.MethodPost && r.URL.Path == "/v1/allocations" {
 			http.Error(w, "run unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if failStop && r.Method == http.MethodDelete && !strings.HasSuffix(r.URL.Path, "/drain") {
+			http.Error(w, "stop unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		if failResume && r.Method == http.MethodDelete {

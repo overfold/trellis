@@ -7,8 +7,8 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/clofour/trellis/internal/runtime"
-	"github.com/clofour/trellis/internal/spec"
+	"github.com/overfold/trellis/internal/runtime"
+	"github.com/overfold/trellis/internal/spec"
 )
 
 // PortManager reserves host ports for allocations.

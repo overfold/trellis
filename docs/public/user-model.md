@@ -64,6 +64,12 @@ The interfaces should keep desired and runtime state visibly separate:
 
 For example, an allocation can be `running` and `unhealthy`. Interfaces should not collapse those into one ambiguous status.
 
+### Lost allocations
+
+An allocation becomes **lost** when its node stops sending heartbeats for longer than the allocation loss timeout (45 seconds by default, set by the operator with `allocation_loss_timeout`), and the current leader has itself been leader for at least 30 seconds. The second condition gives nodes time to report to a newly elected leader before anything is declared lost. A lost allocation no longer counts toward its task group's `count`, so Trellis places a replacement.
+
+Lost is terminal, like `stopped` and `failed`. If the node comes back and still runs the lost allocation's containers, Trellis does not adopt them again: the allocation stays `lost` and never counts toward the group. The containers are not stopped right away, though. Trellis keeps them running until the group has enough `running` replacements, then stops them. The kept containers are not part of service discovery. They are stopped sooner if they stand in the way of a replacement: for example, when a replacement needs the same host port on the same node, or when the group can only be placed on that node (such as a volume bound to it) and would not otherwise fit.
+
 ## User-facing actions
 
 Use the same verbs across interfaces:

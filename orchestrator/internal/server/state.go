@@ -8,9 +8,9 @@ import (
 	"sort"
 	"time"
 
-	"github.com/clofour/trellis/internal/spec"
-	"github.com/clofour/trellis/internal/state"
 	"github.com/google/uuid"
+	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/internal/state"
 )
 
 // StateController persists typed server state.

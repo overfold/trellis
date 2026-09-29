@@ -13,7 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/clofour/trellis/internal/probepath"
+	"github.com/overfold/trellis/internal/probepath"
 )
 
 func TestHTTPProbe(t *testing.T) {

@@ -75,6 +75,27 @@ limit also cannot start those. Raise it for workloads that legitimately run
 many threads or processes. Keep it consistent across nodes unless you
 deliberately want different per-node bounds.
 
+`allocation_loss_timeout` (flag `--allocation-loss-timeout`) is how long a
+node may go without a heartbeat before the leader marks its allocations
+`lost` and replaces them. It is a Go-style duration between `30s` and `24h`
+and defaults to `45s`:
+
+```yaml
+allocation_loss_timeout: 2m
+```
+
+Lost is terminal, so this is the point at which Trellis gives up on the
+node's allocations. When the node returns, its old containers keep running
+until enough replacements are running and are then stopped. They are stopped
+sooner if they block a replacement. See [lost allocations](user-model.md#lost-allocations).
+Raise the timeout when nodes can be briefly unreachable, for example during
+reboots or on unreliable networks, and replacing their work would cost more
+than waiting. This matters most for groups bound to one node by a volume,
+because their replacement can only run on that node anyway. Lower values
+replace work faster after a real failure. The leader still waits 30 seconds
+after it is elected before marking anything lost. The timeout applies on
+whichever node is leader, so keep it the same on every node.
+
 Edit this file when changing persistent node configuration, then restart the service:
 
 ```sh
@@ -139,19 +160,63 @@ unset TOKEN
 The upgrade entrypoint performs the node-maintenance sequence instead of asking the operator to remember it:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/clofour/trellis/main/scripts/upgrade.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/upgrade.sh | sudo bash
 ```
 
 It downloads and verifies the new release before touching the running daemon, then swaps the binaries, refreshes the installer-owned systemd unit, starts the daemon, and verifies both the service and control-plane API. If the new daemon does not become healthy, the previous binaries and unit are restored.
 
 After a successful core upgrade, the script refreshes a dashboard that was installed and recorded by the setup lifecycle state. A service that was already stopped remains stopped. On a multi-node cluster the script also evacuates the node first; see [Multi-node clusters](multi-node.md#maintain-a-multi-node-cluster).
 
+## Agent recovery refused
+
+When the daemon starts, its allocation agent restores the node's allocations from durable records below `data_dir` (`agent/control-epoch` and `agent/allocations/`) and compares them with the containers containerd reports for the cluster. If containerd cannot list containers, the agent starts anyway: it keeps its recorded allocations and their ports, reports them with unknown health, and retries until a listing succeeds. Restore containerd; nothing else is needed.
+
+The agent refuses to start, and the daemon exits, when that state is broken:
+
+- `agent/control-epoch` or an allocation record is unreadable or malformed, or a record's file name does not match its allocation ID;
+- the control epoch is missing while allocation records or managed containers exist, or while containerd cannot be listed to confirm an empty first boot;
+- a Trellis container of this cluster has no allocation record.
+
+The last check also runs when a listing succeeds after containerd was unavailable at startup; the daemon then exits with the same error, and restarting refuses at startup. The agent does not adopt such a container from its labels: labels carry no control epoch, drain state, or restart budget, so adopting it could keep running or restart a task the control plane has already replaced. While the daemon is down its allocations stop heartbeating and are replaced on other nodes.
+
+The error names the file or container and ends with `see "Agent recovery refused"`. To recover:
+
+1. Read the error and stop the restart loop while you work:
+
+   ```sh
+   sudo journalctl -u trellis -n 50
+   sudo systemctl stop trellis
+   ```
+
+2. **Missing epoch while containerd is unavailable.** Fix containerd (`sudo systemctl status containerd`) and start Trellis again.
+
+3. **Container without a record.** Inspect the named container, then remove it. Do not write an allocation record by hand. If its workload is still desired, the control plane starts it again.
+
+   ```sh
+   sudo ctr -n trellis containers info CONTAINER_ID
+   sudo ctr -n trellis tasks kill -s SIGKILL CONTAINER_ID
+   sudo ctr -n trellis tasks delete CONTAINER_ID
+   sudo ctr -n trellis containers rm CONTAINER_ID
+   sudo systemctl start trellis
+   ```
+
+4. **Damaged agent state**: an unreadable, malformed, or mis-keyed file, or a missing epoch while records or containers exist. Restore the named file from a backup of that node if you have one. Otherwise reset the node's allocation state: remove every Trellis container of this cluster as in step 3 (list them with `sudo ctr -n trellis containers ls 'labels."trellis.cluster"==CLUSTER'`), move the agent's allocation state aside, and start again. With no records and no containers left, the agent starts as an empty node and the control plane reschedules its work.
+
+   ```sh
+   cd /var/lib/trellis/data   # data_dir
+   sudo mkdir -p agent-broken
+   sudo mv agent/allocations agent/control-epoch agent-broken/
+   sudo systemctl start trellis
+   ```
+
+   Keep `agent/secret-root`: startup uses it to remove secret files that no allocation owns. Staging mounts and network attachments left by the removed containers are cleaned up at startup as well.
+
 ## Uninstall a node
 
 The default uninstall is a reversible machine-removal operation:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/clofour/trellis/main/scripts/uninstall.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/uninstall.sh | sudo bash
 ```
 
 It removes only dependencies/repositories recorded as introduced by Trellis; older installations without ownership records are handled conservatively and shared host packages are left alone. The user's `trellisctl` contexts are also kept because they describe cluster connections, not ownership of this machine. On a live multi-node cluster the script first hands the node's work and membership to the rest of the cluster; see [Multi-node clusters](multi-node.md#maintain-a-multi-node-cluster).
@@ -161,7 +226,7 @@ Instead of throwing away the encryption key while retaining encrypted state, nor
 For deliberate permanent destruction, use:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/clofour/trellis/main/scripts/uninstall.sh | \
+curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/uninstall.sh | \
   sudo bash -s -- --purge
 ```
 

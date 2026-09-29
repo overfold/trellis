@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/clofour/trellis/internal/auth"
-	"github.com/clofour/trellis/internal/spec"
+	"github.com/overfold/trellis/internal/auth"
+	"github.com/overfold/trellis/internal/spec"
 )
 
 func (s *Server) apiAccessToken(ctx context.Context, access *spec.APIAccessSpec, namespace string) (string, error) {

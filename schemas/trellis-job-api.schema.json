@@ -457,7 +457,7 @@
       "type": "object"
     }
   },
-  "$id": "https://raw.githubusercontent.com/clofour/trellis/main/schemas/trellis-job-api.schema.json",
+  "$id": "https://raw.githubusercontent.com/overfold/trellis/main/schemas/trellis-job-api.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "description": "Canonical JSON representation accepted by the Trellis API. Human authoring syntaxes must convert quantities and durations before submission.",

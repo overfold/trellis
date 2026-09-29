@@ -1,4 +1,4 @@
-# yaml-language-server: $schema=https://raw.githubusercontent.com/clofour/trellis/main/schemas/trellis-job.schema.json
+# yaml-language-server: $schema=https://raw.githubusercontent.com/overfold/trellis/main/schemas/trellis-job.schema.json
 name: web-service
 namespace: default
 task_groups:
@@ -6,7 +6,7 @@ task_groups:
     count: 1
     tasks:
       - name: tutorial
-        image: ghcr.io/clofour/trellis-tutorial:v1
+        image: ghcr.io/overfold/trellis-tutorial:v1
         networking:
           mode: host
           ports:

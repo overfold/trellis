@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="${REPO:-clofour/trellis}"
+REPO="${REPO:-overfold/trellis}"
 RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/${REPO}/main/scripts}"
 TMP=""
 

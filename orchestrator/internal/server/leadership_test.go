@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/clofour/trellis/internal/api"
-	"github.com/clofour/trellis/internal/network"
-	"github.com/clofour/trellis/internal/state"
 	"github.com/google/uuid"
+	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/network"
+	"github.com/overfold/trellis/internal/state"
 )
 
 func TestAcquireLeadershipAdvancesDurableEpoch(t *testing.T) {

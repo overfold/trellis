@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/clofour/trellis/internal/api"
-	"github.com/clofour/trellis/internal/lifecycle"
-	"github.com/clofour/trellis/internal/spec"
-	"github.com/clofour/trellis/internal/state"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
+	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/lifecycle"
+	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/internal/state"
 )
 
 type undrainFailingStore struct{ memoryStore }
@@ -187,6 +187,113 @@ func TestReconcileStopsPendingFromOldRevision(t *testing.T) {
 	replacement := s.allocations[1]
 	if replacement.JobRevision != 2 || replacement.Tasks[0].Image != "app:v2" || replacement.Node != node {
 		t.Fatalf("replacement = %+v, want current revision and task on node", replacement)
+	}
+}
+
+func TestReconcileChargesAllocationsQueuedForStop(t *testing.T) {
+	tests := []struct {
+		name              string
+		setup             func(*testing.T, *Server, *Node, []spec.TaskSpec) *Allocation
+		tasks             []spec.TaskSpec
+		cpu               int
+		memoryAllocatable int64
+	}{
+		{
+			name: "deleted job CPU",
+			setup: func(_ *testing.T, s *Server, node *Node, tasks []spec.TaskSpec) *Allocation {
+				s.jobs[jobKey("default", "wanted")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "wanted", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: tasks}}}, Revision: 1}
+				return &Allocation{ID: "obsolete", Namespace: "default", JobName: "deleted", TaskGroupName: "app", Tasks: tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning}
+			},
+			tasks:             []spec.TaskSpec{{Name: "app", Image: "app", Resources: &spec.ResourcesSpec{CPU: 1000, Memory: 128 << 20}}},
+			cpu:               1000,
+			memoryAllocatable: 1 << 30,
+		},
+		{
+			name: "namespace-unadmitted memory",
+			setup: func(t *testing.T, s *Server, node *Node, tasks []spec.TaskSpec) *Allocation {
+				limits := spec.DefaultLimits()
+				limits.MaxDesiredAllocationsPerNamespace = 1
+				if err := s.SetJobLimits(limits); err != nil {
+					t.Fatal(err)
+				}
+				s.jobs[jobKey("default", "admitted")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "admitted", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: tasks}}}, Revision: 1}
+				s.jobs[jobKey("default", "unadmitted")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "unadmitted", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: tasks}}}, Revision: 1}
+				return &Allocation{ID: "obsolete", Namespace: "default", JobName: "unadmitted", TaskGroupName: "app", Tasks: tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning}
+			},
+			tasks:             []spec.TaskSpec{{Name: "app", Image: "app", Resources: &spec.ResourcesSpec{CPU: 100, Memory: 1 << 30}}},
+			cpu:               1000,
+			memoryAllocatable: 1 << 30,
+		},
+		{
+			name: "recreate-obsolete static host port",
+			setup: func(_ *testing.T, s *Server, node *Node, tasks []spec.TaskSpec) *Allocation {
+				s.jobs[jobKey("default", "web")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: tasks}}}, Revision: 2}
+				return &Allocation{ID: "obsolete", Namespace: "default", JobName: "web", TaskGroupName: "app", Tasks: tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning}
+			},
+			tasks:             []spec.TaskSpec{{Name: "app", Image: "app:v2", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkHost, Ports: []spec.PortSpec{{Port: 8080}}}}},
+			cpu:               1000,
+			memoryAllocatable: 1 << 30,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, agent := newTestServerWithAgent()
+			defer agent.server.Close()
+			node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now(), CPUAllocatable: tt.cpu, MemoryAllocatable: tt.memoryAllocatable}
+			s.nodes[node.ID] = node
+			obsolete := tt.setup(t, s, node, tt.tasks)
+			s.allocations = []*Allocation{obsolete}
+			agent.mu.Lock()
+			agent.failStop = true
+			agent.mu.Unlock()
+
+			s.Reconcile(context.Background())
+
+			if obsolete.Phase != lifecycle.PhaseStopping || obsolete.NextRetryAt == nil {
+				t.Fatalf("obsolete allocation after failed stop: phase=%s retry=%v", obsolete.Phase, obsolete.NextRetryAt)
+			}
+			if len(s.allocations) != 1 {
+				t.Fatalf("allocations = %d, want only the still-occupying obsolete allocation", len(s.allocations))
+			}
+			var starts, stops int
+			for _, call := range agent.recordedCalls() {
+				if call.method == http.MethodPost && call.path == "/v1/allocations" {
+					starts++
+				}
+				if call.method == http.MethodDelete && call.path == "/v1/allocations/obsolete" {
+					stops++
+				}
+			}
+			if starts != 0 || stops != 1 {
+				t.Fatalf("agent calls: starts=%d stops=%d, want no start and one failed stop", starts, stops)
+			}
+
+			agent.mu.Lock()
+			agent.failStop = false
+			agent.mu.Unlock()
+			obsolete.NextRetryAt = nil
+			s.Reconcile(context.Background())
+			if obsolete.Phase != lifecycle.PhaseStopped || len(s.allocations) != 1 {
+				t.Fatalf("successful stop pass: phase=%s allocations=%d, want stopped without same-pass replacement", obsolete.Phase, len(s.allocations))
+			}
+
+			s.Reconcile(context.Background())
+			var replacement *Allocation
+			for _, allocation := range s.allocations {
+				if allocation.ID != obsolete.ID {
+					replacement = allocation
+					break
+				}
+			}
+			if replacement == nil || replacement.Phase != lifecycle.PhaseRunning {
+				var states []string
+				for _, allocation := range s.allocations {
+					states = append(states, allocation.ID+":"+string(allocation.Phase))
+				}
+				t.Fatalf("post-stop allocations = %v calls=%#v, want a running replacement after occupancy is released", states, agent.recordedCalls())
+			}
+		})
 	}
 }
 

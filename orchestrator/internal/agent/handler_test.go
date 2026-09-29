@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/clofour/trellis/internal/api"
-	"github.com/clofour/trellis/internal/spec"
 	"github.com/labstack/echo/v5"
+	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/spec"
 )
 
 func TestMutationHandlersRequirePositiveFences(t *testing.T) {

@@ -22,16 +22,16 @@ import (
 	"sync"
 	"time"
 
-	"github.com/clofour/trellis/internal/api"
-	"github.com/clofour/trellis/internal/auth"
-	"github.com/clofour/trellis/internal/catalog"
-	"github.com/clofour/trellis/internal/client"
-	"github.com/clofour/trellis/internal/lifecycle"
-	secretstore "github.com/clofour/trellis/internal/secrets"
-	"github.com/clofour/trellis/internal/spec"
-	"github.com/clofour/trellis/internal/state"
-	"github.com/clofour/trellis/internal/storage"
-	"github.com/clofour/trellis/internal/tlsutil"
+	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/auth"
+	"github.com/overfold/trellis/internal/catalog"
+	"github.com/overfold/trellis/internal/client"
+	"github.com/overfold/trellis/internal/lifecycle"
+	secretstore "github.com/overfold/trellis/internal/secrets"
+	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/internal/state"
+	"github.com/overfold/trellis/internal/storage"
+	"github.com/overfold/trellis/internal/tlsutil"
 
 	"github.com/google/uuid"
 )
@@ -115,6 +115,10 @@ type Server struct {
 	// each job task group, keyed by replacementBackoffKey. Records are
 	// replaced, never mutated in place. Protected by mu.
 	replacementBackoffs map[string]*ReplacementBackoff
+	// allocationLossTimeout is how long a node must go without a heartbeat
+	// before the leader marks its allocations lost; zero selects
+	// DefaultAllocationLossTimeout. Protected by mu.
+	allocationLossTimeout time.Duration
 }
 
 // SetSecretStore configures encrypted secret storage.
@@ -348,6 +352,8 @@ type Node struct {
 type observedAllocation struct {
 	ID         string
 	Generation uint64
+	// Phase is the lifecycle phase aggregated from the node's task reports.
+	Phase lifecycle.Phase
 }
 
 // NodeStatus describes whether a node can receive allocations.
@@ -511,6 +517,18 @@ func (s *Server) SetJobLimits(limits spec.Limits) error {
 	}
 	s.mu.Lock()
 	s.jobLimits = limits
+	s.mu.Unlock()
+	return nil
+}
+
+// SetAllocationLossTimeout configures how long a node must go without a
+// heartbeat before the leader marks its allocations lost.
+func (s *Server) SetAllocationLossTimeout(timeout time.Duration) error {
+	if err := ValidateAllocationLossTimeout(timeout); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.allocationLossTimeout = timeout
 	s.mu.Unlock()
 	return nil
 }
@@ -863,7 +881,7 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 	}
 	observed := make([]observedAllocation, 0, len(statuses))
 	for _, info := range statuses {
-		observed = append(observed, observedAllocation{ID: info.ID, Generation: info.Generation})
+		observed = append(observed, observedAllocation{ID: info.ID, Generation: info.Generation, Phase: info.Phase})
 	}
 	sort.Slice(observed, func(i, j int) bool {
 		if observed[i].ID == observed[j].ID {

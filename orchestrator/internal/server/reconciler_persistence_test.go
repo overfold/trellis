@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/clofour/trellis/internal/lifecycle"
-	"github.com/clofour/trellis/internal/spec"
-	"github.com/clofour/trellis/internal/state"
 	"github.com/google/uuid"
+	"github.com/overfold/trellis/internal/lifecycle"
+	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/internal/state"
 )
 
 type failingBatchStore struct {
@@ -206,5 +206,42 @@ func TestReconcileCommitsVolumeRegistrationWithAllocation(t *testing.T) {
 	}
 	if !allocationMutation || !volumeMutation {
 		t.Fatalf("reconciliation batch = %#v, want allocation and volume registration", store.batches[0])
+	}
+}
+
+func TestReconcileAppliesVolumeClaimsAcrossTaskGroups(t *testing.T) {
+	store := memoryStore{}
+	controller := NewStateController(store, "test")
+	s := NewServer(slog.Default(), nil, controller, store, "test", "")
+	agent := newTestAgent()
+	t.Cleanup(agent.server.Close)
+	s.client = newTestAgentClient()
+	a := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000001"), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: time.Now(), Labels: map[string]string{"zone": "a"}}
+	b := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000002"), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: time.Now(), Labels: map[string]string{"zone": "b"}}
+	s.nodes[a.ID], s.nodes[b.ID] = a, b
+	volume := []spec.VolumeSpec{{Name: "data", HostPath: "@/data", ContainerPath: "/data"}}
+	s.jobs[jobKey("acme", "database")] = &Job{
+		Spec: &spec.JobSpec{
+			Namespace: "acme",
+			Name:      "database",
+			TaskGroups: []spec.TaskGroupSpec{
+				{Name: "first", Count: 1, Constraints: []spec.ConstraintSpec{{Attribute: "zone", Value: "a"}}, Tasks: []spec.TaskSpec{{Name: "first", Image: "app", Volumes: volume}}},
+				{Name: "second", Count: 1, Constraints: []spec.ConstraintSpec{{Attribute: "zone", Value: "b"}}, Tasks: []spec.TaskSpec{{Name: "second", Image: "app", Volumes: volume}}},
+			},
+		},
+		Revision: 1,
+	}
+
+	s.Reconcile(context.Background())
+
+	if len(s.allocations) != 1 || s.allocations[0].Node != a {
+		t.Fatalf("allocations = %#v, want only first task group on volume owner", s.allocations)
+	}
+	registrations, err := controller.ListVolumeRegistrations(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owner := registrations[volumeRegistrationKey("acme", "data")]; owner != a.ID {
+		t.Fatalf("volume owner = %s, want %s", owner, a.ID)
 	}
 }

@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/clofour/trellis/internal/version"
+	"github.com/overfold/trellis/internal/version"
 	"github.com/spf13/cobra"
 )
 

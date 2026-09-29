@@ -30,26 +30,26 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/clofour/trellis/internal/agent"
-	"github.com/clofour/trellis/internal/api"
-	"github.com/clofour/trellis/internal/auth"
-	"github.com/clofour/trellis/internal/client"
-	trellisdns "github.com/clofour/trellis/internal/dns"
-	"github.com/clofour/trellis/internal/election"
-	"github.com/clofour/trellis/internal/health"
-	"github.com/clofour/trellis/internal/localconfig"
-	"github.com/clofour/trellis/internal/network"
-	containerruntime "github.com/clofour/trellis/internal/runtime"
-	secretstore "github.com/clofour/trellis/internal/secrets"
-	"github.com/clofour/trellis/internal/server"
-	"github.com/clofour/trellis/internal/spec"
-	"github.com/clofour/trellis/internal/state"
-	"github.com/clofour/trellis/internal/storage"
-	"github.com/clofour/trellis/internal/tlsutil"
-	"github.com/clofour/trellis/internal/version"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"github.com/labstack/echo/v5/middleware"
+	"github.com/overfold/trellis/internal/agent"
+	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/auth"
+	"github.com/overfold/trellis/internal/client"
+	trellisdns "github.com/overfold/trellis/internal/dns"
+	"github.com/overfold/trellis/internal/election"
+	"github.com/overfold/trellis/internal/health"
+	"github.com/overfold/trellis/internal/localconfig"
+	"github.com/overfold/trellis/internal/network"
+	containerruntime "github.com/overfold/trellis/internal/runtime"
+	secretstore "github.com/overfold/trellis/internal/secrets"
+	"github.com/overfold/trellis/internal/server"
+	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/internal/state"
+	"github.com/overfold/trellis/internal/storage"
+	"github.com/overfold/trellis/internal/tlsutil"
+	"github.com/overfold/trellis/internal/version"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -76,6 +76,7 @@ type config struct {
 	MaxTaskCPU                                                                     int
 	MaxTaskMemory                                                                  string
 	TaskPidsLimit                                                                  int64
+	AllocationLossTimeout                                                          time.Duration
 }
 
 func main() {
@@ -131,6 +132,7 @@ func main() {
 	f.StringVar(&cfg.SecretsKeyID, "secrets-key-id", "", "Identifier for the active secrets encryption key")
 	f.StringArrayVar(&cfg.Labels, "label", nil, "Node label in key=value form (repeatable)")
 	f.Int64Var(&cfg.TaskPidsLimit, "task-pids-limit", agent.DefaultTaskPidsLimit, "Maximum processes and threads in each task container created on this node")
+	f.DurationVar(&cfg.AllocationLossTimeout, "allocation-loss-timeout", server.DefaultAllocationLossTimeout, "How long a node may miss heartbeats before its allocations become lost and are replaced")
 	defaults := spec.DefaultLimits()
 	f.IntVar(&cfg.MaxReplicasPerTaskGroup, "max-replicas-per-task-group", defaults.MaxReplicasPerTaskGroup, "Maximum replicas allowed in one task group")
 	f.IntVar(&cfg.MaxTaskGroupsPerJob, "max-task-groups-per-job", defaults.MaxTaskGroupsPerJob, "Maximum task groups allowed in one job")
@@ -169,6 +171,9 @@ func run(parent context.Context, cfg *config) error {
 	}
 	if cfg.WireGuardPortCount < 1 || cfg.WireGuardPort+cfg.WireGuardPortCount-1 > 65535 {
 		return fmt.Errorf("--wireguard-port-count must be positive and fit between --wireguard-port and 65535")
+	}
+	if err := server.ValidateAllocationLossTimeout(cfg.AllocationLossTimeout); err != nil {
+		return fmt.Errorf("allocation_loss_timeout or --allocation-loss-timeout: %w", err)
 	}
 	if err := agent.ValidateTaskPidsLimit(cfg.TaskPidsLimit); err != nil {
 		return fmt.Errorf("resources.task_pids_limit or --task-pids-limit: %w", err)
@@ -300,6 +305,9 @@ func run(parent context.Context, cfg *config) error {
 	stateCtl := server.NewStateController(raftStore, cfg.Cluster)
 	control := server.NewServer(log, local, stateCtl, raftStore, cfg.Cluster, cfg.ServerAdvertise)
 	if err := control.SetJobLimits(limits); err != nil {
+		return err
+	}
+	if err := control.SetAllocationLossTimeout(cfg.AllocationLossTimeout); err != nil {
 		return err
 	}
 	if cfg.SecretsKey != "" {
@@ -502,6 +510,11 @@ func run(parent context.Context, cfg *config) error {
 				leaderCancel()
 			}
 			return nil
+		case err := <-ag.Failed():
+			if leaderCancel != nil {
+				leaderCancel()
+			}
+			return fmt.Errorf("allocation agent: %w", err)
 		case event, ok := <-events:
 			if !ok {
 				return fmt.Errorf("leader election event stream closed")

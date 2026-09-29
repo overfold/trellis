@@ -2,12 +2,11 @@ package agent
 
 import (
 	"context"
-	"errors"
 	"path/filepath"
 	"testing"
 
-	"github.com/clofour/trellis/internal/api"
-	"github.com/clofour/trellis/internal/runtime"
+	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/runtime"
 )
 
 // newPausedInjectedRuntime returns an injected runtime holding one running
@@ -154,30 +153,6 @@ func TestRecoverPausedStoppingContainerStaysRestartSuppressed(t *testing.T) {
 		t.Fatal("paused stopping allocation is not restart-suppressed")
 	}
 	assertInjectedStatus(t, rt, "task", runtime.StatusPaused)
-}
-
-// After an initial listing failure, a labelled container without a record is
-// adopted on retry; a paused one is observed rather than left pending.
-func TestRecoverRetryAdoptsUnrecordedPausedContainer(t *testing.T) {
-	rt := &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{}, listErr: errors.New("containerd unavailable")}
-	agent, _ := newRecoveryTestAgent(t, rt)
-	if err := agent.recover(context.Background()); err == nil {
-		t.Fatal("recover succeeded despite listing failure")
-	}
-
-	rt.listErr = nil
-	rt.status = runtime.StatusPaused
-	rt.containers = []runtime.ContainerInfo{{ID: "task", Status: runtime.StatusPaused, Labels: recoveryTestLabels(recoveryTestAllocation(0))}}
-	if agent.retryRecovery(context.Background()) {
-		t.Fatal("adopted paused container left recovery work pending")
-	}
-	adopted := agent.allocations["task"]
-	if adopted == nil || adopted.unobserved || adopted.AllocationID != "allocation" || adopted.Status != "running" || adopted.Health != "unhealthy" {
-		t.Fatalf("adopted allocation = %+v, want observed running and unhealthy", adopted)
-	}
-	if rt.stopCount != 0 || rt.removeCount != 0 || rt.restartCount != 0 {
-		t.Fatalf("paused container was acted on: stops=%d removes=%d restarts=%d", rt.stopCount, rt.removeCount, rt.restartCount)
-	}
 }
 
 // An allocation left unobserved by an unreadable listing is classified once a

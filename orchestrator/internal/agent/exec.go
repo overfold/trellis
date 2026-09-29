@@ -11,10 +11,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/clofour/trellis/internal/api"
-	"github.com/clofour/trellis/internal/runtime"
 	"github.com/containerd/errdefs"
 	"github.com/google/uuid"
+	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/runtime"
 )
 
 const (

@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/clofour/trellis/internal/network"
+	"github.com/overfold/trellis/internal/network"
 )
 
 // detachAllocationNetwork removes an allocation's network attachment. A

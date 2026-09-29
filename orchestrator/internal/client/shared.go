@@ -14,8 +14,8 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/clofour/trellis/internal/api"
-	"github.com/clofour/trellis/internal/auth"
+	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/auth"
 )
 
 const maxResponseBody = 64 << 20
