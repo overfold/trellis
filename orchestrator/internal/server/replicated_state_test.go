@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/overfold/trellis/internal/api"
@@ -27,6 +28,7 @@ type auditStore struct {
 	blockBatch   chan struct{}
 	batchStarted chan struct{}
 	batchOnce    sync.Once
+	batchSizes   []int
 }
 
 func (s *auditStore) Put(ctx context.Context, key string, value []byte) error {
@@ -53,6 +55,7 @@ func (s *auditStore) Put(ctx context.Context, key string, value []byte) error {
 
 func (s *auditStore) Batch(ctx context.Context, mutations []state.Mutation) error {
 	s.mu.Lock()
+	s.batchSizes = append(s.batchSizes, len(mutations))
 	block, started := s.blockBatch, s.batchStarted
 	s.mu.Unlock()
 	if block != nil {
@@ -158,6 +161,46 @@ func TestHeartbeatBatchFailureLeavesMemoryAndDurableStateUnchanged(t *testing.T)
 	allocations, _ := s.state.ListAllocations(context.Background())
 	if nodes[node.ID.String()].Version != "old" || allocations[allocation.ID].Phase != lifecycle.PhaseStarting {
 		t.Fatalf("durable state advanced after failed heartbeat: node=%#v allocation=%#v", nodes[node.ID.String()], allocations[allocation.ID])
+	}
+}
+
+func TestUnchangedHeartbeatPersistsOnlyNode(t *testing.T) {
+	node := &Node{ID: uuid.New(), Host: "node-a", Status: NodeStatusHealthy, Version: "test"}
+	allocation := &Allocation{ID: "web-1", Node: node, Tasks: []spec.TaskSpec{{Name: "app"}}, Generation: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
+	store := &auditStore{memoryStore: memoryStore{}}
+	s := &Server{state: NewStateController(store, "test"), nodes: map[uuid.UUID]*Node{node.ID: node}, allocations: []*Allocation{allocation}, catalog: newNopCatalog()}
+	status := []api.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
+
+	for i := 0; i < 2; i++ {
+		if err := s.Heartbeat(context.Background(), node.ID, status, "test", nil, nil, nodeResourceObservation{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if got := store.batchSizes[len(store.batchSizes)-1]; got != 1 {
+		t.Fatalf("heartbeat mutations = %d, want only the node update", got)
+	}
+}
+
+func TestHeartbeatDoesNotLockAllocationsAssignedToOtherNodes(t *testing.T) {
+	node, otherNode := &Node{ID: uuid.New(), Status: NodeStatusHealthy}, &Node{ID: uuid.New(), Status: NodeStatusHealthy}
+	assigned := &Allocation{ID: "assigned", Node: node, Generation: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
+	unrelated := &Allocation{ID: "unrelated", Node: otherNode, Generation: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
+	s := &Server{state: NewStateController(memoryStore{}, "test"), nodes: map[uuid.UUID]*Node{node.ID: node, otherNode.ID: otherNode}, allocations: []*Allocation{assigned, unrelated}, catalog: newNopCatalog()}
+	unrelated.mu.Lock()
+	defer unrelated.mu.Unlock()
+	done := make(chan error, 1)
+	go func() {
+		done <- s.Heartbeat(context.Background(), node.ID, nil, "test", nil, nil, nodeResourceObservation{})
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("heartbeat inspected an allocation assigned to another node")
 	}
 }
 

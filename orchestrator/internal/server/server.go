@@ -61,10 +61,14 @@ type Server struct {
 	state   *StateController
 	client  *client.AgentClient
 
-	cluster            *Cluster
-	nodes              map[uuid.UUID]*Node
-	jobs               map[string]*Job
-	allocations        []*Allocation
+	cluster     *Cluster
+	nodes       map[uuid.UUID]*Node
+	jobs        map[string]*Job
+	allocations []*Allocation
+	// allocationsByNode indexes the canonical allocation pointers by their
+	// assigned node. It is rebuilt whenever reconciliation replaces the
+	// allocation slice so heartbeats do not scan cluster-wide state.
+	allocationsByNode  map[uuid.UUID][]*Allocation
 	networkPool        netip.Prefix
 	networkPorts       map[string]int
 	wireGuardPortCount int
@@ -481,6 +485,18 @@ func applyAllocationSnapshot(allocation, snapshot *Allocation) {
 	allocation.Events = snapshot.Events
 }
 
+// rebuildAllocationNodeIndexLocked rebuilds allocationsByNode from the
+// canonical allocation slice. The caller must hold s.mu for writing.
+func (s *Server) rebuildAllocationNodeIndexLocked() {
+	index := make(map[uuid.UUID][]*Allocation)
+	for _, allocation := range s.allocations {
+		if allocation.Node != nil {
+			index[allocation.Node.ID] = append(index[allocation.Node.ID], allocation)
+		}
+	}
+	s.allocationsByNode = index
+}
+
 // NewServer constructs an orchestrator server.
 func NewServer(log *slog.Logger, storage *storage.LocalStorage, state *StateController, store state.Store, cluster, serverAddr string) *Server {
 	pool := netip.MustParsePrefix("10.64.0.0/10")
@@ -817,6 +833,9 @@ func (s *Server) RegisterNode(ctx context.Context, nodeRegistration *NodeRegistr
 
 // Heartbeat records a node heartbeat and allocation state.
 func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.AllocationStatus, version string, volumes []string, capabilities []spec.NodeCapability, resources nodeResourceObservation) error {
+	if len(actual) > maxHeartbeatAllocationStatuses {
+		return fmt.Errorf("heartbeat allocation status count %d exceeds limit %d", len(actual), maxHeartbeatAllocationStatuses)
+	}
 	if err := validateNodeCapacity(resources.CPUCapacity, resources.MemoryCapacity, resources.CPUAllocatable, resources.MemoryAllocatable); err != nil {
 		return err
 	}
@@ -917,11 +936,20 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 		current *Allocation
 		next    *Allocation
 	}
-	updates := make([]allocationUpdate, 0)
-	for _, allocation := range s.allocations {
-		if allocation.Node != node {
-			continue
+	if s.allocationsByNode == nil {
+		// Servers assembled directly by focused tests and older embedding code
+		// may not have passed through Reload or reconciliation yet.
+		s.mu.RUnlock()
+		s.mu.Lock()
+		if s.allocationsByNode == nil {
+			s.rebuildAllocationNodeIndexLocked()
 		}
+		s.mu.Unlock()
+		s.mu.RLock()
+	}
+	assigned := s.allocationsByNode[nodeID]
+	updates := make([]allocationUpdate, 0, len(assigned))
+	for _, allocation := range assigned {
 		allocation.mu.Lock()
 		next, err := cloneAllocationForReconcile(allocation)
 		allocation.mu.Unlock()
@@ -966,7 +994,15 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 		sort.Slice(info.Endpoints, func(i, j int) bool { return info.Endpoints[i].Task < info.Endpoints[j].Task })
 		a.Endpoints = append([]api.AllocationEndpoint(nil), info.Endpoints...)
 		a.Ports = append([]api.PortMapping(nil), info.Ports...)
-		changed = append(changed, update)
+		update.current.mu.Lock()
+		same, err := sameAllocationState(update.current, update.next)
+		update.current.mu.Unlock()
+		if err != nil {
+			return fmt.Errorf("compare allocation observation %s: %w", a.ID, err)
+		}
+		if !same {
+			changed = append(changed, update)
+		}
 	}
 	persisted := make([]*Allocation, 0, len(changed))
 	for _, update := range changed {
@@ -984,7 +1020,13 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 	}
 	s.mu.Unlock()
 
-	s.refreshCatalog()
+	if len(changed) > 0 {
+		changedAllocations := make([]*Allocation, len(changed))
+		for i := range changed {
+			changedAllocations[i] = changed[i].current
+		}
+		s.refreshCatalogAllocations(changedAllocations)
+	}
 	return nil
 }
 
@@ -1167,6 +1209,7 @@ func (s *Server) Reload(ctx context.Context) error {
 	s.jobs = jobs
 	s.nodes = nodes
 	s.allocations = allocations
+	s.rebuildAllocationNodeIndexLocked()
 	s.replacementBackoffs = backoffs
 	s.mu.Unlock()
 	return nil
@@ -1764,6 +1807,37 @@ func (s *Server) refreshCatalog() {
 	}
 
 	s.catalog.Replace(namespaced)
+}
+
+func (s *Server) refreshCatalogAllocations(allocations []*Allocation) {
+	ids := make(map[string]bool, len(allocations))
+	replacements := make(map[string][]catalog.ServiceInstance)
+	s.mu.RLock()
+	for _, allocation := range allocations {
+		allocation.mu.Lock()
+		ids[allocation.ID] = true
+		if allocation.Phase == lifecycle.PhaseRunning && allocation.Health == lifecycle.HealthHealthy {
+			var labels map[string]string
+			job := s.jobs[jobKey(allocation.Namespace, allocation.JobName)]
+			if job != nil {
+				for _, group := range job.Spec.TaskGroups {
+					if group.Name == allocation.TaskGroupName {
+						labels = group.Labels
+						break
+					}
+				}
+			}
+			if address := allocationEndpointAddress(allocation); address != "" {
+				replacements[allocation.Namespace] = append(replacements[allocation.Namespace], catalog.ServiceInstance{
+					ID: allocation.ID, Job: allocation.JobName, Group: allocation.TaskGroupName,
+					Address: address, Ports: allocation.Ports, Labels: labels,
+				})
+			}
+		}
+		allocation.mu.Unlock()
+	}
+	s.mu.RUnlock()
+	s.catalog.ReplaceInstances(ids, replacements)
 }
 
 // TokenManager returns the namespace token manager.

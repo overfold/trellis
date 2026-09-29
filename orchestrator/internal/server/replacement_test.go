@@ -226,16 +226,11 @@ func TestPlanReplacementBackoffResetsAfterStableReplacement(t *testing.T) {
 	}
 }
 
-func prunableNode(now time.Time, observed ...observedAllocation) *Node {
-	return &Node{ID: uuid.New(), Status: NodeStatusHealthy, observedAllocations: observed, observedAt: now}
-}
-
-func TestPlanTerminalPruningKeepsNewestAndSkipsUnreleased(t *testing.T) {
+func TestPlanTerminalPruningKeepsNewestAndSkipsCurrentUpdates(t *testing.T) {
 	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
-	node := prunableNode(now.Add(time.Hour), observedAllocation{ID: "f01", Generation: 3})
+	node := &Node{ID: uuid.New(), Status: NodeStatusHealthy, observedAllocations: []observedAllocation{{ID: "f01", Generation: 3}}, observedAt: now.Add(time.Hour)}
 	unhealthy := &Node{ID: uuid.New(), Status: NodeStatusUnhealthy, observedAt: now.Add(time.Hour)}
-	stale := prunableNode(now.Add(-time.Hour))
-	nodes := map[uuid.UUID]*Node{node.ID: node, unhealthy.ID: unhealthy, stale.ID: stale}
+	stale := &Node{ID: uuid.New(), Status: NodeStatusHealthy, observedAt: now.Add(-time.Hour)}
 
 	var allocations []*Allocation
 	for i := 0; i < 10; i++ {
@@ -257,16 +252,16 @@ func TestPlanTerminalPruningKeepsNewestAndSkipsUnreleased(t *testing.T) {
 	input := append([]*Allocation{running, other}, allocations...)
 	before := marshalAllocations(t, input)
 
-	pruned := planTerminalPruning(4, input, nodes, map[*Allocation]bool{skipped: true})
+	pruned := planTerminalPruning(4, input, map[*Allocation]bool{skipped: true})
 	var ids []string
 	for _, allocation := range pruned {
 		ids = append(ids, allocation.ID)
 	}
-	// f06..f09 are the newest four; of the older records f04 and f00 are
-	// released, f05 is skipped for this pass, and f01..f03 may still hold a
-	// container or resources.
-	if fmt.Sprint(ids) != "[f04 f00]" {
-		t.Fatalf("pruned %v, want [f04 f00]", ids)
+	// f06..f09 are the newest four. Every older record except f05, which is
+	// being updated in this pass, is pruned even if its node is unavailable or
+	// still reports it. A later report is fenced as an observed orphan.
+	if fmt.Sprint(ids) != "[f04 f03 f02 f01 f00]" {
+		t.Fatalf("pruned %v, want [f04 f03 f02 f01 f00]", ids)
 	}
 	if after := marshalAllocations(t, input); after != before {
 		t.Fatal("pruning mutated its allocation inputs")
@@ -276,7 +271,7 @@ func TestPlanTerminalPruningKeepsNewestAndSkipsUnreleased(t *testing.T) {
 	tied := []*Allocation{failedAllocation("x2", 1, now), failedAllocation("x1", 1, now), failedAllocation("x3", 1, now)}
 	reversed := []*Allocation{tied[2], tied[0], tied[1]}
 	for _, order := range [][]*Allocation{tied, reversed} {
-		pruned := planTerminalPruning(1, order, nodes, nil)
+		pruned := planTerminalPruning(1, order, nil)
 		if len(pruned) != 2 || pruned[0].ID != "x2" || pruned[1].ID != "x1" {
 			t.Fatalf("tie-broken pruning = %v, want [x2 x1]", pruned)
 		}
@@ -505,7 +500,8 @@ func TestReconcilePrunesTerminalAllocationRecords(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Default retention keeps f3..f7; f1 and f2 are released and deleted.
+	// Default retention keeps only the newest five terminal records, f3..f7.
+	// The observed f0 is pruned too and is stopped as an orphan.
 	for _, id := range ids {
 		_, inMemory := func() (*Allocation, bool) {
 			for _, allocation := range s.allocations {
@@ -516,7 +512,7 @@ func TestReconcilePrunesTerminalAllocationRecords(t *testing.T) {
 			return nil, false
 		}()
 		_, stored := persisted[id]
-		want := id != "f1" && id != "f2"
+		want := id >= "f3"
 		if inMemory != want || stored != want {
 			t.Fatalf("allocation %s retained in memory=%t store=%t, want %t (remaining %v)", id, inMemory, stored, want, remaining)
 		}
@@ -935,7 +931,7 @@ func TestResetReplacementBackoffRequiresWriteAccess(t *testing.T) {
 	}
 }
 
-func TestReconcilePrunesRecordsOfRemovedNodesOnly(t *testing.T) {
+func TestReconcilePrunesRecordsOfRemovedAndUnavailableNodes(t *testing.T) {
 	store := memoryStore{}
 	s, node, clock := newBackoffReconcileServer(t, store)
 	ctx := context.Background()
@@ -973,10 +969,10 @@ func TestReconcilePrunesRecordsOfRemovedNodesOnly(t *testing.T) {
 	}
 	for name, leader := range map[string]*Server{"current": s, "reloaded": successor} {
 		leader.mu.RLock()
-		pruned := planTerminalPruning(0, leader.allocations, leader.nodes, nil)
+		pruned := planTerminalPruning(0, leader.allocations, nil)
 		leader.mu.RUnlock()
-		if len(pruned) != 1 || pruned[0].ID != "t0" {
-			t.Fatalf("%s leader pruned %v, want [t0]", name, pruned)
+		if len(pruned) != 2 || pruned[0].ID != "t1" || pruned[1].ID != "t0" {
+			t.Fatalf("%s leader pruned %v, want [t1 t0]", name, pruned)
 		}
 	}
 
@@ -984,7 +980,7 @@ func TestReconcilePrunesRecordsOfRemovedNodesOnly(t *testing.T) {
 	if _, exists := store[s.state.allocationKey("t0")]; exists {
 		t.Fatal("record of removed node remains persisted")
 	}
-	if _, exists := store[s.state.allocationKey("t1")]; !exists {
-		t.Fatal("record of down node was pruned")
+	if _, exists := store[s.state.allocationKey("t1")]; exists {
+		t.Fatal("record of down node remains persisted")
 	}
 }

@@ -29,6 +29,11 @@ type Handler struct {
 	server *Server
 }
 
+const (
+	maxHeartbeatBodyBytes          = 32 << 20
+	maxHeartbeatAllocationStatuses = 320_000
+)
+
 type contextKey string
 
 // NamespaceContextKey stores the authenticated namespace or encoded scoped authorization in a request context.
@@ -457,9 +462,17 @@ func (h *Handler) handleHeartbeat(c *echo.Context) error {
 	if err := requireNode(c, id, "heartbeat identity does not match certificate"); err != nil {
 		return err
 	}
+	c.Request().Body = http.MaxBytesReader(c.Response(), c.Request().Body, maxHeartbeatBodyBytes)
 	var request api.HeartbeatRequest
 	if err := c.Bind(&request); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return echo.NewHTTPError(http.StatusRequestEntityTooLarge, "heartbeat request body is too large")
+		}
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	}
+	if len(request.Allocations) > maxHeartbeatAllocationStatuses {
+		return echo.NewHTTPError(http.StatusRequestEntityTooLarge, "heartbeat contains too many allocation status reports")
 	}
 	resources := nodeResourceObservation{
 		CPUCapacity: request.CPUCapacity, MemoryCapacity: request.MemoryCapacity,

@@ -53,6 +53,33 @@ func (c *ServiceCatalog) Replace(services map[string][]ServiceInstance) {
 	}
 }
 
+// ReplaceInstances removes the named allocation instances and adds their
+// current discoverable forms. It updates only allocations whose observations
+// changed, avoiding a cluster-wide catalog rebuild on every node heartbeat.
+func (c *ServiceCatalog) ReplaceInstances(ids map[string]bool, replacements map[string][]ServiceInstance) {
+	if len(ids) == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for namespace, instances := range c.services {
+		kept := instances[:0:0]
+		for _, instance := range instances {
+			if !ids[instance.ID] {
+				kept = append(kept, instance)
+			}
+		}
+		if len(kept) == 0 {
+			delete(c.services, namespace)
+		} else {
+			c.services[namespace] = kept
+		}
+	}
+	for namespace, instances := range replacements {
+		c.services[namespace] = append(c.services[namespace], instances...)
+	}
+}
+
 // Lookup returns instances for a job in a namespace.
 func (c *ServiceCatalog) Lookup(namespace, jobName string) []ServiceInstance {
 	c.mu.RLock()
