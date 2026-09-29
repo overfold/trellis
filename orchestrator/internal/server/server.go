@@ -1773,7 +1773,7 @@ func (s *Server) persistJobRestart(ctx context.Context, namespace, name string) 
 	updates := make([]*Allocation, 0)
 	for _, alloc := range allocations {
 		alloc.mu.Lock()
-		if alloc.Namespace == namespace && alloc.JobName == name && alloc.DrainReason != "restart" && activeAllocationPhase(alloc.Phase) {
+		if alloc.Namespace == namespace && alloc.JobName == name && alloc.Node != nil && alloc.DrainReason != "restart" && activeAllocationPhase(alloc.Phase) {
 			update, err := cloneAllocationForReconcile(alloc)
 			alloc.mu.Unlock()
 			if err != nil {

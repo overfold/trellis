@@ -291,8 +291,15 @@ func TestReconcileAppliesVolumeClaimsAcrossTaskGroups(t *testing.T) {
 
 	s.Reconcile(context.Background())
 
-	if len(s.allocations) != 1 || s.allocations[0].Node != a {
-		t.Fatalf("allocations = %#v, want only first task group on volume owner", s.allocations)
+	if len(s.allocations) != 2 || s.allocations[0].Node != a || s.allocations[1].Phase != lifecycle.PhasePending || s.allocations[1].Reason != "volume_owner_unavailable" {
+		t.Fatalf("allocations = %#v, want first task group placed and second pending on volume ownership", s.allocations)
+	}
+	persisted, err := controller.ListAllocations(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending := persisted[s.allocations[1].ID]; pending == nil || pending.Phase != lifecycle.PhasePending || pending.Reason != "volume_owner_unavailable" {
+		t.Fatalf("persisted pending allocation = %#v", pending)
 	}
 	registrations, err := controller.ListVolumeRegistrations(context.Background())
 	if err != nil {

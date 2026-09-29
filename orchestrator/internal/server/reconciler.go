@@ -890,20 +890,6 @@ func tasksUseWireGuard(tasks []spec.TaskSpec) bool {
 	return false
 }
 
-func noCompatibleCapabilityNode(nodes []*Node, constraints []spec.ConstraintSpec, tasks []spec.TaskSpec, volumeOwners map[string]uuid.UUID, namespace string, required []spec.NodeCapability) bool {
-	hasCandidate := false
-	for _, node := range nodes {
-		if node.Status != NodeStatusHealthy || !nodeMatchesConstraints(node, constraints) || !nodeHasTaskVolumes(node.ID, namespace, tasks, volumeOwners) {
-			continue
-		}
-		hasCandidate = true
-		if nodeHasCapabilities(node, required) {
-			return false
-		}
-	}
-	return hasCandidate
-}
-
 func capabilityNames(capabilities []spec.NodeCapability) []string {
 	names := make([]string, len(capabilities))
 	for i, capability := range capabilities {

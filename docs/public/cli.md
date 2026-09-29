@@ -147,7 +147,7 @@ trellisctl jobs status web
 
 Table output shows short allocation references and node addresses instead of requiring full internal UUIDs. Full IDs and API fields remain available through `--output json`.
 
-`jobs status` is also the diagnostic view. When a job is not ready, the normal status output automatically includes allocations that need attention, their lifecycle and health states, reason codes, human-readable messages, retry timing, and attempt count. Healthy allocations and old draining allocations do not create diagnostic noise.
+`jobs status` is also the diagnostic view. When a job is not ready, the normal status output automatically includes allocations that need attention, their lifecycle and health states, reason codes, human-readable messages, retry timing, and attempt count. An unmet replica appears as a pending allocation with a placement reason such as `no_healthy_nodes`, `constraint_mismatch`, `volume_owner_unavailable`, `missing_capability`, `host_port_conflict`, or `insufficient_capacity`; its message identifies the relevant scheduler filter. Healthy allocations and old draining allocations do not create diagnostic noise.
 
 When the current state is not enough to explain what happened, inspect the recorded allocation lifecycle transitions:
 

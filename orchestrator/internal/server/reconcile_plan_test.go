@@ -154,6 +154,7 @@ func TestPlanReconciliation(t *testing.T) {
 				return planTestInput(map[string]*Job{jobKey("default", "web"): planTestJob("web", 1, 2, "")}, nil, pending)
 			},
 			updates: []plannedUpdate{{ID: "a", Phase: lifecycle.PhaseStopped, Reason: "job_changed"}},
+			created: []plannedUpdate{{ID: "default-web-app-00000001", Phase: lifecycle.PhasePending, Reason: "no_healthy_nodes"}},
 		},
 		{
 			name: "marks allocations lost after the node loss timeout",
@@ -164,6 +165,7 @@ func TestPlanReconciliation(t *testing.T) {
 					planTestAllocation("a", gone, lifecycle.PhaseRunning, 1))
 			},
 			updates: []plannedUpdate{{ID: "a", Phase: lifecycle.PhaseLost, Reason: "node_unavailable"}},
+			created: []plannedUpdate{{ID: "default-web-app-00000001", Phase: lifecycle.PhasePending, Reason: "no_healthy_nodes"}},
 		},
 		{
 			name: "keeps allocations on a silent node within the leader recovery grace",
@@ -265,6 +267,127 @@ func TestPlanReconciliation(t *testing.T) {
 				if allocation.Node != nil && allocation.Node != healthy {
 					t.Errorf("new allocation %s node is not the canonical input node", allocation.ID)
 				}
+			}
+		})
+	}
+}
+
+func TestPlanReconciliationPersistsPlacementDiagnosticsAndRecovers(t *testing.T) {
+	type fixture struct {
+		job         *Job
+		nodes       []*Node
+		allocations []*Allocation
+		owners      map[string]uuid.UUID
+		recover     func(*fixture)
+	}
+	healthyNode := func(id byte) *Node {
+		node := planTestNode(id, NodeStatusHealthy)
+		node.CPUAllocatable = 1000
+		node.MemoryAllocatable = 1 << 30
+		return node
+	}
+	tests := []struct {
+		name   string
+		reason string
+		setup  func() fixture
+	}{
+		{
+			name: "no healthy nodes", reason: "no_healthy_nodes",
+			setup: func() fixture {
+				node := healthyNode(1)
+				node.Status = NodeStatusUnhealthy
+				return fixture{job: planTestJob("web", 1, 1, ""), nodes: []*Node{node}, recover: func(f *fixture) { f.nodes[0].Status = NodeStatusHealthy }}
+			},
+		},
+		{
+			name: "constraints", reason: "constraint_mismatch",
+			setup: func() fixture {
+				job := planTestJob("web", 1, 1, "")
+				job.Spec.TaskGroups[0].Constraints = []spec.ConstraintSpec{{Attribute: "zone", Value: "west"}}
+				node := healthyNode(1)
+				node.Labels = map[string]string{"zone": "east"}
+				return fixture{job: job, nodes: []*Node{node}, recover: func(f *fixture) { f.nodes[0].Labels["zone"] = "west" }}
+			},
+		},
+		{
+			name: "volume ownership", reason: "volume_owner_unavailable",
+			setup: func() fixture {
+				job := planTestJob("web", 1, 1, "")
+				job.Spec.TaskGroups[0].Tasks[0].Volumes = []spec.VolumeSpec{{Name: "data", HostPath: "@/data", ContainerPath: "/data"}}
+				owner, other := healthyNode(1), healthyNode(2)
+				owner.Status = NodeStatusUnhealthy
+				return fixture{job: job, nodes: []*Node{owner, other}, owners: map[string]uuid.UUID{volumeRegistrationKey("default", "data"): owner.ID}, recover: func(f *fixture) { f.nodes[0].Status = NodeStatusHealthy }}
+			},
+		},
+		{
+			name: "missing capabilities", reason: "missing_capability",
+			setup: func() fixture {
+				job := planTestJob("web", 1, 1, "")
+				job.Spec.TaskGroups[0].Runtime = spec.RuntimeRunsc
+				node := healthyNode(1)
+				return fixture{job: job, nodes: []*Node{node}, recover: func(f *fixture) { f.nodes[0].Capabilities = []spec.NodeCapability{spec.CapabilityRunsc} }}
+			},
+		},
+		{
+			name: "host ports", reason: "host_port_conflict",
+			setup: func() fixture {
+				job := planTestJob("web", 2, 1, "")
+				tasks := []spec.TaskSpec{{Name: "server", Image: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkHost, Ports: []spec.PortSpec{{Port: 8080}}}}}
+				job.Spec.TaskGroups[0].Tasks = tasks
+				node := healthyNode(1)
+				existing := planTestAllocation("existing", node, lifecycle.PhaseRunning, 1)
+				existing.Tasks = tasks
+				return fixture{job: job, nodes: []*Node{node}, allocations: []*Allocation{existing}, recover: func(f *fixture) { f.nodes = append(f.nodes, healthyNode(2)) }}
+			},
+		},
+		{
+			name: "capacity", reason: "insufficient_capacity",
+			setup: func() fixture {
+				job := planTestJob("web", 1, 1, "")
+				job.Spec.TaskGroups[0].Tasks[0].Resources = &spec.ResourcesSpec{CPU: 500, Memory: 64 << 20}
+				node := healthyNode(1)
+				node.CPUAllocatable = 400
+				return fixture{job: job, nodes: []*Node{node}, recover: func(f *fixture) { f.nodes[0].CPUAllocatable = 500 }}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f := test.setup()
+			blocked := planTestInput(map[string]*Job{jobKey("default", "web"): f.job}, f.nodes, f.allocations...)
+			blocked.VolumeOwners = f.owners
+			plan, err := planReconciliation(blocked)
+			if err != nil {
+				t.Fatalf("plan blocked placement: %v", err)
+			}
+			if len(plan.NewAllocations) != 1 {
+				t.Fatalf("new allocations = %#v, want one pending diagnostic", plan.NewAllocations)
+			}
+			pending := plan.NewAllocations[0]
+			if pending.Phase != lifecycle.PhasePending || pending.Reason != test.reason || pending.Message == "" || pending.Node != nil {
+				t.Fatalf("pending allocation = phase %s reason %q message %q node %v", pending.Phase, pending.Reason, pending.Message, pending.Node)
+			}
+
+			repeated := planTestInput(map[string]*Job{jobKey("default", "web"): f.job}, f.nodes, append(f.allocations, pending)...)
+			repeated.VolumeOwners = f.owners
+			again, err := planReconciliation(repeated)
+			if err != nil {
+				t.Fatalf("repeat blocked placement: %v", err)
+			}
+			if !again.empty() {
+				t.Fatalf("unchanged diagnosis produced a commit: %#v", again.Commit)
+			}
+
+			f.recover(&f)
+			recovered := planTestInput(map[string]*Job{jobKey("default", "web"): f.job}, f.nodes, append(f.allocations, pending)...)
+			recovered.VolumeOwners = f.owners
+			placed, err := planReconciliation(recovered)
+			if err != nil {
+				t.Fatalf("plan recovered placement: %v", err)
+			}
+			if len(placed.NewAllocations) != 0 || len(placed.Updated) != 1 || placed.Updated[0].ID != pending.ID || placed.Updated[0].Phase != lifecycle.PhasePlaced || placed.Updated[0].Reason != "" || placed.Updated[0].Node == nil {
+				t.Fatalf("recovered plan created=%#v updated=%#v, want the pending allocation placed", placed.NewAllocations, placed.Updated)
 			}
 		})
 	}

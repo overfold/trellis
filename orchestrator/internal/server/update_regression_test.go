@@ -251,8 +251,8 @@ func TestReconcileChargesAllocationsQueuedForStop(t *testing.T) {
 			if obsolete.Phase != lifecycle.PhaseStopping || obsolete.NextRetryAt == nil {
 				t.Fatalf("obsolete allocation after failed stop: phase=%s retry=%v", obsolete.Phase, obsolete.NextRetryAt)
 			}
-			if len(s.allocations) != 1 {
-				t.Fatalf("allocations = %d, want only the still-occupying obsolete allocation", len(s.allocations))
+			if len(s.allocations) != 2 || s.allocations[1].Phase != lifecycle.PhasePending || s.allocations[1].Reason == "" {
+				t.Fatalf("allocations = %#v, want the obsolete allocation and one pending placement diagnostic", s.allocations)
 			}
 			var starts, stops int
 			for _, call := range agent.recordedCalls() {
@@ -272,7 +272,7 @@ func TestReconcileChargesAllocationsQueuedForStop(t *testing.T) {
 			agent.mu.Unlock()
 			obsolete.NextRetryAt = nil
 			s.Reconcile(context.Background())
-			if obsolete.Phase != lifecycle.PhaseStopped || len(s.allocations) != 1 {
+			if obsolete.Phase != lifecycle.PhaseStopped || len(s.allocations) != 2 || s.allocations[1].Phase != lifecycle.PhasePending {
 				t.Fatalf("successful stop pass: phase=%s allocations=%d, want stopped without same-pass replacement", obsolete.Phase, len(s.allocations))
 			}
 
@@ -369,7 +369,7 @@ func TestUndrainNodeRetainsCurrentAllocation(t *testing.T) {
 	if err := s.UndrainNode(context.Background(), node.ID); err != nil {
 		t.Fatal(err)
 	}
-	if allocation.Draining || allocation.Phase != lifecycle.PhaseRunning || len(s.allocations) != 1 {
+	if allocation.Draining || allocation.Phase != lifecycle.PhaseRunning || len(s.allocations) != 2 || s.allocations[1].Phase != lifecycle.PhaseStopped {
 		t.Fatalf("allocation after undrain: draining=%t phase=%s count=%d", allocation.Draining, allocation.Phase, len(s.allocations))
 	}
 	resumed := false
