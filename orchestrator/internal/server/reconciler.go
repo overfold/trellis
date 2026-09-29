@@ -157,6 +157,12 @@ func cloneAllocationForReconcile(allocation *Allocation) (*Allocation, error) {
 	if err := json.Unmarshal(raw, &clone); err != nil {
 		return nil, err
 	}
+	// The record stores only the node ID. Plan against a copy of the node so
+	// planning sees its current status without sharing the canonical node.
+	if allocation.Node != nil {
+		node := *allocation.Node
+		clone.Node = &node
+	}
 	if allocation.Events != nil {
 		clone.Events = &lifecycle.RingBuffer{}
 		for _, event := range allocation.Events.Entries() {
@@ -453,7 +459,7 @@ func (s *Server) Reconcile(ctx context.Context) {
 			actions = append(actions, Action{Type: ActionDrain, Allocation: allocation})
 		}
 		if allocation.Node != nil && allocation.Node.Status == NodeStatusDraining {
-			if now.Sub(s.leaderSince) >= leaderRecoveryGrace && !allocation.Node.LastHeartbeat.IsZero() && now.Sub(allocation.Node.LastHeartbeat) >= allocationLossTimeout {
+			if now.Sub(s.leaderSince) >= leaderRecoveryGrace && now.Sub(s.nodeSilentSince(allocation.Node)) >= allocationLossTimeout {
 				_ = allocation.Transition(lifecycle.PhaseLost, now, "node_unavailable", "node did not re-register before the allocation loss timeout")
 				markUpdated(allocation)
 				allocation.mu.Unlock()
@@ -496,7 +502,7 @@ func (s *Server) Reconcile(ctx context.Context) {
 					}
 				}
 				if allocation.Node == nil || allocation.Node.Status != NodeStatusHealthy {
-					if now.Sub(s.leaderSince) >= leaderRecoveryGrace && allocation.Node != nil && !allocation.Node.LastHeartbeat.IsZero() && now.Sub(allocation.Node.LastHeartbeat) >= allocationLossTimeout {
+					if now.Sub(s.leaderSince) >= leaderRecoveryGrace && allocation.Node != nil && now.Sub(s.nodeSilentSince(allocation.Node)) >= allocationLossTimeout {
 						_ = allocation.Transition(lifecycle.PhaseLost, now, "node_unavailable", "node did not re-register before the allocation loss timeout")
 						markUpdated(allocation)
 					}
@@ -513,7 +519,7 @@ func (s *Server) Reconcile(ctx context.Context) {
 			}
 		}
 		if allocation.Node == nil || allocation.Node.Status != NodeStatusHealthy {
-			if now.Sub(s.leaderSince) >= leaderRecoveryGrace && allocation.Node != nil && !allocation.Node.LastHeartbeat.IsZero() && now.Sub(allocation.Node.LastHeartbeat) >= allocationLossTimeout {
+			if now.Sub(s.leaderSince) >= leaderRecoveryGrace && allocation.Node != nil && now.Sub(s.nodeSilentSince(allocation.Node)) >= allocationLossTimeout {
 				_ = allocation.Transition(lifecycle.PhaseLost, now, "node_unavailable", "node did not re-register before the allocation loss timeout")
 				markUpdated(allocation)
 			}

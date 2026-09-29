@@ -95,7 +95,9 @@ reboots or on unreliable networks, and replacing their work would cost more
 than waiting. This matters most for groups bound to one node by a volume,
 because their replacement can only run on that node anyway. Lower values
 replace work faster after a real failure. The leader still waits 30 seconds
-after it is elected before marking anything lost. The timeout applies on
+after it is elected before marking anything lost, and a newly elected leader
+counts a node's silence from the start of its leadership, so each failover
+restarts the timeout for nodes that are already down. The timeout applies on
 whichever node is leader, so keep it the same on every node.
 
 Each node admits at most 256 concurrent UDP DNS queries and 128 active TCP DNS

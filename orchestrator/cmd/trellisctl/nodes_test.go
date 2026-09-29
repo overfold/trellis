@@ -60,7 +60,7 @@ func TestPrintNodeStatusShowsPlacementMetadata(t *testing.T) {
 		Host:          "node-a",
 		Port:          8128,
 		Status:        api.StatusHealthy,
-		LastHeartbeat: time.Date(2026, 9, 2, 15, 0, 0, 0, time.UTC),
+		LastHeartbeat: new(time.Date(2026, 9, 2, 15, 0, 0, 0, time.UTC)),
 		CPU:           4000,
 		Memory:        8 << 30,
 		OS:            "linux",

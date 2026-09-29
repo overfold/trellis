@@ -133,8 +133,11 @@ export function NodesTable() {
                       </div>
                     )}
                   </td>
-                  <td className="whitespace-nowrap px-4 py-3 text-muted-foreground" title={new Date(node.last_heartbeat).toLocaleString()}>
-                    {timeAgo(node.last_heartbeat)}
+                  <td
+                    className="whitespace-nowrap px-4 py-3 text-muted-foreground"
+                    title={node.last_heartbeat ? new Date(node.last_heartbeat).toLocaleString() : "No heartbeat to the current leader yet"}
+                  >
+                    {node.last_heartbeat ? timeAgo(node.last_heartbeat) : "—"}
                   </td>
                   {allowWrites && (
                     <td className="px-4 py-3 text-right">
