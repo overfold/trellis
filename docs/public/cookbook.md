@@ -144,7 +144,7 @@ update:
   max_parallel: 1
 ```
 
-Rolling replacement marks old-revision allocations as draining, starts bounded replacement capacity, and removes old allocations as healthy replacements become available. `max_parallel` limits not-yet-healthy replacements in flight; it is not a percentage.
+Rolling replacement marks old-revision allocations as draining, starts bounded replacement capacity, and removes old allocations as healthy replacements become available. `max_parallel` limits both not-yet-healthy replacements and temporary live capacity above `count`; a stop must succeed before its capacity can be reused. It is not a percentage.
 
 Rolling updates require spare schedulable capacity and a useful health check. If the group reserves a fixed host port, spare capacity also means another node where that port is available. Recreate updates avoid overlap but can reduce or eliminate service capacity during replacement. In either case, preview with `trellisctl jobs apply --dry-run` before applying and treat rollback as another desired-state revision: restore the earlier image/configuration and apply it again.
 
