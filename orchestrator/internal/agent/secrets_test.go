@@ -149,7 +149,7 @@ func TestRunAllocationKeepsManagedEnvironmentSecretsOutOfRuntimeEnvironment(t *t
 	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image"}}
 	request.EnvOverrides = map[string]string{"TRELLIS_TOKEN": "api-token-sentinel", "TRELLIS_NAMESPACE": "default"}
 	request.Secrets = []api.DeliveredSecret{{Task: "first", Name: "password", Target: spec.SecretTargetEnv, Env: "PASSWORD", Value: []byte("secret-sentinel")}}
-	if err := agent.RunGroup(context.Background(), request); err != nil {
+	if err := runGroup(context.Background(), agent, request); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := rt.options.Env["PASSWORD"]; ok {
@@ -266,16 +266,8 @@ func TestSecretDirForKeepsOwnRecordedRootWithLoosenedMode(t *testing.T) {
 	}
 }
 
-type pullHookRuntime struct {
-	*reconcilerRuntime
-	onPull func() error
-}
-
-func (r *pullHookRuntime) Pull(context.Context, string) error { return r.onPull() }
-
 func TestRunAllocationRecordsSecretDirBeforeWritingSecrets(t *testing.T) {
-	rt := &pullHookRuntime{reconcilerRuntime: &reconcilerRuntime{}}
-	agent := newOperationTestAgent(t, rt)
+	agent := newOperationTestAgent(t, &reconcilerRuntime{})
 	root := t.TempDir()
 	local := storage.NewLocalStorage(root)
 	if err := local.Init(); err != nil {
@@ -283,9 +275,11 @@ func TestRunAllocationRecordsSecretDirBeforeWritingSecrets(t *testing.T) {
 	}
 	agent.ConfigureDurability(local, "test")
 	recordDir := filepath.Join(root, "agent", "allocations")
-	// Fail the first durable write after image pull, which must be the
-	// secret-location record rather than anything after plaintext exists.
-	rt.onPull = func() error {
+	// Fail every allocation record write once the secret root is checked,
+	// so the first failing write must be the secret-location record rather
+	// than anything after plaintext exists.
+	agent.secretStatfs = func(_ string, stat *syscall.Statfs_t) error {
+		stat.Type = tmpfsMagic
 		if err := os.RemoveAll(recordDir); err != nil {
 			return err
 		}
@@ -294,7 +288,7 @@ func TestRunAllocationRecordsSecretDirBeforeWritingSecrets(t *testing.T) {
 	request := operationTestRequest()
 	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image"}}
 	request.Secrets = []api.DeliveredSecret{{Task: "first", Name: "key", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Value: []byte("secret")}}
-	err := agent.RunGroup(context.Background(), request)
+	err := runGroup(context.Background(), agent, request)
 	if err == nil || !strings.Contains(err.Error(), "persist secret metadata") {
 		t.Fatalf("run error = %v, want secret metadata persistence failure", err)
 	}
@@ -318,7 +312,7 @@ func TestRunAllocationUsesRecoverableSecretDir(t *testing.T) {
 	request := operationTestRequest()
 	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image"}}
 	request.Secrets = []api.DeliveredSecret{{Task: "first", Name: "key", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Value: []byte("secret")}}
-	if err := agent.RunGroup(context.Background(), request); err != nil {
+	if err := runGroup(context.Background(), agent, request); err != nil {
 		t.Fatal(err)
 	}
 	id := "allocation-g2-first"
@@ -486,7 +480,7 @@ func TestRunAllocationKeepsSecretDirectoryItDidNotCreate(t *testing.T) {
 	request := operationTestRequest()
 	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image"}}
 	request.Secrets = []api.DeliveredSecret{{Task: "first", Name: "key", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Value: []byte("secret")}}
-	err = agent.RunGroup(context.Background(), request)
+	err = runGroup(context.Background(), agent, request)
 	if err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("run error = %v, want existing secret directory refusal", err)
 	}

@@ -379,7 +379,7 @@ func TestReconcileDelaysReplacementOfFailedAllocations(t *testing.T) {
 
 	clock.advance(node, time.Second)
 	s.Reconcile(ctx)
-	if active := activeAllocations(s); len(active) != 1 || active[0].Phase != lifecycle.PhaseRunning {
+	if active := activeAllocations(s); len(active) != 1 || active[0].Phase != lifecycle.PhaseStarting {
 		t.Fatalf("replacement after backoff = %d active allocations", len(active))
 	}
 
@@ -402,7 +402,14 @@ func TestReconcileDelaysReplacementOfFailedAllocations(t *testing.T) {
 		t.Fatal("second replacement was not placed after backoff")
 	}
 
-	// A replacement that stays running resets the backoff.
+	// A replacement that stays running resets the backoff. The agent reports
+	// the accepted start running.
+	replacement := activeAllocations(s)[0]
+	replacement.mu.Lock()
+	if err := replacement.Transition(lifecycle.PhaseRunning, clock.now, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	replacement.mu.Unlock()
 	clock.advance(node, DefaultReplacementPolicy().StableAfter)
 	s.Reconcile(ctx)
 	status, _ = s.GetJob("default", "web")

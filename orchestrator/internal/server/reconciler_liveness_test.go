@@ -53,10 +53,10 @@ func TestReconcileActionsDoNotQueueBehindStalledAgentBody(t *testing.T) {
 	defer cancel()
 	done := make(chan struct{})
 	go func() {
-		s.executeReconcileActions(ctx, []Action{
+		<-s.dispatchReconcileActions(ctx, []Action{
 			{Type: ActionStopObserved, Node: stalledNode, ID: "stalled", Generation: 1},
 			{Type: ActionStopObserved, Node: fastNode, ID: "fast", Generation: 1},
-		})
+		}, false)
 		close(done)
 	}()
 
@@ -109,10 +109,10 @@ func TestReconcileActionsPreserveOrderWithinNode(t *testing.T) {
 	s.client = client.NewAgentClient("", nil)
 	done := make(chan struct{})
 	go func() {
-		s.executeReconcileActions(context.Background(), []Action{
+		<-s.dispatchReconcileActions(context.Background(), []Action{
 			{Type: ActionStopObserved, Node: node, ID: "first", Generation: 1},
 			{Type: ActionStopObserved, Node: node, ID: "second", Generation: 1},
-		})
+		}, false)
 		close(done)
 	}()
 	select {
@@ -135,5 +135,134 @@ func TestReconcileActionsPreserveOrderWithinNode(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("ordered node action batch did not complete")
+	}
+}
+
+func TestReconcilePassesDoNotWaitForBusyNode(t *testing.T) {
+	stalledCalls := make(chan string, 4)
+	releaseStalled := make(chan struct{})
+	stalled := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		stalledCalls <- request.URL.Path
+		select {
+		case <-releaseStalled:
+		case <-request.Context().Done():
+		}
+		response.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(response).Encode(api.OperationResponse{Code: "ok"})
+	}))
+	t.Cleanup(stalled.Close)
+	fastCalls := make(chan string, 4)
+	fast := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		fastCalls <- request.URL.Path
+		response.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(response).Encode(api.OperationResponse{Code: "ok"})
+	}))
+	t.Cleanup(fast.Close)
+	nodeAt := func(server *httptest.Server) *Node {
+		host, portValue, err := net.SplitHostPort(server.Listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		port, err := strconv.Atoi(portValue)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &Node{ID: uuid.New(), Host: "http://" + host, Port: port, Status: NodeStatusHealthy}
+	}
+	stalledNode, fastNode := nodeAt(stalled), nodeAt(fast)
+	s := NewServer(slog.Default(), nil, NewStateController(memoryStore{}, "test"), memoryStore{}, "test", "")
+	s.client = client.NewAgentClient("", nil)
+
+	first := s.dispatchReconcileActions(context.Background(), []Action{{Type: ActionStopObserved, Node: stalledNode, ID: "first", Generation: 1}}, false)
+	select {
+	case <-stalledCalls:
+	case <-time.After(time.Second):
+		t.Fatal("stalled action did not start")
+	}
+	// A later pass runs other nodes' actions at once and defers the busy
+	// node's, which the pass after it plans again.
+	second := s.dispatchReconcileActions(context.Background(), []Action{
+		{Type: ActionStopObserved, Node: stalledNode, ID: "second", Generation: 1},
+		{Type: ActionStopObserved, Node: fastNode, ID: "fast", Generation: 1},
+	}, false)
+	select {
+	case <-second:
+	case <-time.After(time.Second):
+		t.Fatal("pass waited for a node busy with an earlier pass")
+	}
+	select {
+	case path := <-fastCalls:
+		if path != "/v1/allocations/fast" {
+			t.Fatalf("fast node call = %s", path)
+		}
+	default:
+		t.Fatal("fast node action did not run")
+	}
+	select {
+	case path := <-stalledCalls:
+		t.Fatalf("busy node received a second concurrent action %s", path)
+	default:
+	}
+	close(releaseStalled)
+	select {
+	case <-first:
+	case <-time.After(time.Second):
+		t.Fatal("stalled pass did not finish after release")
+	}
+	third := s.dispatchReconcileActions(context.Background(), []Action{{Type: ActionStopObserved, Node: stalledNode, ID: "second", Generation: 1}}, false)
+	<-third
+	if path := <-stalledCalls; path != "/v1/allocations/second" {
+		t.Fatalf("released node call = %s, want deferred action", path)
+	}
+}
+
+func TestQueueingPassWaitsForBusyNode(t *testing.T) {
+	calls := make(chan string, 4)
+	release := make(chan struct{})
+	agent := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		calls <- request.URL.Path
+		if request.URL.Path == "/v1/allocations/first" {
+			select {
+			case <-release:
+			case <-request.Context().Done():
+			}
+		}
+		response.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(response).Encode(api.OperationResponse{Code: "ok"})
+	}))
+	t.Cleanup(agent.Close)
+	host, portValue, err := net.SplitHostPort(agent.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := &Node{ID: uuid.New(), Host: "http://" + host, Port: port, Status: NodeStatusHealthy}
+	s := NewServer(slog.Default(), nil, NewStateController(memoryStore{}, "test"), memoryStore{}, "test", "")
+	s.client = client.NewAgentClient("", nil)
+
+	periodic := s.dispatchReconcileActions(context.Background(), []Action{{Type: ActionStopObserved, Node: node, ID: "first", Generation: 1}}, false)
+	if path := <-calls; path != "/v1/allocations/first" {
+		t.Fatalf("first call = %s", path)
+	}
+	// A pass an API mutation waits for delivers its action once the node
+	// is free rather than dropping it.
+	queued := s.dispatchReconcileActions(context.Background(), []Action{{Type: ActionStopObserved, Node: node, ID: "second", Generation: 1}}, true)
+	select {
+	case path := <-calls:
+		t.Fatalf("queued action %s ran while the node was busy", path)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	<-periodic
+	select {
+	case <-queued:
+	case <-time.After(time.Second):
+		t.Fatal("queued pass did not finish")
+	}
+	if path := <-calls; path != "/v1/allocations/second" {
+		t.Fatalf("queued call = %s, want second", path)
 	}
 }

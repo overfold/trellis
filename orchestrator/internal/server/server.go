@@ -89,13 +89,22 @@ type Server struct {
 	//     leadership snapshots. It must never be held during network or storage I/O.
 	//   - allocation.mu protects lifecycle fields on that allocation. When both
 	//     locks are required, mu is always acquired before allocation.mu.
-	//   - reconcileMu serializes complete reconciliation passes.
+	//   - reconcileMu serializes reconciliation planning and its durable
+	//     commit; a pass's agent actions run after it is released.
+	//   - refreshMu serializes the network-plan and catalog refresh after a
+	//     pass's actions, so overlapping passes cannot apply an older snapshot.
+	//   - actionMu guards actionNodes and actionSlots, which serialize agent
+	//     actions per node and bound them globally across passes.
 	//   - mutationMu serializes durable state mutations and is never acquired
 	//     while mu or allocation.mu is held.
 	//   - networkPortMu serializes durable namespace WireGuard port assignment
 	//     and is never acquired while mu or allocation.mu is held.
 	mu                 sync.RWMutex
 	reconcileMu        sync.Mutex
+	refreshMu          sync.Mutex
+	actionMu           sync.Mutex
+	actionNodes        map[uuid.UUID]chan struct{}
+	actionSlots        chan struct{}
 	mutationMu         sync.Mutex
 	networkPortMu      sync.Mutex
 	networkPlanMu      sync.Mutex
@@ -983,6 +992,7 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 		Endpoints     []api.AllocationEndpoint
 		Ports         []api.PortMapping
 		ObservedTasks map[string]bool
+		StartFailure  *api.StartFailure
 	}
 	statuses := make(map[string]statusInfo, len(actual))
 	for _, a := range actual {
@@ -991,6 +1001,9 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 		}
 		if a.Reason != "" && (a.Phase != lifecycle.PhaseFailed || a.Reason != api.OperationRestartExhausted) {
 			return fmt.Errorf("invalid failure reason for %s: phase=%q reason=%q", a.ID, a.Phase, a.Reason)
+		}
+		if a.StartFailure != nil && (a.Phase != lifecycle.PhaseStarting || a.StartFailure.Attempt < 0 || len(a.StartFailure.Message) > api.MaxStartFailureMessageBytes || !terminalStartFailureCode(a.StartFailure.Code)) {
+			return fmt.Errorf("invalid start failure for %s: phase=%q attempt=%d message bytes=%d", a.ID, a.Phase, a.StartFailure.Attempt, len(a.StartFailure.Message))
 		}
 		phase, health := a.Phase, a.Health
 		key := fmt.Sprintf("%s/%d", a.ID, a.Generation)
@@ -1018,6 +1031,12 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 		// Keep the reason of a failed task whatever the report order.
 		if a.Reason != "" && (info.Reason == "" || a.Reason < info.Reason) {
 			info.Reason = a.Reason
+		}
+		// Every task of a failed start carries the same failure; choose one
+		// deterministically whatever the report order.
+		if failure := a.StartFailure; failure != nil && (info.StartFailure == nil || failure.Attempt > info.StartFailure.Attempt ||
+			failure.Attempt == info.StartFailure.Attempt && failure.Message < info.StartFailure.Message) {
+			info.StartFailure = failure
 		}
 		info.Ports = append(info.Ports, a.Ports...)
 		if a.Task != "" || a.Address != "" || len(a.Ports) > 0 {
@@ -1112,12 +1131,30 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 				break
 			}
 		}
-		if info.Phase.Valid() && lifecycle.CanObserve(a.Phase, info.Phase) {
+		// An unchanged phase keeps its reason, such as a counted start failure.
+		if info.Phase.Valid() && info.Phase != a.Phase && lifecycle.CanObserve(a.Phase, info.Phase) {
 			var reason string
 			if info.Phase == lifecycle.PhaseFailed {
 				reason = string(info.Reason)
 			}
+			if info.Phase == lifecycle.PhaseRunning && a.Phase != lifecycle.PhaseRunning {
+				// The start completed; later starts get a fresh attempt budget.
+				a.Attempt, a.NextRetryAt = 0, nil
+			}
 			_ = a.Transition(info.Phase, heartbeatAt, reason, "")
+		}
+		// Count the agent's failed background start once: the failure names
+		// the attempt it ran for, and counting advances the attempt.
+		if a.Phase == lifecycle.PhaseStarting && info.StartFailure != nil && info.StartFailure.Attempt == a.Attempt {
+			if code := info.StartFailure.Code; code != "" {
+				// Retrying the generation cannot fix it, as for the same
+				// operation code on a start request.
+				if a.Transition(lifecycle.PhaseFailed, heartbeatAt, string(code), info.StartFailure.Message) == nil {
+					a.NextRetryAt = nil
+				}
+			} else {
+				_ = recordStartFailure(a, heartbeatAt, info.StartFailure.Message)
+			}
 		}
 		_ = a.SetHealth(info.Health)
 		sort.Slice(info.Endpoints, func(i, j int) bool { return info.Endpoints[i].Task < info.Endpoints[j].Task })
@@ -2081,8 +2118,10 @@ func (s *Server) runReconcileLoop(ctx context.Context) {
 		return
 	}
 	// A newly elected leader must derive current network-plan state before
-	// waiting for the ordinary periodic reconciliation interval.
-	s.Reconcile(ctx)
+	// waiting for the ordinary periodic reconciliation interval. Periodic
+	// passes do not wait for their agent actions: a node still busy with an
+	// earlier pass is skipped while the other nodes proceed.
+	s.reconcile(ctx, false)
 
 	ticker := time.NewTicker(reconcileInterval)
 	defer ticker.Stop()
@@ -2092,7 +2131,7 @@ func (s *Server) runReconcileLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.Reconcile(ctx)
+			s.reconcile(ctx, false)
 		}
 	}
 }
