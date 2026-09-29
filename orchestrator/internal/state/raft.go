@@ -292,61 +292,53 @@ func (r *RaftStore) Delete(_ context.Context, key string) error {
 	return nil
 }
 
-// RaftMember is one server in the committed-or-pending Raft configuration.
+// RaftMember is one server in the latest, possibly uncommitted, Raft
+// configuration.
 type RaftMember struct {
 	ID      string
 	Address string
 	Voter   bool
 }
 
-// RaftMembership is the latest Raft configuration and the log index that
-// introduced it. Membership changes take the index as a compare-and-set guard
-// so a decision made from one configuration never applies to another.
-type RaftMembership struct {
-	Index   uint64
-	Members []RaftMember
-}
-
 // Membership returns the latest Raft configuration known to this server.
-func (r *RaftStore) Membership() (RaftMembership, error) {
+// hashicorp/raft does not expose that configuration's log index, so callers
+// that plan changes from it must serialize their own reads and changes.
+func (r *RaftStore) Membership() ([]RaftMember, error) {
 	fut := r.raft.GetConfiguration()
 	if err := fut.Error(); err != nil {
-		return RaftMembership{}, err
+		return nil, err
 	}
 	servers := fut.Configuration().Servers
 	members := make([]RaftMember, 0, len(servers))
 	for _, server := range servers {
 		members = append(members, RaftMember{ID: string(server.ID), Address: string(server.Address), Voter: server.Suffrage == raft.Voter})
 	}
-	return RaftMembership{Index: fut.Index(), Members: members}, nil
+	return members, nil
 }
 
 // AddNonvoter adds a server that replicates the log without voting. An
 // existing voter with the same ID keeps its vote and only has its address
 // updated, so a rejoin never demotes a member.
 func (r *RaftStore) AddNonvoter(id, address string) error {
-	return r.raft.AddNonvoter(raft.ServerID(id), raft.ServerAddress(address), 0, 30*time.Second).Error()
+	return r.raft.AddNonvoter(raft.ServerID(id), raft.ServerAddress(address), 0, 10*time.Second).Error()
 }
 
-// PromoteVoter gives an existing member a vote if the configuration is still
-// the one at configIndex.
-func (r *RaftStore) PromoteVoter(id, address string, configIndex uint64) error {
-	return r.raft.AddVoter(raft.ServerID(id), raft.ServerAddress(address), configIndex, 30*time.Second).Error()
+// PromoteVoter gives a member a vote.
+func (r *RaftStore) PromoteVoter(id, address string) error {
+	return r.raft.AddVoter(raft.ServerID(id), raft.ServerAddress(address), 0, 10*time.Second).Error()
 }
 
-// DemoteVoter removes a member's vote, keeping it as a non-voter, if the
-// configuration is still the one at configIndex.
-func (r *RaftStore) DemoteVoter(id string, configIndex uint64) error {
-	return r.raft.DemoteVoter(raft.ServerID(id), configIndex, 30*time.Second).Error()
+// DemoteVoter removes a member's vote, keeping it as a non-voter.
+func (r *RaftStore) DemoteVoter(id string) error {
+	return r.raft.DemoteVoter(raft.ServerID(id), 0, 10*time.Second).Error()
 }
 
 // AppliedIndex returns the last log index applied to the local FSM.
 func (r *RaftStore) AppliedIndex() uint64 { return r.raft.AppliedIndex() }
 
-// RemoveServer removes a member from Raft if the configuration is still the
-// one at configIndex.
-func (r *RaftStore) RemoveServer(id string, configIndex uint64) error {
-	fut := r.raft.RemoveServer(raft.ServerID(id), configIndex, 10*time.Second)
+// RemoveServer removes a member from Raft.
+func (r *RaftStore) RemoveServer(id string) error {
+	fut := r.raft.RemoveServer(raft.ServerID(id), 0, 10*time.Second)
 	return fut.Error()
 }
 

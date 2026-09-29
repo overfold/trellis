@@ -376,11 +376,11 @@ func newTestRaftFollower(t *testing.T) (*RaftStore, string) {
 
 func memberVoter(t *testing.T, store *RaftStore, id string) (voter, found bool) {
 	t.Helper()
-	membership, err := store.Membership()
+	members, err := store.Membership()
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, member := range membership.Members {
+	for _, member := range members {
 		if member.ID == id {
 			return member.Voter, true
 		}
@@ -399,17 +399,7 @@ func TestRaftStore_NonvoterPromotionAndDemotion(t *testing.T) {
 	if voter, found := memberVoter(t, leader, id); !found || voter {
 		t.Fatalf("joined member voter=%v found=%v, want a non-voter", voter, found)
 	}
-	stale, err := leader.Membership()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := leader.Put(context.Background(), "k", []byte("v")); err != nil {
-		t.Fatal(err)
-	}
-	if err := leader.PromoteVoter(id, follower.LocalAddr(), stale.Index-1); err == nil {
-		t.Fatal("promotion from a superseded configuration succeeded")
-	}
-	if err := leader.PromoteVoter(id, follower.LocalAddr(), stale.Index); err != nil {
+	if err := leader.PromoteVoter(id, follower.LocalAddr()); err != nil {
 		t.Fatal(err)
 	}
 	if voter, _ := memberVoter(t, leader, id); !voter {
@@ -422,11 +412,7 @@ func TestRaftStore_NonvoterPromotionAndDemotion(t *testing.T) {
 	if voter, _ := memberVoter(t, leader, id); !voter {
 		t.Fatal("rejoin demoted a voter")
 	}
-	current, err := leader.Membership()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := leader.DemoteVoter(id, current.Index); err != nil {
+	if err := leader.DemoteVoter(id); err != nil {
 		t.Fatal(err)
 	}
 	if voter, found := memberVoter(t, leader, id); !found || voter {
@@ -452,11 +438,7 @@ func TestRaftStore_LeadershipTransferTargetsVotersOnly(t *testing.T) {
 	if err := leader.AddNonvoter(voterID, voter.LocalAddr()); err != nil {
 		t.Fatal(err)
 	}
-	membership, err := leader.Membership()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := leader.PromoteVoter(voterID, voter.LocalAddr(), membership.Index); err != nil {
+	if err := leader.PromoteVoter(voterID, voter.LocalAddr()); err != nil {
 		t.Fatal(err)
 	}
 	// Let the new voter catch up so the transfer has an eligible target.

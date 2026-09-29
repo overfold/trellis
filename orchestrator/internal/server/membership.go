@@ -28,6 +28,7 @@ const (
 	// and can vote again later.
 	voterLossTimeout = 5 * time.Minute
 	// membershipInterval is how often the leader re-evaluates the voter set.
+	// A removal also wakes it.
 	membershipInterval = reconcileInterval
 	// maxMembershipSteps bounds the configuration changes of one pass.
 	maxMembershipSteps = 2 * maxVoters
@@ -105,37 +106,41 @@ type membershipChange struct {
 // toward its desired size, or false when none is needed. It is a pure function
 // of its input, which it does not modify, and breaks every tie by member ID.
 //
-// The desired size is the largest odd number not above voterTarget or the
-// number of members that could vote now: voters that are not gone plus
-// eligible non-voters. Promotions only choose eligible non-voters. Surplus
-// voters are demoted, never the leader, preferring gone members, then
-// unreachable ones, then ineligible ones, so an even voter set is always
-// brought back to odd. A gone voter is replaced by promoting an eligible
-// non-voter first; the resulting surplus then demotes the gone voter, so the
-// number of reachable voters never shrinks during the swap.
+// Promotions only choose eligible non-voters and only move toward the desired
+// count: the largest odd number not above voterTarget or the members that
+// could vote now (voters that are not gone plus eligible non-voters). A gone
+// voter is replaced by promoting an eligible non-voter first; the resulting
+// surplus then demotes the gone voter, so the number of reachable voters never
+// shrinks during the swap. Voters that are not gone are demoted only when they
+// exceed voterTarget, preferring unreachable, then ineligible ones, and never
+// the leader: a reachable voter keeps its vote, and its copy of every commit,
+// while a replacement is missing.
 func planMembership(members []memberState) (membershipChange, bool) {
 	sorted := slices.Clone(members)
 	slices.SortFunc(sorted, func(a, b memberState) int { return strings.Compare(a.ID, b.ID) })
-	voters, presentVoters, goneVoters := 0, 0, 0
-	var eligible []memberState
+	target := voterTarget(len(sorted))
+	voters, presentVoters := 0, 0
+	var eligible, gone []memberState
 	for _, member := range sorted {
 		switch {
+		case member.Voter && member.Gone && !member.Leader:
+			voters++
+			gone = append(gone, member)
 		case member.Voter:
 			voters++
-			if member.Gone && !member.Leader {
-				goneVoters++
-			} else {
-				presentVoters++
-			}
+			presentVoters++
 		case member.Eligible:
 			eligible = append(eligible, member)
 		}
 	}
-	desired := oddFloor(min(voterTarget(len(sorted)), presentVoters+len(eligible)))
-	if len(eligible) > 0 && (voters < desired || (goneVoters > 0 && voters <= desired)) {
+	desired := oddFloor(min(target, presentVoters+len(eligible)))
+	if len(eligible) > 0 && (voters < desired || (len(gone) > 0 && voters <= target)) {
 		return membershipChange{Action: promoteMember, ID: eligible[0].ID, Address: eligible[0].Address}, true
 	}
-	if voters > desired {
+	if voters > desired && len(gone) > 0 {
+		return membershipChange{Action: demoteMember, ID: gone[0].ID, Address: gone[0].Address}, true
+	}
+	if voters > target {
 		if demote, ok := pickDemotion(sorted); ok {
 			return membershipChange{Action: demoteMember, ID: demote.ID, Address: demote.Address}, true
 		}
@@ -187,6 +192,9 @@ func (s *Server) memberStates(members []state.RaftMember) []memberState {
 		id, err := uuid.Parse(member.ID)
 		node := s.nodes[id]
 		if err != nil || node == nil {
+			// A member that has never registered with this leader is silent
+			// since the leader's election.
+			current.Gone = now.Sub(s.leaderSince) >= voterLossTimeout
 			result = append(result, current)
 			continue
 		}
@@ -206,6 +214,12 @@ func (s *Server) memberStates(members []state.RaftMember) []memberState {
 	return result
 }
 
+// Every Raft configuration change in the cluster is made here, by the leader,
+// while holding membershipMu: a change is planned from the configuration read
+// under the same hold, so no other change can interleave. hashicorp/raft
+// allows one uncommitted configuration change at a time and fails in-flight
+// changes on leadership loss, and a new leader re-reads the configuration.
+
 // JoinMember admits an authenticated node to Raft as a non-voter. The leader
 // promotes it once it is healthy and caught up if the voter set needs it.
 func (s *Server) JoinMember(id uuid.UUID, raftAddress string) error {
@@ -217,44 +231,48 @@ func (s *Server) JoinMember(id uuid.UUID, raftAddress string) error {
 	return s.joiner.AddNonvoter(id.String(), raftAddress)
 }
 
-// ReconcileMembership moves the voter set toward its target one change at a
-// time until no change is needed.
+// ReconcileMembership moves the voter set toward its desired size one change
+// at a time until no change is needed. Each step re-reads the configuration
+// under membershipMu and applies its change before releasing it, so every
+// change is planned from the configuration it applies to; joins and removals
+// can interleave between steps.
 func (s *Server) ReconcileMembership(ctx context.Context) error {
 	if s.joiner == nil {
 		return nil
 	}
-	s.membershipMu.Lock()
-	defer s.membershipMu.Unlock()
-	return s.reconcileMembershipLocked(ctx)
-}
-
-func (s *Server) reconcileMembershipLocked(ctx context.Context) error {
 	for range maxMembershipSteps {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		membership, err := s.joiner.Membership()
-		if err != nil {
-			return fmt.Errorf("read Raft membership: %w", err)
-		}
-		change, ok := planMembership(s.memberStates(membership.Members))
-		if !ok {
-			return nil
-		}
-		if err := s.applyMembershipChange(change, membership.Index); err != nil {
+		changed, err := s.reconcileMembershipStep()
+		if err != nil || !changed {
 			return err
 		}
 	}
 	return nil
 }
 
-func (s *Server) applyMembershipChange(change membershipChange, configIndex uint64) error {
+func (s *Server) reconcileMembershipStep() (bool, error) {
+	s.membershipMu.Lock()
+	defer s.membershipMu.Unlock()
+	members, err := s.joiner.Membership()
+	if err != nil {
+		return false, fmt.Errorf("read Raft membership: %w", err)
+	}
+	change, ok := planMembership(s.memberStates(members))
+	if !ok {
+		return false, nil
+	}
+	return true, s.applyMembershipChange(change)
+}
+
+func (s *Server) applyMembershipChange(change membershipChange) error {
 	var err error
 	switch change.Action {
 	case promoteMember:
-		err = s.joiner.PromoteVoter(change.ID, change.Address, configIndex)
+		err = s.joiner.PromoteVoter(change.ID, change.Address)
 	case demoteMember:
-		err = s.joiner.DemoteVoter(change.ID, configIndex)
+		err = s.joiner.DemoteVoter(change.ID)
 	default:
 		err = fmt.Errorf("unknown membership action %q", change.Action)
 	}
@@ -280,11 +298,11 @@ func (s *Server) RemoveMember(_ context.Context, id string) error {
 	}
 	s.membershipMu.Lock()
 	defer s.membershipMu.Unlock()
-	membership, err := s.joiner.Membership()
+	current, err := s.joiner.Membership()
 	if err != nil {
 		return fmt.Errorf("read Raft membership: %w", err)
 	}
-	members := s.memberStates(membership.Members)
+	members := s.memberStates(current)
 	index := slices.IndexFunc(members, func(member memberState) bool { return member.ID == id })
 	if index < 0 {
 		return nil
@@ -300,15 +318,12 @@ func (s *Server) RemoveMember(_ context.Context, id string) error {
 			return err
 		}
 		if promote {
-			if err := s.applyMembershipChange(replacement, membership.Index); err != nil {
+			if err := s.applyMembershipChange(replacement); err != nil {
 				return err
-			}
-			if membership, err = s.joiner.Membership(); err != nil {
-				return fmt.Errorf("read Raft membership: %w", err)
 			}
 		}
 	}
-	if err := s.joiner.RemoveServer(id, membership.Index); err != nil {
+	if err := s.joiner.RemoveServer(id); err != nil {
 		return fmt.Errorf("remove Raft member %s: %w", id, err)
 	}
 	if nodeID, err := uuid.Parse(id); err == nil {
@@ -377,35 +392,38 @@ func (s *Server) MemberVoters() (map[string]bool, error) {
 	if s.joiner == nil {
 		return nil, nil
 	}
-	membership, err := s.joiner.Membership()
+	members, err := s.joiner.Membership()
 	if err != nil {
 		return nil, err
 	}
-	voters := make(map[string]bool, len(membership.Members))
-	for _, member := range membership.Members {
+	voters := make(map[string]bool, len(members))
+	for _, member := range members {
 		voters[member.ID] = member.Voter
 	}
 	return voters, nil
 }
 
 func (s *Server) runMembershipLoop(ctx context.Context) {
+	// A wake left over from an earlier leadership term must not skip this
+	// term's wait below.
+	select {
+	case <-s.membershipWake:
+	default:
+	}
 	ticker := time.NewTicker(membershipInterval)
 	defer ticker.Stop()
 	for {
-		woken := false
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 		case <-s.membershipWake:
-			woken = true
 		}
 		// A new leader first lets nodes report health and progress to it.
-		// An operator's removal is acted on immediately.
 		s.mu.RLock()
 		settled := s.now().Sub(s.leaderSince) >= leaderRecoveryGrace
 		s.mu.RUnlock()
-		if !settled && !woken {
+		if !settled {
 			continue
 		}
 		if err := s.ReconcileMembership(ctx); err != nil && ctx.Err() == nil && s.log != nil {

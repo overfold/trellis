@@ -43,14 +43,13 @@ const heartbeatInterval = 10 * time.Second
 // ErrNodeNotFound indicates that a requested node is absent.
 var ErrNodeNotFound = errors.New("node not found")
 
-// ClusterJoiner reads and changes Raft cluster membership. Changes that take a
-// configIndex apply only if the configuration is still the one at that index.
+// ClusterJoiner reads and changes Raft cluster membership.
 type ClusterJoiner interface {
-	Membership() (state.RaftMembership, error)
+	Membership() ([]state.RaftMember, error)
 	AddNonvoter(id, address string) error
-	PromoteVoter(id, address string, configIndex uint64) error
-	DemoteVoter(id string, configIndex uint64) error
-	RemoveServer(id string, configIndex uint64) error
+	PromoteVoter(id, address string) error
+	DemoteVoter(id string) error
+	RemoveServer(id string) error
 	LeadershipTransfer() error
 	AppliedIndex() uint64
 }
@@ -130,9 +129,9 @@ type Server struct {
 	// DefaultAllocationLossTimeout. Protected by mu.
 	allocationLossTimeout time.Duration
 
-	// membershipMu serializes Raft membership changes made by this server so
-	// each decision is taken from, and applied to, one configuration. It is
-	// never acquired while mu is held.
+	// membershipMu serializes Raft membership reads and changes made by this
+	// server so each change is applied to the configuration it was planned
+	// from. It is never acquired while mu is held.
 	membershipMu sync.Mutex
 	// raftProgress is each node's latest reported Raft applied index, a
 	// renewable observation used only to decide promotions. Protected by mu.

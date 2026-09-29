@@ -33,7 +33,7 @@ Voters are replaced automatically when that is safe:
 - when a voter is removed with `nodes remove` (or by the uninstall script), Trellis first promotes a healthy non-voter, if one exists, so the number of reachable voters never drops;
 - when a voter's node has been silent for 5 minutes, Trellis demotes it, first promoting a healthy non-voter in its place when one exists. If the node returns, it stays a non-voter until a voter is needed again.
 
-When too few healthy nodes are available to fill every voter seat, Trellis runs with the largest odd number of voters it can, rather than an even number.
+Trellis never promotes a node when that would leave an even number of voters. After a voter is removed and no healthy non-voter can take its place yet, the cluster can briefly run with an even number of voters; the next node to become healthy is promoted.
 
 When quorum is lost, allocations already running on reachable nodes keep running, but nothing can change: jobs cannot be applied or deleted, failed or lost allocations are not replaced, nodes cannot be drained, and no voter can be replaced. The cluster resumes once a majority of voters is reachable again.
 

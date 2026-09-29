@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"errors"
-	"fmt"
 	"slices"
 	"sync"
 	"testing"
@@ -13,11 +12,10 @@ import (
 	"github.com/overfold/trellis/internal/state"
 )
 
-// fakeMembership is an in-memory Raft configuration with the same
-// compare-and-set and rejoin semantics as RaftStore.
+// fakeMembership is an in-memory Raft configuration with the same rejoin
+// semantics as RaftStore.
 type fakeMembership struct {
 	mu      sync.Mutex
-	index   uint64
 	members []state.RaftMember
 	applied uint64
 	err     error
@@ -25,28 +23,24 @@ type fakeMembership struct {
 }
 
 func newFakeMembership(members ...state.RaftMember) *fakeMembership {
-	return &fakeMembership{index: 1, members: members, applied: 1000}
+	return &fakeMembership{members: members, applied: 1000}
 }
 
 func fakeMember(id uuid.UUID, voter bool) state.RaftMember {
 	return state.RaftMember{ID: id.String(), Address: id.String()[:8] + ":8129", Voter: voter}
 }
 
-func (f *fakeMembership) Membership() (state.RaftMembership, error) {
+func (f *fakeMembership) Membership() ([]state.RaftMember, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return state.RaftMembership{Index: f.index, Members: slices.Clone(f.members)}, nil
+	return slices.Clone(f.members), nil
 }
 
-func (f *fakeMembership) change(configIndex uint64, op string, apply func()) error {
+func (f *fakeMembership) change(op string, apply func()) error {
 	if f.err != nil {
 		return f.err
 	}
-	if configIndex != 0 && configIndex != f.index {
-		return fmt.Errorf("configuration changed since %d (latest is %d)", configIndex, f.index)
-	}
 	apply()
-	f.index++
 	f.ops = append(f.ops, op)
 	return nil
 }
@@ -58,7 +52,7 @@ func (f *fakeMembership) find(id string) int {
 func (f *fakeMembership) AddNonvoter(id, address string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.change(0, "add-nonvoter "+id+" "+address, func() {
+	return f.change("add-nonvoter "+id+" "+address, func() {
 		if i := f.find(id); i >= 0 {
 			f.members[i].Address = address
 			return
@@ -67,22 +61,22 @@ func (f *fakeMembership) AddNonvoter(id, address string) error {
 	})
 }
 
-func (f *fakeMembership) PromoteVoter(id, _ string, configIndex uint64) error {
+func (f *fakeMembership) PromoteVoter(id, _ string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.change(configIndex, "promote "+id, func() { f.members[f.find(id)].Voter = true })
+	return f.change("promote "+id, func() { f.members[f.find(id)].Voter = true })
 }
 
-func (f *fakeMembership) DemoteVoter(id string, configIndex uint64) error {
+func (f *fakeMembership) DemoteVoter(id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.change(configIndex, "demote "+id, func() { f.members[f.find(id)].Voter = false })
+	return f.change("demote "+id, func() { f.members[f.find(id)].Voter = false })
 }
 
-func (f *fakeMembership) RemoveServer(id string, configIndex uint64) error {
+func (f *fakeMembership) RemoveServer(id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.change(configIndex, "remove "+id, func() { f.members = slices.Delete(f.members, f.find(id), f.find(id)+1) })
+	return f.change("remove "+id, func() { f.members = slices.Delete(f.members, f.find(id), f.find(id)+1) })
 }
 
 func (*fakeMembership) LeadershipTransfer() error { return nil }
@@ -172,7 +166,7 @@ func TestPlanMembership(t *testing.T) {
 		{name: "unhealthy but not gone voter is kept", members: []memberState{leader, voter("b"), {ID: "c", Voter: true}, nonvoter("d")}},
 		{name: "gone voter below target is still swapped", members: []memberState{leader, voter("b"), gone(voter("c")), nonvoter("d"), lagging("e")}, want: &membershipChange{Action: promoteMember, ID: "d"}},
 		{name: "then demoted to an odd set below target", members: []memberState{leader, voter("b"), gone(voter("c")), voter("d"), lagging("e")}, want: &membershipChange{Action: demoteMember, ID: "c"}},
-		{name: "even set without a promotion is made odd", members: []memberState{leader, voter("b"), lagging("c")}, want: &membershipChange{Action: demoteMember, ID: "b"}},
+		{name: "reachable voter keeps its vote without a replacement", members: []memberState{leader, voter("b"), lagging("c")}},
 		{name: "even set with a promotion is completed", members: []memberState{leader, voter("b"), nonvoter("c")}, want: &membershipChange{Action: promoteMember, ID: "c"}},
 		{name: "unreachable voter is demoted before a draining one", members: []memberState{leader, {ID: "b", Voter: true, Live: true}, {ID: "c", Voter: true}, voter("d")}, want: &membershipChange{Action: demoteMember, ID: "c"}},
 	}
@@ -203,9 +197,9 @@ func TestJoinMemberAddsNonvoter(t *testing.T) {
 	if err := s.JoinMember(joining, "joining:8129"); err != nil {
 		t.Fatal(err)
 	}
-	membership, _ := joiner.Membership()
-	if len(membership.Members) != 2 || membership.Members[1].ID != joining.String() || membership.Members[1].Voter {
-		t.Fatalf("membership = %+v, want the joining node as a non-voter", membership.Members)
+	members, _ := joiner.Membership()
+	if len(members) != 2 || members[1].ID != joining.String() || members[1].Voter {
+		t.Fatalf("membership = %+v, want the joining node as a non-voter", members)
 	}
 }
 
@@ -380,5 +374,19 @@ func TestRemoveMemberIsIdempotent(t *testing.T) {
 	}
 	if got := joiner.operations(); len(got) != 0 {
 		t.Fatalf("operations = %v, want none", got)
+	}
+}
+
+func TestReconcileMembershipReplacesVoterThatNeverRegistered(t *testing.T) {
+	leader, b, c, d := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	joiner := newFakeMembership(fakeMember(leader, true), fakeMember(b, true), fakeMember(c, true), fakeMember(d, false))
+	s := membershipTestServer(joiner, leader, b, d)
+	// c votes but has not registered with this leader since its election an
+	// hour ago.
+	if err := s.ReconcileMembership(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := joiner.voters(), sortedIDs(leader, b, d); !slices.Equal(got, want) {
+		t.Fatalf("voters = %v, want %v", got, want)
 	}
 }
