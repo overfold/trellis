@@ -388,6 +388,7 @@ func (s *Server) reconcile(ctx context.Context, queue bool) (finished <-chan str
 	s.mu.Unlock()
 	s.mutationMu.Unlock()
 	mutationLocked = false
+	s.revokeStaleWorkloadCredentials(ctx)
 	for _, event := range plan.Events {
 		s.log.Info("delaying task group replacement after failed allocations", "namespace", event.Namespace, "job", event.JobName, "group", event.Group, "failures", event.Failures, "next_replacement_at", *event.NextReplacementAt, "last_allocation", event.AllocationID)
 		s.events.publish(event)
@@ -1033,7 +1034,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 			}
 		}()
 		if groupAPIAccess != nil {
-			token, err := s.apiAccessToken(ctx, groupAPIAccess, request.Namespace)
+			token, err := s.apiAccessToken(ctx, groupAPIAccess, request)
 			if err != nil {
 				return err
 			}

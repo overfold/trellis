@@ -12,6 +12,8 @@ Credential prefixes (`trls_op_`, `trls_wl_`) are descriptive only. The server au
 
 A task group requests workload access with an object such as `{"scope":"namespace","access":"read"}`. Namespace scope is restricted to the namespace containing the job. Cluster scope grants only the ordinary read/write API authority represented by the credential; it never turns into the administrator credential. Both scopes set `TRELLIS_NAMESPACE` to the job namespace as a default request scope.
 
+Each workload credential belongs to one allocation generation and carries a subject naming its namespace, job, and task group, which `GET /v1/auth/whoami` reports as `subject`. The leader mints it on the generation's first start and, like every generated credential, authenticates it by hash. Replicated state keeps only that hash and a copy sealed with the secrets encryption key, so start retries and leadership changes re-deliver the same token and the allocation execution hash stays stable. A server without a secrets key cannot start API-enabled allocations. Starting a new generation of the allocation, or with a different grant, replaces its credential and revokes the previous one. The leader's reconciliation revokes a workload credential once its allocation record is pruned, its job or task group is deleted, the job is recreated under the same name, or the task group's current `api_access` is removed or narrowed below the credential's scope or access. Widening `api_access` does not revoke existing credentials. A start for a generation older than the credential's recorded generation is rejected rather than revoking the newer credential, and a storage error while recovering a credential fails the start instead of rotating the token.
+
 The API uses the same resource vocabulary as the [Trellis user model](../public/user-model.md), but JSON is the transport representation. Humans author jobs as YAML manifests; job submission carries the equivalent JSON `JobSpec` inside the API request. Human-readable YAML memory sizes are normalized to byte counts in JSON.
 
 ## Public/operator endpoints
@@ -52,6 +54,8 @@ The API uses the same resource vocabulary as the [Trellis user model](../public/
   "created_at": "2026-09-02T20:00:00Z"
 }
 ```
+
+A workload credential additionally reports `"subject": {"namespace": "payments", "job": "router", "task_group": "sync"}`.
 
 An administrator credential reports `kind: "administrator"`, `scope: "cluster"`, and `access: "write"`, but callers must still treat `administrator` as more privileged than ordinary `cluster/write`: root-only endpoint checks use the credential kind/context, not merely those two effective fields.
 

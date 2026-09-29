@@ -122,3 +122,32 @@ func TestStoreAADPreventsReplayAcrossSecretIdentity(t *testing.T) {
 		t.Fatalf("matching identity resolution = %q, %v", value, err)
 	}
 }
+
+func TestSealBindsAssociatedDataAndKey(t *testing.T) {
+	store, err := NewStore(nil, "cluster", "key-1", bytes.Repeat([]byte{7}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := []byte("sentinel-plaintext-value")
+	sealed, err := store.Seal(value, []byte("alloc-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(sealed, value) {
+		t.Fatal("sealed value contains plaintext")
+	}
+	opened, err := store.Open(sealed, []byte("alloc-1"))
+	if err != nil || !bytes.Equal(opened, value) {
+		t.Fatalf("Open = %q, %v", opened, err)
+	}
+	if _, err := store.Open(sealed, []byte("alloc-2")); err == nil {
+		t.Fatal("sealed value opened with different associated data")
+	}
+	other, err := NewStore(nil, "cluster", "key-2", bytes.Repeat([]byte{7}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.Open(sealed, []byte("alloc-1")); err == nil {
+		t.Fatal("sealed value opened under a different key ID")
+	}
+}
