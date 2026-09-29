@@ -1,8 +1,11 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -139,7 +142,7 @@ func TestHeartbeatBatchFailureLeavesMemoryAndDurableStateUnchanged(t *testing.T)
 	node := &Node{ID: uuid.New(), Host: "node-a", Status: NodeStatusHealthy, Version: "old"}
 	allocation := &Allocation{ID: "web-1", Node: node, Tasks: []spec.TaskSpec{{Name: "app"}}, Generation: 1, Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown}
 	store := &auditStore{memoryStore: memoryStore{}}
-	s := &Server{state: NewStateController(store, "test"), nodes: map[uuid.UUID]*Node{node.ID: node}, allocations: []*Allocation{allocation}, catalog: newNopCatalog()}
+	s := &Server{now: time.Now, state: NewStateController(store, "test"), nodes: map[uuid.UUID]*Node{node.ID: node}, allocations: []*Allocation{allocation}, catalog: newNopCatalog()}
 	if err := s.state.PutNode(context.Background(), node.ID.String(), nodeSummary(node)); err != nil {
 		t.Fatal(err)
 	}
@@ -163,22 +166,130 @@ func TestHeartbeatBatchFailureLeavesMemoryAndDurableStateUnchanged(t *testing.T)
 	}
 }
 
-func TestUnchangedHeartbeatPersistsOnlyNode(t *testing.T) {
-	node := &Node{ID: uuid.New(), Host: "node-a", Status: NodeStatusHealthy, Version: "test"}
-	allocation := &Allocation{ID: "web-1", Node: node, Tasks: []spec.TaskSpec{{Name: "app"}}, Generation: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
+func TestUnchangedHeartbeatDoesNotWriteRaft(t *testing.T) {
+	node := &Node{ID: uuid.New(), Host: "node-a", Status: NodeStatusHealthy, Version: "test", CPUCapacity: 4000, CPUAllocatable: 4000}
+	allocation := &Allocation{ID: "web-1", Node: node, Tasks: []spec.TaskSpec{{Name: "app"}}, Generation: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy,
+		Endpoints: []api.AllocationEndpoint{{Task: "app"}}}
 	store := &auditStore{memoryStore: memoryStore{}}
-	s := &Server{state: NewStateController(store, "test"), nodes: map[uuid.UUID]*Node{node.ID: node}, allocations: []*Allocation{allocation}, catalog: newNopCatalog()}
+	clock := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	s := &Server{now: func() time.Time { return clock }, state: NewStateController(store, "test"), nodes: map[uuid.UUID]*Node{node.ID: node}, allocations: []*Allocation{allocation}, catalog: newNopCatalog()}
 	status := []api.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
 
-	for i := 0; i < 2; i++ {
-		if err := s.Heartbeat(context.Background(), node.ID, status, "test", nil, nil, nodeResourceObservation{}); err != nil {
+	for i := 0; i < 3; i++ {
+		clock = clock.Add(heartbeatInterval)
+		usage, used := float64(i)/10, int64(i)<<20
+		metricsAt := clock
+		resources := nodeResourceObservation{CPUCapacity: 4000, CPUAllocatable: 4000, CPUUsage: &usage, MemoryUsed: &used, MetricsAt: &metricsAt}
+		if err := s.Heartbeat(context.Background(), node.ID, status, "test", nil, nil, resources); err != nil {
 			t.Fatal(err)
+		}
+		if !node.LastHeartbeat.Equal(clock) || node.MetricsAt == nil || !node.MetricsAt.Equal(clock) || len(node.observedAllocations) != 1 {
+			t.Fatalf("heartbeat %d observations not kept in memory: last=%s metrics=%v observed=%v", i, node.LastHeartbeat, node.MetricsAt, node.observedAllocations)
 		}
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	if got := store.batchSizes[len(store.batchSizes)-1]; got != 1 {
-		t.Fatalf("heartbeat mutations = %d, want only the node update", got)
+	if len(store.batchSizes) != 0 || store.puts != 0 {
+		t.Fatalf("unchanged heartbeats wrote to Raft: batches=%v puts=%d", store.batchSizes, store.puts)
+	}
+}
+
+func TestHeartbeatPersistsOnlyDurableChanges(t *testing.T) {
+	node := &Node{ID: uuid.New(), Host: "node-a", Status: NodeStatusUnhealthy, Version: "old"}
+	allocation := &Allocation{ID: "web-1", Node: node, Tasks: []spec.TaskSpec{{Name: "app"}}, Generation: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy,
+		Endpoints: []api.AllocationEndpoint{{Task: "app"}}}
+	store := &auditStore{memoryStore: memoryStore{}}
+	s := &Server{now: time.Now, state: NewStateController(store, "test"), nodes: map[uuid.UUID]*Node{node.ID: node}, allocations: []*Allocation{allocation}, catalog: newNopCatalog()}
+	status := []api.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
+
+	// Liveness returning is an observation, not a durable fact.
+	if err := s.Heartbeat(context.Background(), node.ID, status, "old", nil, nil, nodeResourceObservation{}); err != nil {
+		t.Fatal(err)
+	}
+	if node.Status != NodeStatusHealthy {
+		t.Fatalf("node status = %s, want healthy", node.Status)
+	}
+	// A new agent version is a durable node fact.
+	if err := s.Heartbeat(context.Background(), node.ID, status, "new", nil, nil, nodeResourceObservation{}); err != nil {
+		t.Fatal(err)
+	}
+	// An allocation phase change is durable lifecycle state.
+	status[0].Phase, status[0].Health = lifecycle.PhaseFailed, lifecycle.HealthUnhealthy
+	if err := s.Heartbeat(context.Background(), node.ID, status, "new", nil, nil, nodeResourceObservation{}); err != nil {
+		t.Fatal(err)
+	}
+	store.mu.Lock()
+	batches := append([]int(nil), store.batchSizes...)
+	store.mu.Unlock()
+	if len(batches) != 2 || batches[0] != 1 || batches[1] != 1 {
+		t.Fatalf("heartbeat batches = %v, want one node write then one allocation write", batches)
+	}
+	nodes, err := s.state.ListNodes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	allocations, err := s.state.ListAllocations(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nodes[node.ID.String()].Version != "new" || allocations[allocation.ID].Phase != lifecycle.PhaseFailed {
+		t.Fatalf("durable state = node %#v allocation phase %s", nodes[node.ID.String()], allocations[allocation.ID].Phase)
+	}
+}
+
+func TestAllocationRecordStoresNodeIDWithoutObservations(t *testing.T) {
+	usage, used := 0.5, int64(1<<30)
+	metricsAt := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	node := &Node{ID: uuid.New(), Host: "node-a", Port: 8127, Status: NodeStatusHealthy, LastHeartbeat: metricsAt, CPUUsage: &usage, MemoryUsed: &used, MetricsAt: &metricsAt,
+		Labels: map[string]string{"zone": "a"}, Volumes: []string{"data"}, Version: "v1"}
+	allocation := &Allocation{ID: "web-1", Node: node, Generation: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
+	store := memoryStore{}
+	controller := NewStateController(store, "test")
+	if err := controller.PutNode(context.Background(), node.ID.String(), nodeSummary(node)); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.PutAllocation(context.Background(), allocation); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := store.Get(context.Background(), controller.allocationKey(allocation.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &record); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := record["Node"]; ok {
+		t.Fatalf("allocation record embeds its node: %s", raw)
+	}
+	for _, observation := range []string{"CPUUsage", "MemoryUsed", "MetricsAt", "LastHeartbeat", "zone"} {
+		if bytes.Contains(raw, []byte(observation)) {
+			t.Fatalf("allocation record carries node data %q: %s", observation, raw)
+		}
+	}
+	if got := string(record["node_id"]); got != `"`+node.ID.String()+`"` {
+		t.Fatalf("allocation node_id = %s, want %s", got, node.ID)
+	}
+	rawNode, err := store.Get(context.Background(), fmt.Sprintf("trellis/test/nodes/%s", node.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, observation := range []string{"CPUUsage", "MemoryUsed", "MetricsAt", "LastHeartbeat", "Status"} {
+		if bytes.Contains(rawNode, []byte(observation)) {
+			t.Fatalf("node record carries observation %q: %s", observation, rawNode)
+		}
+	}
+
+	s := &Server{now: time.Now, state: controller}
+	if err := s.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	reloaded := s.allocations[0]
+	if reloaded.Node == nil || reloaded.Node != s.nodes[node.ID] {
+		t.Fatalf("reloaded allocation node = %p, want canonical node %p", reloaded.Node, s.nodes[node.ID])
+	}
+	if reloaded.Node.Status != NodeStatusUnhealthy || !reloaded.Node.LastHeartbeat.IsZero() || reloaded.Node.MetricsAt != nil || reloaded.Node.Version != "v1" {
+		t.Fatalf("reloaded node = %#v, want durable facts without observations", reloaded.Node)
 	}
 }
 
@@ -186,7 +297,7 @@ func TestHeartbeatDoesNotLockAllocationsAssignedToOtherNodes(t *testing.T) {
 	node, otherNode := &Node{ID: uuid.New(), Status: NodeStatusHealthy}, &Node{ID: uuid.New(), Status: NodeStatusHealthy}
 	assigned := &Allocation{ID: "assigned", Node: node, Generation: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
 	unrelated := &Allocation{ID: "unrelated", Node: otherNode, Generation: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
-	s := &Server{state: NewStateController(memoryStore{}, "test"), nodes: map[uuid.UUID]*Node{node.ID: node, otherNode.ID: otherNode}, allocations: []*Allocation{assigned, unrelated}, catalog: newNopCatalog()}
+	s := &Server{now: time.Now, state: NewStateController(memoryStore{}, "test"), nodes: map[uuid.UUID]*Node{node.ID: node, otherNode.ID: otherNode}, allocations: []*Allocation{assigned, unrelated}, catalog: newNopCatalog()}
 	unrelated.mu.Lock()
 	defer unrelated.mu.Unlock()
 	done := make(chan error, 1)
@@ -226,7 +337,7 @@ func TestUndrainBatchFailureLeavesMemoryAndDurableStateDraining(t *testing.T) {
 	}
 	nodes, _ := s.state.ListNodes(context.Background())
 	allocations, _ := s.state.ListAllocations(context.Background())
-	if nodes[node.ID.String()].Status != NodeStatusDraining || !allocations[allocation.ID].Draining || allocations[allocation.ID].DrainSequence != 1 {
+	if !nodes[node.ID.String()].Draining || !allocations[allocation.ID].Draining || allocations[allocation.ID].DrainSequence != 1 {
 		t.Fatalf("durable state after failed undrain: node=%#v allocation=%#v", nodes[node.ID.String()], allocations[allocation.ID])
 	}
 	if requests := resumeCalls(agent, allocation.ID); len(requests) != 0 {
@@ -250,8 +361,8 @@ func TestDrainWriteFailureLeavesMemoryAndDurableStateHealthy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if node.Status != NodeStatusHealthy || nodes[node.ID.String()].Status != NodeStatusHealthy {
-		t.Fatalf("state after failed drain: memory=%s durable=%s", node.Status, nodes[node.ID.String()].Status)
+	if node.Status != NodeStatusHealthy || nodes[node.ID.String()].Draining {
+		t.Fatalf("state after failed drain: memory=%s durable draining=%t", node.Status, nodes[node.ID.String()].Draining)
 	}
 }
 
@@ -286,7 +397,7 @@ func TestRegisterAndDrainSerializeDurableNodeSnapshots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if node.Host != "new" || node.Status != NodeStatusDraining || nodes[nodeID.String()].Host != "new" || nodes[nodeID.String()].Status != NodeStatusDraining {
+	if node.Host != "new" || node.Status != NodeStatusDraining || nodes[nodeID.String()].Host != "new" || !nodes[nodeID.String()].Draining {
 		t.Fatalf("register/drain result: memory=%#v durable=%#v", node, nodes[nodeID.String()])
 	}
 }
@@ -320,7 +431,7 @@ func TestHeartbeatAndDrainSerializeDurableNodeSnapshots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if node.Version != "new" || node.Status != NodeStatusDraining || nodes[nodeID.String()].Version != "new" || nodes[nodeID.String()].Status != NodeStatusDraining {
+	if node.Version != "new" || node.Status != NodeStatusDraining || nodes[nodeID.String()].Version != "new" || !nodes[nodeID.String()].Draining {
 		t.Fatalf("heartbeat/drain result: memory=%#v durable=%#v", node, nodes[nodeID.String()])
 	}
 }

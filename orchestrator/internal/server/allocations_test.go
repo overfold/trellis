@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -105,6 +106,42 @@ func TestListJobsIncludesAllocationDiagnostics(t *testing.T) {
 	allocation := jobs[0].Allocations[0]
 	if allocation.JobRevision != 2 || allocation.NodeID != nodeID || allocation.Reason != "start_failed" || allocation.Message != "container exited" {
 		t.Fatalf("allocation diagnostics missing from job list: %#v", allocation)
+	}
+}
+
+func TestListJobsGroupsAllocationsByNamespacedJob(t *testing.T) {
+	job := func(namespace, name string) *Job {
+		return &Job{Spec: &spec.JobSpec{Namespace: namespace, Name: name, TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1}}}, Revision: 1}
+	}
+	allocation := func(namespace, name, id string) *Allocation {
+		return &Allocation{Namespace: namespace, JobName: name, TaskGroupName: "app", ID: id, JobRevision: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
+	}
+	s := &Server{
+		jobs: map[string]*Job{
+			jobKey("default", "web"): job("default", "web"),
+			jobKey("default", "api"): job("default", "api"),
+			jobKey("other", "web"):   job("other", "web"),
+		},
+		allocations: []*Allocation{
+			allocation("default", "web", "web-1"),
+			allocation("other", "web", "other-web-1"),
+			allocation("default", "api", "api-1"),
+			allocation("default", "web", "web-2"),
+			allocation("default", "deleted", "deleted-1"),
+		},
+	}
+	got := map[string][]string{}
+	for _, job := range s.ListJobs("default") {
+		for _, allocation := range job.Allocations {
+			got[job.Name] = append(got[job.Name], allocation.ID)
+		}
+		if job.Running != len(job.Allocations) || job.Healthy != len(job.Allocations) {
+			t.Fatalf("job %s counts running=%d healthy=%d for %d allocations", job.Name, job.Running, job.Healthy, len(job.Allocations))
+		}
+	}
+	want := map[string][]string{"web": {"web-1", "web-2"}, "api": {"api-1"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("job allocations = %v, want %v", got, want)
 	}
 }
 
@@ -316,6 +353,7 @@ func TestHeartbeatPreservesTaskEndpointIdentity(t *testing.T) {
 		Health:     lifecycle.HealthHealthy,
 	}
 	s := &Server{
+		now:         time.Now,
 		state:       NewStateController(memoryStore{}, "test"),
 		nodes:       map[uuid.UUID]*Node{nodeID: node},
 		allocations: []*Allocation{allocation},
@@ -355,6 +393,7 @@ func TestHeartbeatRequiresEveryTaskForRunningHealth(t *testing.T) {
 		Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown,
 	}
 	s := &Server{
+		now:   time.Now,
 		state: NewStateController(memoryStore{}, "test"),
 		nodes: map[uuid.UUID]*Node{nodeID: node}, allocations: []*Allocation{allocation},
 		catalog: catalog.New(),
@@ -396,6 +435,7 @@ func TestHeartbeatFailedTaskFailsGroupInAnyOrder(t *testing.T) {
 			Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy,
 		}
 		s := &Server{
+			now:   time.Now,
 			state: NewStateController(memoryStore{}, "test"),
 			nodes: map[uuid.UUID]*Node{nodeID: node}, allocations: []*Allocation{allocation},
 			catalog: catalog.New(),
@@ -432,6 +472,7 @@ func TestHeartbeatDoesNotMoveTerminalOrStoppingAllocations(t *testing.T) {
 				Phase: tc.phase, Health: lifecycle.HealthUnhealthy,
 			}
 			s := &Server{
+				now:   time.Now,
 				state: NewStateController(memoryStore{}, "test"),
 				nodes: map[uuid.UUID]*Node{nodeID: node}, allocations: []*Allocation{allocation},
 				catalog: catalog.New(),

@@ -38,11 +38,13 @@ const (
 
 // NodeResponse contains the reported state and capacity of a node.
 type NodeResponse struct {
-	ID                uuid.UUID             `json:"id"`
-	Host              string                `json:"host"`
-	Port              int                   `json:"port"`
-	Status            NodeStatusResponse    `json:"status"`
-	LastHeartbeat     time.Time             `json:"last_heartbeat"`
+	ID     uuid.UUID          `json:"id"`
+	Host   string             `json:"host"`
+	Port   int                `json:"port"`
+	Status NodeStatusResponse `json:"status"`
+	// LastHeartbeat is when the current leader last received a heartbeat from
+	// the node. It is absent until the node heartbeats to that leader.
+	LastHeartbeat     *time.Time            `json:"last_heartbeat,omitempty"`
 	CPU               int                   `json:"cpu"`
 	Memory            int64                 `json:"memory"`
 	CPUCapacity       int                   `json:"cpu_capacity"`

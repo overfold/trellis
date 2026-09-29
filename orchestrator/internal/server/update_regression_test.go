@@ -555,8 +555,8 @@ func TestUndrainNodeRedeliversResumeAfterDeliveryFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if nodes[node.ID.String()].Status != NodeStatusHealthy || allocations[allocation.ID].Draining || allocations[allocation.ID].DrainSequence != 2 {
-		t.Fatalf("persisted undrain: node=%s allocation=%#v", nodes[node.ID.String()].Status, allocations[allocation.ID])
+	if nodes[node.ID.String()].Draining || allocations[allocation.ID].Draining || allocations[allocation.ID].DrainSequence != 2 {
+		t.Fatalf("persisted undrain: node draining=%t allocation=%#v", nodes[node.ID.String()].Draining, allocations[allocation.ID])
 	}
 
 	agent.mu.Lock()

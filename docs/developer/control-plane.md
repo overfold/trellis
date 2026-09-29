@@ -4,6 +4,16 @@
 
 Nodes register UUID, agent address, capacity, OS/architecture, labels, volume inventory, and optional WireGuard identity. Periodic heartbeats refresh node status and report allocation generation, task, phase, health, each task's observed namespace-network address when present, ports, capabilities, and version. The control plane retains endpoint observations per task rather than collapsing a multi-task allocation onto whichever task was reported first. A successful heartbeat is acknowledged without returning desired state. After three missed heartbeat intervals a healthy node is marked unhealthy. The leader keeps each node's latest observed allocation generations and their aggregated phase for reconciliation.
 
+### What a heartbeat persists
+
+Heartbeat observations live in the leader's memory: the last heartbeat time, healthy/unhealthy liveness, host metrics (`cpu_usage`, `memory_used`, `memory_available`, `metrics_at`), and the observed allocation generations. A heartbeat writes to Raft only when it changes durable state, so a steady-state heartbeat is not a Raft entry:
+
+- the node record is rewritten only when a durable node fact changes: address, capacity or allocatable resources, platform, labels, volume inventory, capabilities, agent version, WireGuard identity, or drain intent. The persisted node record has no heartbeat time, liveness, or metrics; `draining` is its only status;
+- an allocation record is rewritten only when the heartbeat changes it: a phase transition with its reason and transition time, health, or the task endpoints and ports. Health and endpoints are observations, but they change only with the workload, not with every heartbeat, and keeping the last known value lets a new leader serve discovery and allocation health without waiting for every node to report;
+- an allocation record stores its node as `node_id`, never an embedded node snapshot. Reload binds it to the node registry.
+
+A new leader therefore starts with every non-draining node unhealthy, no heartbeat time (`last_heartbeat` is absent from `GET /v1/nodes` until the node reports to it), no metrics, and no observed allocations. It measures node silence from the later of the node's last heartbeat to it and the start of its term; see [lost allocations](#lost-allocations). Terminal-record pruning needs a heartbeat received after the allocation became terminal, which a new leader only has once the node reports to it, so pruning on a node waits for its first heartbeat in the term.
+
 ## Scheduling algorithm
 
 For each task-group deficit, `Schedule`:
@@ -56,7 +66,7 @@ Operators see the state as `replacement_backoff` in job status (`trellisctl jobs
 
 ### Lost allocations
 
-A node is marked unhealthy after three missed heartbeat intervals (30s). Its non-terminal allocations become lost once the node's last heartbeat is at least the allocation loss timeout old (`DefaultAllocationLossTimeout`, 45s, configurable per server with `allocation_loss_timeout` / `--allocation-loss-timeout` between 30s and 24h) and the leader has held leadership for at least `leaderRecoveryGrace` (30s). The recovery grace applies to the orphan and stale-generation observation stops as well. It avoids duplicating work during transient leadership changes: a new leader first gives nodes a chance to heartbeat to it.
+A node is marked unhealthy after three missed heartbeat intervals (30s). Its non-terminal allocations become lost once the node has been silent for at least the allocation loss timeout (`DefaultAllocationLossTimeout`, 45s, configurable per server with `allocation_loss_timeout` / `--allocation-loss-timeout` between 30s and 24h) and the leader has held leadership for at least `leaderRecoveryGrace` (30s). Heartbeat times are not replicated, so silence is measured from the later of the node's last heartbeat to the current leader and the start of the leader's term: after a failover, a node that stopped before the election is declared lost one loss timeout after the new term began, never sooner. The recovery grace applies to the orphan and stale-generation observation stops as well. It avoids duplicating work during transient leadership changes: a new leader first gives nodes a chance to heartbeat to it.
 
 Lost is terminal. Heartbeats never move a lost allocation to another phase, and it never counts toward its group again. While its allocation record is retained, when its node returns and reports the lost generation's container `running`, reconciliation treats it as a retained original rather than stopping it immediately as an unowned observation:
 
