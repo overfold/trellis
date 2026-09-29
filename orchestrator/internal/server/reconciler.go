@@ -51,7 +51,25 @@ type Action struct {
 }
 
 const (
-	allocationLossTimeout         = 45 * time.Second
+	// DefaultAllocationLossTimeout is how long a node must go without a
+	// heartbeat before its allocations become lost, unless configured.
+	DefaultAllocationLossTimeout = 45 * time.Second
+	// MinAllocationLossTimeout keeps the loss timeout at or above the point
+	// where a silent node is marked unhealthy (three heartbeat intervals).
+	MinAllocationLossTimeout = 3 * heartbeatInterval
+	// MaxAllocationLossTimeout bounds the configurable loss timeout.
+	MaxAllocationLossTimeout = 24 * time.Hour
+)
+
+// ValidateAllocationLossTimeout checks an operator-configured loss timeout.
+func ValidateAllocationLossTimeout(timeout time.Duration) error {
+	if timeout < MinAllocationLossTimeout || timeout > MaxAllocationLossTimeout {
+		return fmt.Errorf("allocation loss timeout %s must be between %s and %s", timeout, MinAllocationLossTimeout, MaxAllocationLossTimeout)
+	}
+	return nil
+}
+
+const (
 	leaderRecoveryGrace           = 30 * time.Second
 	maxExecutionAttempts          = 8
 	networkPlanBaseTimeout        = 15 * time.Second
@@ -274,6 +292,10 @@ func (s *Server) Reconcile(ctx context.Context) {
 	if policy == (ReplacementPolicy{}) {
 		policy = DefaultReplacementPolicy()
 	}
+	allocationLossTimeout := s.allocationLossTimeout
+	if allocationLossTimeout == 0 {
+		allocationLossTimeout = DefaultAllocationLossTimeout
+	}
 	admittedJobs := make(map[string]bool, len(jobKeys))
 	namespaceDesired := make(map[string]int64)
 	for _, key := range jobKeys {
@@ -319,6 +341,14 @@ func (s *Server) Reconcile(ctx context.Context) {
 		plannedUpdates[allocation] = true
 	}
 	var actions []Action
+	// Lost allocations whose returning node still runs their container. The
+	// group loop decides whether each is kept until replacements run or
+	// released; any it does not keep is stopped after the loop.
+	var retained []*retainedOriginal
+	// retainedStops release retained originals. They run before every other
+	// action so a replacement never starts while an original it conflicts
+	// with still holds its node's ports.
+	var retainedStops []Action
 	if !s.leaderSince.IsZero() && now.Sub(s.leaderSince) >= leaderRecoveryGrace {
 		type observationKey struct {
 			nodeID     uuid.UUID
@@ -326,10 +356,14 @@ func (s *Server) Reconcile(ctx context.Context) {
 			generation uint64
 		}
 		desired := make(map[observationKey]bool)
+		lost := make(map[observationKey]*Allocation)
 		for _, allocation := range allocations {
 			allocation.mu.Lock()
 			if allocation.Node != nil && allocation.Phase != lifecycle.PhaseStopped && allocation.Phase != lifecycle.PhaseFailed && allocation.Phase != lifecycle.PhaseLost {
 				desired[observationKey{nodeID: allocation.Node.ID, allocation: allocation.ID, generation: allocation.Generation}] = true
+			}
+			if allocation.Node != nil && allocation.Phase == lifecycle.PhaseLost {
+				lost[observationKey{nodeID: allocation.Node.ID, allocation: allocation.ID, generation: allocation.Generation}] = allocation
 			}
 			allocation.mu.Unlock()
 		}
@@ -338,11 +372,18 @@ func (s *Server) Reconcile(ctx context.Context) {
 				continue
 			}
 			for _, observed := range node.observedAllocations {
-				if !desired[observationKey{nodeID: node.ID, allocation: observed.ID, generation: observed.Generation}] {
-					actions = append(actions, Action{Type: ActionStopObserved, Node: node, ID: observed.ID, Generation: observed.Generation})
+				key := observationKey{nodeID: node.ID, allocation: observed.ID, generation: observed.Generation}
+				if desired[key] {
+					continue
 				}
+				if original := lost[key]; original != nil && observed.Phase == lifecycle.PhaseRunning {
+					retained = append(retained, &retainedOriginal{allocation: original, node: node})
+					continue
+				}
+				actions = append(actions, Action{Type: ActionStopObserved, Node: node, ID: observed.ID, Generation: observed.Generation})
 			}
 		}
+		sortRetainedOriginals(retained)
 	}
 	valid := make([]*Allocation, 0, len(allocations))
 	for _, allocation := range allocations {
@@ -519,6 +560,26 @@ func (s *Server) Reconcile(ctx context.Context) {
 				actions = append(actions, Action{Type: ActionStop, Allocation: current[len(current)-1]})
 				current = current[:len(current)-1]
 			}
+			// Keep a lost original's container running while the group has
+			// fewer running replacements than it needs, unless it holds a host
+			// port an already placed allocation on its node needs.
+			missing := group.Count
+			for _, alloc := range current {
+				if alloc.Phase == lifecycle.PhaseRunning {
+					missing--
+				}
+			}
+			for _, original := range retained {
+				if original.released || original.kept || !original.inGroup(namespace, jobName, group.Name) {
+					continue
+				}
+				if missing > 0 && (original.allocation.JobRevision == job.Revision || updateStrategy(job, group.Name) == spec.UpdateRolling) && !original.blocksPlacedAllocation(occupied) {
+					original.kept = true
+					missing--
+					continue
+				}
+				retainedStops = append(retainedStops, original.release())
+			}
 			if len(draining) > 0 {
 				healthyNew := 0
 				for _, alloc := range current {
@@ -569,7 +630,10 @@ func (s *Server) Reconcile(ctx context.Context) {
 				continue
 			}
 			requiredCapabilities := spec.GroupRequiredCapabilities(&group)
-			placements := Schedule(&PlacementIntent{Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Count: deficit, Nodes: s.nodePointers(), Allocations: occupied, DesiredAllocations: valid, Tasks: group.Tasks, Constraints: group.Constraints, RequiredCapabilities: requiredCapabilities, VolumeOwners: volumeOwners})
+			placements, released := scheduleAroundRetained(PlacementIntent{Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Count: deficit, Nodes: s.nodePointers(), Allocations: occupied, DesiredAllocations: valid, Tasks: group.Tasks, Constraints: group.Constraints, RequiredCapabilities: requiredCapabilities, VolumeOwners: volumeOwners}, retained)
+			for _, original := range released {
+				retainedStops = append(retainedStops, original.stopAction())
+			}
 			for i, placement := range placements {
 				for _, claim := range placement.VolumeClaims {
 					volumeOwners[volumeRegistrationKey(claim.Namespace, claim.Name)] = claim.NodeID
@@ -605,6 +669,12 @@ func (s *Server) Reconcile(ctx context.Context) {
 			}
 		}
 	}
+	for _, original := range retained {
+		if !original.kept && !original.released {
+			retainedStops = append(retainedStops, original.release())
+		}
+	}
+	actions = append(retainedStops, actions...)
 	pruned := planTerminalPruning(policy.RetainTerminal, allocations, s.nodes, plannedUpdates)
 	prunedSet := make(map[*Allocation]bool, len(pruned))
 	for _, allocation := range pruned {
