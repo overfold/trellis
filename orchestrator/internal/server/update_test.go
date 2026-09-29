@@ -59,9 +59,7 @@ func TestReconcileDoesNotCreateAllocationsForInvalidJob(t *testing.T) {
 	limits.MaxTaskGroupsPerJob = 1
 	limits.MaxTasksPerTaskGroup = 1
 	limits.MaxDesiredAllocations = 1
-	if err := s.SetJobLimits(limits); err != nil {
-		t.Fatal(err)
-	}
+	s.jobLimits = limits
 	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
 	s.nodes[node.ID] = node
 	s.jobs[jobKey("default", "oversized")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "oversized", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 2, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}, Revision: 1}
@@ -137,9 +135,7 @@ func TestNamespaceDesiredAllocationLimitIncludesOtherJobs(t *testing.T) {
 	defer agent.server.Close()
 	limits := spec.DefaultLimits()
 	limits.MaxDesiredAllocationsPerNamespace = 2
-	if err := s.SetJobLimits(limits); err != nil {
-		t.Fatal(err)
-	}
+	s.jobLimits = limits
 	s.jobs[jobKey("default", "first")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "first", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 2, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}}}
 	candidate := &spec.JobSpec{Namespace: "default", Name: "second", TaskGroups: []spec.TaskGroupSpec{{Name: "worker", Count: 1, Tasks: []spec.TaskSpec{{Name: "worker", Image: "worker"}}}}}
 	if err := s.CanonicalizeJob(candidate); err != nil {
@@ -155,9 +151,7 @@ func TestReconcileEnforcesNamespaceDesiredAllocationLimit(t *testing.T) {
 	defer agent.server.Close()
 	limits := spec.DefaultLimits()
 	limits.MaxDesiredAllocationsPerNamespace = 2
-	if err := s.SetJobLimits(limits); err != nil {
-		t.Fatal(err)
-	}
+	s.jobLimits = limits
 	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
 	s.nodes[node.ID] = node
 	for _, name := range []string{"first", "second", "third"} {
