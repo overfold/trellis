@@ -18,6 +18,7 @@ func TestLoadConfigPreservesTLSFlags(t *testing.T) {
 	t.Cleanup(func() { config = previousConfig })
 
 	t.Setenv("TRELLIS_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv("TRELLIS_CA_CERT", "environment-inline-ca")
 	config = CLIConfig{}
 	root := testRootCommand()
 	flags := root.PersistentFlags()
@@ -35,6 +36,9 @@ func TestLoadConfigPreservesTLSFlags(t *testing.T) {
 	}
 	if config.CACert != "cluster-ca.pem" {
 		t.Fatalf("CA certificate flag was not preserved: got %q", config.CACert)
+	}
+	if config.CACertPEM != "" {
+		t.Fatalf("explicit CA certificate path did not override inline environment CA: got %q", config.CACertPEM)
 	}
 	if config.Cert != "client.pem" {
 		t.Fatalf("client certificate flag was not preserved: got %q", config.Cert)
@@ -113,6 +117,23 @@ contexts:
 	}
 	if config.CACertPEM != "prod-ca" {
 		t.Fatalf("CA = %q", config.CACertPEM)
+	}
+}
+
+func TestLoadConfigTreatsEnvironmentCACertAsInlinePEM(t *testing.T) {
+	previousConfig := config
+	t.Cleanup(func() { config = previousConfig })
+
+	t.Setenv("TRELLIS_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv("TRELLIS_CA_CERT", "inline-ca-pem")
+	config = CLIConfig{}
+	root := testRootCommand()
+
+	if err := loadConfig(root); err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if config.CACert != "" || config.CACertPEM != "inline-ca-pem" {
+		t.Fatalf("CA path = %q, inline CA = %q", config.CACert, config.CACertPEM)
 	}
 }
 

@@ -5,11 +5,12 @@ set -eu
 : "${TRELLIS_NAMESPACE:?api_access must inject TRELLIS_NAMESPACE}"
 
 case "$TRELLIS_ADDR" in
-  http://*|https://*) api_url=${TRELLIS_ADDR%/} ;;
+  https://*) api_url=${TRELLIS_ADDR%/} ;;
+  http://*) echo "refusing to send TRELLIS_TOKEN over plaintext HTTP" >&2; exit 1 ;;
   *) api_url="https://${TRELLIS_ADDR%/}" ;;
 esac
 
-set -- --fail --silent --show-error \
+set -- --fail --silent --show-error --connect-timeout 5 --max-time 15 \
   -H "Authorization: Bearer $TRELLIS_TOKEN" \
   -H "X-Trellis-Namespace: $TRELLIS_NAMESPACE"
 

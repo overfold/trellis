@@ -95,15 +95,16 @@ First-party clients treat a server address without an explicit scheme as HTTPS. 
 
 ```sh
 case "$TRELLIS_ADDR" in
-  http://*|https://*) api_url=${TRELLIS_ADDR%/} ;;
+  https://*) api_url=${TRELLIS_ADDR%/} ;;
+  http://*) echo "refusing to send TRELLIS_TOKEN over plaintext HTTP" >&2; exit 1 ;;
   *) api_url="https://${TRELLIS_ADDR%/}" ;;
 esac
 
 printf '%s\n' "$TRELLIS_CA_CERT" > /tmp/trellis-ca.pem
-curl -fsS --cacert /tmp/trellis-ca.pem \
+curl -fsS --connect-timeout 5 --max-time 15 --cacert /tmp/trellis-ca.pem \
   -H "Authorization: Bearer $TRELLIS_TOKEN" \
   -H "X-Trellis-Namespace: $TRELLIS_NAMESPACE" \
   "$api_url/v1/auth/whoami"
 ```
 
-For deployments that deliberately use `http://`, omit `--cacert`. See [`examples/api-access/`](../../examples/api-access/) for an in-allocation namespace-scoped helper that handles both cases.
+Never send a workload bearer credential over plaintext HTTP. See [`examples/api-access/`](../../examples/api-access/) for an in-allocation namespace-scoped helper with the same TLS and timeout behavior.

@@ -217,7 +217,8 @@ func loadConfig(cmd *cobra.Command) error {
 		merged.Namespace = value
 	}
 	if value, ok := os.LookupEnv("TRELLIS_CA_CERT"); ok {
-		merged.CACert = value
+		merged.CACert = ""
+		merged.CACertPEM = value
 	}
 	if value, ok := os.LookupEnv("TRELLIS_CERT"); ok {
 		merged.Cert = value
@@ -241,6 +242,7 @@ func loadConfig(cmd *cobra.Command) error {
 	}
 	if flags.Changed("ca-cert") {
 		merged.CACert = flagConfig.CACert
+		merged.CACertPEM = ""
 	}
 	if flags.Changed("cert") {
 		merged.Cert = flagConfig.Cert

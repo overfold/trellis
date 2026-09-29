@@ -38,7 +38,7 @@ Tests beside each package document state-machine invariants, Raft persistence, s
 
 ## Three-node Vagrant demo
 
-[`orchestrator/Vagrantfile`](../../orchestrator/Vagrantfile) provides a real three-node local demo cluster for development and for the multi-node public learning-path examples. It currently targets Hyper-V and uses Vagrant hostmanager integration. With those host prerequisites configured:
+[`orchestrator/Vagrantfile`](../../orchestrator/Vagrantfile) provides a real three-node local demo cluster for development and for the multi-node public learning-path examples. It uses Vagrant's provider-independent private-network abstraction and guest mDNS rather than hostmanager or provider-specific addressing. With a compatible Vagrant provider configured:
 
 ```sh
 cd orchestrator

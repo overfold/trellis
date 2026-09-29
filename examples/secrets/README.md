@@ -11,8 +11,7 @@ Every server must use the same separately managed secrets encryption key and key
 Create the namespace-scoped values before applying the job:
 
 ```sh
-printf %s 'token-value' | \
-  trellisctl --namespace default secrets set api-token --stdin
+openssl rand -base64 32 | trellisctl --namespace default secrets set api-token --stdin
 trellisctl --namespace default secrets set tls-key --file ./server.key
 trellisctl jobs apply --check --file examples/secrets/trellis.yaml
 trellisctl jobs apply --file examples/secrets/trellis.yaml --wait
@@ -35,7 +34,7 @@ Secret APIs and the dashboard return name, version, update time, and key ID—no
 Use the current metadata version as a compare-and-swap guard:
 
 ```sh
-printf %s 'replacement' | trellisctl --namespace default secrets set api-token \
+openssl rand -base64 32 | trellisctl --namespace default secrets set api-token \
   --stdin --expected-version 1
 ```
 

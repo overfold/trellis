@@ -99,7 +99,7 @@ You have now completed the full workload lifecycle: install → connect → depl
 
 ## Optional: dashboard
 
-If you installed the dashboard through **Customize** or with `--with-dashboard`, open `http://NODE_ADDRESS:3000`. The default dashboard mode uses a real `cluster/read` credential, not the administrator token. Choosing read/write access (or using `--dashboard-write`) instead uses `cluster/write` and enables mutation controls. In either mode the dashboard stays close to `trellisctl`: it edits the same YAML, asks the control plane for the same semantic plan, and exposes Trellis resources rather than adding application-platform abstractions.
+If you installed the dashboard through **Customize** or with `--with-dashboard`, open `http://NODE_ADDRESS:3000` only from the trusted node network used for initial evaluation. The installer does not terminate dashboard TLS; before exposing it beyond that network, place it behind HTTPS and an identity-aware proxy as described in the [dashboard guide](dashboard.md#production). The default dashboard mode uses a real `cluster/read` credential, not the administrator token. Choosing read/write access (or using `--dashboard-write`) instead uses `cluster/write` and enables mutation controls. In either mode the dashboard stays close to `trellisctl`: it edits the same YAML, asks the control plane for the same semantic plan, and exposes Trellis resources rather than adding application-platform abstractions.
 
 ## Troubleshooting
 

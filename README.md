@@ -6,40 +6,9 @@ Every project that ships software ends up rebuilding the same infrastructure: wo
 
 Every machine runs the same `trellis` daemon. Raft consensus elects one node to serve the control-plane API and reconcile jobs, while every node continues to run allocations and participate in the next election.
 
-## Quick start
+## Get started
 
-The setup script downloads the latest release binaries, configures a systemd service, and creates a single-node cluster. It supports Linux x64 and requires root access. The normal plan auto-detects the node address, installs containerd when it is missing, and makes namespace networking and gVisor available out of the box. The dashboard remains disabled by default because it exposes an additional service and credential.
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/setup.sh | sudo bash
-```
-
-The installer shows the complete plan before changing the machine. Press Enter to use it, or choose **Customize** to change cluster mode, node address, namespace networking, gVisor, or dashboard access without hunting for command-line flags.
-
-Or clone the repository and run the script directly:
-
-```sh
-git clone https://github.com/overfold/trellis.git
-sudo ./trellis/scripts/setup.sh
-```
-
-The same choices remain available as flags for automation. For example, a deliberately minimal host can opt out of the default networking and sandboxing dependencies:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/setup.sh | \
-  sudo bash -s -- --without-networking --without-gvisor
-```
-
-Use `--join HOST:8128` to add a machine to an existing cluster. Managed enrollment uses a pinned copy of the cluster node CA plus a dedicated enrollment credential; administrator access and the shared secrets-encryption key remain separate. See [Multi-node clusters](docs/public/multi-node.md) for cluster sizing and the managed and external-signing workflows.
-
-Upgrade and removal use the same lifecycle tooling without requiring a repository clone:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/upgrade.sh | sudo bash
-curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/uninstall.sh | sudo bash
-```
-
-See the [getting-started guide](docs/public/getting-started.md) for a walkthrough of deploying your first workload.
+Follow [Getting Started](docs/public/getting-started.md) for the single authoritative installation and first-workload walkthrough. It covers the interactive installer, automation flags, CLI connection, and the complete apply/inspect/update/log/delete lifecycle. Grow an installed node into a cluster with [Multi-node clusters](docs/public/multi-node.md), and use [Operations](docs/public/operations.md) for upgrades and removal.
 
 ## User model
 

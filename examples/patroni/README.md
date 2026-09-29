@@ -11,7 +11,7 @@ This directory demonstrates how Trellis can place and monitor three Patroni/Post
 - A distinct namespace-scoped volume identity for every PostgreSQL member (`postgres-data-1`, `postgres-data-2`, and `postgres-data-3`).
 - Task-level namespace WireGuard networking with the `runsc` runtime for additional syscall-level sandboxing.
 - PostgreSQL and Patroni REST listeners inside each namespace-networked task, plus a script `/health` probe.
-- Namespace-scoped Trellis API access for optional endpoint discovery.
+- An optional endpoint-discovery helper that a separate, trusted namespace/read controller can use.
 - Environment-delivered superuser and replication credentials.
 
 The separate task groups and volume names are deliberate. A Trellis volume name is a namespace-scoped locality identity: every allocation using the same `(namespace, name)` is scheduled to the node that owns that registration. Reusing one volume name for all three Patroni members would therefore colocate them instead of giving them independent local disks.
@@ -20,17 +20,30 @@ The separate task groups and volume names are deliberate. A Trellis volume name 
 
 ### 1. Prepare three nodes
 
-Label one intended database node for each member:
+Label one intended database node for each member by adding the corresponding entry to that node's `/etc/trellis/trellis.yaml`, preserving any existing labels:
+
+On node 1:
+
+```yaml
+labels: [patroni-member=1]
+```
+
+On node 2:
+
+```yaml
+labels: [patroni-member=2]
+```
+
+On node 3:
+
+```yaml
+labels: [patroni-member=3]
+```
+
+Restart Trellis on each node after changing its configuration:
 
 ```sh
-# Node 1
-sudo trellis --bootstrap-token "$TRELLIS_TOKEN" --label patroni-member=1
-
-# Node 2
-sudo trellis --bootstrap-token "$TRELLIS_TOKEN" --label patroni-member=2
-
-# Node 3
-sudo trellis --bootstrap-token "$TRELLIS_TOKEN" --label patroni-member=3
+sudo systemctl restart trellis
 ```
 
 The manifest uses `@/patroni/member-N`, so each node creates its PostgreSQL directory below Trellis's volume root for the `database` namespace when that member is first realized. Each logical volume then remains registered to that node. Back up the three data directories independently; the matching `@/` paths do not imply replication between nodes.
@@ -41,7 +54,7 @@ If you instead use explicit absolute `host_path` values, prepare those directori
 
 The manifest gives each member a distinct static `PATRONI_NAME`, but it still omits the real DCS configuration required by Patroni. Configure Patroni for etcd, Consul, or another Patroni-supported DCS with quorum and TLS appropriate to your environment.
 
-`discover-members.sh` queries Trellis allocations labeled `service:patroni`; it can help a controller find endpoints, but the Trellis catalog is eventually reconciled service discovery—not Patroni's consensus DCS. Never use the catalog alone to decide which PostgreSQL member may accept writes.
+`discover-members.sh` queries Trellis allocations labeled `service:patroni`; it can help a separate controller find endpoints, but the database tasks do not need or receive API credentials themselves. A controller using the helper should request `namespace/read` access in its own task group. The Trellis catalog is eventually reconciled service discovery—not Patroni's consensus DCS. Never use the catalog alone to decide which PostgreSQL member may accept writes.
 
 ### 3. Create credentials
 

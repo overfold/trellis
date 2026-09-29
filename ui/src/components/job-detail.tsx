@@ -121,10 +121,10 @@ export function JobDetail({
             <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Revision {job.revision}</p>
             <h2 className="mt-1 text-base font-semibold text-foreground">
               {state === "ready"
-                ? "Deployment is ready"
+                ? "Job revision is ready"
                 : state === "degraded"
-                  ? "Deployment needs attention"
-                  : "Deployment is converging"}
+                  ? "Job revision needs attention"
+                  : "Job revision is converging"}
             </h2>
             <p className="mt-1 text-sm text-muted-foreground">{jobStateDescription(job)}</p>
           </div>

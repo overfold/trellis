@@ -55,7 +55,7 @@ COPY --chmod=0755 list-jobs.sh /usr/local/bin/list-jobs
 ENTRYPOINT ["/usr/local/bin/list-jobs"]
 ```
 
-Build and push that image, then replace the manifest's image. The helper validates the injected address, token, and namespace, sends Bearer authentication and `X-Trellis-Namespace`, treats an address without an explicit scheme as HTTPS, and uses `TRELLIS_CA_CERT` as a curl trust root when TLS is configured.
+Build and push that image, then replace the manifest's image. The helper validates the injected address, token, and namespace, sends Bearer authentication and `X-Trellis-Namespace`, treats an address without an explicit scheme as HTTPS, refuses plaintext HTTP, applies connection and overall request deadlines, and uses `TRELLIS_CA_CERT` as a curl trust root when TLS is configured.
 
 ## Deploy and verify
 

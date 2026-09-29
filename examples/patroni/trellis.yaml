@@ -4,9 +4,6 @@ task_groups:
   - name: postgres-1
     count: 1
     runtime: runsc
-    api_access:
-      scope: namespace
-      access: read
     labels:
       service: patroni
       role: database
@@ -52,9 +49,6 @@ task_groups:
   - name: postgres-2
     count: 1
     runtime: runsc
-    api_access:
-      scope: namespace
-      access: read
     labels:
       service: patroni
       role: database
@@ -100,9 +94,6 @@ task_groups:
   - name: postgres-3
     count: 1
     runtime: runsc
-    api_access:
-      scope: namespace
-      access: read
     labels:
       service: patroni
       role: database

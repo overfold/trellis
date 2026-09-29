@@ -6,6 +6,8 @@ This directory compares three release patterns. Trellis implements `recreate` an
 
 Every manifest in this directory uses host networking and reserves port 80. Trellis does not translate host ports, so every simultaneously running allocation needs a distinct node where port 80 is free. These examples are therefore intentionally capacity-expensive: they make the overlap required by each release pattern visible instead of hiding it behind a networking abstraction.
 
+The fixtures use explicit nginx version tags so the release changes remain readable. Tags can still be repointed; replace them with qualified image digests before adapting these patterns to production.
+
 ## Rolling update
 
 `rolling.yaml` runs three replicas with a readiness check and `max_parallel: 1`.
@@ -55,7 +57,7 @@ Weights apply to individual discovered allocations. Four stable replicas at weig
 
 ## Requirements common to all strategies
 
-- Pin deployable images to immutable versions or digests; mutable tags make rollback ambiguous.
+- Pin production images to immutable digests; mutable tags make rollback ambiguous.
 - Use a readiness check that proves the process can serve real requests, not merely that its port opened.
 - Budget node/port capacity for every allocation that must coexist during a release.
 - Keep the proxy's discovery token private and namespace scoped.

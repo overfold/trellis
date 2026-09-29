@@ -46,4 +46,4 @@ trellisctl jobs logs sidecar-demo --task metrics-sidecar
 
 Sidecars work well for local proxies, metrics exporters, and tightly coupled agents. Give each task explicit resources and pin image versions. Do not use a sidecar merely to colocate unrelated services: a group scales, updates, drains, and fails as one unit. If the helper must discover many replicas rather than only its local application, use the API-access/controller pattern instead.
 
-[Examples index](../README.md) · [Next: Networking and discovery](../../docs/public/learning-path.md#6-namespace-networking-and-discovery)
+[Examples index](../README.md) · [Next: Networking and discovery](../../docs/public/learning-path.md#8-namespace-networking-and-discovery)

@@ -20,8 +20,7 @@ tasks:
     networking:
       mode: host
       ports:
-        - host_port: 8080
-          container_port: 8080
+        - port: 8080
     health_check:
       type: http
       port: 8080
@@ -30,7 +29,7 @@ tasks:
 
 Host networking is intentionally literal: Trellis reserves port 8080 on the selected node, and the application itself must listen on 8080. There is no built-in NAT or host-to-container port translation. Replicas that reserve the same port therefore need different nodes, and rolling updates need additional compatible nodes while old and new allocations overlap.
 
-Run a trusted controller with `api_access: namespace`. It should query allocations by label, include only healthy endpoints, render or update the upstream set, and preserve its last known-good routing state through temporary control-plane failures. Namespace mode grants access only to the controller job's own namespace, which is sufficient for a namespace-local ingress controller. The bundled `trellis-proxy-sync` implements this polling pattern. When an allocation exposes more than one port, select the intended application port explicitly with `-container-port` rather than depending on mapping order.
+Run a trusted controller with `api_access` set to `scope: namespace` and the narrowest required `access` level. It should query allocations by label, include only healthy endpoints, render or update the upstream set, and preserve its last known-good routing state through temporary control-plane failures. Namespace scope grants access only to the controller job's own namespace, which is sufficient for a namespace-local ingress controller. The bundled `trellis-proxy-sync` implements this polling pattern. When an allocation exposes more than one port, select the intended application port explicitly with `-container-port` rather than depending on mapping order.
 
 Give `trellis-proxy-sync` write access to the output config's parent directory, even when the config file already exists and is writable. It writes a temporary file there and renames it over the config so the proxy never reads a partial update. The output must be a regular file (or a symlink to one); missing files are created with mode `0644`, subject to the process umask and parent directory's default ACL. For an existing config, the synchronizer preserves its owner, group, mode, ACLs, and security labels; its process must be permitted to set that metadata.
 
@@ -40,14 +39,14 @@ Keep the public listener itself stable: place it deliberately or put an external
 
 **Outcome:** let services communicate across nodes without exposing their application ports on the node network.
 
-Use `networking.mode: wireguard` for tasks that should join the namespace's private mesh:
+Use `networking.mode: namespace` for tasks that should join the namespace's private mesh:
 
 ```yaml
 tasks:
   - name: api
     image: registry.example.com/api:v1
     networking:
-      mode: wireguard
+      mode: namespace
 ```
 
 Optionally add `runtime: runsc` at the task-group level for additional syscall-level sandboxing.
@@ -252,14 +251,22 @@ A scaled task group repeats the same volume identities in every replica, so shar
 
 **Outcome:** allow an in-cluster controller to inspect and reconcile resources in the namespace that contains the controller job.
 
-Set `api_access: namespace` on the controller's task group. Namespace mode cannot name or select some other namespace: Trellis creates a persistent bearer token restricted to the **job's own namespace**. It injects:
+Request namespace-scoped access on the controller's task group:
+
+```yaml
+api_access:
+  scope: namespace
+  access: read
+```
+
+Namespace scope cannot name or select some other namespace: Trellis creates a persistent bearer token restricted to the **job's own namespace**. It injects:
 
 - `TRELLIS_ADDR` — workload-reachable control-plane address;
 - `TRELLIS_TOKEN` — bearer token restricted to the job namespace;
 - `TRELLIS_NAMESPACE` — that same job namespace, for request scoping;
 - `TRELLIS_CA_CERT` — cluster CA PEM when TLS is configured.
 
-Use a namespace-aware client and verify TLS with the injected CA. Treat an address without an explicit scheme as HTTPS, matching first-party Trellis client behavior. Raw HTTP clients should send both Bearer authentication and `X-Trellis-Namespace`.
+Use a namespace-aware client and verify TLS with the injected CA. Treat an address without an explicit scheme as HTTPS, matching first-party Trellis client behavior. Requests send both Bearer authentication and `X-Trellis-Namespace`; never send the workload credential over plaintext HTTP.
 
 Every task in the group receives the injected environment, so use only reviewed images in an API-enabled group. Controllers should set request deadlines, retry transient failures with backoff, tolerate resources changing between reads, avoid leaking credentials into logs or metrics, and preserve useful last-known-good state through temporary API outages.
 
@@ -269,7 +276,7 @@ Prefer this mode for proxies, discovery controllers, and automation that does no
 
 **Outcome:** let a workload perform ordinary cluster-wide or cross-namespace operations that a namespace controller cannot perform.
 
-Set `api_access: cluster` only on a fully trusted task group. Trellis injects a scoped cluster API token in `TRELLIS_TOKEN`, never the administrator or enrollment credential. It also sets `TRELLIS_NAMESPACE` to the job's namespace as a conservative default for clients that automatically send a namespace header, but that value is **not** an authorization boundary for a cluster-scoped token.
+Set `api_access.scope: cluster` with the required `read` or `write` access only on a fully trusted task group. Trellis injects a scoped cluster API token in `TRELLIS_TOKEN`, never the administrator or enrollment credential. It also sets `TRELLIS_NAMESPACE` to the job's namespace as a conservative default for clients that automatically send a namespace header, but that value is **not** an authorization boundary for a cluster-scoped token.
 
 Cluster mode is appropriate for an operator workload that genuinely needs ordinary cross-namespace reads or writes. It does not grant credential minting, backup/restore, node enrollment, or Raft administration; those remain administrator, enrollment, or node-identity operations. It is not a shortcut for giving an ordinary application access to another namespace.
 
@@ -279,7 +286,7 @@ Treat compromise of any task in the group as compromise of the cluster credentia
 
 **Outcome:** evolve a database schema without downtime or data loss, regardless of whether the workload uses rolling, blue/green, or canary deployment.
 
-Database migrations are a deployment concern, not a container lifecycle concern. In any deployment strategy old and new application code run simultaneously against the same database, so the schema must be compatible with both versions at all times.
+Database migrations are a deployment concern, not a container lifecycle concern. Rolling, blue/green, and canary releases run old and new application code simultaneously against the same database, so the schema must remain compatible with both versions during their overlap. The default `recreate` strategy stops old allocations first, but backwards-compatible migrations still make rollback and mixed external clients safer.
 
 ### Development and single-instance environments
 

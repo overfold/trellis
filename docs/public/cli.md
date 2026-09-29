@@ -232,7 +232,7 @@ trellisctl jobs delete web --wait --timeout 2m
 trellisctl nodes status worker-2
 ```
 
-`nodes status` shows the full ID, scheduling state, version, CPU/memory capacity, last heartbeat, labels, and locally known volume registrations. The Raft-backed registration is authoritative for placement; the node view is useful for confirming what backing volumes the node itself has recorded. Add `--output json` when automation needs the API representation.
+`nodes status` shows the full ID, scheduling state, version, CPU/memory capacity, last heartbeat, labels, and locally known volume registration identities. The Raft-backed registration is authoritative for placement; this view does not expose backing paths. Add `--output json` when automation needs the API representation.
 
 Node references for status, drain, undrain, and remove may be any of:
 
@@ -277,6 +277,6 @@ trellisctl nodes status worker-2 -o json
 
 `jobs logs` remains a log byte stream and `exec` remains a command/terminal stream, while `jobs apply`, `jobs status --watch`, `jobs delete`, `jobs reset-backoff`, node mutation commands, backup operations, and context mutation commands remain human/action workflows rather than pretending to produce a stable JSON document.
 
-Explicit `--server-addr`, `--token`, `--namespace`, TLS flags, and `TRELLIS_*` environment variables override saved context values. Named contexts are therefore an interactive convenience, not a hidden requirement for automation.
+Explicit `--server-addr`, `--token`, `--namespace`, TLS flags, and `TRELLIS_*` environment variables override saved context values. `TRELLIS_CA_CERT` contains inline PEM, matching workload API injection; `--ca-cert` accepts a PEM file path. Named contexts are therefore an interactive convenience, not a hidden requirement for automation.
 
 [Documentation index](../README.md) · [Previous: Job manifest reference](job-specification.md) · [Next: Operations](operations.md)

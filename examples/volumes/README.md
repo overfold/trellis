@@ -17,13 +17,16 @@ The group requires node label `storage=fast` because the explicit `/srv/trellis/
 
 ## Prepare a node
 
-Create and secure the explicit path, then start the node normally:
+Create and secure the explicit path. Add the placement label to that node's durable `/etc/trellis/trellis.yaml` configuration, preserving any existing labels, then restart the service:
+
+```yaml
+labels:
+  - storage=fast
+```
 
 ```sh
 sudo install -d -m 0750 /srv/trellis/app-data
-sudo trellis \
-  --bootstrap-token "$TRELLIS_TOKEN" \
-  --label storage=fast
+sudo systemctl restart trellis
 ```
 
 There is no volume-registration flag or node-side volume map. Registration happens when the allocation is first realized. Ensure explicit host paths have ownership compatible with the UID/GID used by the container image.
