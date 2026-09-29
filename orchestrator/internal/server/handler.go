@@ -176,6 +176,8 @@ func (h *Handler) Register(e *echo.Echo) {
 	v1.POST("/raft/join", h.handleRaftJoin)
 	v1.DELETE("/raft/members/:id", h.handleRaftMemberRemove)
 	v1.POST("/raft/leadership-transfer", h.handleRaftLeadershipTransfer)
+	v1.GET("/cluster/settings", h.handleGetClusterSettings)
+	v1.PUT("/cluster/settings/job-limits", h.handleUpdateJobLimits)
 	v1.GET("/backup", h.handleBackupCreate)
 	v1.POST("/backup/restore", h.handleBackupRestore)
 	v1.PUT("/namespaces/:namespace/secrets/:name", h.handleSetSecret)
@@ -213,6 +215,35 @@ func (h *Handler) handleCreateCredential(c *echo.Context) error {
 	}
 	c.Response().Header().Set("Cache-Control", "no-store")
 	return c.JSON(http.StatusCreated, api.CredentialCreateResponse{Token: token})
+}
+
+func (h *Handler) handleGetClusterSettings(c *echo.Context) error {
+	if err := requireClusterRead(c, "cluster settings require cluster/read authorization"); err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, h.server.ClusterSettings().API())
+}
+
+func (h *Handler) handleUpdateJobLimits(c *echo.Context) error {
+	if err := requireRoot(c, "changing cluster settings requires the administrator credential"); err != nil {
+		return err
+	}
+	var limits spec.Limits
+	decoder := json.NewDecoder(http.MaxBytesReader(c.Response(), c.Request().Body, 64<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&limits); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid job limits")
+	}
+	settings, err := h.server.UpdateJobLimits(c.Request().Context(), limits)
+	switch {
+	case errors.Is(err, ErrInvalidClusterSettings):
+		return echo.NewHTTPError(http.StatusUnprocessableEntity, err.Error())
+	case errors.Is(err, ErrClusterSettingsConflict):
+		return echo.NewHTTPError(http.StatusConflict, err.Error())
+	case err != nil:
+		return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error())
+	}
+	return c.JSON(http.StatusOK, settings.API())
 }
 
 func (h *Handler) handleBackupCreate(c *echo.Context) error {

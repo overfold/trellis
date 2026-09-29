@@ -97,9 +97,34 @@ not alter authorization: namespace-scoped streams continue to receive only
 events for their authenticated namespace. Clients should reconnect with
 backoff after overload or a leader change.
 
+## Cluster settings
+
+Job limits and namespace-network settings are cluster-wide semantics, so they live in the replicated cluster record rather than in each node's configuration; every leader applies the same values. The node that creates the cluster supplies their initial values from its configuration.
+
+`GET /v1/cluster/settings` requires cluster-scoped read access (or the administrator credential) and returns:
+
+```json
+{
+  "job_limits": {
+    "max_replicas_per_task_group": 500,
+    "max_task_groups_per_job": 64,
+    "max_tasks_per_task_group": 32,
+    "max_desired_allocations": 1000,
+    "max_desired_allocations_per_namespace": 10000,
+    "default_task_cpu": 100,
+    "default_task_memory": 134217728,
+    "max_task_cpu": 1000000,
+    "max_task_memory": 1099511627776
+  },
+  "network": {"wireguard_pool": "10.64.0.0/10", "wireguard_port_count": 256}
+}
+```
+
+Memory values are byte counts. `PUT /v1/cluster/settings/job-limits` requires an administrator-signed request and replaces the complete `job_limits` object (unknown fields are rejected with `400`). It returns the updated settings, `422` when the limits are invalid (every value positive, defaults no larger than their maximums), and `409` when the new limits would stop admitting a job that is currently desired, naming the jobs; shrink or delete those jobs first. A job apply that races the change is checked against the limits current when it commits. The `network` settings are fixed when the cluster is created, because every namespace subnet and WireGuard port slot is derived from them; the leader rejects node registrations whose WireGuard port count differs from `wireguard_port_count`.
+
 ## Administrator, enrollment, and cluster-internal endpoints
 
-`POST /v1/credentials`, `GET /v1/backup`, `POST /v1/backup/restore`, `DELETE /v1/raft/members/{id}`, and `POST /v1/raft/leadership-transfer` require an administrator-signed request. Removing a voter first promotes a healthy caught-up non-voter when one exists, and returns `409` without changing membership if the remaining voters could not form a quorum from reachable members. Removing an absent member succeeds. Leadership transfer only targets voters. The operator keeps the Ed25519 private key; replicated cluster state contains only its PKIX public key.
+`POST /v1/credentials`, `PUT /v1/cluster/settings/job-limits`, `GET /v1/backup`, `POST /v1/backup/restore`, `DELETE /v1/raft/members/{id}`, and `POST /v1/raft/leadership-transfer` require an administrator-signed request. Removing a voter first promotes a healthy caught-up non-voter when one exists, and returns `409` without changing membership if the remaining voters could not form a quorum from reachable members. Removing an absent member succeeds. Leadership transfer only targets voters. The operator keeps the Ed25519 private key; replicated cluster state contains only its PKIX public key.
 
 To sign a request, first `POST /v1/auth/administrator/challenge`. The leader returns a short-lived one-time `challenge`. Sign these newline-separated fields as UTF-8 bytes: `trellis-admin-request-v1`, challenge, uppercase HTTP method, exact path and query (`RequestURI`), and lowercase hexadecimal SHA-256 of the transmitted body. Send the challenge in `X-Trellis-Admin-Challenge` and the unpadded base64url Ed25519 signature in `X-Trellis-Admin-Signature`. The leader consumes a challenge on its first verification attempt. Challenges are leader-local and bound to the control epoch; clients receiving `X-Trellis-Admin-Challenge-Status: invalid` must obtain a fresh challenge and retry. `trellisctl` does this automatically.
 

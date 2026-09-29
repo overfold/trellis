@@ -83,6 +83,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(NewExecCmd())
 	root.AddCommand(NewNamespacesCmd())
 	root.AddCommand(NewNodesCmd())
+	root.AddCommand(NewClusterCmd())
 	root.AddCommand(NewSecretsCmd())
 	root.AddCommand(NewBackupCmd())
 	root.AddCommand(NewCredentialsCmd())
@@ -97,6 +98,7 @@ var structuredOutputCommands = [][]string{
 	{"namespaces", "list"},
 	{"nodes", "list"},
 	{"nodes", "status"},
+	{"cluster", "settings"},
 	{"secrets", "set"},
 	{"secrets", "list"},
 	{"secrets", "describe"},

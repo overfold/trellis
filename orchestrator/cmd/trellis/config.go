@@ -114,6 +114,9 @@ func loadNodeConfig(path string, cfg *config, flags *pflag.FlagSet) error {
 	if parsed.WireGuardPortCount != nil && !flags.Changed("wireguard-port-count") {
 		cfg.WireGuardPortCount = *parsed.WireGuardPortCount
 	}
+	cfg.Explicit.WireGuardPool = parsed.WireGuardPool != nil
+	cfg.Explicit.WireGuardPortCount = parsed.WireGuardPortCount != nil
+	cfg.Explicit.JobLimits = parsed.JobLimits != nil
 	if parsed.AllocationLossTimeout != nil && !flags.Changed("allocation-loss-timeout") {
 		timeout, err := time.ParseDuration(*parsed.AllocationLossTimeout)
 		if err != nil {
