@@ -6,15 +6,15 @@ import "fmt"
 // persisted or reconciled. It is deliberately absent from JobSpec so authors
 // cannot relax cluster safety bounds.
 type Limits struct {
-	MaxReplicasPerTaskGroup           int
-	MaxTaskGroupsPerJob               int
-	MaxTasksPerTaskGroup              int
-	MaxDesiredAllocations             int
-	MaxDesiredAllocationsPerNamespace int
-	DefaultTaskCPU                    int
-	DefaultTaskMemory                 ByteSize
-	MaxTaskCPU                        int
-	MaxTaskMemory                     ByteSize
+	MaxReplicasPerTaskGroup           int      `json:"max_replicas_per_task_group"`
+	MaxTaskGroupsPerJob               int      `json:"max_task_groups_per_job"`
+	MaxTasksPerTaskGroup              int      `json:"max_tasks_per_task_group"`
+	MaxDesiredAllocations             int      `json:"max_desired_allocations"`
+	MaxDesiredAllocationsPerNamespace int      `json:"max_desired_allocations_per_namespace"`
+	DefaultTaskCPU                    int      `json:"default_task_cpu"`
+	DefaultTaskMemory                 ByteSize `json:"default_task_memory"`
+	MaxTaskCPU                        int      `json:"max_task_cpu"`
+	MaxTaskMemory                     ByteSize `json:"max_task_memory"`
 }
 
 // DefaultLimits provides bounded, useful defaults for small clusters.

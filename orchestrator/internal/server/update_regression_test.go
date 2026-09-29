@@ -210,12 +210,10 @@ func TestReconcileChargesAllocationsQueuedForStop(t *testing.T) {
 		},
 		{
 			name: "namespace-unadmitted memory",
-			setup: func(t *testing.T, s *Server, node *Node, tasks []spec.TaskSpec) *Allocation {
+			setup: func(_ *testing.T, s *Server, node *Node, tasks []spec.TaskSpec) *Allocation {
 				limits := spec.DefaultLimits()
 				limits.MaxDesiredAllocationsPerNamespace = 1
-				if err := s.SetJobLimits(limits); err != nil {
-					t.Fatal(err)
-				}
+				s.jobLimits = limits
 				s.jobs[jobKey("default", "admitted")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "admitted", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: tasks}}}, Revision: 1}
 				s.jobs[jobKey("default", "unadmitted")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "unadmitted", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: tasks}}}, Revision: 1}
 				return &Allocation{ID: "obsolete", Namespace: "default", JobName: "unadmitted", TaskGroupName: "app", Tasks: tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning}

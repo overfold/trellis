@@ -252,6 +252,22 @@ trellisctl --administrator-key ./trellis-administrator.pem nodes remove 9cf13a2b
 
 Ambiguous prefixes are rejected and the CLI shows the matching nodes rather than guessing.
 
+## Inspect and change cluster settings
+
+Job limits and namespace-network settings apply to the whole cluster and are replicated with the rest of its state, so they do not change when leadership moves. Show them with:
+
+```sh
+trellisctl cluster settings
+```
+
+Change job limits with the administrator key. Only the flags you pass change; memory accepts human sizes:
+
+```sh
+trellisctl --administrator-key ./trellis-administrator.pem cluster set-job-limits --max-replicas-per-task-group 1000 --max-task-memory 2TiB
+```
+
+The leader refuses limits that would stop admitting a job that is already applied. The WireGuard pool and port count are fixed when the cluster is created.
+
 ## Structured output and automation
 
 `--output` / `-o` is deliberately **command-local**, not a global promise. Commands that can return one coherent structured result expose `--output table|json`; streaming or action-oriented commands do not expose the flag and therefore cannot silently ignore `--output json` while printing prose.
@@ -262,6 +278,7 @@ Current structured-output commands are:
 jobs list, status
 namespaces list
 nodes list, status
+cluster settings
 secrets set, list, describe
 credentials create
 ```
