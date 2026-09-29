@@ -385,7 +385,7 @@ func TestLabelOnlyRevisionSkipsDrain(t *testing.T) {
 			Tasks:  []spec.TaskSpec{{Name: "server", Image: "app:v1"}},
 		}},
 	}
-	if err := s.RegisterJob(context.Background(), "default", jobSpec); err != nil {
+	if _, err := s.RegisterJob(context.Background(), "default", jobSpec, nil); err != nil {
 		t.Fatal(err)
 	}
 	job := s.jobs[jobKey("default", "web")]
@@ -402,7 +402,7 @@ func TestLabelOnlyRevisionSkipsDrain(t *testing.T) {
 			Tasks:  []spec.TaskSpec{{Name: "server", Image: "app:v1"}},
 		}},
 	}
-	if err := s.RegisterJob(context.Background(), "default", updatedSpec); err != nil {
+	if _, err := s.RegisterJob(context.Background(), "default", updatedSpec, nil); err != nil {
 		t.Fatal(err)
 	}
 	job = s.jobs[jobKey("default", "web")]
@@ -421,7 +421,7 @@ func TestTaskChangeBumpsRevision(t *testing.T) {
 			Tasks: []spec.TaskSpec{{Name: "server", Image: "app:v1"}},
 		}},
 	}
-	if err := s.RegisterJob(context.Background(), "default", jobSpec); err != nil {
+	if _, err := s.RegisterJob(context.Background(), "default", jobSpec, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -432,7 +432,7 @@ func TestTaskChangeBumpsRevision(t *testing.T) {
 			Tasks: []spec.TaskSpec{{Name: "server", Image: "app:v2"}},
 		}},
 	}
-	if err := s.RegisterJob(context.Background(), "default", updated); err != nil {
+	if _, err := s.RegisterJob(context.Background(), "default", updated, nil); err != nil {
 		t.Fatal(err)
 	}
 	job := s.jobs[jobKey("default", "web")]
@@ -451,7 +451,7 @@ func TestCountChangeIsLabelOnly(t *testing.T) {
 			Tasks: []spec.TaskSpec{{Name: "server", Image: "app:v1"}},
 		}},
 	}
-	if err := s.RegisterJob(context.Background(), "default", jobSpec); err != nil {
+	if _, err := s.RegisterJob(context.Background(), "default", jobSpec, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -463,7 +463,7 @@ func TestCountChangeIsLabelOnly(t *testing.T) {
 			Tasks: []spec.TaskSpec{{Name: "server", Image: "app:v1"}},
 		}},
 	}
-	if err := s.RegisterJob(context.Background(), "default", updated); err != nil {
+	if _, err := s.RegisterJob(context.Background(), "default", updated, nil); err != nil {
 		t.Fatal(err)
 	}
 	job := s.jobs[jobKey("default", "web")]

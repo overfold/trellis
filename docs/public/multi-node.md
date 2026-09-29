@@ -173,7 +173,7 @@ To move control-plane leadership deliberately before maintenance, the advanced c
 
 ## Node failure
 
-A node that misses heartbeats for 30 seconds becomes unhealthy and receives no new allocations. Once it has been silent for the allocation loss timeout (`allocation_loss_timeout`, default 45 seconds), and the current leader has been leader for at least 30 seconds, its allocations become lost. Reconciliation then replaces the missing capacity on other nodes when placement remains valid.
+A node that misses heartbeats for 30 seconds becomes unhealthy and receives no new allocations. Once it has been silent for the allocation loss timeout (`allocation_loss_timeout`, default 45 seconds), and the current leader has been leader for at least 30 seconds, its allocations become lost. A newly elected leader counts that silence from the start of its leadership. Reconciliation then replaces the missing capacity on other nodes when placement remains valid.
 
 A lost allocation is not re-adopted. While its record is retained, if its node returns with the old containers still running, Trellis keeps them running until enough replacements are `running`, then stops them. If an older pruned allocation is later reported, Trellis stops it as an observed orphan. It stops them sooner if they block a replacement, such as one that needs the same host port on that node. Allocations that depend on a volume bound to the failed node stay unplaced rather than starting with an empty copy elsewhere. If that data is intentionally abandoned, use a new volume name; changing only `host_path` does not change the owning node.
 

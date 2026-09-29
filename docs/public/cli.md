@@ -107,16 +107,16 @@ The CLI parses the human-authored YAML locally, converts it to canonical JSON, a
 The plan is semantic rather than a textual YAML diff. Task groups are identified by name, so merely reordering them does not look like a deployment. Ordered fields inside a group remain positional where order participates in Trellis semantics. Example output:
 
 ```text
-Plan: update production/web from revision 7
+Plan: update production/web from version 12 (revision 7)
   ~ task_groups[frontend].tasks[0].image: "registry.example/app:v7" -> "registry.example/app:v8"
   ~ task_groups[frontend].update.max_parallel: 1 -> 2
 ```
 
-A normal `apply` also asks the server for a plan first and uses its `none` result for the no-op decision.
+A normal `apply` also asks the server for a plan first and uses its `none` result for the no-op decision. It then submits the manifest conditioned on the plan's version, so the change you reviewed is exactly the change applied. If another apply changed, created, or deleted the job in between, the command fails with a version conflict and changes nothing; run it again to review the new plan.
 
 ## Apply and observe convergence
 
-A normal apply reports whether it created a job, changed its revision, or was already up to date:
+A normal apply reports whether it created a job, advanced its version (and, for execution changes, its revision), or was already up to date. A scale-only change reports, for example, `Applied job production/web: version 12 -> 13, revision 7 unchanged.`
 
 ```sh
 trellisctl jobs apply --file trellis.yaml
