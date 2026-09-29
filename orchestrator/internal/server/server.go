@@ -254,6 +254,21 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 	snapshot.JobRevisions = retainedRevisions
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
+	// Job limits can change between validation and this point.
+	restored := make(map[string]*Job, len(restoredJobs))
+	for _, job := range restoredJobs {
+		restored[jobKey(job.Spec.Namespace, job.Spec.Name)] = job
+	}
+	s.mu.RLock()
+	limits := s.jobLimits
+	s.mu.RUnlock()
+	if limits == (spec.Limits{}) {
+		limits = spec.DefaultLimits()
+	}
+	violations := jobLimitViolations(restored, limits)
+	if len(violations) > 0 {
+		return fmt.Errorf("restored jobs exceed the current job limits: %s", joinViolations(violations))
+	}
 	if err := s.backupStore.RestoreDesired(s.clusterName, snapshot); err != nil {
 		return err
 	}
