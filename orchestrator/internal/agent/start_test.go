@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -238,6 +239,11 @@ func TestStartFencesAgainstStartInProgress(t *testing.T) {
 	if err := agent.DrainGroup(&api.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: 5, Sequence: 3}); err != nil {
 		t.Fatalf("drain during pull: %v", err)
 	}
+	// The leader of the new epoch re-sends the start it still wants.
+	request.Epoch = 5
+	if err := agent.StartGroup(context.Background(), request); err != nil {
+		t.Fatalf("retry at new epoch: %v", err)
+	}
 	rt.release <- nil
 	if start := waitStart(t, agent, request.AllocationID); start.err != nil {
 		t.Fatalf("start: %v", start.err)
@@ -335,5 +341,78 @@ func TestTruncateStartFailureKeepsValidUTF8(t *testing.T) {
 		if r == '�' {
 			t.Fatal("truncated message contains a replacement rune")
 		}
+	}
+}
+
+func TestStartSupersededByNewEpochCreatesNothing(t *testing.T) {
+	rt := newSlowPullRuntime()
+	agent := newOperationTestAgent(t, rt)
+	request := singleTaskRequest()
+	if err := agent.StartGroup(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	waitPulling(t, rt)
+	agent.mu.RLock()
+	start := agent.starts[request.AllocationID]
+	agent.mu.RUnlock()
+	// A new leader takes over and has not asked for this start.
+	if err := agent.AcceptEpoch(request.Epoch + 1); err != nil {
+		t.Fatal(err)
+	}
+	rt.release <- nil
+	<-start.done
+	if !errors.Is(start.err, errStartSuperseded) {
+		t.Fatalf("start error = %v, want superseded", start.err)
+	}
+	if _, creates := rt.counts(); creates != 0 {
+		t.Fatalf("superseded start created %d containers", creates)
+	}
+	if statuses := statusesFor(agent, request.AllocationID); len(statuses) != 0 {
+		t.Fatalf("superseded start reported %+v, want nothing", statuses)
+	}
+	request.Epoch++
+	if err := agent.StartGroup(context.Background(), request); err != nil {
+		t.Fatalf("new leader's start: %v", err)
+	}
+	waitPulling(t, rt)
+	rt.release <- nil
+	if start := waitStart(t, agent, request.AllocationID); start.err != nil {
+		t.Fatalf("new leader's start: %v", start.err)
+	}
+}
+
+func TestTerminalStartFailureCarriesCode(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		code api.OperationCode
+	}{
+		{ErrRestartBudgetExhausted, api.OperationRestartExhausted},
+		{ErrAllocationExists, api.OperationConflict},
+		{ErrExecutionConflict, api.OperationConflict},
+		{ErrStaleGeneration, api.OperationStaleGeneration},
+		{errors.New("pull failed"), ""},
+	} {
+		if got := terminalStartCode(fmt.Errorf("start: %w", tc.err)); got != tc.code {
+			t.Fatalf("code for %v = %q, want %q", tc.err, got, tc.code)
+		}
+	}
+}
+
+func TestFailedNewerStartDoesNotFenceOlderStop(t *testing.T) {
+	rt := newSlowPullRuntime()
+	agent := newOperationTestAgent(t, rt)
+	request := singleTaskRequest()
+	if err := agent.StartGroup(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	waitPulling(t, rt)
+	rt.release <- errors.New("registry unavailable")
+	waitStart(t, agent, request.AllocationID)
+	older := &api.StopAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation - 1, Epoch: request.Epoch}
+	if err := agent.StopGroup(context.Background(), older); err != nil {
+		t.Fatalf("stop of older generation beside a failed start: %v", err)
+	}
+	if statuses := statusesFor(agent, request.AllocationID); len(statuses) != 1 || statuses[0].StartFailure == nil {
+		t.Fatalf("failure no longer reported after older stop: %+v", statuses)
 	}
 }

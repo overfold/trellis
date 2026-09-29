@@ -129,3 +129,37 @@ func TestHeartbeatRejectsInvalidStartFailure(t *testing.T) {
 		}
 	}
 }
+
+func TestHeartbeatTerminalStartFailureFailsAllocation(t *testing.T) {
+	s, _, node, allocation := newStartingTestServer(t, 1)
+	statuses := startFailure(allocation, 1)
+	statuses[0].StartFailure.Code = api.OperationRestartExhausted
+	if err := s.Heartbeat(context.Background(), node.ID, statuses, "test", nil, nil, nodeResourceObservation{}); err != nil {
+		t.Fatal(err)
+	}
+	if allocation.Phase != lifecycle.PhaseFailed || allocation.Reason != string(api.OperationRestartExhausted) || allocation.NextRetryAt != nil {
+		t.Fatalf("after terminal failure: phase=%s reason=%s retry=%v", allocation.Phase, allocation.Reason, allocation.NextRetryAt)
+	}
+	statuses[0].StartFailure.Code = api.OperationFailed
+	if err := s.Heartbeat(context.Background(), node.ID, statuses, "test", nil, nil, nodeResourceObservation{}); err == nil {
+		t.Fatal("heartbeat accepted a start failure with a non-terminal code")
+	}
+}
+
+func TestStartRequestFailureAfterObservedRunningIsNotCounted(t *testing.T) {
+	s, agent, _, allocation := newStartingTestServer(t, 0)
+	agent.mu.Lock()
+	agent.failRun = true
+	agent.mu.Unlock()
+	// The heartbeat observing the start complete lands while the start
+	// request is in flight.
+	allocation.mu.Lock()
+	allocation.Phase = lifecycle.PhaseRunning
+	allocation.mu.Unlock()
+	if err := s.Execute(context.Background(), &Action{Type: ActionStart, Allocation: allocation}); err == nil {
+		t.Fatal("start request failure not returned")
+	}
+	if allocation.Phase != lifecycle.PhaseRunning || allocation.Attempt != 0 || allocation.NextRetryAt != nil {
+		t.Fatalf("running allocation after failed request: phase=%s attempt=%d retry=%v", allocation.Phase, allocation.Attempt, allocation.NextRetryAt)
+	}
+}

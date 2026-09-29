@@ -133,10 +133,13 @@ const MaxStartFailureMessageBytes = 1024
 
 // StartFailure describes a failed background allocation start. Attempt echoes
 // the start request's attempt; the agent reports the failure until a start
-// with a different attempt, a stop, or a newer generation replaces it.
+// with a different attempt, a stop, or a newer generation replaces it. Code is
+// set for a failure that retrying the generation cannot fix:
+// OperationStaleGeneration, OperationConflict, or OperationRestartExhausted.
 type StartFailure struct {
-	Attempt int    `json:"attempt"`
-	Message string `json:"message"`
+	Attempt int           `json:"attempt"`
+	Code    OperationCode `json:"code,omitempty"`
+	Message string        `json:"message"`
 }
 
 // PortMapping maps a host port to a container port.

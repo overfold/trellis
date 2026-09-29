@@ -56,7 +56,7 @@ func TestReconcileActionsDoNotQueueBehindStalledAgentBody(t *testing.T) {
 		<-s.dispatchReconcileActions(ctx, []Action{
 			{Type: ActionStopObserved, Node: stalledNode, ID: "stalled", Generation: 1},
 			{Type: ActionStopObserved, Node: fastNode, ID: "fast", Generation: 1},
-		})
+		}, false)
 		close(done)
 	}()
 
@@ -112,7 +112,7 @@ func TestReconcileActionsPreserveOrderWithinNode(t *testing.T) {
 		<-s.dispatchReconcileActions(context.Background(), []Action{
 			{Type: ActionStopObserved, Node: node, ID: "first", Generation: 1},
 			{Type: ActionStopObserved, Node: node, ID: "second", Generation: 1},
-		})
+		}, false)
 		close(done)
 	}()
 	select {
@@ -173,7 +173,7 @@ func TestReconcilePassesDoNotWaitForBusyNode(t *testing.T) {
 	s := NewServer(slog.Default(), nil, NewStateController(memoryStore{}, "test"), memoryStore{}, "test", "")
 	s.client = client.NewAgentClient("", nil)
 
-	first := s.dispatchReconcileActions(context.Background(), []Action{{Type: ActionStopObserved, Node: stalledNode, ID: "first", Generation: 1}})
+	first := s.dispatchReconcileActions(context.Background(), []Action{{Type: ActionStopObserved, Node: stalledNode, ID: "first", Generation: 1}}, false)
 	select {
 	case <-stalledCalls:
 	case <-time.After(time.Second):
@@ -184,7 +184,7 @@ func TestReconcilePassesDoNotWaitForBusyNode(t *testing.T) {
 	second := s.dispatchReconcileActions(context.Background(), []Action{
 		{Type: ActionStopObserved, Node: stalledNode, ID: "second", Generation: 1},
 		{Type: ActionStopObserved, Node: fastNode, ID: "fast", Generation: 1},
-	})
+	}, false)
 	select {
 	case <-second:
 	case <-time.After(time.Second):
@@ -209,9 +209,60 @@ func TestReconcilePassesDoNotWaitForBusyNode(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("stalled pass did not finish after release")
 	}
-	third := s.dispatchReconcileActions(context.Background(), []Action{{Type: ActionStopObserved, Node: stalledNode, ID: "second", Generation: 1}})
+	third := s.dispatchReconcileActions(context.Background(), []Action{{Type: ActionStopObserved, Node: stalledNode, ID: "second", Generation: 1}}, false)
 	<-third
 	if path := <-stalledCalls; path != "/v1/allocations/second" {
 		t.Fatalf("released node call = %s, want deferred action", path)
+	}
+}
+
+func TestQueueingPassWaitsForBusyNode(t *testing.T) {
+	calls := make(chan string, 4)
+	release := make(chan struct{})
+	agent := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		calls <- request.URL.Path
+		if request.URL.Path == "/v1/allocations/first" {
+			select {
+			case <-release:
+			case <-request.Context().Done():
+			}
+		}
+		response.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(response).Encode(api.OperationResponse{Code: "ok"})
+	}))
+	t.Cleanup(agent.Close)
+	host, portValue, err := net.SplitHostPort(agent.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := &Node{ID: uuid.New(), Host: "http://" + host, Port: port, Status: NodeStatusHealthy}
+	s := NewServer(slog.Default(), nil, NewStateController(memoryStore{}, "test"), memoryStore{}, "test", "")
+	s.client = client.NewAgentClient("", nil)
+
+	periodic := s.dispatchReconcileActions(context.Background(), []Action{{Type: ActionStopObserved, Node: node, ID: "first", Generation: 1}}, false)
+	if path := <-calls; path != "/v1/allocations/first" {
+		t.Fatalf("first call = %s", path)
+	}
+	// A pass an API mutation waits for delivers its action once the node
+	// is free rather than dropping it.
+	queued := s.dispatchReconcileActions(context.Background(), []Action{{Type: ActionStopObserved, Node: node, ID: "second", Generation: 1}}, true)
+	select {
+	case path := <-calls:
+		t.Fatalf("queued action %s ran while the node was busy", path)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	<-periodic
+	select {
+	case <-queued:
+	case <-time.After(time.Second):
+		t.Fatal("queued pass did not finish")
+	}
+	if path := <-calls; path != "/v1/allocations/second" {
+		t.Fatalf("queued call = %s, want second", path)
 	}
 }

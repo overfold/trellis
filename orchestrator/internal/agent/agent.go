@@ -1375,7 +1375,7 @@ func (a *Agent) drainStartLocked(allocationID string, generation uint64, drainin
 	if start == nil {
 		return nil
 	}
-	if start.generation > generation {
+	if start.generation > generation && !start.finished() {
 		return fmt.Errorf("%w: current %d, requested %d", ErrStaleGeneration, start.generation, generation)
 	}
 	if start.generation == generation {

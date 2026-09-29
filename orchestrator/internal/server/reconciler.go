@@ -222,14 +222,15 @@ func sameAllocationState(a, b *Allocation) (bool, error) {
 // Reconcile converges the in-memory allocation set on the latest job specs and
 // waits for the pass's agent actions.
 func (s *Server) Reconcile(ctx context.Context) {
-	<-s.reconcile(ctx)
+	<-s.reconcile(ctx, true)
 }
 
 // reconcile runs one reconciliation pass. Planning and its durable commit are
 // serialized with other passes; the agent actions run after reconcileMu is
-// released, so a slow node delays neither later passes nor other nodes. The
-// returned channel closes once the actions this pass dispatched finish.
-func (s *Server) reconcile(ctx context.Context) (finished <-chan struct{}) {
+// released, so a slow node delays neither later passes nor other nodes. A
+// queueing pass waits for a node busy with an earlier pass instead of skipping
+// its actions. The returned channel closes once the pass's actions finish.
+func (s *Server) reconcile(ctx context.Context, queue bool) (finished <-chan struct{}) {
 	start := time.Now()
 	var executable []Action
 	planned := false
@@ -250,7 +251,7 @@ func (s *Server) reconcile(ctx context.Context) (finished <-chan struct{}) {
 			finished = closed
 			return
 		}
-		finished = s.dispatchReconcileActions(ctx, executable)
+		finished = s.dispatchReconcileActions(ctx, executable, queue)
 	}()
 	s.mu.RLock()
 	registeredNodes := make(map[uuid.UUID]struct{}, len(s.nodes))
@@ -937,12 +938,14 @@ func (s *Server) reconcile(ctx context.Context) (finished <-chan struct{}) {
 // dispatchReconcileActions runs a pass's actions. Retained originals must
 // release their conflicting resources before their replacements start on the
 // same node, so each node's actions run in order, and a node runs one pass's
-// actions at a time: a pass skips the actions of a node still busy with an
-// earlier pass, and the next pass plans them again. Independent nodes run
+// actions at a time. A node still busy with an earlier pass delays only its
+// own actions: a queueing pass (one an API mutation waits for) runs them once
+// the node is free, and a periodic pass skips them for the next pass to plan
+// again. Independent nodes run
 // concurrently, bounded by maxConcurrentReconcileActions across all passes, so
 // an unreachable agent delays only its own queue. The returned channel closes
 // once the dispatched actions finish and the catalog is refreshed.
-func (s *Server) dispatchReconcileActions(ctx context.Context, actions []Action) <-chan struct{} {
+func (s *Server) dispatchReconcileActions(ctx context.Context, actions []Action, queue bool) <-chan struct{} {
 	var nodes []uuid.UUID
 	byNode := make(map[uuid.UUID][]Action)
 	for _, action := range actions {
@@ -959,14 +962,22 @@ func (s *Server) dispatchReconcileActions(ctx context.Context, actions []Action)
 	}
 	var group sync.WaitGroup
 	for _, nodeID := range nodes {
-		slots, claimed := s.claimActionNode(nodeID)
-		if !claimed {
+		slots, busy := s.claimActionNode(nodeID)
+		if busy != nil && !queue {
 			s.log.Debug("node is still running earlier reconcile actions; deferring", "node", nodeID, "actions", len(byNode[nodeID]))
 			continue
 		}
 		group.Add(1)
 		go func(nodeID uuid.UUID, batch []Action) {
 			defer group.Done()
+			for busy != nil {
+				select {
+				case <-busy:
+				case <-ctx.Done():
+					return
+				}
+				slots, busy = s.claimActionNode(nodeID)
+			}
 			defer s.releaseActionNode(nodeID)
 			select {
 			case slots <- struct{}{}:
@@ -989,31 +1000,35 @@ func (s *Server) dispatchReconcileActions(ctx context.Context, actions []Action)
 	done := make(chan struct{})
 	go func() {
 		group.Wait()
+		s.refreshMu.Lock()
 		s.refreshNetworkPlans()
 		s.refreshCatalog()
+		s.refreshMu.Unlock()
 		close(done)
 	}()
 	return done
 }
 
 // claimActionNode reserves a node for one pass's actions and returns the
-// global action slots.
-func (s *Server) claimActionNode(nodeID uuid.UUID) (chan struct{}, bool) {
+// global action slots. When the node is busy it returns the channel that
+// closes when the node is released instead.
+func (s *Server) claimActionNode(nodeID uuid.UUID) (chan struct{}, <-chan struct{}) {
 	s.actionMu.Lock()
 	defer s.actionMu.Unlock()
 	if s.actionSlots == nil {
 		s.actionSlots = make(chan struct{}, maxConcurrentReconcileActions)
-		s.actionNodes = make(map[uuid.UUID]bool)
+		s.actionNodes = make(map[uuid.UUID]chan struct{})
 	}
-	if s.actionNodes[nodeID] {
-		return nil, false
+	if released := s.actionNodes[nodeID]; released != nil {
+		return nil, released
 	}
-	s.actionNodes[nodeID] = true
-	return s.actionSlots, true
+	s.actionNodes[nodeID] = make(chan struct{})
+	return s.actionSlots, nil
 }
 
 func (s *Server) releaseActionNode(nodeID uuid.UUID) {
 	s.actionMu.Lock()
+	close(s.actionNodes[nodeID])
 	delete(s.actionNodes, nodeID)
 	s.actionMu.Unlock()
 }
@@ -1330,6 +1345,16 @@ func recordStartFailure(next *Allocation, now time.Time, message string) error {
 	return nil
 }
 
+// terminalStartFailureCode reports whether code may accompany a reported start
+// failure.
+func terminalStartFailureCode(code api.OperationCode) bool {
+	switch code {
+	case "", api.OperationStaleGeneration, api.OperationConflict, api.OperationRestartExhausted:
+		return true
+	}
+	return false
+}
+
 // Execute performs a reconciliation action.
 func (s *Server) Execute(ctx context.Context, action *Action) error {
 	if action.Type == ActionStopObserved {
@@ -1520,7 +1545,8 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 				return err
 			}
 			if persistErr := s.persistAllocationUpdate(context.WithoutCancel(ctx), alloc, func(next *Allocation) error {
-				if next.Phase != lifecycle.PhaseStarting && next.Phase != lifecycle.PhaseRunning {
+				// A heartbeat may have observed the start complete meanwhile.
+				if next.Phase != lifecycle.PhaseStarting {
 					return nil
 				}
 				return recordStartFailure(next, now, err.Error())
