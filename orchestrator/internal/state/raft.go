@@ -89,11 +89,8 @@ func (r *RaftStore) Batch(_ context.Context, mutations []Mutation) error {
 	return nil
 }
 
-// IteratePrefix takes a linearizable view and streams matching local FSM entries.
+// IteratePrefix streams matching entries from the local replicated FSM, like List.
 func (r *RaftStore) IteratePrefix(ctx context.Context, prefix string, visit func(key string, value []byte) error) error {
-	if err := r.raft.Barrier(10 * time.Second).Error(); err != nil {
-		return fmt.Errorf("raft iterate barrier: %w", err)
-	}
 	return r.fsm.store.IteratePrefix(ctx, prefix, visit)
 }
 
