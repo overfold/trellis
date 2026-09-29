@@ -492,6 +492,9 @@ type NodeSummary struct {
 // Job contains a persisted job specification and revision.
 type Job struct {
 	Spec *spec.JobSpec
+	// Incarnation distinguishes jobs recreated with the same namespace and
+	// name. Unlike Revision and Version, it never resets within a job's life.
+	Incarnation string `json:"incarnation"`
 	// Revision identifies the execution content of the job. It advances only
 	// when a task group's execution hash changes, which replaces allocations.
 	Revision int
@@ -506,16 +509,17 @@ type Job struct {
 
 // Allocation contains desired and observed allocation state.
 type Allocation struct {
-	mu            sync.Mutex
-	Namespace     string
-	JobName       string
-	TaskGroupName string
-	ID            string `json:"allocation_id"`
-	Generation    uint64 `json:"generation"`
-	JobRevision   int    `json:"job_revision"`
-	Tasks         []spec.TaskSpec
-	Phase         lifecycle.Phase  `json:"phase"`
-	Health        lifecycle.Health `json:"health"`
+	mu             sync.Mutex
+	Namespace      string
+	JobName        string
+	TaskGroupName  string
+	ID             string `json:"allocation_id"`
+	Generation     uint64 `json:"generation"`
+	JobIncarnation string `json:"job_incarnation"`
+	JobRevision    int    `json:"job_revision"`
+	Tasks          []spec.TaskSpec
+	Phase          lifecycle.Phase  `json:"phase"`
+	Health         lifecycle.Health `json:"health"`
 	lifecycle.Diagnostic
 	// Node is the canonical in-memory node the allocation is placed on. The
 	// persisted record stores only its ID (see MarshalJSON); Reload rebinds
@@ -634,6 +638,7 @@ func applyAllocationSnapshot(allocation, snapshot *Allocation) {
 	allocation.TaskGroupName = snapshot.TaskGroupName
 	allocation.ID = snapshot.ID
 	allocation.Generation = snapshot.Generation
+	allocation.JobIncarnation = snapshot.JobIncarnation
 	allocation.JobRevision = snapshot.JobRevision
 	allocation.Tasks = snapshot.Tasks
 	allocation.Phase = snapshot.Phase
@@ -1290,8 +1295,13 @@ func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spe
 			labelOnly = true
 		}
 	}
+	incarnation := uuid.NewString()
+	if existing != nil {
+		incarnation = existing.Incarnation
+	}
 	job := &Job{
 		Spec:          jobSpec,
+		Incarnation:   incarnation,
 		Revision:      revision,
 		Version:       version,
 		ContentHashes: hashes,
@@ -1543,7 +1553,7 @@ func (s *Server) resumeNodeAllocations(ctx context.Context, id uuid.UUID) error 
 			continue
 		}
 		job := s.jobs[jobKey(allocation.Namespace, allocation.JobName)]
-		if job == nil || allocation.JobRevision != job.Revision {
+		if job == nil || allocation.JobIncarnation != job.Incarnation || allocation.JobRevision != job.Revision {
 			allocation.mu.Unlock()
 			continue
 		}
@@ -1672,10 +1682,10 @@ func (s *Server) ListJobs(namespace string) api.JobListResponse {
 		}
 		r := &result[positions[a.JobName]]
 		r.Allocations = append(r.Allocations, s.allocationResponseLocked(a))
-		if a.JobRevision == job.Revision && !a.Draining && a.Phase == lifecycle.PhaseRunning {
+		if a.JobIncarnation == job.Incarnation && a.JobRevision == job.Revision && !a.Draining && a.Phase == lifecycle.PhaseRunning {
 			r.Running++
 		}
-		if a.JobRevision == job.Revision && !a.Draining && a.Phase == lifecycle.PhaseRunning && a.Health == lifecycle.HealthHealthy {
+		if a.JobIncarnation == job.Incarnation && a.JobRevision == job.Revision && !a.Draining && a.Phase == lifecycle.PhaseRunning && a.Health == lifecycle.HealthHealthy {
 			r.Healthy++
 		}
 		a.mu.Unlock()
@@ -1704,10 +1714,10 @@ func (s *Server) GetJob(namespace, name string) (*api.JobStatusResponse, bool) {
 		}
 		ar := s.allocationResponseLocked(a)
 		r.Allocations = append(r.Allocations, ar)
-		if a.JobRevision == job.Revision && !a.Draining && a.Phase == lifecycle.PhaseRunning {
+		if a.JobIncarnation == job.Incarnation && a.JobRevision == job.Revision && !a.Draining && a.Phase == lifecycle.PhaseRunning {
 			r.Running++
 		}
-		if a.JobRevision == job.Revision && !a.Draining && a.Phase == lifecycle.PhaseRunning && a.Health == lifecycle.HealthHealthy {
+		if a.JobIncarnation == job.Incarnation && a.JobRevision == job.Revision && !a.Draining && a.Phase == lifecycle.PhaseRunning && a.Health == lifecycle.HealthHealthy {
 			r.Healthy++
 		}
 		a.mu.Unlock()
@@ -1763,17 +1773,19 @@ func (s *Server) persistJobRestart(ctx context.Context, namespace, name string) 
 	defer s.mutationMu.Unlock()
 	s.mu.RLock()
 	key := jobKey(namespace, name)
-	if s.jobs[key] == nil {
+	job := s.jobs[key]
+	if job == nil {
 		s.mu.RUnlock()
 		return fmt.Errorf("job %s not found", name)
 	}
+	incarnation := job.Incarnation
 	allocations := append([]*Allocation(nil), s.allocations...)
 	s.mu.RUnlock()
 
 	updates := make([]*Allocation, 0)
 	for _, alloc := range allocations {
 		alloc.mu.Lock()
-		if alloc.Namespace == namespace && alloc.JobName == name && alloc.Node != nil && alloc.DrainReason != "restart" && activeAllocationPhase(alloc.Phase) {
+		if alloc.Namespace == namespace && alloc.JobName == name && alloc.JobIncarnation == incarnation && alloc.Node != nil && alloc.DrainReason != "restart" && activeAllocationPhase(alloc.Phase) {
 			update, err := cloneAllocationForReconcile(alloc)
 			alloc.mu.Unlock()
 			if err != nil {
@@ -2083,12 +2095,14 @@ func (s *Server) refreshCatalog() {
 		}
 		var labels map[string]string
 		job := s.jobs[jobKey(a.Namespace, a.JobName)]
-		if job != nil {
-			for _, g := range job.Spec.TaskGroups {
-				if g.Name == a.TaskGroupName {
-					labels = g.Labels
-					break
-				}
+		if job == nil || a.JobIncarnation != job.Incarnation {
+			a.mu.Unlock()
+			continue
+		}
+		for _, g := range job.Spec.TaskGroups {
+			if g.Name == a.TaskGroupName {
+				labels = g.Labels
+				break
 			}
 		}
 		address := allocationEndpointAddress(a)
@@ -2120,12 +2134,14 @@ func (s *Server) refreshCatalogAllocations(allocations []*Allocation) {
 		if allocation.Phase == lifecycle.PhaseRunning && allocation.Health == lifecycle.HealthHealthy {
 			var labels map[string]string
 			job := s.jobs[jobKey(allocation.Namespace, allocation.JobName)]
-			if job != nil {
-				for _, group := range job.Spec.TaskGroups {
-					if group.Name == allocation.TaskGroupName {
-						labels = group.Labels
-						break
-					}
+			if job == nil || allocation.JobIncarnation != job.Incarnation {
+				allocation.mu.Unlock()
+				continue
+			}
+			for _, group := range job.Spec.TaskGroups {
+				if group.Name == allocation.TaskGroupName {
+					labels = group.Labels
+					break
 				}
 			}
 			if address := allocationEndpointAddress(allocation); address != "" {

@@ -986,8 +986,8 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 	switch action.Type {
 	case ActionStart:
 		job := s.jobs[jobKey(alloc.Namespace, alloc.JobName)]
-		if job == nil {
-			return fmt.Errorf("job %s was deleted before allocation start", alloc.JobName)
+		if job == nil || job.Incarnation != alloc.JobIncarnation {
+			return fmt.Errorf("job %s was deleted or recreated before allocation start", alloc.JobName)
 		}
 		var groupRuntime string
 		var groupAPIAccess *spec.APIAccessSpec
