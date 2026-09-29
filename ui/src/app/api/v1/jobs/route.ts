@@ -80,7 +80,13 @@ export async function POST(request: NextRequest) {
       body: JSON.stringify({ spec: body.spec, expected_version: expectedVersion }),
     });
 
-    const data: unknown = await res.json().catch(() => null);
+    const text = await res.text();
+    let data: unknown = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = null;
+    }
     if (!res.ok) {
       if (typeof data === "object" && data !== null) {
         const record = data as Record<string, unknown>;
@@ -95,7 +101,7 @@ export async function POST(request: NextRequest) {
         return NextResponse.json(data, { status: res.status });
       }
       return NextResponse.json(
-        { error: `Upstream error: ${res.status}` },
+        { error: text.trim() || `Upstream error: ${res.status}` },
         { status: res.status },
       );
     }

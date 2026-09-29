@@ -1104,28 +1104,29 @@ func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spe
 	if expectedVersion != nil && *expectedVersion < 0 {
 		return nil, fmt.Errorf("expected_version must not be negative")
 	}
-	s.mutationMu.Lock()
-	defer s.mutationMu.Unlock()
-	s.mu.Lock()
 	if jobSpec.Namespace != namespace {
-		s.mu.Unlock()
 		return nil, fmt.Errorf("job namespace does not match request namespace")
 	}
+	s.mutationMu.Lock()
+	defer s.mutationMu.Unlock()
 	key := jobKey(namespace, jobSpec.Name)
-	existing := s.jobs[key]
 	// The precondition is checked under mutationMu, which serializes every
-	// job mutation on the leader, so the version cannot change between this
-	// check and the commit below.
+	// job mutation on the leader, so the job cannot change between this
+	// check and the commit below. Job records are replaced, never mutated,
+	// so existing can be compared without holding s.mu.
+	s.mu.RLock()
+	existing := s.jobs[key]
+	s.mu.RUnlock()
 	if err := checkJobVersion(existing, expectedVersion); err != nil {
-		s.mu.Unlock()
 		return nil, err
 	}
 	if existing != nil && len(plan.Diff(existing.Spec, jobSpec)) == 0 {
-		s.mu.Unlock()
 		return &api.JobRegistrationResponse{Namespace: namespace, Name: jobSpec.Name, Version: existing.Version, Revision: existing.Revision}, nil
 	}
-	if err := s.validateNamespaceAllocationLimitLocked(nil, namespace, jobSpec, key); err != nil {
-		s.mu.Unlock()
+	s.mu.RLock()
+	err := s.validateNamespaceAllocationLimitLocked(nil, namespace, jobSpec, key)
+	s.mu.RUnlock()
+	if err != nil {
 		return nil, err
 	}
 
@@ -1150,7 +1151,6 @@ func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spe
 		Version:       version,
 		ContentHashes: hashes,
 	}
-	s.mu.Unlock()
 	revisionRecord := &JobRevisionRecord{Version: version, Revision: revision, Spec: jobSpec, CreatedAt: s.now().UTC()}
 	if err := s.state.PutJobWithRevision(ctx, key, job, revisionRecord); err != nil {
 		return nil, fmt.Errorf("save job remotely: %w", err)
@@ -1161,15 +1161,15 @@ func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spe
 
 	if labelOnly {
 		s.refreshCatalog()
-	} else {
-		s.events.publish(api.ClusterEvent{
-			Type:      api.EventJobRegistered,
-			Namespace: namespace,
-			JobName:   jobSpec.Name,
-			Revision:  revision,
-			At:        s.now().UTC(),
-		})
 	}
+	s.events.publish(api.ClusterEvent{
+		Type:      api.EventJobRegistered,
+		Namespace: namespace,
+		JobName:   jobSpec.Name,
+		Version:   version,
+		Revision:  revision,
+		At:        s.now().UTC(),
+	})
 
 	return &api.JobRegistrationResponse{Namespace: namespace, Name: jobSpec.Name, Version: version, Revision: revision}, nil
 }

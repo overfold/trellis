@@ -343,7 +343,8 @@ const (
 	EventAllocationPhaseChanged EventType = "allocation.phase_changed"
 	// EventAllocationHealthChanged fires when an allocation's health changes.
 	EventAllocationHealthChanged EventType = "allocation.health_changed"
-	// EventJobRegistered fires when a job is applied.
+	// EventJobRegistered fires when an apply changes a job and carries the
+	// job's new version and revision.
 	EventJobRegistered EventType = "job.registered"
 	// EventJobDeleted fires when a job is deleted.
 	EventJobDeleted EventType = "job.deleted"
@@ -363,6 +364,7 @@ type ClusterEvent struct {
 	AllocationID string    `json:"allocation_id,omitempty"`
 	Phase        string    `json:"phase,omitempty"`
 	Health       string    `json:"health,omitempty"`
+	Version      int       `json:"version,omitempty"`
 	Revision     int       `json:"revision,omitempty"`
 	Group        string    `json:"group,omitempty"`
 	// Failures and NextReplacementAt describe a replacement backoff.

@@ -102,9 +102,22 @@ func TestRegisterJobScaleChangeAdvancesVersionAndHistory(t *testing.T) {
 	if _, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v1", 1), nil); err != nil {
 		t.Fatal(err)
 	}
+	s.events = newEventBus()
+	events, ok := s.events.subscribe("default")
+	if !ok {
+		t.Fatal("subscribe to events")
+	}
 	scaled, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v1", 3), expectVersion(1))
 	if err != nil {
 		t.Fatal(err)
+	}
+	select {
+	case event := <-events:
+		if event.Type != api.EventJobRegistered || event.Version != 2 || event.Revision != 1 {
+			t.Fatalf("scale event = %+v, want job.registered at version 2 revision 1", event)
+		}
+	default:
+		t.Fatal("scale change published no job.registered event")
 	}
 	if scaled.Version != 2 || scaled.Revision != 1 {
 		t.Fatalf("scaled job = %+v, want version 2 at unchanged revision 1", scaled)

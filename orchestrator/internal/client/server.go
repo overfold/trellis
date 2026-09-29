@@ -314,15 +314,6 @@ func (s *ServerClient) SubmitJob(ctx context.Context, spec *spec.JobSpec, expect
 	return &response, nil
 }
 
-// ListJobVersions returns the retained versions of a job in ascending order.
-func (s *ServerClient) ListJobVersions(ctx context.Context, name string) (api.JobVersionListResponse, error) {
-	var response api.JobVersionListResponse
-	if err := s.client.request(ctx, http.MethodGet, s.address()+"/v1/jobs/"+url.PathEscape(name)+"/versions", nil, &response); err != nil {
-		return nil, fmt.Errorf("list job versions: %w", err)
-	}
-	return response, nil
-}
-
 // DeleteJob deletes a job.
 func (s *ServerClient) DeleteJob(ctx context.Context, name string) error {
 	if err := s.client.request(ctx, http.MethodDelete, s.address()+"/v1/jobs/"+url.PathEscape(name), nil, nil); err != nil {
