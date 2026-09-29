@@ -1,6 +1,7 @@
 package state
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/url"
@@ -78,6 +79,73 @@ func TestBoltStoreListPrefix(t *testing.T) {
 	}
 	if string(result["trellis/default/jobs/api"]) != "api" {
 		t.Fatal("missing api entry")
+	}
+}
+
+func TestBoltSnapshotStreamsDeterministicCompatibleJSON(t *testing.T) {
+	store, err := NewBoltStore(filepath.Join(t.TempDir(), "source.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	ctx := context.Background()
+	for key, value := range map[string]string{"z/key": "last", "a/key": "first", "m/key": "middle"} {
+		if err := store.Put(ctx, key, []byte(value)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot, err := store.snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var encoded bytes.Buffer
+	if err := snapshot.persistTo(&encoded); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshot.Close(); err != nil {
+		t.Fatal(err)
+	}
+	want, err := json.Marshal(map[string][]byte{"z/key": []byte("last"), "a/key": []byte("first"), "m/key": []byte("middle")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(encoded.Bytes(), want) {
+		t.Fatalf("streamed snapshot = %s, want %s", encoded.Bytes(), want)
+	}
+
+	target, err := NewBoltStore(filepath.Join(t.TempDir(), "target.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = target.Close() }()
+	if err := target.RestoreReader(bytes.NewReader(encoded.Bytes())); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := target.List(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 3 || string(entries["a/key"]) != "first" || string(entries["z/key"]) != "last" {
+		t.Fatalf("restored streamed snapshot = %#v", entries)
+	}
+}
+
+func TestBoltRestoreReaderIsAtomicOnInvalidSnapshot(t *testing.T) {
+	store, err := NewBoltStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	ctx := context.Background()
+	if err := store.Put(ctx, "existing", []byte("value")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RestoreReader(bytes.NewBufferString(`{"new":"bmV3","bad":"!"}`)); err == nil {
+		t.Fatal("expected invalid snapshot to fail")
+	}
+	value, err := store.Get(ctx, "existing")
+	if err != nil || string(value) != "value" {
+		t.Fatalf("failed restore changed state: value=%q err=%v", value, err)
 	}
 }
 
@@ -235,5 +303,37 @@ func TestBoltBatchAndDesiredSnapshot(t *testing.T) {
 	}
 }
 
+func TestBoltBatchDeletesPrefixAtomically(t *testing.T) {
+	store, err := NewBoltStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	ctx := context.Background()
+	for _, key := range []string{"revisions/job/1", "revisions/job/2", "revisions/other/1"} {
+		if err := store.Put(ctx, key, []byte(key)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Batch(ctx, []Mutation{{DeletePrefix: "revisions/job/"}, {Key: "revisions/job/3", Value: []byte("new")}}); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := store.List(ctx, "revisions/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 || string(entries["revisions/job/3"]) != "new" || entries["revisions/other/1"] == nil {
+		t.Fatalf("entries after prefix replacement = %#v", entries)
+	}
+	if err := store.Batch(ctx, []Mutation{{DeletePrefix: "revisions/"}, {Key: "", Value: []byte("invalid")}}); err == nil {
+		t.Fatal("expected invalid prefix-deletion batch to fail")
+	}
+	entries, err = store.List(ctx, "revisions/")
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("failed batch changed prefix: entries=%#v err=%v", entries, err)
+	}
+}
+
 var _ Store = (*BoltStore)(nil)
 var _ AtomicStore = (*BoltStore)(nil)
+var _ PrefixIterator = (*BoltStore)(nil)

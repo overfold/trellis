@@ -75,11 +75,13 @@ Lost is terminal, like `stopped` and `failed`. If the node comes back and still 
 Use the same verbs across interfaces:
 
 - **Apply** a job manifest to create a job or advance its revision.
-- **Delete** a job to remove its desired state and stop its allocations.
+- **Delete** a job to remove its desired state and retained revision history, and stop its allocations.
 - **Drain** / **undrain** a node for maintenance.
 - **Inspect** a job for desired-versus-observed state.
 - **Inspect an allocation** for placement, lifecycle, health, events, and task logs.
 - **Set**, **describe**, and **delete** secrets.
+
+Trellis keeps the 10 newest substantive revisions of each live job for inspection and backup. Applying execution changes advances the revision and drops older history beyond that window; metadata, scaling, and update-policy-only changes do not add a revision. Deleting a job removes its history, so applying the same name later starts again at revision 1.
 
 Documentation and UI copy use these canonical terms; CLI aliases are convenience spellings rather than a second vocabulary.
 

@@ -2,10 +2,12 @@
 package state
 
 import (
+	"bufio"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"strconv"
 	"strings"
@@ -76,6 +78,27 @@ func (b *BoltStore) List(_ context.Context, prefix string) (map[string][]byte, e
 	return result, nil
 }
 
+// IteratePrefix visits matching entries in key order inside one read transaction.
+func (b *BoltStore) IteratePrefix(ctx context.Context, prefix string, visit func(key string, value []byte) error) error {
+	err := b.db.View(func(tx *bolt.Tx) error {
+		c := tx.Bucket(bucketName).Cursor()
+		p := []byte(prefix)
+		for k, v := c.Seek(p); k != nil && strings.HasPrefix(string(k), prefix); k, v = c.Next() {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := visit(string(k), v); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("iterate %s: %w", prefix, err)
+	}
+	return nil
+}
+
 func listBucket(bucket *bolt.Bucket, prefix string) map[string][]byte {
 	result := make(map[string][]byte)
 	c := bucket.Cursor()
@@ -113,6 +136,19 @@ func (b *BoltStore) Batch(_ context.Context, mutations []Mutation) error {
 	if err := b.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(bucketName)
 		for _, mutation := range mutations {
+			if mutation.DeletePrefix != "" {
+				if mutation.Key != "" || mutation.Value != nil {
+					return fmt.Errorf("batch prefix deletion also contains a key or value")
+				}
+				cursor := bucket.Cursor()
+				prefix := []byte(mutation.DeletePrefix)
+				for key, _ := cursor.Seek(prefix); key != nil && strings.HasPrefix(string(key), mutation.DeletePrefix); key, _ = cursor.Next() {
+					if err := cursor.Delete(); err != nil {
+						return err
+					}
+				}
+				continue
+			}
 			if mutation.Key == "" {
 				return fmt.Errorf("batch contains an empty key")
 			}
@@ -174,6 +210,110 @@ func (b *BoltStore) Restore(data map[string][]byte) error {
 			if err := bucket.Put([]byte(k), v); err != nil {
 				return err
 			}
+		}
+		return nil
+	})
+}
+
+// snapshot starts a consistent read transaction that can be streamed later.
+func (b *BoltStore) snapshot() (*boltSnapshot, error) {
+	tx, err := b.db.Begin(false)
+	if err != nil {
+		return nil, fmt.Errorf("begin snapshot: %w", err)
+	}
+	return &boltSnapshot{tx: tx}, nil
+}
+
+type boltSnapshot struct {
+	tx *bolt.Tx
+}
+
+func (s *boltSnapshot) persistTo(w io.Writer) error {
+	bw := bufio.NewWriter(w)
+	if err := bw.WriteByte('{'); err != nil {
+		return err
+	}
+	first := true
+	cursor := s.tx.Bucket(bucketName).Cursor()
+	for key, value := cursor.First(); key != nil; key, value = cursor.Next() {
+		if !first {
+			if err := bw.WriteByte(','); err != nil {
+				return err
+			}
+		}
+		first = false
+		encodedKey, _ := json.Marshal(string(key))
+		encodedValue, _ := json.Marshal(base64.StdEncoding.EncodeToString(value))
+		if _, err := bw.Write(encodedKey); err != nil {
+			return err
+		}
+		if err := bw.WriteByte(':'); err != nil {
+			return err
+		}
+		if _, err := bw.Write(encodedValue); err != nil {
+			return err
+		}
+	}
+	if err := bw.WriteByte('}'); err != nil {
+		return err
+	}
+	return bw.Flush()
+}
+
+func (s *boltSnapshot) Close() error {
+	if s.tx == nil {
+		return nil
+	}
+	err := s.tx.Rollback()
+	s.tx = nil
+	return err
+}
+
+// RestoreReader atomically replaces all state from the streamed snapshot JSON.
+func (b *BoltStore) RestoreReader(r io.Reader) error {
+	return b.db.Update(func(tx *bolt.Tx) error {
+		if err := tx.DeleteBucket(bucketName); err != nil {
+			return err
+		}
+		bucket, err := tx.CreateBucket(bucketName)
+		if err != nil {
+			return err
+		}
+		decoder := json.NewDecoder(r)
+		token, err := decoder.Token()
+		if err != nil || token != json.Delim('{') {
+			return fmt.Errorf("invalid snapshot object")
+		}
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok || key == "" {
+				return fmt.Errorf("invalid snapshot key")
+			}
+			var encoded string
+			if err := decoder.Decode(&encoded); err != nil {
+				return err
+			}
+			value, err := base64.StdEncoding.DecodeString(encoded)
+			if err != nil {
+				return fmt.Errorf("decode snapshot value %q: %w", key, err)
+			}
+			if err := bucket.Put([]byte(key), value); err != nil {
+				return err
+			}
+		}
+		if _, err := decoder.Token(); err != nil {
+			return err
+		}
+		var trailing any
+		if err := decoder.Decode(&trailing); err != io.EOF {
+			if err == nil {
+				return fmt.Errorf("snapshot contains trailing data")
+			}
+			return err
 		}
 		return nil
 	})

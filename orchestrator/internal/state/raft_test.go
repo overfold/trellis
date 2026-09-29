@@ -190,6 +190,29 @@ func TestRaftStore_Batch(t *testing.T) {
 	}
 }
 
+func TestRaftStore_BatchReplicatesPrefixDeletion(t *testing.T) {
+	store := newTestRaftStore(t)
+	waitLeader(t, store)
+	ctx := context.Background()
+	if err := store.Batch(ctx, []Mutation{
+		{Key: "revisions/job/1", Value: []byte("one")},
+		{Key: "revisions/job/2", Value: []byte("two")},
+		{Key: "revisions/other/1", Value: []byte("other")},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Batch(ctx, []Mutation{{DeletePrefix: "revisions/job/"}, {Key: "revisions/job/3", Value: []byte("three")}}); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := store.List(ctx, "revisions/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 || string(entries["revisions/job/3"]) != "three" || string(entries["revisions/other/1"]) != "other" {
+		t.Fatalf("replicated prefix replacement = %#v", entries)
+	}
+}
+
 func TestRaftStore_List(t *testing.T) {
 	store := newTestRaftStore(t)
 	waitLeader(t, store)
