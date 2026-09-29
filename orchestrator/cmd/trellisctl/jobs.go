@@ -24,6 +24,7 @@ func NewJobsCmd() *cobra.Command {
 	cmd.AddCommand(NewJobsStatusCmd())
 	cmd.AddCommand(NewJobsLogsCmd())
 	cmd.AddCommand(NewJobsDeleteCmd())
+	cmd.AddCommand(NewJobsResetBackoffCmd())
 	return cmd
 }
 
@@ -240,6 +241,27 @@ func NewJobsLogsCmd() *cobra.Command {
 	flags.StringVar(&group, "group", "", "Only allocations for this task group")
 	flags.StringVar(&task, "task", "", "Only logs for this task name")
 	return cmd
+}
+
+func NewJobsResetBackoffCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "reset-backoff NAME GROUP",
+		Args:  cobra.ExactArgs(2),
+		Short: "Reset a task group's replacement backoff",
+		Long:  "Reset the replacement backoff of a task group so its failed allocations are replaced without waiting. Use it after fixing the cause of the failures; a group without counted failures is left unchanged.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			tlsCfg, err := buildCLITLSConfig()
+			if err != nil {
+				return err
+			}
+			serverClient := client.NewNamespaceServerClient(config.ClusterToken, config.ServerAddr, config.Namespace, tlsCfg)
+			if err := serverClient.ResetReplacementBackoff(cmd.Context(), args[0], args[1]); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Reset replacement backoff of task group %s in job %s.\n", args[1], args[0])
+			return err
+		},
+	}
 }
 
 func NewJobsDeleteCmd() *cobra.Command {

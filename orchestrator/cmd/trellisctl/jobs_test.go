@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -21,11 +24,12 @@ func TestJobsCommandSurface(t *testing.T) {
 		t.Fatalf("find jobs: %v", err)
 	}
 	want := map[string]bool{
-		"apply":  true,
-		"delete": true,
-		"list":   true,
-		"logs":   true,
-		"status": true,
+		"apply":         true,
+		"delete":        true,
+		"list":          true,
+		"logs":          true,
+		"reset-backoff": true,
+		"status":        true,
 	}
 	got := map[string]bool{}
 	for _, command := range jobs.Commands() {
@@ -194,5 +198,31 @@ func TestJobStateSeparatesConvergingAndDegraded(t *testing.T) {
 	}
 	if got := jobState(overlap); got != "converging" {
 		t.Fatalf("rolling overlap state = %q, want converging", got)
+	}
+}
+
+func TestJobsResetBackoffCommand(t *testing.T) {
+	previousConfig := config
+	t.Cleanup(func() { config = previousConfig })
+	var method, path, namespace string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method, path, namespace = r.Method, r.URL.Path, r.Header.Get("X-Trellis-Namespace")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	config = CLIConfig{ServerAddr: server.URL, Namespace: "payments"}
+	cmd := NewJobsResetBackoffCmd()
+	cmd.SetArgs([]string{"web", "api"})
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if method != http.MethodPost || path != "/v1/jobs/web/groups/api/replacement-backoff/reset" || namespace != "payments" {
+		t.Fatalf("request = %s %s namespace %q", method, path, namespace)
+	}
+	if got := stdout.String(); got != "Reset replacement backoff of task group api in job web.\n" {
+		t.Fatalf("output = %q", got)
 	}
 }

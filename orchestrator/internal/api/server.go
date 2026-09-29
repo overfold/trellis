@@ -335,6 +335,9 @@ const (
 	// EventJobReplacementDelayed fires when failed allocations put a task
 	// group's replacements into backoff.
 	EventJobReplacementDelayed EventType = "job.replacement_delayed"
+	// EventJobReplacementBackoffReset fires when an operator clears a task
+	// group's replacement backoff.
+	EventJobReplacementBackoffReset EventType = "job.replacement_backoff_reset"
 )
 
 // ClusterEvent carries a typed cluster event payload.

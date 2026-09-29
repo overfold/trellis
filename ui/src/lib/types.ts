@@ -74,7 +74,19 @@ export interface Job {
   running: number;
   healthy: number;
   allocations: Allocation[] | null;
+  replacement_backoff?: ReplacementBackoff[];
   spec?: JobSpec;
+}
+
+export interface ReplacementBackoff {
+  group: string;
+  job_revision: number;
+  failures: number;
+  last_failure_at: string;
+  last_allocation_id?: string;
+  reason?: string;
+  message?: string;
+  next_replacement_at: string;
 }
 
 export interface SecretMetadata {

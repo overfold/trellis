@@ -319,6 +319,16 @@ func (s *ServerClient) DeleteJob(ctx context.Context, name string) error {
 	return nil
 }
 
+// ResetReplacementBackoff clears the replacement backoff of a job task group
+// so its failed allocations are replaced without waiting.
+func (s *ServerClient) ResetReplacementBackoff(ctx context.Context, job, group string) error {
+	path := fmt.Sprintf("%s/v1/jobs/%s/groups/%s/replacement-backoff/reset", s.address(), url.PathEscape(job), url.PathEscape(group))
+	if err := s.client.request(ctx, http.MethodPost, path, nil, nil); err != nil {
+		return fmt.Errorf("reset replacement backoff: %w", err)
+	}
+	return nil
+}
+
 // SetSecret creates or updates a namespace secret.
 func (s *ServerClient) SetSecret(ctx context.Context, namespace, name string, value []byte, expected *uint64) (*api.SecretMetadata, error) {
 	request := make([]byte, 0, base64.StdEncoding.EncodedLen(len(value))+64)

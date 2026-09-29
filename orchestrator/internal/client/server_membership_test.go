@@ -26,3 +26,20 @@ func TestRemoveRaftMember(t *testing.T) {
 		t.Fatalf("path = %q, want %q", path, "/v1/raft/members/node-2.example:8128")
 	}
 }
+
+func TestResetReplacementBackoff(t *testing.T) {
+	var method, path, namespace string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method, path, namespace = r.Method, r.URL.EscapedPath(), r.Header.Get("X-Trellis-Namespace")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	client := NewNamespaceServerClient("token", server.URL, "payments", nil)
+	if err := client.ResetReplacementBackoff(context.Background(), "web", "api"); err != nil {
+		t.Fatal(err)
+	}
+	if method != http.MethodPost || path != "/v1/jobs/web/groups/api/replacement-backoff/reset" || namespace != "payments" {
+		t.Fatalf("request = %s %s namespace %q", method, path, namespace)
+	}
+}

@@ -12,6 +12,7 @@ import { Skeleton } from "./skeleton";
 import { EmptyState } from "./empty-state";
 import { JobForm } from "./job-form";
 import { ConfirmDialog } from "./confirm-dialog";
+import { ReplacementBackoffSection } from "./replacement-backoff";
 import { deleteJob } from "@/lib/api";
 import {
   attentionAllocations,
@@ -142,6 +143,8 @@ export function JobDetail({
         <StatCard label="Running" value={job.running} />
         <StatCard label="Healthy" value={job.healthy} />
       </div>
+
+      <ReplacementBackoffSection job={job} onReset={() => mutate()} />
 
       {problems.length > 0 && state !== "ready" && (
         <section>
