@@ -38,6 +38,9 @@ resources:
 	if cfg.Cluster != "production" || cfg.AdminPublicKey != "test-public-key" || cfg.EnrollmentToken != "trls_enroll_test" || cfg.SigningMode != "managed" || cfg.AgentAdvertise != "node-a:8127" || cfg.WireGuardPort != 51900 || cfg.WireGuardPortCount != 64 {
 		t.Fatalf("unexpected config: %#v", cfg)
 	}
+	if cfg.Explicit != (explicitClusterSettings{WireGuardPortCount: true}) {
+		t.Fatalf("explicit cluster settings = %+v, want only the WireGuard port count", cfg.Explicit)
+	}
 	if cfg.TaskPidsLimit != 2048 {
 		t.Fatalf("task pids limit = %d, want 2048", cfg.TaskPidsLimit)
 	}

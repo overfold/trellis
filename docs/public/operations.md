@@ -48,8 +48,12 @@ job_limits:
 defaults shown above are used when the section is omitted. Every task without a
 `resources` block receives the configured CPU and memory requests before it is
 stored, scheduled, and sent to containerd. Explicit zero or negative resource
-values are invalid. In a [multi-node cluster](multi-node.md#prepare-the-network-and-configuration),
-keep these values identical on every node.
+values are invalid. `job_limits`, `wireguard_pool`, and `wireguard_port_count`
+are [cluster settings](multi-node.md#prepare-the-network-and-configuration):
+they only initialize a new cluster, and afterwards every node uses the
+replicated values. Editing them here and restarting has no effect on an
+existing cluster; use `trellisctl cluster settings` to inspect them and
+`trellisctl cluster set-job-limits` to change job limits.
 
 Every task container a node creates is limited to `resources.task_pids_limit`
 processes and threads (default `4096`, maximum `4194304`; flag

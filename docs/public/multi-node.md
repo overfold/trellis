@@ -43,14 +43,17 @@ Before joining nodes, make sure they can reach each other:
 
 Node and Raft transports use mutually authenticated TLS. Each node's `agent_advertise`, `server_advertise`, and `raft_advertise` addresses must be routable from the other nodes; wildcard bind addresses are not valid advertised addresses. The installer auto-detects a private address and accepts `--advertise HOST` when peers cannot reach the detected one.
 
-Namespace networking gives each namespace one stable UDP port from the configured WireGuard range: `wireguard_port` (default `51820`) plus `wireguard_port_count` (default `256`). Allow that range between every node that may run namespace-networked tasks. `wireguard_endpoint` sets the externally reachable host or base `host:port` other nodes use; Trellis applies each namespace's port offset to that base.
+Namespace networking gives each namespace one stable UDP port from the cluster's WireGuard range: `wireguard_port` (default `51820`) plus the cluster's `wireguard_port_count` (default `256`). Allow that range between every node that may run namespace-networked tasks. `wireguard_endpoint` sets the externally reachable host or base `host:port` other nodes use; Trellis applies each namespace's port offset to that base.
 
-Some settings must match on every node, because any node may become leader or take part in the same namespace network:
+**Cluster settings** are replicated with the rest of the cluster state, so any node can become leader without changing them. The first node's `job_limits`, `wireguard_pool`, and `wireguard_port_count` (or the matching flags) initialize them when it creates the cluster; after that, node configuration no longer changes them, on the first node or any other. Inspect them with `trellisctl cluster settings` and change job limits with `trellisctl cluster set-job-limits` ([CLI](cli.md#inspect-and-change-cluster-settings)). The pool and port count are fixed for the life of the cluster. A node started with different values behaves as follows:
+
+- a different `job_limits` or `wireguard_pool` is ignored, and the node logs a warning at startup;
+- a node that leaves `wireguard_port_count` unset uses the cluster's count; one that sets a different count refuses to start and names the cluster's value, because the leader would reject its registration.
+
+Some node settings must still match on every node, because any node may become leader or take part in the same namespace network:
 
 - the **secrets-encryption key** (and `secrets_key_id`, if set explicitly), so every potential leader can decrypt replicated secret records;
-- `job_limits`, so admission policy does not change with leadership;
 - `allocation_loss_timeout`, so how long a silent node is tolerated does not change with leadership;
-- `wireguard_port_count`, so a namespace's port offset means the same thing everywhere (the base `wireguard_port` may differ per node);
 - the node signing mode and trusted node CA.
 
 ## Add a node

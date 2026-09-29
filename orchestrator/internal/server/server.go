@@ -315,10 +315,19 @@ func (s *Server) AllocationLogsForNamespace(ctx context.Context, namespace, id s
 	return s.client.Logs(ctx, nodeID, address, id, follow, tail)
 }
 
-// Cluster contains persisted cluster identity and TLS state.
+// Cluster contains persisted cluster identity, leadership fencing, and
+// cluster-wide settings.
 type Cluster struct {
-	AdministratorPublicKey string `json:"administrator_public_key"`
-	ControlEpoch           uint64 `json:"control_epoch,omitempty"`
+	AdministratorPublicKey string          `json:"administrator_public_key"`
+	ControlEpoch           uint64          `json:"control_epoch,omitempty"`
+	Settings               ClusterSettings `json:"settings"`
+}
+
+// ClusterBootstrap is the initial replicated state of a new cluster. Only the
+// node that creates the cluster supplies it; existing clusters ignore it.
+type ClusterBootstrap struct {
+	AdministratorPublicKey string
+	Settings               ClusterSettings
 }
 
 // NodeRegistration contains the identity and capacity of a node.
@@ -542,7 +551,7 @@ func (s *Server) rebuildAllocationNodeIndexLocked() {
 
 // NewServer constructs an orchestrator server.
 func NewServer(log *slog.Logger, storage *storage.LocalStorage, state *StateController, store state.Store, cluster, serverAddr string) *Server {
-	pool := netip.MustParsePrefix("10.64.0.0/10")
+	settings := DefaultClusterSettings()
 	s := &Server{
 		log:                log.With("component", "server"),
 		storage:            storage,
@@ -550,9 +559,9 @@ func NewServer(log *slog.Logger, storage *storage.LocalStorage, state *StateCont
 		client:             &client.AgentClient{},
 		nodes:              make(map[uuid.UUID]*Node),
 		jobs:               make(map[string]*Job),
-		networkPool:        pool,
+		networkPool:        settings.WireGuardPool,
 		networkPorts:       make(map[string]int),
-		wireGuardPortCount: 256,
+		wireGuardPortCount: settings.WireGuardPortCount,
 		networkPlans:       make(map[networkPlanKey]*networkPlanState),
 		networkPlanWorkers: make(map[uuid.UUID]uint64),
 		networkPlanWake:    make(chan struct{}, 1),
@@ -560,24 +569,13 @@ func NewServer(log *slog.Logger, storage *storage.LocalStorage, state *StateCont
 		catalog:            catalog.New(),
 		serverAddr:         serverAddr,
 		clusterName:        cluster,
-		jobLimits:          spec.DefaultLimits(),
+		jobLimits:          settings.JobLimits,
 		replacementPolicy:  DefaultReplacementPolicy(),
 		now:                time.Now,
 	}
 	s.backupStore, _ = store.(desiredStore)
 	s.events = newEventBus()
 	return s
-}
-
-// SetJobLimits configures operator-owned job admission and resource defaults.
-func (s *Server) SetJobLimits(limits spec.Limits) error {
-	if err := spec.ValidateLimits(limits); err != nil {
-		return err
-	}
-	s.mu.Lock()
-	s.jobLimits = limits
-	s.mu.Unlock()
-	return nil
 }
 
 // SetAllocationLossTimeout configures how long a node must go without a
@@ -634,6 +632,9 @@ func (s *Server) AcquireLeadership(ctx context.Context) error {
 	s.mu.Lock()
 	s.cluster = cluster
 	s.controlEpoch = epoch
+	// Job limits may have changed under a previous leader. Network settings
+	// are fixed when the cluster is created and were loaded by Init.
+	s.jobLimits = cluster.Settings.JobLimits
 	s.leaderSince = s.now()
 	s.mu.Unlock()
 
@@ -650,29 +651,11 @@ func (s *Server) AcquireLeadership(ctx context.Context) error {
 	return nil
 }
 
-// SetNetworkPool configures the allocation address pool.
-func (s *Server) SetNetworkPool(pool string) error {
-	p, err := netip.ParsePrefix(pool)
-	if err != nil || !p.Addr().Is4() || p.Bits() > 16 {
-		return fmt.Errorf("WireGuard pool must be an IPv4 prefix of /16 or larger")
-	}
-	s.networkPool = p.Masked()
-	return nil
-}
-
-// SetWireGuardPortCount configures how many consecutive UDP ports are
-// available for namespace WireGuard pathways on every node.
-func (s *Server) SetWireGuardPortCount(count int) error {
-	if count < 1 || count > 65535 {
-		return fmt.Errorf("WireGuard port count must be between 1 and 65535")
-	}
-	s.wireGuardPortCount = count
-	return nil
-}
-
-// Init initializes cluster state from the replicated administrator public key.
-// Existing members do not need any administrator key material in node configuration.
-func (s *Server) Init(ctx context.Context, initialAdministratorPublicKey string) error {
+// Init loads the replicated cluster record, creating it from bootstrap when
+// the cluster does not exist yet. Existing members need neither administrator
+// key material nor cluster settings in node configuration: every member uses
+// the replicated values, whatever its local configuration says.
+func (s *Server) Init(ctx context.Context, bootstrap ClusterBootstrap) error {
 	cluster, err := s.state.GetCluster(ctx)
 	if err != nil {
 		return fmt.Errorf("get cluster: %w", err)
@@ -683,26 +666,30 @@ func (s *Server) Init(ctx context.Context, initialAdministratorPublicKey string)
 		if _, err := parseAdministratorPublicKey(cluster.AdministratorPublicKey); err != nil {
 			return fmt.Errorf("replicated administrator public key: %w", err)
 		}
-		s.cluster = cluster
-		s.client = client.NewAgentClient("", s.clientTLS)
-		s.controlEpoch = cluster.ControlEpoch
-		return nil
+		if err := cluster.Settings.Validate(); err != nil {
+			return fmt.Errorf("replicated cluster settings: %w", err)
+		}
+	} else {
+		if _, err := parseAdministratorPublicKey(bootstrap.AdministratorPublicKey); err != nil {
+			return fmt.Errorf("initial administrator public key: %w", err)
+		}
+		if err := bootstrap.Settings.Validate(); err != nil {
+			return fmt.Errorf("initial cluster settings: %w", err)
+		}
+		cluster = &Cluster{AdministratorPublicKey: bootstrap.AdministratorPublicKey, Settings: bootstrap.Settings}
+		if err := s.state.PutCluster(ctx, cluster); err != nil {
+			return fmt.Errorf("save cluster remotely: %w", err)
+		}
 	}
 
-	if _, err := parseAdministratorPublicKey(initialAdministratorPublicKey); err != nil {
-		return fmt.Errorf("initial administrator public key: %w", err)
-	}
-	cluster = &Cluster{AdministratorPublicKey: initialAdministratorPublicKey}
-
-	err = s.state.PutCluster(ctx, cluster)
-	if err != nil {
-		return fmt.Errorf("save cluster remotely: %w", err)
-	}
-
+	s.mu.Lock()
 	s.cluster = cluster
 	s.controlEpoch = cluster.ControlEpoch
+	s.jobLimits = cluster.Settings.JobLimits
+	s.networkPool = cluster.Settings.WireGuardPool
+	s.wireGuardPortCount = cluster.Settings.WireGuardPortCount
+	s.mu.Unlock()
 	s.client = client.NewAgentClient("", s.clientTLS)
-
 	return nil
 }
 
@@ -1102,6 +1089,15 @@ func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spe
 		return fmt.Errorf("job namespace does not match request namespace")
 	}
 	key := jobKey(namespace, jobSpec.Name)
+	// Job limits can change between canonicalization and this point.
+	limits := s.jobLimits
+	if limits == (spec.Limits{}) {
+		limits = spec.DefaultLimits()
+	}
+	if err := spec.ValidateWithLimits(jobSpec, limits); err != nil {
+		s.mu.Unlock()
+		return fmt.Errorf("validate job: %w", err)
+	}
 	if err := s.validateNamespaceAllocationLimitLocked(nil, namespace, jobSpec, key); err != nil {
 		s.mu.Unlock()
 		return err

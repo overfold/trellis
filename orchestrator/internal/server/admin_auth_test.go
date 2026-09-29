@@ -30,7 +30,7 @@ func TestJoiningServerUsesReplicatedAdministratorPublicKeyWithoutPrivateKey(t *t
 	store := memoryStore{}
 	state := NewStateController(store, "test")
 	publicKey, encoded := encodedAdministratorPublicKey(t)
-	if err := state.PutCluster(ctx, &Cluster{AdministratorPublicKey: encoded, ControlEpoch: 4}); err != nil {
+	if err := state.PutCluster(ctx, &Cluster{AdministratorPublicKey: encoded, ControlEpoch: 4, Settings: DefaultClusterSettings()}); err != nil {
 		t.Fatal(err)
 	}
 	local := storage.NewLocalStorage(t.TempDir())
@@ -38,7 +38,7 @@ func TestJoiningServerUsesReplicatedAdministratorPublicKeyWithoutPrivateKey(t *t
 		t.Fatal(err)
 	}
 	control := NewServer(slog.Default(), local, state, store, "test", "node-b:8128")
-	if err := control.Init(ctx, ""); err != nil {
+	if err := control.Init(ctx, ClusterBootstrap{}); err != nil {
 		t.Fatalf("initialize joining server without administrator private key: %v", err)
 	}
 	got, epoch, ok := control.AdministratorVerification()
@@ -55,7 +55,7 @@ func TestInitialServerStoresOnlyAdministratorPublicKey(t *testing.T) {
 	}
 	publicKey, encoded := encodedAdministratorPublicKey(t)
 	control := NewServer(slog.Default(), local, NewStateController(store, "test"), store, "test", "node-a:8128")
-	if err := control.Init(context.Background(), encoded); err != nil {
+	if err := control.Init(context.Background(), ClusterBootstrap{AdministratorPublicKey: encoded, Settings: DefaultClusterSettings()}); err != nil {
 		t.Fatal(err)
 	}
 	got, _, ok := control.AdministratorVerification()
@@ -71,7 +71,7 @@ func TestInitialServerRequiresValidAdministratorPublicKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	control := NewServer(slog.Default(), local, NewStateController(store, "test"), store, "test", "node-a:8128")
-	if err := control.Init(context.Background(), ""); err == nil {
+	if err := control.Init(context.Background(), ClusterBootstrap{Settings: DefaultClusterSettings()}); err == nil {
 		t.Fatal("initialized a new cluster without an administrator public key")
 	}
 }
