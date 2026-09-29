@@ -167,9 +167,14 @@ func TestPlanMembership(t *testing.T) {
 		{name: "surplus demotion prefers a lagging voter", members: []memberState{leader, voter("b"), voter("c"), {ID: "d", Voter: true, Live: true}}, want: &membershipChange{Action: demoteMember, ID: "d"}},
 		{name: "gone voter is replaced by promotion first", members: []memberState{leader, voter("b"), gone(voter("c")), nonvoter("d")}, want: &membershipChange{Action: promoteMember, ID: "d"}},
 		{name: "then the gone voter is demoted", members: []memberState{leader, voter("b"), gone(voter("c")), voter("d")}, want: &membershipChange{Action: demoteMember, ID: "c"}},
-		{name: "gone voter without a replacement is kept", members: []memberState{leader, voter("b"), gone(voter("c")), lagging("d")}},
+		{name: "gone voter without a replacement leaves an odd set", members: []memberState{leader, voter("b"), gone(voter("c")), lagging("d")}, want: &membershipChange{Action: demoteMember, ID: "c"}},
 		{name: "gone leader record is never replaced", members: []memberState{gone(leader), voter("b"), voter("c"), nonvoter("d")}},
 		{name: "unhealthy but not gone voter is kept", members: []memberState{leader, voter("b"), {ID: "c", Voter: true}, nonvoter("d")}},
+		{name: "gone voter below target is still swapped", members: []memberState{leader, voter("b"), gone(voter("c")), nonvoter("d"), lagging("e")}, want: &membershipChange{Action: promoteMember, ID: "d"}},
+		{name: "then demoted to an odd set below target", members: []memberState{leader, voter("b"), gone(voter("c")), voter("d"), lagging("e")}, want: &membershipChange{Action: demoteMember, ID: "c"}},
+		{name: "even set without a promotion is made odd", members: []memberState{leader, voter("b"), lagging("c")}, want: &membershipChange{Action: demoteMember, ID: "b"}},
+		{name: "even set with a promotion is completed", members: []memberState{leader, voter("b"), nonvoter("c")}, want: &membershipChange{Action: promoteMember, ID: "c"}},
+		{name: "unreachable voter is demoted before a draining one", members: []memberState{leader, {ID: "b", Voter: true, Live: true}, {ID: "c", Voter: true}, voter("d")}, want: &membershipChange{Action: demoteMember, ID: "c"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -235,7 +240,7 @@ func TestReconcileMembershipIgnoresStaleProgressAndDrainingNodes(t *testing.T) {
 	joiner := newFakeMembership(fakeMember(leader, true), fakeMember(b, false), fakeMember(c, false))
 	s := membershipTestServer(joiner, leader, b, c)
 	s.nodes[b].Status = NodeStatusDraining
-	s.raftProgress[c] = raftProgress{applied: joiner.applied, leaderApplied: joiner.applied, at: s.now().Add(-raftProgressTTL - time.Second)}
+	s.raftProgress[c] = raftProgress{applied: joiner.applied, leaderApplied: joiner.applied, at: s.now().Add(-recentHeartbeat - time.Second)}
 	if err := s.ReconcileMembership(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -305,6 +310,9 @@ func TestRemoveMemberRebalancesToOddVoterSet(t *testing.T) {
 	if err := s.RemoveMember(context.Background(), c.String()); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.ReconcileMembership(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	// Two voters tolerate no failure, and losing either would stop the
 	// control plane; one voter plus a non-voter keeps the survivor harmless.
 	if got, want := joiner.operations(), []string{"remove " + c.String(), "demote " + b.String()}; !slices.Equal(got, want) {
@@ -342,6 +350,21 @@ func TestRemoveMemberRefusesQuorumLoss(t *testing.T) {
 	if got := joiner.operations(); len(got) != 0 {
 		t.Fatalf("unsafe removal changed membership: %v", got)
 	}
+	// A removal refused for quorum must not leave a promotion behind.
+	f := uuid.New()
+	joiner.members = append(joiner.members, fakeMember(f, false))
+	s.nodes[f] = &Node{ID: f, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
+	s.RecordRaftProgress(f, joiner.AppliedIndex())
+	s.nodes[e].LastHeartbeat = s.now().Add(-time.Minute)
+	s.nodes[b].LastHeartbeat = s.now().Add(-time.Minute)
+	if err := s.RemoveMember(context.Background(), leader.String()); !errors.Is(err, ErrMembershipUnsafe) {
+		t.Fatalf("RemoveMember error = %v, want ErrMembershipUnsafe", err)
+	}
+	if got := joiner.operations(); len(got) != 0 {
+		t.Fatalf("refused removal changed membership: %v", got)
+	}
+	s.nodes[e].LastHeartbeat = s.now()
+	s.nodes[b].LastHeartbeat = s.now()
 	// Removing an unreachable voter keeps three live voters of four.
 	if err := s.RemoveMember(context.Background(), c.String()); err != nil {
 		t.Fatal(err)

@@ -20,9 +20,9 @@ const (
 	// raftCatchUpLag is how many log entries a node may trail the leader and
 	// still count as caught up for promotion.
 	raftCatchUpLag = 256
-	// raftProgressTTL bounds how old a node's reported Raft progress may be
-	// when deciding a promotion.
-	raftProgressTTL = 3 * heartbeatInterval
+	// recentHeartbeat bounds how old a node's last heartbeat, and the Raft
+	// progress it reported, may be for the node to count as reachable.
+	recentHeartbeat = 3 * heartbeatInterval
 	// voterLossTimeout is how long a voter's node must be silent before its
 	// vote is handed to a healthy non-voter. The replaced node stays a member
 	// and can vote again later.
@@ -62,11 +62,15 @@ func (s *Server) RecordRaftProgress(id uuid.UUID, applied uint64) {
 // largest odd number not above the member count or maxVoters. An even voter
 // count tolerates no more failures than one voter fewer.
 func voterTarget(members int) int {
-	target := min(members, maxVoters)
-	if target%2 == 0 {
-		target--
+	return oddFloor(min(members, maxVoters))
+}
+
+// oddFloor returns the largest odd number not above n, and at least one.
+func oddFloor(n int) int {
+	if n%2 == 0 {
+		n--
 	}
-	return max(target, 1)
+	return max(n, 1)
 }
 
 // memberState is the leader's view of one Raft member.
@@ -98,19 +102,21 @@ type membershipChange struct {
 }
 
 // planMembership returns the next single change that moves the voter set
-// toward voterTarget, or false when none is needed. It is a pure function of
-// its input, which it does not modify, and breaks every tie by member ID.
+// toward its desired size, or false when none is needed. It is a pure function
+// of its input, which it does not modify, and breaks every tie by member ID.
 //
-// Promotions only choose eligible non-voters and only move toward an odd voter
-// count. Demotions never choose the leader and prefer gone members, then
-// members that are not eligible. A gone voter is replaced by promoting a
+// The desired size is the largest odd number not above voterTarget or the
+// number of members that could vote now: voters that are not gone plus
+// eligible non-voters. Promotions only choose eligible non-voters. Surplus
+// voters are demoted, never the leader, preferring gone members, then
+// unreachable ones, then ineligible ones, so an even voter set is always
+// brought back to odd. A gone voter is replaced by promoting an eligible
 // non-voter first; the resulting surplus then demotes the gone voter, so the
-// number of live voters never shrinks during the swap.
+// number of reachable voters never shrinks during the swap.
 func planMembership(members []memberState) (membershipChange, bool) {
 	sorted := slices.Clone(members)
 	slices.SortFunc(sorted, func(a, b memberState) int { return strings.Compare(a.ID, b.ID) })
-	target := voterTarget(len(sorted))
-	voters, goneVoters := 0, 0
+	voters, presentVoters, goneVoters := 0, 0, 0
 	var eligible []memberState
 	for _, member := range sorted {
 		switch {
@@ -118,23 +124,21 @@ func planMembership(members []memberState) (membershipChange, bool) {
 			voters++
 			if member.Gone && !member.Leader {
 				goneVoters++
+			} else {
+				presentVoters++
 			}
 		case member.Eligible:
 			eligible = append(eligible, member)
 		}
 	}
-	if voters > target {
+	desired := oddFloor(min(voterTarget(len(sorted)), presentVoters+len(eligible)))
+	if len(eligible) > 0 && (voters < desired || (goneVoters > 0 && voters <= desired)) {
+		return membershipChange{Action: promoteMember, ID: eligible[0].ID, Address: eligible[0].Address}, true
+	}
+	if voters > desired {
 		if demote, ok := pickDemotion(sorted); ok {
 			return membershipChange{Action: demoteMember, ID: demote.ID, Address: demote.Address}, true
 		}
-		return membershipChange{}, false
-	}
-	reachable := min(target, voters+len(eligible))
-	if reachable%2 == 0 {
-		reachable--
-	}
-	if len(eligible) > 0 && (voters < reachable || goneVoters > 0) {
-		return membershipChange{Action: promoteMember, ID: eligible[0].ID, Address: eligible[0].Address}, true
 	}
 	return membershipChange{}, false
 }
@@ -144,10 +148,12 @@ func pickDemotion(sorted []memberState) (memberState, bool) {
 		switch {
 		case member.Gone:
 			return 0
-		case !member.Eligible:
+		case !member.Live:
 			return 1
-		default:
+		case !member.Eligible:
 			return 2
+		default:
+			return 3
 		}
 	}
 	var pick memberState
@@ -185,9 +191,9 @@ func (s *Server) memberStates(members []state.RaftMember) []memberState {
 			continue
 		}
 		progress, reported := s.raftProgress[id]
-		caughtUp := reported && now.Sub(progress.at) <= raftProgressTTL && progress.leaderApplied <= progress.applied+raftCatchUpLag
+		caughtUp := reported && now.Sub(progress.at) <= recentHeartbeat && progress.leaderApplied <= progress.applied+raftCatchUpLag
 		current.Eligible = node.Status == NodeStatusHealthy && caughtUp
-		current.Live = now.Sub(node.LastHeartbeat) <= 3*heartbeatInterval
+		current.Live = now.Sub(node.LastHeartbeat) <= recentHeartbeat
 		// A new leader may hold old heartbeat times until nodes report to it,
 		// so silence is measured from no earlier than its election.
 		silentSince := node.LastHeartbeat
@@ -263,10 +269,12 @@ func (s *Server) applyMembershipChange(change membershipChange, configIndex uint
 
 // RemoveMember permanently removes a Raft member. Before a voter is removed, a
 // healthy caught-up non-voter is promoted in its place so the number of live
-// voters does not shrink. The removal is refused if the voters that would
-// remain could not form a quorum from the members known to be live. Removing
-// an absent member succeeds, so retries are safe.
-func (s *Server) RemoveMember(ctx context.Context, id string) error {
+// voters does not shrink. The removal is refused, before any change, if the
+// voters that would remain could not form a quorum from the members known to
+// be live. Removing an absent member succeeds, so retries are safe. Any
+// resulting surplus voter is demoted by the membership loop, which the removal
+// wakes.
+func (s *Server) RemoveMember(_ context.Context, id string) error {
 	if s.joiner == nil {
 		return fmt.Errorf("cluster membership changes not available")
 	}
@@ -282,30 +290,44 @@ func (s *Server) RemoveMember(ctx context.Context, id string) error {
 		return nil
 	}
 	if members[index].Voter {
-		if replacement, ok := planReplacement(members, id); ok {
+		replacement, promote := planReplacement(members, id)
+		if promote {
+			// Check the configuration the removal would leave before changing
+			// anything, counting the eligible, and so live, replacement.
+			members[slices.IndexFunc(members, func(member memberState) bool { return member.ID == replacement.ID })].Voter = true
+		}
+		if err := checkRemovalQuorum(members, id); err != nil {
+			return err
+		}
+		if promote {
 			if err := s.applyMembershipChange(replacement, membership.Index); err != nil {
 				return err
 			}
 			if membership, err = s.joiner.Membership(); err != nil {
 				return fmt.Errorf("read Raft membership: %w", err)
 			}
-			members = s.memberStates(membership.Members)
-		}
-		if err := checkRemovalQuorum(members, id); err != nil {
-			return err
 		}
 	}
 	if err := s.joiner.RemoveServer(id, membership.Index); err != nil {
 		return fmt.Errorf("remove Raft member %s: %w", id, err)
 	}
-	if id == s.nodeID.String() {
-		// The leader removed itself; the next leader rebalances voters.
-		return nil
+	if nodeID, err := uuid.Parse(id); err == nil {
+		s.mu.Lock()
+		delete(s.raftProgress, nodeID)
+		s.mu.Unlock()
 	}
-	if err := s.reconcileMembershipLocked(ctx); err != nil && s.log != nil {
-		s.log.Warn("rebalance control-plane voters after removal", "error", err)
-	}
+	s.wakeMembership()
 	return nil
+}
+
+func (s *Server) wakeMembership() {
+	if s.membershipWake == nil {
+		return
+	}
+	select {
+	case s.membershipWake <- struct{}{}:
+	default:
+	}
 }
 
 // planReplacement chooses the eligible non-voter, by ID, to promote before
@@ -370,19 +392,23 @@ func (s *Server) runMembershipLoop(ctx context.Context) {
 	ticker := time.NewTicker(membershipInterval)
 	defer ticker.Stop()
 	for {
+		woken := false
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		case <-s.membershipWake:
+			woken = true
 		}
 		// A new leader first lets nodes report health and progress to it.
+		// An operator's removal is acted on immediately.
 		s.mu.RLock()
 		settled := s.now().Sub(s.leaderSince) >= leaderRecoveryGrace
 		s.mu.RUnlock()
-		if !settled {
+		if !settled && !woken {
 			continue
 		}
-		if err := s.ReconcileMembership(ctx); err != nil && ctx.Err() == nil {
+		if err := s.ReconcileMembership(ctx); err != nil && ctx.Err() == nil && s.log != nil {
 			s.log.Warn("reconcile control-plane voters", "error", err)
 		}
 	}

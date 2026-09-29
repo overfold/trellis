@@ -137,6 +137,8 @@ type Server struct {
 	// raftProgress is each node's latest reported Raft applied index, a
 	// renewable observation used only to decide promotions. Protected by mu.
 	raftProgress map[uuid.UUID]raftProgress
+	// membershipWake asks the membership loop for an immediate pass.
+	membershipWake chan struct{}
 }
 
 // SetSecretStore configures encrypted secret storage.
@@ -569,6 +571,7 @@ func NewServer(log *slog.Logger, storage *storage.LocalStorage, state *StateCont
 		networkPlans:       make(map[networkPlanKey]*networkPlanState),
 		networkPlanWorkers: make(map[uuid.UUID]uint64),
 		networkPlanWake:    make(chan struct{}, 1),
+		membershipWake:     make(chan struct{}, 1),
 		tokenManager:       auth.NewTokenManager(store, cluster),
 		catalog:            catalog.New(),
 		serverAddr:         serverAddr,
@@ -648,6 +651,9 @@ func (s *Server) AcquireLeadership(ctx context.Context) error {
 	s.cluster = cluster
 	s.controlEpoch = epoch
 	s.leaderSince = s.now()
+	// Raft progress is measured against this server's own applied index;
+	// reports from an earlier term must not decide promotions in this one.
+	s.raftProgress = nil
 	s.mu.Unlock()
 
 	// Desired network plans are derived from the leader's in-memory topology.

@@ -412,10 +412,9 @@ func (h *Handler) handleListNodes(c *echo.Context) error {
 		return err
 	}
 	nodes := h.server.ListNodes()
-	voters, err := h.server.MemberVoters()
-	if err != nil {
-		return echo.NewHTTPError(http.StatusServiceUnavailable, "read control-plane membership")
-	}
+	// Membership only annotates the listing; node commands must keep working
+	// while the Raft configuration is briefly unreadable.
+	voters, _ := h.server.MemberVoters()
 	result := make(api.NodeListResponse, 0, len(nodes))
 	for _, node := range nodes {
 		response := h.convertNode(&node)

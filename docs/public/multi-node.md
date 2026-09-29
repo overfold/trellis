@@ -31,7 +31,9 @@ Three nodes is the smallest cluster that survives a node failure, and five survi
 Voters are replaced automatically when that is safe:
 
 - when a voter is removed with `nodes remove` (or by the uninstall script), Trellis first promotes a healthy non-voter, if one exists, so the number of reachable voters never drops;
-- when a voter's node has been silent for 5 minutes and a healthy non-voter exists, Trellis promotes the non-voter and demotes the silent voter. If the node returns, it stays a non-voter until a voter is needed again.
+- when a voter's node has been silent for 5 minutes, Trellis demotes it, first promoting a healthy non-voter in its place when one exists. If the node returns, it stays a non-voter until a voter is needed again.
+
+When too few healthy nodes are available to fill every voter seat, Trellis runs with the largest odd number of voters it can, rather than an even number.
 
 When quorum is lost, allocations already running on reachable nodes keep running, but nothing can change: jobs cannot be applied or deleted, failed or lost allocations are not replaced, nodes cannot be drained, and no voter can be replaced. The cluster resumes once a majority of voters is reachable again.
 
@@ -179,6 +181,6 @@ A node that misses heartbeats for 30 seconds becomes unhealthy and receives no n
 
 A lost allocation is not re-adopted. While its record is retained, if its node returns with the old containers still running, Trellis keeps them running until enough replacements are `running`, then stops them. If an older pruned allocation is later reported, Trellis stops it as an observed orphan. It stops them sooner if they block a replacement, such as one that needs the same host port on that node. Allocations that depend on a volume bound to the failed node stay unplaced rather than starting with an empty copy elsewhere. If that data is intentionally abandoned, use a new volume name; changing only `host_path` does not change the owning node.
 
-If a failure takes the cluster below quorum, see [Choose a cluster size](#choose-a-cluster-size): restore enough voters to regain a majority before expecting any of this reconciliation to happen. A voter that stays down is replaced by a healthy non-voter after 5 minutes when one exists, as long as the remaining voters still hold quorum.
+If a failure takes the cluster below quorum, see [Choose a cluster size](#choose-a-cluster-size): restore enough voters to regain a majority before expecting any of this reconciliation to happen. A voter that stays down for 5 minutes is demoted, and replaced by a healthy non-voter when one exists, as long as the remaining voters still hold quorum.
 
 [Documentation index](../README.md) · [Previous: Operations](operations.md) · [Next: Cookbook](cookbook.md)
