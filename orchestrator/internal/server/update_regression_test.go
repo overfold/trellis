@@ -279,6 +279,7 @@ func TestReconcileChargesAllocationsQueuedForStop(t *testing.T) {
 			}
 
 			s.Reconcile(context.Background())
+			observeStarted(t, s, node.ID)
 			var replacement *Allocation
 			for _, allocation := range s.allocations {
 				if allocation.ID != obsolete.ID {
@@ -344,7 +345,7 @@ func TestDrainNodeStopsAllocationAfterReplacementHealthy(t *testing.T) {
 	if replacement.Node != replacementNode {
 		t.Fatalf("replacement node = %v, want %v", replacement.Node, replacementNode)
 	}
-	replacement.Health = lifecycle.HealthHealthy
+	observeStarted(t, s, replacementNode.ID)
 	s.Reconcile(context.Background())
 	if original.Phase != lifecycle.PhaseStopped {
 		t.Fatalf("original phase after replacement healthy = %s, want stopped", original.Phase)
@@ -410,7 +411,7 @@ func TestUndrainNodeRetriesRecoveredStartingAllocation(t *testing.T) {
 	if err := s.UndrainNode(context.Background(), node.ID); err != nil {
 		t.Fatalf("undrain starting allocation: %v", err)
 	}
-	if node.Status != NodeStatusHealthy || allocation.Draining || allocation.Phase != lifecycle.PhaseRunning {
+	if node.Status != NodeStatusHealthy || allocation.Draining || allocation.Phase != lifecycle.PhaseStarting {
 		t.Fatalf("after undrain: node=%s draining=%t phase=%s", node.Status, allocation.Draining, allocation.Phase)
 	}
 	var resumed, started bool

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/overfold/trellis/internal/api"
 	"github.com/overfold/trellis/internal/lifecycle"
 	"github.com/overfold/trellis/internal/spec"
 )
@@ -26,6 +27,28 @@ func newTestServerWithAgent() (*Server, *testAgent) {
 		catalog: newNopCatalog(),
 	}
 	return s, agent
+}
+
+// observeStarted sends a heartbeat for a node that reports every task of its
+// starting and running allocations running and healthy, as an agent does once
+// its background starts complete.
+func observeStarted(t *testing.T, s *Server, nodeID uuid.UUID) {
+	t.Helper()
+	var statuses []api.AllocationStatus
+	s.mu.RLock()
+	for _, allocation := range s.allocations {
+		allocation.mu.Lock()
+		if allocation.Node != nil && allocation.Node.ID == nodeID && (allocation.Phase == lifecycle.PhaseStarting || allocation.Phase == lifecycle.PhaseRunning) {
+			for _, task := range allocation.Tasks {
+				statuses = append(statuses, api.AllocationStatus{ID: allocation.ID, Generation: allocation.Generation, Task: task.Name, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy})
+			}
+		}
+		allocation.mu.Unlock()
+	}
+	s.mu.RUnlock()
+	if err := s.Heartbeat(context.Background(), nodeID, statuses, "test", nil, nil, nodeResourceObservation{}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestReconcileDoesNotCreateAllocationsForInvalidJob(t *testing.T) {
@@ -69,13 +92,13 @@ func TestReconcileContinuesAfterWireGuardPortExhaustion(t *testing.T) {
 	if old.Phase != lifecycle.PhaseStopped {
 		t.Fatalf("deleted allocation phase = %s, want stopped", old.Phase)
 	}
-	if len(s.allocations) != 2 || s.allocations[1].Namespace != "plain" || s.allocations[1].Phase != lifecycle.PhaseRunning {
-		t.Fatalf("allocations after exhaustion = %+v, want stopped old and running plain", s.allocations)
+	if len(s.allocations) != 2 || s.allocations[1].Namespace != "plain" || s.allocations[1].Phase != lifecycle.PhaseStarting {
+		t.Fatalf("allocations after exhaustion = %+v, want stopped old and starting plain", s.allocations)
 	}
 
 	s.Reconcile(context.Background())
-	if len(s.allocations) != 3 || s.allocations[2].Namespace != "new" || s.allocations[2].Phase != lifecycle.PhaseRunning {
-		t.Fatalf("allocations after slot release = %+v, want new network allocation running", s.allocations)
+	if len(s.allocations) != 3 || s.allocations[2].Namespace != "new" || s.allocations[2].Phase != lifecycle.PhaseStarting {
+		t.Fatalf("allocations after slot release = %+v, want new network allocation starting", s.allocations)
 	}
 }
 

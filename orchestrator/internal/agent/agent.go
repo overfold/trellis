@@ -63,6 +63,11 @@ type Agent struct {
 	mu          sync.RWMutex
 	operationMu sync.Mutex
 	operations  map[string]*allocationOperation
+	// starts holds accepted allocation starts running in the background, and
+	// failed ones until the control plane retries; guarded by mu.
+	starts map[string]*groupStart
+	// lifetime bounds background starts; Init sets it.
+	lifetime context.Context
 
 	recoveryListPending bool
 	// supersededStops holds retained older generations that recovery must
@@ -282,6 +287,7 @@ func NewAgent(log *slog.Logger, runtime runtime.ContainerRuntime, health *health
 		execSessionsByAllocation: make(map[string]int),
 		healthProbe:              filepath.Join(filepath.Dir(executable), "trellis-health-probe"),
 		operations:               make(map[string]*allocationOperation),
+		starts:                   make(map[string]*groupStart),
 
 		log: log,
 
@@ -384,6 +390,7 @@ func (a *Agent) SetVersion(version string) { a.version = version }
 // listing failure does not fail Init: recorded allocations are kept unobserved
 // and the recovery retry lists again. Failed reports a later recovery failure.
 func (a *Agent) Init(ctx context.Context) error {
+	a.lifetime = ctx
 	a.health.Subscriber = a
 	a.health.SetContext(ctx)
 	a.reconciler.Subscriber = a
@@ -1103,86 +1110,6 @@ func (a *Agent) GetAllocations() []*Allocation {
 	return result
 }
 
-// PrepareStart validates and begins an allocation start operation.
-func (a *Agent) PrepareStart(ctx context.Context, request *api.AllocationRequest) error {
-	unlock := a.lockAllocationOperation(request.AllocationID)
-	defer unlock()
-	return a.prepareStart(ctx, request)
-}
-
-func (a *Agent) prepareStart(ctx context.Context, request *api.AllocationRequest) error {
-	if err := a.AcceptEpoch(request.Epoch); err != nil {
-		return err
-	}
-	a.mu.RLock()
-	var oldIDs []string
-	var exhaustedTask string
-	for id, allocation := range a.allocations {
-		if allocation.AllocationID != request.AllocationID {
-			continue
-		}
-		if allocation.Generation > request.Generation {
-			a.mu.RUnlock()
-			return fmt.Errorf("%w: current %d, requested %d", ErrStaleGeneration, allocation.Generation, request.Generation)
-		}
-		if allocation.Generation == request.Generation && (allocation.JobRevision != request.JobRevision || allocation.ExecutionHash != request.ExecutionHash) {
-			a.mu.RUnlock()
-			return fmt.Errorf("%w: allocation %s generation %d", ErrExecutionConflict, request.AllocationID, request.Generation)
-		}
-		if allocation.Generation == request.Generation && allocation.RestartExhausted && (exhaustedTask == "" || allocation.TaskName < exhaustedTask) {
-			exhaustedTask = allocation.TaskName
-		}
-		if allocation.Generation < request.Generation {
-			oldIDs = append(oldIDs, id)
-		}
-	}
-	// Reject after the fencing checks, and before touching any task, so a
-	// start retry cannot churn the siblings of a task whose restart budget is
-	// terminally exhausted. Pick the task deterministically.
-	if exhaustedTask != "" {
-		a.mu.RUnlock()
-		return fmt.Errorf("%w: allocation %s generation %d task %s", ErrRestartBudgetExhausted, request.AllocationID, request.Generation, exhaustedTask)
-	}
-	a.mu.RUnlock()
-	for _, id := range oldIDs {
-		if err := a.stopAllocation(ctx, id); err != nil {
-			return fmt.Errorf("replace older generation: %w", err)
-		}
-	}
-	return nil
-}
-
-// RunGroup serializes and starts every task in one scheduler allocation.
-func (a *Agent) RunGroup(ctx context.Context, request *api.AllocationRequest) error {
-	unlock := a.lockAllocationOperation(request.AllocationID)
-	defer unlock()
-	if err := a.prepareStart(ctx, request); err != nil {
-		return err
-	}
-	draining, drainSequence := a.startDrainState(request)
-	// Tasks that are already running keep their records, so apply the drain
-	// state to them before any task starts. Each start reapplies it so a
-	// partially applied state converges. Records that are neither running nor
-	// starting are rebuilt by RunAllocation with the same state.
-	var err error
-	if draining {
-		err = a.applyDrain(request.AllocationID, request.Generation, drainSequence)
-	} else if drainSequence > 0 {
-		err = a.applyResume(request.AllocationID, request.Generation, drainSequence, true)
-	}
-	if err != nil {
-		return err
-	}
-	for i := range request.Tasks {
-		task := &request.Tasks[i]
-		id := fmt.Sprintf("%s-g%d-%s", request.AllocationID, request.Generation, task.Name)
-		if err := a.RunAllocation(ctx, id, request.AllocationID, request.Generation, request.JobRevision, request.ExecutionHash, request.Namespace, request.JobName, request.GroupName, task.Name, task, request.Runtime, request.NetworkPlan, request.EnvOverrides, request.Secrets, request.Restart, draining, drainSequence); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // startDrainState combines the drain state carried by a start request with the
 // newest drain or resume the agent already applied to that generation. The
 // higher sequence wins, so a delayed start cannot roll back a later drain.
@@ -1256,11 +1183,31 @@ func (a *Agent) StopGroup(ctx context.Context, request *api.StopAllocationReques
 	if request.Generation == 0 {
 		return ErrInvalidGeneration
 	}
-	unlock := a.lockAllocationOperation(request.AllocationID)
-	defer unlock()
-	if err := a.AcceptEpoch(request.Epoch); err != nil {
-		return err
+	var unlock func()
+	for {
+		unlock = a.lockAllocationOperation(request.AllocationID)
+		if err := a.AcceptEpoch(request.Epoch); err != nil {
+			unlock()
+			return err
+		}
+		// A start in the background is cancelled; its own cleanup runs
+		// before the stop handles whatever records it left.
+		wait, err := a.cancelStartLocked(request.AllocationID, request.Generation)
+		if err != nil {
+			unlock()
+			return err
+		}
+		if wait == nil {
+			break
+		}
+		unlock()
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
+	defer unlock()
 	a.mu.RLock()
 	var ids []string
 	for id, allocation := range a.allocations {
@@ -1382,6 +1329,10 @@ func (a *Agent) DrainGroup(request *api.DrainAllocationRequest) error {
 // must hold the allocation operation lock.
 func (a *Agent) applyDrain(allocationID string, generation, sequence uint64) error {
 	a.mu.Lock()
+	if err := a.drainStartLocked(allocationID, generation, true, sequence); err != nil {
+		a.mu.Unlock()
+		return err
+	}
 	var ids []string
 	var persistErr error
 	for _, allocation := range a.allocations {
@@ -1415,6 +1366,24 @@ func (a *Agent) applyDrain(allocationID string, generation, sequence uint64) err
 	return persistErr
 }
 
+// drainStartLocked records a drain or resume for a start of the generation
+// that runs in the background, which applies it when it creates the tasks. It
+// rejects the operation when a newer generation is starting. The caller holds
+// a.mu.
+func (a *Agent) drainStartLocked(allocationID string, generation uint64, draining bool, sequence uint64) error {
+	start := a.starts[allocationID]
+	if start == nil {
+		return nil
+	}
+	if start.generation > generation {
+		return fmt.Errorf("%w: current %d, requested %d", ErrStaleGeneration, start.generation, generation)
+	}
+	if start.generation == generation {
+		start.mergeDrain(draining, sequence)
+	}
+	return nil
+}
+
 // ResumeGroup cancels a drain for a retained allocation generation.
 func (a *Agent) ResumeGroup(request *api.DrainAllocationRequest) error {
 	unlock := a.lockAllocationOperation(request.AllocationID)
@@ -1430,6 +1399,10 @@ func (a *Agent) ResumeGroup(request *api.DrainAllocationRequest) error {
 // skipInactive is set. The caller must hold the allocation operation lock.
 func (a *Agent) applyResume(allocationID string, generation, sequence uint64, skipInactive bool) error {
 	a.mu.Lock()
+	if err := a.drainStartLocked(allocationID, generation, false, sequence); err != nil {
+		a.mu.Unlock()
+		return err
+	}
 	var resumed []*Allocation
 	for _, allocation := range a.allocations {
 		if allocation.AllocationID != allocationID {
@@ -1480,170 +1453,137 @@ func (a *Agent) applyResume(allocationID string, generation, sequence uint64, sk
 	return nil
 }
 
-// RunAllocation creates and starts one allocation task. draining and
-// drainSequence are the generation's drain state; a draining task starts
-// restart-suppressed. RunGroup applies that state to existing records first.
-func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, generation uint64, jobRevision int, executionHash, namespace, jobName, groupName, taskName string, taskSpec *spec.TaskSpec, groupRuntime string, networkPlan *network.Plan, envOverrides map[string]string, delivered []api.DeliveredSecret, restartPolicy *spec.RestartPolicySpec, draining bool, drainSequence uint64) (runErr error) {
-	ts := taskSpec
-	if ts == nil {
+// taskStart describes one task of an allocation start.
+type taskStart struct {
+	// ID identifies the task record and its container.
+	ID            string
+	AllocationID  string
+	Generation    uint64
+	JobRevision   int
+	ExecutionHash string
+	Namespace     string
+	JobName       string
+	GroupName     string
+	Spec          *spec.TaskSpec
+	Runtime       string
+	NetworkPlan   *network.Plan
+	EnvOverrides  map[string]string
+	Secrets       []api.DeliveredSecret
+	Restart       *spec.RestartPolicySpec
+	// Draining and DrainSequence are the generation's drain state; a draining
+	// task starts restart-suppressed.
+	Draining      bool
+	DrainSequence uint64
+}
+
+// taskLaunch records what a task start has acquired, so a failed start
+// releases exactly that. alloc is the durable record under construction;
+// readers see copies published to Agent.allocations.
+type taskLaunch struct {
+	task             *taskStart
+	alloc            *Allocation
+	ports            []*runtime.Port
+	secretDir        string
+	netAttachment    *network.Attachment
+	containerCreated bool
+	startAttempted   bool
+	tracked          bool
+	healthRegistered bool
+	committed        bool
+}
+
+// startTask creates and starts one allocation task. The caller holds the
+// allocation operation lock and has pulled the task image; runGroupTasks
+// applies the generation's drain state to existing records first.
+func (a *Agent) startTask(ctx context.Context, task *taskStart) (runErr error) {
+	if task.Spec == nil {
 		return fmt.Errorf("task spec is required")
 	}
-	if allocID == "" {
+	if task.ID == "" {
 		return fmt.Errorf("allocation ID is required")
 	}
-	a.mu.RLock()
-	known := a.allocations[allocID] != nil
-	a.mu.RUnlock()
-	if !known {
-		// Checked before any start state exists, so a refused start never
-		// reaches cleanup that would release staging it does not own. A tracked
-		// allocation's staging is released by its own stop below.
-		if err := a.releaseOrphanedStaging(ctx, allocID); err != nil {
-			return err
-		}
+	restartAttempts, restartWindow, running, err := a.prepareTaskRecord(ctx, task)
+	if err != nil || running {
+		return err
 	}
-	a.mu.Lock()
-	existing := a.allocations[allocID]
-	// Restart accounting belongs to the allocation generation. A start retry
-	// for the same generation keeps it, so repeated retries or agent restarts
-	// cannot hide a crash loop behind a fresh budget.
-	var restartAttempts int
-	var restartWindow time.Time
-	if existing != nil {
-		matching := existing.AllocationID == schedulerID && existing.Generation == generation && existing.JobRevision == jobRevision && existing.ExecutionHash == executionHash
-		status, exhausted, unobserved := existing.Status, existing.RestartExhausted, existing.unobserved
-		restartAttempts, restartWindow = existing.RestartAttempts, existing.RestartWindow
-		a.mu.Unlock()
-		if !matching {
-			return fmt.Errorf("%w: %s", ErrAllocationExists, allocID)
-		}
-		// An exhausted restart budget is terminal for this generation; a
-		// start retry must not recreate the task with a fresh budget.
-		if exhausted {
-			return fmt.Errorf("%w: allocation %s", ErrRestartBudgetExhausted, allocID)
-		}
-		if unobserved {
-			observed, err := a.observeRecovered(ctx, allocID)
-			if err != nil {
-				return err
-			}
-			status = observed
-		}
-		if status == "running" {
-			return nil
-		}
-		// A previous start may have reached the runtime but failed before it
-		// could be committed. Preserve its resources while Stop is uncertain,
-		// then finish that cleanup on a later retry instead of converting the
-		// retry into a terminal execution conflict. An empty status means
-		// recovery already confirmed the container missing and cleaned it up.
-		if status != "" {
-			if err := a.stopAllocation(context.WithoutCancel(ctx), allocID); err != nil {
-				return fmt.Errorf("clean up incomplete allocation %s before retry: %w", allocID, err)
-			}
-		}
-		a.mu.Lock()
-	}
-	alloc := &Allocation{ID: allocID, ContainerID: allocID, AllocationID: schedulerID, Generation: generation, JobRevision: jobRevision, ExecutionHash: executionHash, Restart: restartPolicy, RestartAttempts: restartAttempts, RestartWindow: restartWindow, Namespace: namespace, JobName: jobName, GroupName: groupName, TaskName: taskName, Spec: ts, Status: "starting", Health: "unknown", Draining: draining, DrainSequence: drainSequence}
+	alloc := &Allocation{ID: task.ID, ContainerID: task.ID, AllocationID: task.AllocationID, Generation: task.Generation, JobRevision: task.JobRevision, ExecutionHash: task.ExecutionHash, Restart: task.Restart, RestartAttempts: restartAttempts, RestartWindow: restartWindow, Namespace: task.Namespace, JobName: task.JobName, GroupName: task.GroupName, TaskName: task.Spec.Name, Spec: task.Spec, Status: "starting", Health: "unknown", Draining: task.Draining, DrainSequence: task.DrainSequence}
 	starting := *alloc
-	a.allocations[allocID] = &starting
+	a.mu.Lock()
+	a.allocations[task.ID] = &starting
 	a.mu.Unlock()
 	if err := a.persistAllocation(alloc); err != nil {
 		a.mu.Lock()
-		delete(a.allocations, allocID)
+		delete(a.allocations, task.ID)
 		a.mu.Unlock()
 		return fmt.Errorf("persist starting allocation: %w", err)
 	}
-	committed := false
-	containerCreated := false
-	startAttempted := false
-	tracked := false
-	healthRegistered := false
-	var netAttachment *network.Attachment
-	var ports []*runtime.Port
-	var secretDir string
+	launch := &taskLaunch{task: task, alloc: alloc}
 	defer func() {
-		if committed {
-			return
+		if !launch.committed {
+			runErr = errors.Join(runErr, a.abortTaskStart(ctx, launch))
 		}
-		if startAttempted {
-			if tracked {
-				a.reconciler.BeginStop(allocID)
-			} else {
-				// Start may have succeeded even if its response was lost. Track
-				// the retained allocation as stopping from the outset so an
-				// observed stopped task can never be restarted.
-				a.reconciler.TrackStopping(allocID, false, restartPolicy, restartAttempts, restartWindow, false)
-				tracked = true
-			}
-		}
-		// Publish the latest durable startup state before marking it stopping.
-		// Startup builds alloc privately so readers never observe it changing.
-		failed := *alloc
-		a.mu.Lock()
-		a.allocations[allocID] = &failed
-		a.mu.Unlock()
-		persistStopErr := a.markAllocationStopping(allocID)
-		runErr = errors.Join(runErr, persistStopErr)
-		if alloc.ContainerOwnershipUnverified {
-			runErr = errors.Join(runErr, fmt.Errorf("container ownership for %s remains unverified", allocID))
-			return
-		}
-		if startAttempted {
-			if err := a.runtime.Stop(context.WithoutCancel(ctx), allocID); err != nil {
-				runErr = errors.Join(runErr, fmt.Errorf("stop container %s during failed start: %w", allocID, err))
-				return
-			}
-		}
-		if healthRegistered {
-			a.health.DeregisterTask(allocID)
-		}
-		var cleanupErrs []error
-		if tracked {
-			if err := a.reconciler.Untrack(allocID); err != nil {
-				cleanupErrs = append(cleanupErrs, fmt.Errorf("untrack allocation %s: %w", allocID, err))
-			}
-		}
-		containerRemoved := true
-		if containerCreated {
-			if err := a.runtime.Remove(context.WithoutCancel(ctx), allocID); err != nil {
-				containerRemoved = false
-				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove container %s: %w", allocID, err))
-			}
-		}
-		if err := a.detachAllocationNetwork(context.WithoutCancel(ctx), alloc); err != nil {
-			cleanupErrs = append(cleanupErrs, fmt.Errorf("detach allocation network: %w", err))
-		}
-		if secretDir != "" {
-			if err := removeSecretDir(secretDir); err != nil {
-				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove secret files: %w", err))
-			}
-		}
-		// A container that still exists keeps its staging mounts as OCI mount
-		// sources; a cleanup retry releases them after removal succeeds.
-		if containerRemoved {
-			if err := a.volumes.ReleaseStaging(allocID); err != nil {
-				cleanupErrs = append(cleanupErrs, fmt.Errorf("release volume staging: %w", err))
-			}
-		}
-		if err := errors.Join(cleanupErrs...); err != nil {
-			runErr = errors.Join(runErr, err)
-			return
-		}
-		if err := a.deleteAllocationRecord(allocID); err != nil {
-			runErr = errors.Join(runErr, fmt.Errorf("delete allocation record: %w", err))
-			return
-		}
-		// Port release is infallible. Keep claims until no cleanup retry can
-		// release a port that has since been assigned to another allocation.
-		for _, p := range ports {
-			_ = a.ports.Release(p)
-		}
-		a.mu.Lock()
-		delete(a.allocations, allocID)
-		a.mu.Unlock()
 	}()
+	return a.launchTask(ctx, launch)
+}
 
+// prepareTaskRecord checks an existing record of the task. It reports running
+// when a start retry finds the task running, and otherwise returns the
+// generation's restart accounting after cleaning up an incomplete earlier
+// start.
+func (a *Agent) prepareTaskRecord(ctx context.Context, task *taskStart) (int, time.Time, bool, error) {
+	a.mu.RLock()
+	existing := a.allocations[task.ID]
+	var snapshot Allocation
+	if existing != nil {
+		snapshot = *existing
+	}
+	a.mu.RUnlock()
+	if existing == nil {
+		// Checked before any start state exists, so a refused start never
+		// reaches cleanup that would release staging it does not own. A
+		// tracked allocation's staging is released by its own stop below.
+		return 0, time.Time{}, false, a.releaseOrphanedStaging(ctx, task.ID)
+	}
+	// Restart accounting belongs to the allocation generation. A start retry
+	// for the same generation keeps it, so repeated retries or agent restarts
+	// cannot hide a crash loop behind a fresh budget.
+	restartAttempts, restartWindow := snapshot.RestartAttempts, snapshot.RestartWindow
+	if snapshot.AllocationID != task.AllocationID || snapshot.Generation != task.Generation || snapshot.JobRevision != task.JobRevision || snapshot.ExecutionHash != task.ExecutionHash {
+		return 0, time.Time{}, false, fmt.Errorf("%w: %s", ErrAllocationExists, task.ID)
+	}
+	// An exhausted restart budget is terminal for this generation; a start
+	// retry must not recreate the task with a fresh budget.
+	if snapshot.RestartExhausted {
+		return 0, time.Time{}, false, fmt.Errorf("%w: allocation %s", ErrRestartBudgetExhausted, task.ID)
+	}
+	status := snapshot.Status
+	if snapshot.unobserved {
+		observed, err := a.observeRecovered(ctx, task.ID)
+		if err != nil {
+			return 0, time.Time{}, false, err
+		}
+		status = observed
+	}
+	if status == "running" {
+		return 0, time.Time{}, true, nil
+	}
+	// A previous start may have reached the runtime but failed before it
+	// could be committed. Preserve its resources while Stop is uncertain,
+	// then finish that cleanup on a later retry instead of converting the
+	// retry into a terminal execution conflict. An empty status means
+	// recovery already confirmed the container missing and cleaned it up.
+	if status != "" {
+		if err := a.stopAllocation(context.WithoutCancel(ctx), task.ID); err != nil {
+			return 0, time.Time{}, false, fmt.Errorf("clean up incomplete allocation %s before retry: %w", task.ID, err)
+		}
+	}
+	return restartAttempts, restartWindow, false, nil
+}
+
+// launchTask acquires the task's resources, then creates, starts, and commits
+// its container. startTask releases whatever it acquired when it fails.
+func (a *Agent) launchTask(ctx context.Context, launch *taskLaunch) error {
+	task, alloc, ts := launch.task, launch.alloc, launch.task.Spec
 	var taskPorts []spec.PortSpec
 	if ts.Networking != nil {
 		taskPorts = ts.Networking.Ports
@@ -1654,8 +1594,8 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 			return fmt.Errorf("claim port %d: %w", p.HostPort, err)
 		}
 
-		ports = append(ports, port)
-		alloc.Ports = append([]*runtime.Port(nil), ports...)
+		launch.ports = append(launch.ports, port)
+		alloc.Ports = append([]*runtime.Port(nil), launch.ports...)
 		if err := a.persistAllocation(alloc); err != nil {
 			return fmt.Errorf("persist port claim: %w", err)
 		}
@@ -1663,7 +1603,7 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 
 	var mounts []*runtime.Mount
 	for _, v := range ts.Volumes {
-		mount, err := a.volumes.Create(namespace, jobName, allocID, v)
+		mount, err := a.volumes.Create(task.Namespace, task.JobName, task.ID, v)
 		if err != nil {
 			return fmt.Errorf("create volume %s: %w", v.Name, err)
 		}
@@ -1675,13 +1615,6 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		return fmt.Errorf("persist volume metadata: %w", err)
 	}
 
-	err := a.runtime.Pull(ctx, ts.Image)
-	if err != nil {
-		return fmt.Errorf("pull image %s: %w", ts.Image, err)
-	}
-
-	containerID := allocID
-	alloc.ContainerID = containerID
 	var taskNetMode spec.TaskNetworkMode
 	if ts.Networking != nil {
 		taskNetMode = ts.Networking.Mode
@@ -1689,86 +1622,121 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 	hostMode := taskNetMode == spec.TaskNetworkHost
 	wireGuard := taskNetMode == spec.TaskNetworkWireGuard
 	if wireGuard {
-		if networkPlan == nil {
-			return fmt.Errorf("automatic WireGuard network plan is required")
-		}
-		// Record the intent before Attach so a restarted agent can find and
-		// detach an attachment whose result was never recorded.
-		alloc.NetworkIntent = &network.AttachmentIntent{AllocationID: allocID, Namespace: namespace, Network: namespace}
-		if err := a.persistAllocation(alloc); err != nil {
-			return fmt.Errorf("persist network intent: %w", err)
-		}
-		netAttachment, err = a.network.Attach(ctx, network.AttachRequest{AllocationID: allocID, Namespace: namespace, Network: namespace, Plan: *networkPlan})
-		if err != nil {
-			return fmt.Errorf("attach WireGuard network: %w", err)
-		}
-		alloc.Network = netAttachment
-		if err := a.persistAllocation(alloc); err != nil {
-			return fmt.Errorf("persist network attachment: %w", err)
+		if err := a.attachTaskNetwork(ctx, launch); err != nil {
+			return err
 		}
 	}
-	env := make(map[string]string, len(ts.Env)+len(envOverrides))
+	env := make(map[string]string, len(ts.Env)+len(task.EnvOverrides))
 	for k, v := range ts.Env {
 		env[k] = v
 	}
-	taskSecrets := delivered
-	for k, v := range envOverrides {
+	taskSecrets := task.Secrets
+	for k, v := range task.EnvOverrides {
 		if k == "TRELLIS_TOKEN" {
 			overridden := false
-			for _, secret := range delivered {
-				overridden = overridden || secret.Task == taskName && secret.Target == spec.SecretTargetEnv && secret.Env == k
+			for _, secret := range task.Secrets {
+				overridden = overridden || secret.Task == ts.Name && secret.Target == spec.SecretTargetEnv && secret.Env == k
 			}
 			if !overridden {
 				value := []byte(v)
 				defer clear(value)
-				taskSecrets = append(taskSecrets, api.DeliveredSecret{Task: taskName, Name: "api-access-token", Target: spec.SecretTargetEnv, Env: k, Value: value})
+				taskSecrets = append(taskSecrets, api.DeliveredSecret{Task: ts.Name, Name: "api-access-token", Target: spec.SecretTargetEnv, Env: k, Value: value})
 			}
 			continue
 		}
 		env[k] = v
 	}
-	if taskHasSecrets(taskName, taskSecrets) {
-		secretDir, err = a.secretDirFor(allocID)
+	if taskHasSecrets(ts.Name, taskSecrets) {
+		secretDir, err := a.secretDirFor(task.ID)
 		if err != nil {
 			return err
 		}
 		// Record the location before any plaintext is written so a restarted
 		// agent can always find and remove it.
-		alloc.SecretDir = secretDir
+		launch.secretDir, alloc.SecretDir = secretDir, secretDir
 		if err := a.persistAllocation(alloc); err != nil {
 			return fmt.Errorf("persist secret metadata: %w", err)
 		}
 		if err := createSecretDir(secretDir); err != nil {
 			// Never clean up a directory this start did not create.
-			secretDir, alloc.SecretDir = "", ""
+			launch.secretDir, alloc.SecretDir = "", ""
 			return err
 		}
 	}
-	secretMounts, err := materializeSecrets(secretDir, taskName, taskSecrets)
+	secretMounts, err := materializeSecrets(launch.secretDir, ts.Name, taskSecrets)
 	if err != nil {
 		return err
 	}
 	mounts = append(mounts, secretMounts...)
 	alloc.Mounts = append([]*runtime.Mount(nil), mounts...)
-	labels := map[string]string{
-		"trellis.cluster":               a.cluster,
-		"trellis.allocation-id":         schedulerID,
-		"trellis.allocation-generation": strconv.FormatUint(generation, 10),
-		"trellis.job-revision":          strconv.Itoa(jobRevision),
-		"trellis.execution-hash":        executionHash,
-		"trellis.namespace":             namespace,
-		"trellis.job":                   jobName,
-		"trellis.task-group":            groupName,
-		"trellis.task":                  taskName,
-	}
 	extraHosts := map[string]string{}
-	if _, apiAccess := envOverrides["TRELLIS_ADDR"]; apiAccess {
+	if _, apiAccess := task.EnvOverrides["TRELLIS_ADDR"]; apiAccess {
 		switch {
 		case hostMode:
 			extraHosts["trellis"] = "127.0.0.1"
-		case wireGuard && networkPlan != nil:
-			extraHosts["trellis"] = networkPlan.Gateway
+		case wireGuard && task.NetworkPlan != nil:
+			extraHosts["trellis"] = task.NetworkPlan.Gateway
 		}
+	}
+	networkNamespace := ""
+	if launch.netAttachment != nil {
+		networkNamespace = launch.netAttachment.NetworkNamespace
+	} else if hostMode {
+		networkNamespace = "/proc/1/ns/net"
+	}
+	if err := a.createTaskContainer(ctx, launch, env, mounts, networkNamespace, extraHosts); err != nil {
+		return err
+	}
+
+	launch.startAttempted = true
+	if err := a.runtime.Start(ctx, alloc.ContainerID); err != nil {
+		observed, inspectErr := a.runtime.Inspect(context.WithoutCancel(ctx), alloc.ContainerID)
+		if inspectErr != nil || observed.Status != runtime.StatusRunning {
+			return fmt.Errorf("start container %s: %w", alloc.ContainerID, err)
+		}
+	}
+	return a.commitTaskStart(launch, mounts)
+}
+
+// attachTaskNetwork attaches the task to its namespace WireGuard network.
+func (a *Agent) attachTaskNetwork(ctx context.Context, launch *taskLaunch) error {
+	task, alloc := launch.task, launch.alloc
+	if task.NetworkPlan == nil {
+		return fmt.Errorf("automatic WireGuard network plan is required")
+	}
+	// Record the intent before Attach so a restarted agent can find and
+	// detach an attachment whose result was never recorded.
+	alloc.NetworkIntent = &network.AttachmentIntent{AllocationID: task.ID, Namespace: task.Namespace, Network: task.Namespace}
+	if err := a.persistAllocation(alloc); err != nil {
+		return fmt.Errorf("persist network intent: %w", err)
+	}
+	attachment, err := a.network.Attach(ctx, network.AttachRequest{AllocationID: task.ID, Namespace: task.Namespace, Network: task.Namespace, Plan: *task.NetworkPlan})
+	if err != nil {
+		return fmt.Errorf("attach WireGuard network: %w", err)
+	}
+	launch.netAttachment = attachment
+	alloc.Network = attachment
+	if err := a.persistAllocation(alloc); err != nil {
+		return fmt.Errorf("persist network attachment: %w", err)
+	}
+	return nil
+}
+
+// createTaskContainer creates the task container. The record is marked
+// unverified first, so an ambiguous create is resolved by inspecting the
+// container's execution labels rather than by assuming it is absent.
+func (a *Agent) createTaskContainer(ctx context.Context, launch *taskLaunch, env map[string]string, mounts []*runtime.Mount, networkNamespace string, extraHosts map[string]string) error {
+	task, alloc, ts := launch.task, launch.alloc, launch.task.Spec
+	labels := map[string]string{
+		"trellis.cluster":               a.cluster,
+		"trellis.allocation-id":         task.AllocationID,
+		"trellis.allocation-generation": strconv.FormatUint(task.Generation, 10),
+		"trellis.job-revision":          strconv.Itoa(task.JobRevision),
+		"trellis.execution-hash":        task.ExecutionHash,
+		"trellis.namespace":             task.Namespace,
+		"trellis.job":                   task.JobName,
+		"trellis.task-group":            task.GroupName,
+		"trellis.task":                  ts.Name,
 	}
 	runtimeMounts := append([]*runtime.Mount(nil), mounts...)
 	runtimeMounts = append(runtimeMounts, &runtime.Mount{
@@ -1776,93 +1744,78 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		ContainerPath: health.ProbeContainerPath,
 		ReadOnly:      true,
 	})
+	var cpu int
+	var memory int64
+	if ts.Resources != nil {
+		cpu, memory = ts.Resources.CPU, int64(ts.Resources.Memory)
+	}
 	alloc.ContainerOwnershipUnverified = true
 	if err := a.persistAllocation(alloc); err != nil {
 		alloc.ContainerOwnershipUnverified = false
 		return fmt.Errorf("persist pending container creation: %w", err)
 	}
-	_, err = a.runtime.Create(ctx, runtime.CreateOptions{
-		ID:     containerID,
-		Image:  ts.Image,
-		Env:    env,
-		Mounts: runtimeMounts,
-		CPU: func() int {
-			if ts.Resources != nil {
-				return ts.Resources.CPU
-			}
-			return 0
-		}(),
-		Memory: func() int64 {
-			if ts.Resources != nil {
-				return int64(ts.Resources.Memory)
-			}
-			return 0
-		}(),
-		PidsLimit: a.taskPidsLimit(),
-		Runtime:   groupRuntime,
-		NetworkNamespace: func() string {
-			if netAttachment != nil {
-				return netAttachment.NetworkNamespace
-			}
-			if hostMode {
-				return "/proc/1/ns/net"
-			}
-			return ""
-		}(),
-		DNSServers: a.dnsServers,
-		ExtraHosts: extraHosts,
-		Labels:     labels,
+	_, err := a.runtime.Create(ctx, runtime.CreateOptions{
+		ID:               alloc.ContainerID,
+		Image:            ts.Image,
+		Env:              env,
+		Mounts:           runtimeMounts,
+		CPU:              cpu,
+		Memory:           memory,
+		PidsLimit:        a.taskPidsLimit(),
+		Runtime:          task.Runtime,
+		NetworkNamespace: networkNamespace,
+		DNSServers:       a.dnsServers,
+		ExtraHosts:       extraHosts,
+		Labels:           labels,
 	})
 	if err != nil {
-		observed, inspectErr := a.runtime.Inspect(context.WithoutCancel(ctx), containerID)
+		observed, inspectErr := a.runtime.Inspect(context.WithoutCancel(ctx), alloc.ContainerID)
 		if inspectErr != nil {
-			return errors.Join(fmt.Errorf("create container %s: %w", containerID, err), fmt.Errorf("inspect container ownership: %w", inspectErr))
+			return errors.Join(fmt.Errorf("create container %s: %w", alloc.ContainerID, err), fmt.Errorf("inspect container ownership: %w", inspectErr))
 		}
 		if !a.containerMatchesAllocation(*observed, alloc) {
-			return fmt.Errorf("create container %s: %w", containerID, err)
+			return fmt.Errorf("create container %s: %w", alloc.ContainerID, err)
 		}
 	}
-	containerCreated = true
+	launch.containerCreated = true
 	alloc.ContainerOwnershipUnverified = false
 	if err := a.persistAllocation(alloc); err != nil {
 		return fmt.Errorf("persist verified container creation: %w", err)
 	}
+	return nil
+}
 
-	startAttempted = true
-	err = a.runtime.Start(ctx, containerID)
-	if err != nil {
-		observed, inspectErr := a.runtime.Inspect(context.WithoutCancel(ctx), containerID)
-		if inspectErr != nil || observed.Status != runtime.StatusRunning {
-			return fmt.Errorf("start container %s: %w", containerID, err)
-		}
-	}
+// commitTaskStart stores the running record, then starts restart tracking and
+// health checks for it.
+func (a *Agent) commitTaskStart(launch *taskLaunch, mounts []*runtime.Mount) error {
+	task, alloc, ts := launch.task, launch.alloc, launch.task.Spec
 	ready := &Allocation{
-		ID:            allocID,
-		AllocationID:  schedulerID,
-		Generation:    generation,
-		JobRevision:   jobRevision,
-		ExecutionHash: executionHash,
-		Restart:       restartPolicy,
-		Namespace:     namespace,
+		ID:            task.ID,
+		AllocationID:  task.AllocationID,
+		Generation:    task.Generation,
+		JobRevision:   task.JobRevision,
+		ExecutionHash: task.ExecutionHash,
+		Restart:       task.Restart,
+		Namespace:     task.Namespace,
 
-		RestartAttempts: restartAttempts,
-		RestartWindow:   restartWindow,
+		RestartAttempts: alloc.RestartAttempts,
+		RestartWindow:   alloc.RestartWindow,
 
-		JobName:   jobName,
-		GroupName: groupName,
+		JobName:   task.JobName,
+		GroupName: task.GroupName,
 		TaskName:  ts.Name,
 		Spec:      ts,
 
-		ContainerID: containerID,
-		Ports:       ports,
+		ContainerID: alloc.ContainerID,
+		Ports:       launch.ports,
 		Mounts:      mounts,
-		SecretDir:   secretDir,
-		Network:     netAttachment,
+		SecretDir:   launch.secretDir,
+		Network:     launch.netAttachment,
 		Status:      "running",
 		Health:      "unknown",
 
-		Draining:      draining,
-		DrainSequence: drainSequence,
+		Draining:      task.Draining,
+		DrainSequence: task.DrainSequence,
 	}
 	ready.NetworkIntent = alloc.NetworkIntent
 	if ts.HealthCheck == nil {
@@ -1872,31 +1825,110 @@ func (a *Agent) RunAllocation(ctx context.Context, allocID, schedulerID string, 
 		return fmt.Errorf("persist allocation: %w", err)
 	}
 	a.mu.Lock()
-	a.allocations[allocID] = ready
+	a.allocations[task.ID] = ready
 	a.mu.Unlock()
 	// Track only after the running record is stored, so a restart decision
 	// (including terminal exhaustion) is never overwritten by startup.
-	if draining {
-		a.reconciler.TrackStopping(allocID, ts.HealthCheck != nil, restartPolicy, restartAttempts, restartWindow, false)
+	if task.Draining {
+		a.reconciler.TrackStopping(task.ID, ts.HealthCheck != nil, task.Restart, alloc.RestartAttempts, alloc.RestartWindow, false)
 	} else {
-		a.reconciler.TrackRecovered(allocID, ts.HealthCheck != nil, restartPolicy, restartAttempts, restartWindow, false)
+		a.reconciler.TrackRecovered(task.ID, ts.HealthCheck != nil, task.Restart, alloc.RestartAttempts, alloc.RestartWindow, false)
 	}
-	tracked = true
+	launch.tracked = true
 	if ts.HealthCheck != nil {
 		check := *ts.HealthCheck
-		a.health.RegisterTask(allocID, containerID, &check)
-		healthRegistered = true
+		a.health.RegisterTask(task.ID, alloc.ContainerID, &check)
+		launch.healthRegistered = true
 	}
 	if ts.HealthCheck == nil {
-		if err := a.reconciler.ObserveHealth(allocID, true); err != nil {
+		if err := a.reconciler.ObserveHealth(task.ID, true); err != nil {
 			return fmt.Errorf("mark allocation healthy: %w", err)
 		}
 	}
 	// Keep managed-volume staging mounts until the container is removed: they
 	// are its OCI mount sources, which every restarted task resolves again.
-	committed = true
-
+	launch.committed = true
 	return nil
+}
+
+// abortTaskStart releases what a failed task start acquired. A container that
+// may exist, or whose ownership is unverified, keeps its record as stopping
+// together with its resources, so a later start, stop, or recovery finishes
+// the cleanup.
+func (a *Agent) abortTaskStart(ctx context.Context, launch *taskLaunch) error {
+	task, alloc := launch.task, launch.alloc
+	if launch.startAttempted {
+		if launch.tracked {
+			a.reconciler.BeginStop(task.ID)
+		} else {
+			// Start may have succeeded even if its response was lost. Track
+			// the retained allocation as stopping from the outset so an
+			// observed stopped task can never be restarted.
+			a.reconciler.TrackStopping(task.ID, false, task.Restart, alloc.RestartAttempts, alloc.RestartWindow, false)
+			launch.tracked = true
+		}
+	}
+	// Publish the latest durable startup state before marking it stopping.
+	// Startup builds alloc privately so readers never observe it changing.
+	failed := *alloc
+	a.mu.Lock()
+	a.allocations[task.ID] = &failed
+	a.mu.Unlock()
+	errs := []error{a.markAllocationStopping(task.ID)}
+	if alloc.ContainerOwnershipUnverified {
+		return errors.Join(append(errs, fmt.Errorf("container ownership for %s remains unverified", task.ID))...)
+	}
+	if launch.startAttempted {
+		if err := a.runtime.Stop(context.WithoutCancel(ctx), task.ID); err != nil {
+			return errors.Join(append(errs, fmt.Errorf("stop container %s during failed start: %w", task.ID, err))...)
+		}
+	}
+	if launch.healthRegistered {
+		a.health.DeregisterTask(task.ID)
+	}
+	var cleanupErrs []error
+	if launch.tracked {
+		if err := a.reconciler.Untrack(task.ID); err != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("untrack allocation %s: %w", task.ID, err))
+		}
+	}
+	containerRemoved := true
+	if launch.containerCreated {
+		if err := a.runtime.Remove(context.WithoutCancel(ctx), task.ID); err != nil {
+			containerRemoved = false
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove container %s: %w", task.ID, err))
+		}
+	}
+	if err := a.detachAllocationNetwork(context.WithoutCancel(ctx), alloc); err != nil {
+		cleanupErrs = append(cleanupErrs, fmt.Errorf("detach allocation network: %w", err))
+	}
+	if launch.secretDir != "" {
+		if err := removeSecretDir(launch.secretDir); err != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove secret files: %w", err))
+		}
+	}
+	// A container that still exists keeps its staging mounts as OCI mount
+	// sources; a cleanup retry releases them after removal succeeds.
+	if containerRemoved {
+		if err := a.volumes.ReleaseStaging(task.ID); err != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("release volume staging: %w", err))
+		}
+	}
+	if err := errors.Join(cleanupErrs...); err != nil {
+		return errors.Join(append(errs, err)...)
+	}
+	if err := a.deleteAllocationRecord(task.ID); err != nil {
+		return errors.Join(append(errs, fmt.Errorf("delete allocation record: %w", err))...)
+	}
+	// Port release is infallible. Keep claims until no cleanup retry can
+	// release a port that has since been assigned to another allocation.
+	for _, p := range launch.ports {
+		_ = a.ports.Release(p)
+	}
+	a.mu.Lock()
+	delete(a.allocations, task.ID)
+	a.mu.Unlock()
+	return errors.Join(errs...)
 }
 
 // releaseOrphanedStaging ensures a start never stages volumes over staging
@@ -2180,5 +2212,5 @@ func (a *Agent) allocationStatuses() []api.AllocationStatus {
 		}
 		actual = append(actual, api.AllocationStatus{ID: alloc.AllocationID, Generation: alloc.Generation, Task: alloc.TaskName, Address: allocationNetworkAddress(alloc), Phase: lifecycle.Phase(alloc.Status), Health: lifecycle.Health(reportedHealth(alloc)), Reason: reason, Ports: ports})
 	}
-	return actual
+	return append(actual, a.startingStatusesLocked()...)
 }

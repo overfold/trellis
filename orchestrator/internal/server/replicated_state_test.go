@@ -101,7 +101,6 @@ func TestExecutePersistenceFailuresDoNotAdvanceMemory(t *testing.T) {
 	}{
 		{name: "initial transition", failAfter: 2, wantPhase: lifecycle.PhasePlaced},
 		{name: "agent failure transition", failAfter: 3, failRun: true, wantPhase: lifecycle.PhaseStarting},
-		{name: "running transition", failAfter: 3, wantPhase: lifecycle.PhaseStarting},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, agent := newTestServerWithAgent()

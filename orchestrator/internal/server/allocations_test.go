@@ -478,9 +478,10 @@ func TestHeartbeatMissingTaskRetriesRunningAllocation(t *testing.T) {
 		t.Fatalf("persisted partial observation = %#v, want starting", persisted[allocation.ID])
 	}
 
+	// The agent accepts the retried start; heartbeats report it running.
 	s.Reconcile(context.Background())
-	if allocation.Phase != lifecycle.PhaseRunning || len(s.allocations) != 1 {
-		t.Fatalf("after retry: phase=%s allocations=%d, want running allocation reused", allocation.Phase, len(s.allocations))
+	if allocation.Phase != lifecycle.PhaseStarting || len(s.allocations) != 1 {
+		t.Fatalf("after retry: phase=%s allocations=%d, want starting allocation reused", allocation.Phase, len(s.allocations))
 	}
 	if err := s.Heartbeat(context.Background(), node.ID, []api.AllocationStatus{app, sidecar}, "test", nil, nil, nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
@@ -534,8 +535,16 @@ func TestHeartbeatEmptyTaskReportRetriesRunningAllocation(t *testing.T) {
 		t.Fatalf("persisted empty observation = %#v, want starting/unknown", got)
 	}
 
+	// The agent accepts the retried start; heartbeats report it running.
 	s.Reconcile(context.Background())
-	if allocation.Phase != lifecycle.PhaseRunning || len(s.allocations) != 1 {
-		t.Fatalf("after retry: phase=%s allocations=%d, want running allocation reused", allocation.Phase, len(s.allocations))
+	if allocation.Phase != lifecycle.PhaseStarting || len(s.allocations) != 1 {
+		t.Fatalf("after retry: phase=%s allocations=%d, want starting allocation reused", allocation.Phase, len(s.allocations))
+	}
+	app := api.AllocationStatus{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
+	if err := s.Heartbeat(context.Background(), node.ID, []api.AllocationStatus{app}, "test", nil, nil, nodeResourceObservation{}); err != nil {
+		t.Fatal(err)
+	}
+	if allocation.Phase != lifecycle.PhaseRunning {
+		t.Fatalf("after running heartbeat: phase=%s, want running", allocation.Phase)
 	}
 }
