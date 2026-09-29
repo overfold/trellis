@@ -174,7 +174,7 @@ func (s *Server) AllocationEvents(namespace, id string) (api.AllocationEventList
 
 func (s *Server) allocationLabelsLocked(allocation *Allocation) map[string]string {
 	job := s.jobs[jobKey(allocation.Namespace, allocation.JobName)]
-	if job == nil {
+	if job == nil || allocation.JobIncarnation != job.Incarnation {
 		return nil
 	}
 	for _, group := range job.Spec.TaskGroups {

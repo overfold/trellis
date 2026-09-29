@@ -102,6 +102,7 @@ func TestRegisterJobScaleChangeAdvancesVersionAndHistory(t *testing.T) {
 	if _, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v1", 1), nil); err != nil {
 		t.Fatal(err)
 	}
+	incarnation := s.jobs[jobKey("default", "web")].Incarnation
 	s.events = newEventBus()
 	events, ok := s.events.subscribe("default")
 	if !ok {
@@ -135,6 +136,9 @@ func TestRegisterJobScaleChangeAdvancesVersionAndHistory(t *testing.T) {
 	}
 	if updated.Version != 3 || updated.Revision != 2 {
 		t.Fatalf("image change = %+v, want version 3 revision 2", updated)
+	}
+	if got := s.jobs[jobKey("default", "web")].Incarnation; got != incarnation {
+		t.Fatalf("job update changed incarnation from %q to %q", incarnation, got)
 	}
 
 	history, err := s.ListJobVersions(ctx, "default", "web")

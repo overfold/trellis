@@ -225,6 +225,16 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 			}
 			continue
 		}
+		if allocation.JobIncarnation != job.Incarnation {
+			if activeAllocationPhase(allocation.Phase) && allocation.Node != nil {
+				actions = append(actions, Action{Type: ActionStop, Allocation: allocation})
+			} else if allocation.Phase == lifecycle.PhasePending {
+				_ = allocation.Transition(lifecycle.PhaseStopping, now, "job_changed", "pending allocation belongs to an earlier job incarnation")
+				_ = allocation.Transition(lifecycle.PhaseStopped, now, "job_changed", "pending allocation belongs to an earlier job incarnation")
+				markUpdated(allocation)
+			}
+			continue
+		}
 		if allocation.Phase == lifecycle.PhasePending {
 			if !jobHasGroup(job, allocation.TaskGroupName) || allocation.JobRevision != job.Revision {
 				_ = allocation.Transition(lifecycle.PhaseStopping, now, "job_changed", "pending allocation is obsolete")
@@ -341,7 +351,7 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 		namespace := job.Spec.Namespace
 		for _, group := range job.Spec.TaskGroups {
 			backoffKey := replacementBackoffKey(namespace, jobName, group.Name)
-			backoff := planReplacementBackoff(policy, in.Backoffs[backoffKey], namespace, jobName, group.Name, job.Revision, allocationsByGroup[backoffKey], now)
+			backoff := planReplacementBackoff(policy, in.Backoffs[backoffKey], namespace, jobName, group.Name, job.Revision, allocationsByGroup[backoffKey], now, job.Incarnation)
 			plannedBackoffs[backoffKey] = backoff
 			var current []*Allocation
 			var pending []*Allocation
@@ -357,7 +367,7 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 			}
 			unavailable := 0
 			for _, alloc := range allocationsByGroup[backoffKey] {
-				if activeAllocationPhase(alloc.Phase) && !alloc.Draining && alloc.Node != nil && alloc.Node.Status != NodeStatusHealthy && !lossTimedOut(alloc.Node) {
+				if alloc.JobIncarnation == job.Incarnation && activeAllocationPhase(alloc.Phase) && !alloc.Draining && alloc.Node != nil && alloc.Node.Status != NodeStatusHealthy && !lossTimedOut(alloc.Node) {
 					unavailable++
 				}
 			}
@@ -378,7 +388,7 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 				if original.released || original.kept || !original.inGroup(namespace, jobName, group.Name) {
 					continue
 				}
-				if missing > 0 && (original.allocation.JobRevision == job.Revision || updateStrategy(job, group.Name) == spec.UpdateRolling) && !original.blocksPlacedAllocation(occupied) {
+				if missing > 0 && original.allocation.JobIncarnation == job.Incarnation && (original.allocation.JobRevision == job.Revision || updateStrategy(job, group.Name) == spec.UpdateRolling) && !original.blocksPlacedAllocation(occupied) {
 					original.kept = true
 					missing--
 					continue
@@ -464,7 +474,7 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 					continue
 				}
 				name := fmt.Sprintf("%s-%s-%s-%s", namespace, jobName, group.Name, newSuffix())
-				allocation := &Allocation{ID: name, Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Tasks: group.Tasks, Node: node, Generation: 1, JobRevision: job.Revision, Phase: lifecycle.PhasePlaced, Health: lifecycle.HealthUnknown, Diagnostic: lifecycle.Diagnostic{CreatedAt: now, TransitionedAt: now}}
+				allocation := &Allocation{ID: name, Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Tasks: group.Tasks, Node: node, Generation: 1, JobIncarnation: job.Incarnation, JobRevision: job.Revision, Phase: lifecycle.PhasePlaced, Health: lifecycle.HealthUnknown, Diagnostic: lifecycle.Diagnostic{CreatedAt: now, TransitionedAt: now}}
 				actions = append(actions, Action{Type: ActionStart, Allocation: allocation})
 				plan.NewAllocations = append(plan.NewAllocations, allocation)
 				valid = append(valid, allocation)
@@ -488,7 +498,7 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 				}
 				for i := len(reusable); i < unplaced; i++ {
 					name := fmt.Sprintf("%s-%s-%s-%s", namespace, jobName, group.Name, newSuffix())
-					allocation := &Allocation{ID: name, Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Tasks: group.Tasks, Generation: 1, JobRevision: job.Revision, Phase: lifecycle.PhasePending, Health: lifecycle.HealthUnknown, Diagnostic: lifecycle.Diagnostic{CreatedAt: now, TransitionedAt: now, Reason: diagnostic.Reason, Message: diagnostic.Message}}
+					allocation := &Allocation{ID: name, Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Tasks: group.Tasks, Generation: 1, JobIncarnation: job.Incarnation, JobRevision: job.Revision, Phase: lifecycle.PhasePending, Health: lifecycle.HealthUnknown, Diagnostic: lifecycle.Diagnostic{CreatedAt: now, TransitionedAt: now, Reason: diagnostic.Reason, Message: diagnostic.Message}}
 					plan.NewAllocations = append(plan.NewAllocations, allocation)
 					valid = append(valid, allocation)
 				}
@@ -532,7 +542,7 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 		// The group is no longer desired: forget its failures but keep the
 		// record, and with it the failed allocations already seen, while the
 		// group's allocation records remain.
-		plannedBackoffs[key] = planReplacementBackoff(policy, previous, previous.Namespace, previous.JobName, previous.TaskGroupName, 0, allocations, now)
+		plannedBackoffs[key] = planReplacementBackoff(policy, previous, previous.Namespace, previous.JobName, previous.TaskGroupName, 0, allocations, now, previous.JobIncarnation)
 	}
 	backoffKeys := make([]string, 0, len(plannedBackoffs))
 	for key := range plannedBackoffs {

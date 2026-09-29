@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/overfold/trellis/internal/api"
 	"github.com/overfold/trellis/internal/lifecycle"
 	"github.com/overfold/trellis/internal/spec"
@@ -231,7 +232,7 @@ func TestStateControllerRoundTripsDurableLeaderState(t *testing.T) {
 func TestBackupRestoreRoundTripsPersistedJob(t *testing.T) {
 	ctx := context.Background()
 	store := &backupStore{data: memoryStore{}, snapshot: &state.DesiredSnapshot{Jobs: map[string][]byte{}, JobRevisions: map[string][]byte{}, Secrets: map[string][]byte{}, VolumeRegistrations: map[string][]byte{}, NetworkPortRegistrations: map[string][]byte{}}}
-	job := &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}}, Revision: 1, Version: 1}
+	job := &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}}, Incarnation: uuid.NewString(), Revision: 1, Version: 1}
 	raw, err := json.Marshal(job)
 	if err != nil {
 		t.Fatal(err)
@@ -251,7 +252,7 @@ func TestBackupRestoreRoundTripsPersistedJob(t *testing.T) {
 	if err := json.Unmarshal(store.snapshot.Jobs["default%00web"], &restored); err != nil {
 		t.Fatal(err)
 	}
-	if restored.Spec == nil || restored.Spec.TaskGroups[0].Tasks[0].Resources == nil {
+	if restored.Spec == nil || restored.Spec.TaskGroups[0].Tasks[0].Resources == nil || restored.Incarnation != job.Incarnation {
 		t.Fatalf("restored job was not canonicalized: %#v", restored)
 	}
 	if string(store.snapshot.JobRevisions["default%00web/1"]) != string(historicalRaw) {

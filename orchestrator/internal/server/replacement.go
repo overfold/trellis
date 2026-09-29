@@ -47,6 +47,9 @@ type ReplacementBackoff struct {
 	Namespace     string `json:"namespace"`
 	JobName       string `json:"job"`
 	TaskGroupName string `json:"group"`
+	// JobIncarnation prevents a recreated revision-one job from inheriting
+	// failures recorded for the deleted job with the same identity.
+	JobIncarnation string `json:"job_incarnation"`
 	// JobRevision is the revision whose failures are counted. A new revision
 	// is new desired state and starts from zero failures.
 	JobRevision int `json:"job_revision"`
@@ -112,7 +115,7 @@ func (b *ReplacementBackoff) equal(other *ReplacementBackoff) bool {
 	if b == nil || other == nil {
 		return b == other
 	}
-	return b.Namespace == other.Namespace && b.JobName == other.JobName && b.TaskGroupName == other.TaskGroupName &&
+	return b.Namespace == other.Namespace && b.JobName == other.JobName && b.TaskGroupName == other.TaskGroupName && b.JobIncarnation == other.JobIncarnation &&
 		b.JobRevision == other.JobRevision && b.Failures == other.Failures && b.LastFailureAt.Equal(other.LastFailureAt) &&
 		b.LastAllocationID == other.LastAllocationID && b.Reason == other.Reason && b.Message == other.Message &&
 		b.NextReplacementAt.Equal(other.NextReplacementAt) && b.DelayedReplacements == other.DelayedReplacements && slices.Equal(b.SeenAllocations, other.SeenAllocations)
@@ -154,7 +157,11 @@ func isTerminalPhase(phase lifecycle.Phase) bool {
 // DelayedReplacements accumulates the failures counted while the backoff is
 // active. Once it elapses, the pass places the whole deficit, so the count
 // restarts from the failures counted in that pass.
-func planReplacementBackoff(policy ReplacementPolicy, previous *ReplacementBackoff, namespace, job, group string, revision int, allocations []*Allocation, now time.Time) *ReplacementBackoff {
+func planReplacementBackoff(policy ReplacementPolicy, previous *ReplacementBackoff, namespace, job, group string, revision int, allocations []*Allocation, now time.Time, jobIncarnation ...string) *ReplacementBackoff {
+	incarnation := ""
+	if len(jobIncarnation) > 0 {
+		incarnation = jobIncarnation[0]
+	}
 	var next *ReplacementBackoff
 	seen := make(map[string]bool)
 	if previous != nil {
@@ -166,7 +173,16 @@ func planReplacementBackoff(policy ReplacementPolicy, previous *ReplacementBacko
 		if !previous.active(now) {
 			next.DelayedReplacements = 0
 		}
-		if next.JobRevision != revision {
+		if next.JobIncarnation != incarnation {
+			next.JobIncarnation = incarnation
+			next.SeenAllocations = nil
+			next.LastFailureAt = time.Time{}
+			next.LastAllocationID = ""
+			next.Reason = ""
+			next.Message = ""
+			clear(seen)
+		}
+		if next.JobRevision != revision || next.JobIncarnation != previous.JobIncarnation {
 			next.JobRevision = revision
 			next.Failures = 0
 			next.NextReplacementAt = time.Time{}
@@ -177,7 +193,7 @@ func planReplacementBackoff(policy ReplacementPolicy, previous *ReplacementBacko
 	var retained []string
 	var failures []*Allocation
 	for _, allocation := range allocations {
-		if allocation.Namespace != namespace || allocation.JobName != job || allocation.TaskGroupName != group || allocation.Phase != lifecycle.PhaseFailed {
+		if allocation.Namespace != namespace || allocation.JobName != job || allocation.TaskGroupName != group || allocation.JobIncarnation != incarnation || allocation.Phase != lifecycle.PhaseFailed {
 			continue
 		}
 		retained = append(retained, allocation.ID)
@@ -189,7 +205,7 @@ func planReplacementBackoff(policy ReplacementPolicy, previous *ReplacementBacko
 		return nil
 	}
 	if next == nil {
-		next = &ReplacementBackoff{Namespace: namespace, JobName: job, TaskGroupName: group, JobRevision: revision}
+		next = &ReplacementBackoff{Namespace: namespace, JobName: job, TaskGroupName: group, JobIncarnation: incarnation, JobRevision: revision}
 	}
 	sort.Strings(retained)
 	next.SeenAllocations = slices.Compact(retained)
@@ -213,7 +229,7 @@ func planReplacementBackoff(policy ReplacementPolicy, previous *ReplacementBacko
 
 	if next.Failures > 0 {
 		for _, allocation := range allocations {
-			if allocation.Namespace != namespace || allocation.JobName != job || allocation.TaskGroupName != group {
+			if allocation.Namespace != namespace || allocation.JobName != job || allocation.TaskGroupName != group || allocation.JobIncarnation != incarnation {
 				continue
 			}
 			if allocation.Phase != lifecycle.PhaseRunning || allocation.Health == lifecycle.HealthUnhealthy || allocation.Draining || allocation.JobRevision != revision {
@@ -310,7 +326,7 @@ func (s *Server) ResetReplacementBackoff(ctx context.Context, namespace, job, gr
 	key := replacementBackoffKey(current.Spec.Namespace, current.Spec.Name, group)
 	previous := s.replacementBackoffs[key]
 	s.mu.RUnlock()
-	if previous == nil || previous.Failures == 0 {
+	if previous == nil || previous.JobIncarnation != current.Incarnation || previous.Failures == 0 {
 		s.mutationMu.Unlock()
 		return nil
 	}
@@ -344,9 +360,10 @@ func (s *Server) ResetReplacementBackoff(ctx context.Context, namespace, job, gr
 // replacementBackoffResponsesLocked returns the task groups of a job whose
 // replacements are being delayed, sorted by group. The caller holds s.mu.
 func (s *Server) replacementBackoffResponsesLocked(namespace, job string) []api.ReplacementBackoffResponse {
+	current := s.jobs[jobKey(namespace, job)]
 	var result []api.ReplacementBackoffResponse
 	for _, backoff := range s.replacementBackoffs {
-		if backoff.Namespace != namespace || backoff.JobName != job || backoff.Failures == 0 {
+		if current == nil || backoff.Namespace != namespace || backoff.JobName != job || backoff.JobIncarnation != current.Incarnation || backoff.Failures == 0 {
 			continue
 		}
 		result = append(result, replacementBackoffResponse(backoff))
