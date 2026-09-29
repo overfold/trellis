@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
@@ -702,9 +703,14 @@ func (h *Handler) handleMetrics(c *echo.Context) error {
 }
 
 func (h *Handler) convertNode(node *Node) *api.NodeResponse {
+	var lastHeartbeat *time.Time
+	if !node.LastHeartbeat.IsZero() {
+		heartbeat := node.LastHeartbeat
+		lastHeartbeat = &heartbeat
+	}
 	return &api.NodeResponse{
 		ID: node.ID, Host: node.Host, Port: node.Port, Status: api.NodeStatusResponse(node.Status),
-		LastHeartbeat: node.LastHeartbeat, CPU: node.CPUAllocatable, Memory: node.MemoryAllocatable,
+		LastHeartbeat: lastHeartbeat, CPU: node.CPUAllocatable, Memory: node.MemoryAllocatable,
 		CPUCapacity: node.CPUCapacity, MemoryCapacity: node.MemoryCapacity,
 		CPUAllocatable: node.CPUAllocatable, MemoryAllocatable: node.MemoryAllocatable,
 		CPUUsage: node.CPUUsage, MemoryUsed: node.MemoryUsed, MemoryAvailable: node.MemoryAvailable, MetricsAt: node.MetricsAt,

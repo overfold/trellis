@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
@@ -24,6 +25,7 @@ func heartbeatReasonTestServer(phase lifecycle.Phase) (*Server, *Node, *Allocati
 		Phase: phase, Health: lifecycle.HealthHealthy,
 	}
 	s := &Server{
+		now:   time.Now,
 		state: NewStateController(memoryStore{}, "test"),
 		nodes: map[uuid.UUID]*Node{node.ID: node}, allocations: []*Allocation{allocation},
 		catalog: catalog.New(),
