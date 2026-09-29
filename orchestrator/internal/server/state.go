@@ -299,26 +299,29 @@ func (s *StateController) PutNodeAndAllocations(ctx context.Context, node *NodeS
 
 // ReconciliationCommit is the durable outcome of one reconciliation pass.
 type ReconciliationCommit struct {
-	Allocations         []*Allocation
-	DeleteAllocations   []string
-	VolumeRegistrations []*VolumeRegistration
-	Backoffs            []*ReplacementBackoff
-	DeleteBackoffs      []*ReplacementBackoff
+	Allocations                 []*Allocation
+	DeleteAllocations           []string
+	VolumeRegistrations         []*VolumeRegistration
+	NetworkPortRegistrations    []*NetworkPortRegistration
+	DeleteNetworkPortNamespaces []string
+	Backoffs                    []*ReplacementBackoff
+	DeleteBackoffs              []*ReplacementBackoff
 }
 
 // CommitReconciliation applies allocation updates, new volume bindings,
-// terminal-record pruning, and replacement backoff changes as one durable state
-// transition. The mutations carry every value, including leader-chosen
-// timestamps, so replaying the Raft entry is deterministic.
+// namespace network port changes, terminal-record pruning, and replacement
+// backoff changes as one durable state transition. The mutations carry every
+// value, including leader-chosen timestamps, so replaying the Raft entry is
+// deterministic.
 func (s *StateController) CommitReconciliation(ctx context.Context, commit *ReconciliationCommit) error {
-	if commit == nil || len(commit.Allocations)+len(commit.DeleteAllocations)+len(commit.VolumeRegistrations)+len(commit.Backoffs)+len(commit.DeleteBackoffs) == 0 {
+	if commit == nil || len(commit.Allocations)+len(commit.DeleteAllocations)+len(commit.VolumeRegistrations)+len(commit.NetworkPortRegistrations)+len(commit.DeleteNetworkPortNamespaces)+len(commit.Backoffs)+len(commit.DeleteBackoffs) == 0 {
 		return nil
 	}
 	atomic, ok := s.store.(state.AtomicStore)
 	if !ok {
 		return fmt.Errorf("state store does not support atomic reconciliation updates")
 	}
-	mutations := make([]state.Mutation, 0, len(commit.Allocations)+len(commit.DeleteAllocations)+len(commit.VolumeRegistrations)+len(commit.Backoffs)+len(commit.DeleteBackoffs))
+	mutations := make([]state.Mutation, 0, len(commit.Allocations)+len(commit.DeleteAllocations)+len(commit.VolumeRegistrations)+len(commit.NetworkPortRegistrations)+len(commit.DeleteNetworkPortNamespaces)+len(commit.Backoffs)+len(commit.DeleteBackoffs))
 	for _, allocation := range commit.Allocations {
 		raw, err := json.Marshal(allocation)
 		if err != nil {
@@ -338,6 +341,22 @@ func (s *StateController) CommitReconciliation(ctx context.Context, commit *Reco
 			return fmt.Errorf("marshal volume registration %s/%s: %w", registration.Namespace, registration.Name, err)
 		}
 		mutations = append(mutations, state.Mutation{Key: s.volumeRegistrationStorageKey(registration.Namespace, registration.Name), Value: raw})
+	}
+	for _, namespace := range commit.DeleteNetworkPortNamespaces {
+		if namespace == "" {
+			return fmt.Errorf("network namespace is required")
+		}
+		mutations = append(mutations, state.Mutation{Key: s.networkPortRegistrationKey(namespace)})
+	}
+	for _, registration := range commit.NetworkPortRegistrations {
+		if registration == nil || registration.Namespace == "" || registration.Slot < 0 {
+			return fmt.Errorf("invalid network port registration")
+		}
+		raw, err := json.Marshal(registration)
+		if err != nil {
+			return fmt.Errorf("marshal network port registration for %s: %w", registration.Namespace, err)
+		}
+		mutations = append(mutations, state.Mutation{Key: s.networkPortRegistrationKey(registration.Namespace), Value: raw})
 	}
 	for _, backoff := range commit.Backoffs {
 		raw, err := json.Marshal(backoff)
@@ -444,6 +463,45 @@ func (s *StateController) ListJobRevisions(ctx context.Context, key string) ([]*
 // It is called by a newly elected leader so upgrades compact existing FSM state
 // even when jobs are never applied again.
 func (s *StateController) CompactJobRevisions(ctx context.Context, jobs map[string]*Job) error {
+	mutations, err := s.jobRevisionCompactionMutations(ctx, jobs)
+	if err != nil || len(mutations) == 0 {
+		return err
+	}
+	atomic, ok := s.store.(state.AtomicStore)
+	if !ok {
+		return fmt.Errorf("state store does not support atomic job revision compaction")
+	}
+	if err := atomic.Batch(ctx, mutations); err != nil {
+		return fmt.Errorf("compact job revisions: %w", err)
+	}
+	return nil
+}
+
+// ActivateLeadership advances the fencing epoch and compacts legacy revision
+// history in one replicated state transition.
+func (s *StateController) ActivateLeadership(ctx context.Context, cluster *Cluster, jobs map[string]*Job) error {
+	clusterRaw, err := json.Marshal(cluster)
+	if err != nil {
+		return fmt.Errorf("marshal cluster: %w", err)
+	}
+	compaction, err := s.jobRevisionCompactionMutations(ctx, jobs)
+	if err != nil {
+		return err
+	}
+	mutations := make([]state.Mutation, 0, len(compaction)+1)
+	mutations = append(mutations, state.Mutation{Key: fmt.Sprintf("%s/%s/meta", trellisNamespace, s.cluster), Value: clusterRaw})
+	mutations = append(mutations, compaction...)
+	atomic, ok := s.store.(state.AtomicStore)
+	if !ok {
+		return fmt.Errorf("state store does not support atomic leadership activation")
+	}
+	if err := atomic.Batch(ctx, mutations); err != nil {
+		return fmt.Errorf("activate leadership: %w", err)
+	}
+	return nil
+}
+
+func (s *StateController) jobRevisionCompactionMutations(ctx context.Context, jobs map[string]*Job) ([]state.Mutation, error) {
 	rootPrefix := fmt.Sprintf("%s/%s/job-revisions/", trellisNamespace, s.cluster)
 	retained := make(map[string][]*JobRevisionRecord, len(jobs))
 	total := 0
@@ -470,16 +528,16 @@ func (s *StateController) CompactJobRevisions(ctx context.Context, jobs map[stri
 	}
 	if iterator, ok := s.store.(state.PrefixIterator); ok {
 		if err := iterator.IteratePrefix(ctx, rootPrefix, appendRecord); err != nil {
-			return err
+			return nil, err
 		}
 	} else {
 		values, err := s.store.List(ctx, rootPrefix)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		for key, raw := range values {
 			if err := appendRecord(key, raw); err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
@@ -490,7 +548,7 @@ func (s *StateController) CompactJobRevisions(ctx context.Context, jobs map[stri
 		identities = append(identities, identity)
 	}
 	if kept == total {
-		return nil
+		return nil, nil
 	}
 	sort.Strings(identities)
 	mutations := make([]state.Mutation, 0, kept+1)
@@ -500,19 +558,12 @@ func (s *StateController) CompactJobRevisions(ctx context.Context, jobs map[stri
 		for _, record := range retained[identity] {
 			raw, err := json.Marshal(record)
 			if err != nil {
-				return fmt.Errorf("marshal retained job revision: %w", err)
+				return nil, fmt.Errorf("marshal retained job revision: %w", err)
 			}
 			mutations = append(mutations, state.Mutation{Key: prefix + fmt.Sprint(record.Version), Value: raw})
 		}
 	}
-	atomic, ok := s.store.(state.AtomicStore)
-	if !ok {
-		return fmt.Errorf("state store does not support atomic job revision compaction")
-	}
-	if err := atomic.Batch(ctx, mutations); err != nil {
-		return fmt.Errorf("compact job revisions: %w", err)
-	}
-	return nil
+	return mutations, nil
 }
 
 func (s *StateController) listJobRevisions(ctx context.Context, prefix string, limit int) ([]*JobRevisionRecord, error) {

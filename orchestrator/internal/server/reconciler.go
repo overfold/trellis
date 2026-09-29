@@ -293,7 +293,7 @@ func (s *Server) reconcile(ctx context.Context, queue bool) (finished <-chan str
 		allocation.mu.Unlock()
 	}
 	s.mu.RUnlock()
-	networkPorts, err := s.ensureNetworkPortRegistrations(ctx, networkNamespaces)
+	networkPorts, networkPortRegistrations, deleteNetworkPortNamespaces, err := s.planNetworkPortRegistrations(ctx, networkNamespaces)
 	if err != nil {
 		s.log.Error("prepare namespace WireGuard ports", "error", err)
 		if !errors.Is(err, errNetworkPortExhausted) {
@@ -301,7 +301,6 @@ func (s *Server) reconcile(ctx context.Context, queue bool) (finished <-chan str
 		}
 	}
 	s.mu.Lock()
-	s.networkPorts = networkPorts
 	for _, node := range s.nodes {
 		if node.Status == NodeStatusHealthy && now.Sub(node.LastHeartbeat) > 3*heartbeatInterval {
 			node.Status = NodeStatusUnhealthy
@@ -319,6 +318,8 @@ func (s *Server) reconcile(ctx context.Context, queue bool) (finished <-chan str
 		s.log.Error("plan reconciliation", "error", err)
 		return
 	}
+	plan.Commit.NetworkPortRegistrations = networkPortRegistrations
+	plan.Commit.DeleteNetworkPortNamespaces = deleteNetworkPortNamespaces
 	for _, diagnostic := range plan.Diagnostics {
 		s.log.Error(diagnostic.Message, diagnostic.Args...)
 	}
@@ -352,8 +353,9 @@ func (s *Server) reconcile(ctx context.Context, queue bool) (finished <-chan str
 			actions[i].Allocation = original
 		}
 	}
+	s.mu.Lock()
+	s.networkPorts = networkPorts
 	if !plan.empty() {
-		s.mu.Lock()
 		if len(plan.Pruned) > 0 {
 			removed := make(map[*Allocation]bool, len(plan.Pruned))
 			for _, allocation := range plan.Pruned {
@@ -382,8 +384,8 @@ func (s *Server) reconcile(ctx context.Context, queue bool) (finished <-chan str
 			}
 			s.replacementBackoffs = backoffs
 		}
-		s.mu.Unlock()
 	}
+	s.mu.Unlock()
 	s.mutationMu.Unlock()
 	mutationLocked = false
 	for _, event := range plan.Events {
