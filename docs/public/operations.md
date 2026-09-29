@@ -85,9 +85,11 @@ allocation_loss_timeout: 2m
 ```
 
 Lost is terminal, so this is the point at which Trellis gives up on the
-node's allocations. When the node returns, its old containers keep running
-until enough replacements are running and are then stopped. They are stopped
-sooner if they block a replacement. See [lost allocations](user-model.md#lost-allocations).
+node's allocations. While a lost allocation record is retained, its old
+containers keep running until enough replacements are running when the node
+returns, and are then stopped. They are stopped sooner if they block a
+replacement. If an older pruned allocation is later reported, Trellis stops
+it as an observed orphan. See [lost allocations](user-model.md#lost-allocations).
 Raise the timeout when nodes can be briefly unreachable, for example during
 reboots or on unreliable networks, and replacing their work would cost more
 than waiting. This matters most for groups bound to one node by a volume,
