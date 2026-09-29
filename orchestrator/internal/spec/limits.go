@@ -66,6 +66,24 @@ func Canonicalize(job *JobSpec, limits Limits) error {
 	return ValidateWithLimits(job, limits)
 }
 
+// Canonical returns a canonical copy of job and leaves job unchanged. The copy
+// owns its task groups and tasks; other nested values are shared with job and
+// must be treated as read-only.
+func Canonical(job *JobSpec, limits Limits) (*JobSpec, error) {
+	if job == nil {
+		return nil, Canonicalize(nil, limits)
+	}
+	copied := *job
+	copied.TaskGroups = append([]TaskGroupSpec(nil), job.TaskGroups...)
+	for i := range copied.TaskGroups {
+		copied.TaskGroups[i].Tasks = append([]TaskSpec(nil), copied.TaskGroups[i].Tasks...)
+	}
+	if err := Canonicalize(&copied, limits); err != nil {
+		return nil, err
+	}
+	return &copied, nil
+}
+
 // ValidateWithLimits validates a resolved canonical job against its operator
 // policy. Call Canonicalize for untrusted author input.
 func ValidateWithLimits(job *JobSpec, limits Limits) error {

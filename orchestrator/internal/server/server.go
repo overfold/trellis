@@ -1403,13 +1403,21 @@ type resumeDeliveryKey struct {
 	generation uint64
 }
 
-// resumeDelivered reports whether an agent acknowledged the resume at sequence
-// during the current leadership term. The record is renewable delivery state,
-// not desired state: a new term starts empty and redelivers each resume once.
-func (s *Server) resumeDelivered(epoch uint64, allocation string, generation, sequence uint64) bool {
+// deliveredResumes copies the resume sequence each agent acknowledged per
+// allocation generation during the given leadership term. The record is
+// renewable delivery state, not desired state: a new term starts empty and
+// redelivers each resume once.
+func (s *Server) deliveredResumes(epoch uint64) map[resumeDeliveryKey]uint64 {
 	s.resumeMu.Lock()
 	defer s.resumeMu.Unlock()
-	return s.resumeEpoch == epoch && s.resumes[resumeDeliveryKey{allocation: allocation, generation: generation}] == sequence
+	if s.resumeEpoch != epoch {
+		return nil
+	}
+	delivered := make(map[resumeDeliveryKey]uint64, len(s.resumes))
+	for key, sequence := range s.resumes {
+		delivered[key] = sequence
+	}
+	return delivered
 }
 
 func (s *Server) recordResumeDelivered(request *api.DrainAllocationRequest) {
@@ -1520,9 +1528,20 @@ func (s *Server) DeleteJob(ctx context.Context, namespace, name string) error {
 	return nil
 }
 
-// RestartJob marks all running allocations for a job as draining so the
-// reconciler will replace them with fresh instances.
+// RestartJob marks all running allocations for a job as draining and
+// reconciles so they are replaced with fresh instances.
 func (s *Server) RestartJob(ctx context.Context, namespace, name string) error {
+	s.reconcileMu.Lock()
+	err := s.persistJobRestart(ctx, namespace, name)
+	s.reconcileMu.Unlock()
+	if err != nil {
+		return err
+	}
+	s.Reconcile(ctx)
+	return nil
+}
+
+func (s *Server) persistJobRestart(ctx context.Context, namespace, name string) error {
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
 	s.mu.RLock()
@@ -1537,21 +1556,16 @@ func (s *Server) RestartJob(ctx context.Context, namespace, name string) error {
 	updates := make([]*Allocation, 0)
 	for _, alloc := range allocations {
 		alloc.mu.Lock()
-		if alloc.Namespace == namespace && alloc.JobName == name && alloc.DrainReason != "restart" &&
-			alloc.Phase != lifecycle.PhaseStopped && alloc.Phase != lifecycle.PhaseFailed && alloc.Phase != lifecycle.PhaseLost {
-			raw, err := json.Marshal(alloc)
+		if alloc.Namespace == namespace && alloc.JobName == name && alloc.DrainReason != "restart" && activeAllocationPhase(alloc.Phase) {
+			update, err := cloneAllocationForReconcile(alloc)
 			alloc.mu.Unlock()
 			if err != nil {
-				return fmt.Errorf("marshal restart intent: %w", err)
-			}
-			var update Allocation
-			if err := json.Unmarshal(raw, &update); err != nil {
-				return fmt.Errorf("decode restart intent: %w", err)
+				return fmt.Errorf("snapshot restart intent: %w", err)
 			}
 			update.Draining = true
 			update.DrainSequence++
 			update.DrainReason = "restart"
-			updates = append(updates, &update)
+			updates = append(updates, update)
 			continue
 		}
 		alloc.mu.Unlock()
@@ -1578,7 +1592,10 @@ func (s *Server) RestartJob(ctx context.Context, namespace, name string) error {
 }
 
 // StopAllocationByID stops a single allocation identified by namespace and ID.
+// The stop is serialized with reconciliation passes, and a pass follows it so
+// the task group converges on its desired count.
 func (s *Server) StopAllocationByID(ctx context.Context, namespace, id string) error {
+	s.reconcileMu.Lock()
 	s.mu.RLock()
 	var found *Allocation
 	for _, alloc := range s.allocations {
@@ -1589,10 +1606,17 @@ func (s *Server) StopAllocationByID(ctx context.Context, namespace, id string) e
 	}
 	if found == nil || found.Node == nil {
 		s.mu.RUnlock()
+		s.reconcileMu.Unlock()
 		return fmt.Errorf("allocation not found")
 	}
 	s.mu.RUnlock()
-	return s.Execute(ctx, &Action{Type: ActionStop, Allocation: found})
+	err := s.Execute(ctx, &Action{Type: ActionStop, Allocation: found})
+	s.reconcileMu.Unlock()
+	if err != nil {
+		return err
+	}
+	s.Reconcile(ctx)
+	return nil
 }
 
 // ListJobRevisions returns the stored spec history for a job.

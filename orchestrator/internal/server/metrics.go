@@ -10,6 +10,7 @@ import (
 // Metrics holds instrumentation counters owned by the Server.
 type Metrics struct {
 	ReconcileDuration prometheus.Histogram
+	ReconcileAborted  *prometheus.CounterVec
 }
 
 // RegisterMetrics registers all Trellis Prometheus metrics against reg and
@@ -21,8 +22,12 @@ func RegisterMetrics(s *Server, reg prometheus.Registerer) *Metrics {
 			Help:    "Duration of each server reconcile loop run in seconds.",
 			Buckets: prometheus.DefBuckets,
 		}),
+		ReconcileAborted: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "trellis_reconcile_aborted_total",
+			Help: "Reconcile loop runs abandoned before commit because planned state changed, by reason.",
+		}, []string{"reason"}),
 	}
-	reg.MustRegister(m.ReconcileDuration)
+	reg.MustRegister(m.ReconcileDuration, m.ReconcileAborted)
 	reg.MustRegister(&metricsCollector{server: s})
 	s.metrics = m
 	return m

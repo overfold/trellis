@@ -69,3 +69,28 @@ func TestCanonicalizeRejectsResourcesAboveOperatorMaximum(t *testing.T) {
 		}
 	}
 }
+
+func TestCanonicalResolvesCopyWithoutMutatingJob(t *testing.T) {
+	limits := DefaultLimits()
+	job := validJob()
+	canonical, err := Canonical(job, limits)
+	if err != nil {
+		t.Fatalf("canonical: %v", err)
+	}
+	if job.TaskGroups[0].Tasks[0].Resources != nil {
+		t.Fatal("canonical copy resolved defaults into the original job")
+	}
+	resources := canonical.TaskGroups[0].Tasks[0].Resources
+	if resources == nil || resources.CPU != limits.DefaultTaskCPU || resources.Memory != limits.DefaultTaskMemory {
+		t.Fatalf("canonical resources = %#v, want operator defaults", resources)
+	}
+
+	invalid := validJob()
+	invalid.TaskGroups[0].Count = limits.MaxReplicasPerTaskGroup + 1
+	if _, err := Canonical(invalid, limits); err == nil {
+		t.Fatal("expected operator limit rejection")
+	}
+	if invalid.TaskGroups[0].Tasks[0].Resources != nil {
+		t.Fatal("rejected canonical copy mutated the original job")
+	}
+}
