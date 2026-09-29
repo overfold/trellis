@@ -10,11 +10,19 @@ type Store interface {
 	Delete(ctx context.Context, key string) error
 }
 
+// PrefixIterator visits matching entries in key order without materializing
+// the whole prefix. The callback must not retain value after it returns.
+type PrefixIterator interface {
+	IteratePrefix(ctx context.Context, prefix string, visit func(key string, value []byte) error) error
+}
+
 // Mutation is one operation in an atomic batch. A nil Value deletes Key;
-// a non-nil Value stores it (including an empty value).
+// a non-nil Value stores it (including an empty value). DeletePrefix removes
+// every matching key and is mutually exclusive with Key and Value.
 type Mutation struct {
-	Key   string
-	Value []byte
+	Key          string
+	Value        []byte
+	DeletePrefix string
 }
 
 // AtomicStore extends Store with all-or-nothing multi-key updates.

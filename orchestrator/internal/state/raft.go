@@ -18,6 +18,7 @@ import (
 
 var _ Store = (*RaftStore)(nil)
 var _ AtomicStore = (*RaftStore)(nil)
+var _ PrefixIterator = (*RaftStore)(nil)
 
 // RaftStore replicates state through a Raft cluster.
 type RaftStore struct {
@@ -86,6 +87,14 @@ func (r *RaftStore) Batch(_ context.Context, mutations []Mutation) error {
 		return resp
 	}
 	return nil
+}
+
+// IteratePrefix takes a linearizable view and streams matching local FSM entries.
+func (r *RaftStore) IteratePrefix(ctx context.Context, prefix string, visit func(key string, value []byte) error) error {
+	if err := r.raft.Barrier(10 * time.Second).Error(); err != nil {
+		return fmt.Errorf("raft iterate barrier: %w", err)
+	}
+	return r.fsm.store.IteratePrefix(ctx, prefix, visit)
 }
 
 // RaftConfig configures replicated state storage.
@@ -351,37 +360,34 @@ func (f *fsm) Apply(log *raft.Log) interface{} {
 }
 
 func (f *fsm) Snapshot() (raft.FSMSnapshot, error) {
-	data, err := f.store.List(context.Background(), "")
+	snapshot, err := f.store.snapshot()
 	if err != nil {
 		return nil, err
 	}
-	return &fsmSnapshot{data: data}, nil
+	return &fsmSnapshot{snapshot: snapshot}, nil
 }
 
 func (f *fsm) Restore(rc io.ReadCloser) error {
 	defer func() { _ = rc.Close() }()
-	var data map[string][]byte
-	if err := json.NewDecoder(rc).Decode(&data); err != nil {
-		return err
-	}
-	return f.store.Restore(data)
+	return f.store.RestoreReader(rc)
 }
 
 type fsmSnapshot struct {
-	data map[string][]byte
+	snapshot *boltSnapshot
 }
 
 func (s *fsmSnapshot) Persist(sink raft.SnapshotSink) error {
-	data, err := json.Marshal(s.data)
-	if err != nil {
-		_ = sink.Cancel()
-		return err
-	}
-	if _, err := sink.Write(data); err != nil {
+	defer s.Release()
+	if err := s.snapshot.persistTo(sink); err != nil {
 		_ = sink.Cancel()
 		return err
 	}
 	return sink.Close()
 }
 
-func (s *fsmSnapshot) Release() {}
+func (s *fsmSnapshot) Release() {
+	if s.snapshot != nil {
+		_ = s.snapshot.Close()
+		s.snapshot = nil
+	}
+}

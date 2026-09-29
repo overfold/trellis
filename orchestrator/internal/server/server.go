@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"maps"
 	"net/netip"
+	"net/url"
 	"os"
 	"sort"
 	"sync"
@@ -235,12 +236,54 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 		}
 		snapshot.NetworkPortRegistrations[key] = value
 	}
+	// Validate the complete backup before dropping legacy excess or orphaned
+	// revisions so malformed records cannot hide outside the retained window.
+	if err := state.ValidateDesiredSnapshot(snapshot, nil); err != nil {
+		return err
+	}
+	retainedRevisions, err := retainedJobRevisionEntries(snapshot.Jobs, snapshot.JobRevisions)
+	if err != nil {
+		return err
+	}
+	snapshot.JobRevisions = retainedRevisions
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
 	if err := s.backupStore.RestoreDesired(s.clusterName, snapshot); err != nil {
 		return err
 	}
 	return s.Reload(ctx)
+}
+
+func retainedJobRevisionEntries(jobs, revisions map[string][]byte) (map[string][]byte, error) {
+	type entry struct {
+		key      string
+		revision int
+		raw      []byte
+	}
+	byJob := make(map[string][]entry)
+	for key, raw := range revisions {
+		var record JobRevisionRecord
+		if err := json.Unmarshal(raw, &record); err != nil || record.Spec == nil {
+			return nil, fmt.Errorf("invalid job revision record %q", key)
+		}
+		identity := jobKey(record.Spec.Namespace, record.Spec.Name)
+		if jobs[url.QueryEscape(identity)] == nil {
+			continue
+		}
+		entries := append(byJob[identity], entry{key: key, revision: record.Revision, raw: raw})
+		sort.Slice(entries, func(i, j int) bool { return entries[i].revision < entries[j].revision })
+		if len(entries) > jobRevisionRetention {
+			entries = entries[1:]
+		}
+		byJob[identity] = entries
+	}
+	result := make(map[string][]byte)
+	for _, entries := range byJob {
+		for _, entry := range entries {
+			result[entry.key] = entry.raw
+		}
+	}
+	return result, nil
 }
 
 // AllocationLogs opens logs for an allocation.
@@ -562,6 +605,15 @@ func (s *Server) AcquireLeadership(ctx context.Context) error {
 	epoch := cluster.ControlEpoch
 	if err := s.state.PutCluster(ctx, cluster); err != nil {
 		return fmt.Errorf("persist control-plane epoch: %w", err)
+	}
+	s.mu.RLock()
+	jobs := make(map[string]*Job, len(s.jobs))
+	for key, job := range s.jobs {
+		jobs[key] = job
+	}
+	s.mu.RUnlock()
+	if err := s.state.CompactJobRevisions(ctx, jobs); err != nil {
+		return fmt.Errorf("compact job revisions: %w", err)
 	}
 	s.mu.Lock()
 	s.cluster = cluster

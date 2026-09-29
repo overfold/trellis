@@ -22,6 +22,11 @@ type StateController struct {
 
 const trellisNamespace = "trellis"
 
+// jobRevisionRetention is the maximum number of full historical specs kept
+// for each live job. A substantive apply rewrites the retained window so it
+// also compacts histories created by older, unbounded versions.
+const jobRevisionRetention = 10
+
 // NewStateController creates a typed state controller.
 func NewStateController(store state.Store, cluster string) *StateController {
 	return &StateController{
@@ -153,21 +158,41 @@ func (s *StateController) PutJobWithRevision(ctx context.Context, id string, job
 		return fmt.Errorf("marshal job revision: %w", err)
 	}
 	jobKey := fmt.Sprintf("%s/%s/jobs/%s", trellisNamespace, s.cluster, url.QueryEscape(id))
-	revisionKey := fmt.Sprintf("%s/%s/job-revisions/%s/%d", trellisNamespace, s.cluster, url.QueryEscape(id), record.Revision)
+	revisionPrefix := fmt.Sprintf("%s/%s/job-revisions/%s/", trellisNamespace, s.cluster, url.QueryEscape(id))
+	revisionKey := revisionPrefix + fmt.Sprint(record.Revision)
 	atomic, ok := s.store.(state.AtomicStore)
 	if !ok {
 		return fmt.Errorf("state store does not support atomic job revisions")
 	}
-	if err := atomic.Batch(ctx, []state.Mutation{{Key: jobKey, Value: jobRaw}, {Key: revisionKey, Value: revisionRaw}}); err != nil {
+	retained, err := s.listJobRevisions(ctx, revisionPrefix, jobRevisionRetention-1)
+	if err != nil {
+		return fmt.Errorf("list retained job revisions: %w", err)
+	}
+	mutations := make([]state.Mutation, 0, len(retained)+3)
+	mutations = append(mutations, state.Mutation{Key: jobKey, Value: jobRaw}, state.Mutation{DeletePrefix: revisionPrefix})
+	for _, retainedRecord := range retained {
+		raw, err := json.Marshal(retainedRecord)
+		if err != nil {
+			return fmt.Errorf("marshal retained job revision: %w", err)
+		}
+		mutations = append(mutations, state.Mutation{Key: revisionPrefix + fmt.Sprint(retainedRecord.Revision), Value: raw})
+	}
+	mutations = append(mutations, state.Mutation{Key: revisionKey, Value: revisionRaw})
+	if err := atomic.Batch(ctx, mutations); err != nil {
 		return fmt.Errorf("put job and revision: %w", err)
 	}
 	return nil
 }
 
-// DeleteJob removes a persisted job.
+// DeleteJob atomically removes a persisted job and all of its revision history.
 func (s *StateController) DeleteJob(ctx context.Context, id string) error {
 	key := fmt.Sprintf("%s/%s/jobs/%s", trellisNamespace, s.cluster, url.QueryEscape(id))
-	if err := s.store.Delete(ctx, key); err != nil {
+	revisionPrefix := fmt.Sprintf("%s/%s/job-revisions/%s/", trellisNamespace, s.cluster, url.QueryEscape(id))
+	atomic, ok := s.store.(state.AtomicStore)
+	if !ok {
+		return fmt.Errorf("state store does not support atomic job deletion")
+	}
+	if err := atomic.Batch(ctx, []state.Mutation{{Key: key}, {DeletePrefix: revisionPrefix}}); err != nil {
 		return fmt.Errorf("delete job: %w", err)
 	}
 	return nil
@@ -377,29 +402,116 @@ type JobRevisionRecord struct {
 	CreatedAt time.Time     `json:"created_at"`
 }
 
-// PutJobRevision persists a job revision record.
-func (s *StateController) PutJobRevision(ctx context.Context, key string, record *JobRevisionRecord) error {
-	storageKey := fmt.Sprintf("%s/%s/job-revisions/%s/%d", trellisNamespace, s.cluster, url.QueryEscape(key), record.Revision)
-	if err := s.put(ctx, storageKey, record); err != nil {
-		return fmt.Errorf("put job revision: %w", err)
+// ListJobRevisions returns the retained revisions for a job in ascending order.
+func (s *StateController) ListJobRevisions(ctx context.Context, key string) ([]*JobRevisionRecord, error) {
+	prefix := fmt.Sprintf("%s/%s/job-revisions/%s/", trellisNamespace, s.cluster, url.QueryEscape(key))
+	return s.listJobRevisions(ctx, prefix, jobRevisionRetention)
+}
+
+// CompactJobRevisions removes deleted-job history and bounds legacy histories.
+// It is called by a newly elected leader so upgrades compact existing FSM state
+// even when jobs are never applied again.
+func (s *StateController) CompactJobRevisions(ctx context.Context, jobs map[string]*Job) error {
+	rootPrefix := fmt.Sprintf("%s/%s/job-revisions/", trellisNamespace, s.cluster)
+	retained := make(map[string][]*JobRevisionRecord, len(jobs))
+	total := 0
+	appendRecord := func(_ string, raw []byte) error {
+		total++
+		var record JobRevisionRecord
+		if err := json.Unmarshal(raw, &record); err != nil {
+			return fmt.Errorf("unmarshal job revision: %w", err)
+		}
+		if record.Spec == nil {
+			return fmt.Errorf("job revision is missing its spec")
+		}
+		identity := jobKey(record.Spec.Namespace, record.Spec.Name)
+		if jobs[identity] == nil {
+			return nil
+		}
+		records := append(retained[identity], &record)
+		sort.Slice(records, func(i, j int) bool { return records[i].Revision < records[j].Revision })
+		if len(records) > jobRevisionRetention {
+			records = records[1:]
+		}
+		retained[identity] = records
+		return nil
+	}
+	if iterator, ok := s.store.(state.PrefixIterator); ok {
+		if err := iterator.IteratePrefix(ctx, rootPrefix, appendRecord); err != nil {
+			return err
+		}
+	} else {
+		values, err := s.store.List(ctx, rootPrefix)
+		if err != nil {
+			return err
+		}
+		for key, raw := range values {
+			if err := appendRecord(key, raw); err != nil {
+				return err
+			}
+		}
+	}
+	kept := 0
+	identities := make([]string, 0, len(retained))
+	for identity, records := range retained {
+		kept += len(records)
+		identities = append(identities, identity)
+	}
+	if kept == total {
+		return nil
+	}
+	sort.Strings(identities)
+	mutations := make([]state.Mutation, 0, kept+1)
+	mutations = append(mutations, state.Mutation{DeletePrefix: rootPrefix})
+	for _, identity := range identities {
+		prefix := rootPrefix + url.QueryEscape(identity) + "/"
+		for _, record := range retained[identity] {
+			raw, err := json.Marshal(record)
+			if err != nil {
+				return fmt.Errorf("marshal retained job revision: %w", err)
+			}
+			mutations = append(mutations, state.Mutation{Key: prefix + fmt.Sprint(record.Revision), Value: raw})
+		}
+	}
+	atomic, ok := s.store.(state.AtomicStore)
+	if !ok {
+		return fmt.Errorf("state store does not support atomic job revision compaction")
+	}
+	if err := atomic.Batch(ctx, mutations); err != nil {
+		return fmt.Errorf("compact job revisions: %w", err)
 	}
 	return nil
 }
 
-// ListJobRevisions returns all stored revisions for a job in ascending order.
-func (s *StateController) ListJobRevisions(ctx context.Context, key string) ([]*JobRevisionRecord, error) {
-	prefix := fmt.Sprintf("%s/%s/job-revisions/%s/", trellisNamespace, s.cluster, url.QueryEscape(key))
-	values, err := listValues[JobRevisionRecord](ctx, s.store, prefix)
+func (s *StateController) listJobRevisions(ctx context.Context, prefix string, limit int) ([]*JobRevisionRecord, error) {
+	result := make([]*JobRevisionRecord, 0, limit)
+	appendRecord := func(_ string, raw []byte) error {
+		var record JobRevisionRecord
+		if err := json.Unmarshal(raw, &record); err != nil {
+			return fmt.Errorf("unmarshal job revision: %w", err)
+		}
+		result = append(result, &record)
+		sort.Slice(result, func(i, j int) bool { return result[i].Revision < result[j].Revision })
+		if len(result) > limit {
+			result = result[1:]
+		}
+		return nil
+	}
+	if iterator, ok := s.store.(state.PrefixIterator); ok {
+		if err := iterator.IteratePrefix(ctx, prefix, appendRecord); err != nil {
+			return nil, err
+		}
+		return result, nil
+	}
+	values, err := s.store.List(ctx, prefix)
 	if err != nil {
 		return nil, err
 	}
-	result := make([]*JobRevisionRecord, 0, len(values))
-	for _, r := range values {
-		result = append(result, r)
+	for key, raw := range values {
+		if err := appendRecord(key, raw); err != nil {
+			return nil, err
+		}
 	}
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].Revision < result[j].Revision
-	})
 	return result, nil
 }
 

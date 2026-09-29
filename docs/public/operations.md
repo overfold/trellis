@@ -239,7 +239,7 @@ trellisctl --administrator-key ./trellis-administrator.pem backup create trellis
 trellisctl --administrator-key ./trellis-administrator.pem backup restore trellis-backup.json
 ```
 
-Backups contain desired jobs and their revision history, encrypted secret records, volume-registration locality metadata, and durable namespace WireGuard port assignments. They do **not** contain allocations, container images, local volume bytes, TLS private keys, or the secret encryption key. Restoring the locality metadata deliberately prevents Trellis from silently treating a previously bound volume as new; recovering a volume-backed workload therefore also requires the owning node identity and its data, or an intentional manifest change to a new volume name. Secure and separately back up the 32-byte secrets key referenced by `secrets_key` in the node config; encrypted records are unusable without it.
+Backups contain desired jobs and each live job's retained revision history (at most the 10 newest substantive revisions), encrypted secret records, volume-registration locality metadata, and durable namespace WireGuard port assignments. They do **not** contain allocations, container images, local volume bytes, deleted-job history, TLS private keys, or the secret encryption key. Restoring the locality metadata deliberately prevents Trellis from silently treating a previously bound volume as new; recovering a volume-backed workload therefore also requires the owning node identity and its data, or an intentional manifest change to a new volume name. Secure and separately back up the 32-byte secrets key referenced by `secrets_key` in the node config; encrypted records are unusable without it.
 
 ## Secrets
 
