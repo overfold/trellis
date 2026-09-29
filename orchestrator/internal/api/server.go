@@ -59,7 +59,20 @@ type NodeResponse struct {
 	Volumes           []string              `json:"volumes,omitempty"`
 	Capabilities      []spec.NodeCapability `json:"capabilities,omitempty"`
 	Version           string                `json:"version,omitempty"`
+	// ControlPlane is the node's Raft membership: voter or nonvoter. It is
+	// empty for a registered node that is no longer a member.
+	ControlPlane ControlPlaneMembership `json:"control_plane,omitempty"`
 }
+
+// ControlPlaneMembership describes whether a node votes in the control plane.
+type ControlPlaneMembership string
+
+const (
+	// ControlPlaneVoter nodes vote in leader elections and commit changes.
+	ControlPlaneVoter ControlPlaneMembership = "voter"
+	// ControlPlaneNonvoter nodes replicate state and can be promoted to voters.
+	ControlPlaneNonvoter ControlPlaneMembership = "nonvoter"
+)
 
 // NodeListResponse is the response returned when listing nodes.
 type NodeListResponse = []NodeResponse
@@ -107,6 +120,9 @@ type HeartbeatRequest struct {
 	MemoryUsed        *int64                `json:"memory_used,omitempty"`
 	MemoryAvailable   *int64                `json:"memory_available,omitempty"`
 	MetricsAt         *time.Time            `json:"metrics_at,omitempty"`
+	// RaftAppliedIndex is the node's last applied Raft log index. The leader
+	// promotes only non-voters that are caught up.
+	RaftAppliedIndex uint64 `json:"raft_applied_index,omitempty"`
 }
 
 // AllocationStatus reports the observed state of an allocation.

@@ -127,7 +127,7 @@ func NewNodesListCmd() *cobra.Command {
 			}
 
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
-			if _, err := fmt.Fprintln(w, "Node\tID\tStatus\tVersion\tCPU\tMemory\tHeartbeat"); err != nil {
+			if _, err := fmt.Fprintln(w, "Node\tID\tStatus\tControl plane\tVersion\tCPU\tMemory\tHeartbeat"); err != nil {
 				return err
 			}
 			for _, node := range *nodes {
@@ -136,7 +136,7 @@ func NewNodesListCmd() *cobra.Command {
 				if version == "" {
 					version = "unknown"
 				}
-				if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%dm\t%s\t%s\n", nodeDisplay(node), shortID(node.ID.String()), node.Status, version, node.CPU, formatByteCount(node.Memory), heartbeat); err != nil {
+				if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%dm\t%s\t%s\n", nodeDisplay(node), shortID(node.ID.String()), node.Status, controlPlaneDisplay(node), version, node.CPU, formatByteCount(node.Memory), heartbeat); err != nil {
 					return err
 				}
 			}
@@ -163,6 +163,14 @@ func NewNodesStatusCmd() *cobra.Command {
 	}
 }
 
+// controlPlaneDisplay shows whether a node votes in the control plane.
+func controlPlaneDisplay(node api.NodeResponse) string {
+	if node.ControlPlane == "" {
+		return "-"
+	}
+	return string(node.ControlPlane)
+}
+
 func printNodeStatus(w interface{ Write([]byte) (int, error) }, node api.NodeResponse) error {
 	version := node.Version
 	if version == "" {
@@ -172,7 +180,7 @@ func printNodeStatus(w interface{ Write([]byte) (int, error) }, node api.NodeRes
 	if node.OS != "" || node.Arch != "" {
 		platform = fmt.Sprintf("%s/%s", valueOrUnknown(node.OS), valueOrUnknown(node.Arch))
 	}
-	if _, err := fmt.Fprintf(w, "Node: %s\nID: %s\nStatus: %s\nVersion: %s\nPlatform: %s\nCPU: %dm\nMemory: %s (%d bytes)\nHeartbeat: %s\n", nodeDisplay(node), node.ID, node.Status, version, platform, node.CPU, formatByteCount(node.Memory), node.Memory, node.LastHeartbeat.Format(time.RFC3339)); err != nil {
+	if _, err := fmt.Fprintf(w, "Node: %s\nID: %s\nStatus: %s\nControl plane: %s\nVersion: %s\nPlatform: %s\nCPU: %dm\nMemory: %s (%d bytes)\nHeartbeat: %s\n", nodeDisplay(node), node.ID, node.Status, controlPlaneDisplay(node), version, platform, node.CPU, formatByteCount(node.Memory), node.Memory, node.LastHeartbeat.Format(time.RFC3339)); err != nil {
 		return err
 	}
 

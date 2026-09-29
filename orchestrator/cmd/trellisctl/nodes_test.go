@@ -69,6 +69,7 @@ func TestPrintNodeStatusShowsPlacementMetadata(t *testing.T) {
 		Volumes:       []string{"data", "cache"},
 		Capabilities:  []spec.NodeCapability{spec.CapabilityRunsc},
 		Version:       "v0.1.0",
+		ControlPlane:  api.ControlPlaneNonvoter,
 	}
 	var out bytes.Buffer
 	if err := printNodeStatus(&out, node); err != nil {
@@ -77,6 +78,7 @@ func TestPrintNodeStatusShowsPlacementMetadata(t *testing.T) {
 	text := out.String()
 	for _, want := range []string{
 		"Node: node-a:8128",
+		"Control plane: nonvoter",
 		"Platform: linux/amd64",
 		"CPU: 4000m",
 		"Memory: 8.0 GiB",

@@ -4,7 +4,7 @@ Trellis is a container scheduler built on containerd. It sits in the space betwe
 
 Every project that ships software ends up rebuilding the same infrastructure: workload placement, health checks, rolling updates, port reservation. Tools like Coolify improve the developer experience, but at their core they are not orchestrators. Kubernetes is a full orchestrator, but it brings significant complexity that many workloads simply do not need. Trellis is closer to Nomad in spirit: a lightweight, focused scheduler you can understand and operate yourself.
 
-Every machine runs the same `trellis` daemon. Raft consensus elects one node to serve the control-plane API and reconcile jobs, while every node continues to run allocations and participate in the next election.
+Every machine runs the same `trellis` daemon. Raft consensus elects one node to serve the control-plane API and reconcile jobs, while every node continues to run allocations. Up to five nodes vote in elections; any other node replicates state and can be promoted to replace a voter.
 
 ## Get started
 

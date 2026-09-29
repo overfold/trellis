@@ -43,11 +43,16 @@ const heartbeatInterval = 10 * time.Second
 // ErrNodeNotFound indicates that a requested node is absent.
 var ErrNodeNotFound = errors.New("node not found")
 
-// ClusterJoiner adds and removes Raft cluster members.
+// ClusterJoiner reads and changes Raft cluster membership. Changes that take a
+// configIndex apply only if the configuration is still the one at that index.
 type ClusterJoiner interface {
-	AddVoter(id, address string) error
-	RemoveServer(id string) error
+	Membership() (state.RaftMembership, error)
+	AddNonvoter(id, address string) error
+	PromoteVoter(id, address string, configIndex uint64) error
+	DemoteVoter(id string, configIndex uint64) error
+	RemoveServer(id string, configIndex uint64) error
 	LeadershipTransfer() error
+	AppliedIndex() uint64
 }
 
 type desiredStore interface {
@@ -124,6 +129,14 @@ type Server struct {
 	// before the leader marks its allocations lost; zero selects
 	// DefaultAllocationLossTimeout. Protected by mu.
 	allocationLossTimeout time.Duration
+
+	// membershipMu serializes Raft membership changes made by this server so
+	// each decision is taken from, and applied to, one configuration. It is
+	// never acquired while mu is held.
+	membershipMu sync.Mutex
+	// raftProgress is each node's latest reported Raft applied index, a
+	// renewable observation used only to decide promotions. Protected by mu.
+	raftProgress map[uuid.UUID]raftProgress
 }
 
 // SetSecretStore configures encrypted secret storage.
@@ -815,6 +828,7 @@ func (s *Server) EnrollNode(ctx context.Context, advertised ...string) (*api.Nod
 func (s *Server) Run(ctx context.Context) {
 	go s.runReconcileLoop(ctx)
 	go s.runNetworkPlanLoop(ctx)
+	go s.runMembershipLoop(ctx)
 }
 
 // ListNodes returns registered nodes.

@@ -11,39 +11,24 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/state"
 	"github.com/overfold/trellis/internal/storage"
 	"github.com/overfold/trellis/internal/tlsutil"
 )
 
-type recordingClusterJoiner struct {
-	removedID string
-	addedID   string
-	addedAddr string
-	err       error
-}
-
-func (j *recordingClusterJoiner) AddVoter(id, address string) error {
-	j.addedID, j.addedAddr = id, address
-	return j.err
-}
-func (*recordingClusterJoiner) LeadershipTransfer() error { return nil }
-
-func (j *recordingClusterJoiner) RemoveServer(id string) error {
-	j.removedID = id
-	return j.err
-}
-
 func TestHandleRaftMemberRemove(t *testing.T) {
-	joiner := &recordingClusterJoiner{}
-	control := &Server{joiner: joiner}
+	leader := uuid.New()
+	joiner := newFakeMembership(fakeMember(leader, true), state.RaftMember{ID: "node-2", Address: "node-2:8129"})
+	control := &Server{joiner: joiner, nodeID: leader, now: time.Now}
 	e := echo.New()
 	NewHandler(control).Register(e)
 
-	req := httptest.NewRequest(http.MethodDelete, "/v1/raft/members/node-2.example:8128", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/v1/raft/members/node-2", nil)
 	req = req.WithContext(context.WithValue(req.Context(), AdminContextKey, true))
 	rec := httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
@@ -51,14 +36,16 @@ func TestHandleRaftMemberRemove(t *testing.T) {
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusNoContent, rec.Body.String())
 	}
-	if joiner.removedID != "node-2.example:8128" {
-		t.Fatalf("removed ID = %q, want %q", joiner.removedID, "node-2.example:8128")
+	if got := joiner.operations(); len(got) != 1 || got[0] != "remove node-2" {
+		t.Fatalf("operations = %v, want [remove node-2]", got)
 	}
 }
 
 func TestHandleRaftMemberRemoveFailure(t *testing.T) {
-	joiner := &recordingClusterJoiner{err: errors.New("not the leader")}
-	control := &Server{joiner: joiner}
+	leader := uuid.New()
+	joiner := newFakeMembership(fakeMember(leader, true), state.RaftMember{ID: "node-2", Address: "node-2:8129"})
+	joiner.err = errors.New("not the leader")
+	control := &Server{joiner: joiner, nodeID: leader, now: time.Now}
 	e := echo.New()
 	NewHandler(control).Register(e)
 
@@ -72,9 +59,34 @@ func TestHandleRaftMemberRemoveFailure(t *testing.T) {
 	}
 }
 
+func TestHandleRaftMemberRemoveRefusesQuorumLoss(t *testing.T) {
+	leader, live, silent := uuid.New(), uuid.New(), uuid.New()
+	now := time.Now()
+	joiner := newFakeMembership(fakeMember(leader, true), fakeMember(live, true), fakeMember(silent, true))
+	control := &Server{joiner: joiner, nodeID: leader, now: func() time.Time { return now }, nodes: map[uuid.UUID]*Node{
+		live:   {ID: live, Status: NodeStatusHealthy, LastHeartbeat: now},
+		silent: {ID: silent, Status: NodeStatusUnhealthy, LastHeartbeat: now.Add(-time.Hour)},
+	}}
+	e := echo.New()
+	NewHandler(control).Register(e)
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/raft/members/"+live.String(), nil)
+	req = req.WithContext(context.WithValue(req.Context(), AdminContextKey, true))
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	if got := joiner.operations(); len(got) != 0 {
+		t.Fatalf("unsafe removal changed membership: %v", got)
+	}
+}
+
 func TestHandleRaftMemberRemoveRequiresClusterAuthorization(t *testing.T) {
-	joiner := &recordingClusterJoiner{}
-	control := &Server{joiner: joiner}
+	leader := uuid.New()
+	joiner := newFakeMembership(fakeMember(leader, true), state.RaftMember{ID: "node-2", Address: "node-2:8129"})
+	control := &Server{joiner: joiner, nodeID: leader, now: time.Now}
 	e := echo.New()
 	NewHandler(control).Register(e)
 
@@ -85,8 +97,8 @@ func TestHandleRaftMemberRemoveRequiresClusterAuthorization(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusForbidden, rec.Body.String())
 	}
-	if joiner.removedID != "" {
-		t.Fatalf("unexpected removal of %q", joiner.removedID)
+	if got := joiner.operations(); len(got) != 0 {
+		t.Fatalf("unexpected membership changes %v", got)
 	}
 }
 
@@ -115,7 +127,7 @@ func TestHandleRaftJoinBindsMembershipToCertificateIdentity(t *testing.T) {
 	if err := local.Put("tls/ca-key", string(caKey)); err != nil {
 		t.Fatal(err)
 	}
-	joiner := &recordingClusterJoiner{}
+	joiner := newFakeMembership(fakeMember(uuid.New(), true))
 	store := memoryStore{}
 	control := &Server{storage: local, joiner: joiner, state: NewStateController(store, "test")}
 	e := echo.New()
@@ -134,8 +146,8 @@ func TestHandleRaftJoinBindsMembershipToCertificateIdentity(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &joinResponse); err != nil || joinResponse.CAKey != string(caKey) {
 		t.Fatalf("join response did not return managed CA key after admission: %v", err)
 	}
-	if joiner.addedID != nodeID.String() || joiner.addedAddr != "node-b:8129" {
-		t.Fatalf("added voter = (%q, %q), want (%q, %q)", joiner.addedID, joiner.addedAddr, nodeID, "node-b:8129")
+	if got := joiner.operations(); len(got) != 1 || got[0] != "add-nonvoter "+nodeID.String()+" node-b:8129" {
+		t.Fatalf("join operations = %v, want the node added as a non-voter", got)
 	}
 	address, err := control.NodeServerAddress(context.Background(), nodeID.String())
 	if err != nil || address != "node-b:8128" {
@@ -273,5 +285,35 @@ func TestExternalSigningCannotEnrollWithoutCAKey(t *testing.T) {
 	}
 	if _, err := (&Server{storage: local}).EnrollNode(context.Background()); err == nil {
 		t.Fatal("external-signing node unexpectedly enrolled another node")
+	}
+}
+
+func TestHandleListNodesShowsControlPlaneMembership(t *testing.T) {
+	leader, nonvoter, removed := uuid.New(), uuid.New(), uuid.New()
+	joiner := newFakeMembership(fakeMember(leader, true), fakeMember(nonvoter, false))
+	control := &Server{joiner: joiner, nodeID: leader, now: time.Now, nodes: map[uuid.UUID]*Node{
+		leader: {ID: leader}, nonvoter: {ID: nonvoter}, removed: {ID: removed},
+	}}
+	e := echo.New()
+	NewHandler(control).Register(e)
+	req := httptest.NewRequest(http.MethodGet, "/v1/nodes", nil)
+	req = req.WithContext(context.WithValue(req.Context(), AdminContextKey, true))
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var nodes api.NodeListResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &nodes); err != nil {
+		t.Fatal(err)
+	}
+	want := map[uuid.UUID]api.ControlPlaneMembership{leader: api.ControlPlaneVoter, nonvoter: api.ControlPlaneNonvoter, removed: ""}
+	for _, node := range nodes {
+		if node.ControlPlane != want[node.ID] {
+			t.Errorf("node %s control plane = %q, want %q", node.ID, node.ControlPlane, want[node.ID])
+		}
+	}
+	if len(nodes) != len(want) {
+		t.Fatalf("listed %d nodes, want %d", len(nodes), len(want))
 	}
 }

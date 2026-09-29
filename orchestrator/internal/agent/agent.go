@@ -76,6 +76,10 @@ type Agent struct {
 	secretBase   string
 	secretRoot   string
 	secretStatfs func(string, *syscall.Statfs_t) error
+
+	// raftAppliedIndex reports the local Raft applied index in heartbeats so
+	// the leader promotes only caught-up members to voters.
+	raftAppliedIndex func() uint64
 }
 
 type allocationOperation struct {
@@ -379,6 +383,10 @@ func (a *Agent) SetLabels(labels map[string]string) {
 
 // SetVersion configures the reported agent version.
 func (a *Agent) SetVersion(version string) { a.version = version }
+
+// SetRaftAppliedIndex configures how heartbeats read the local Raft applied
+// index.
+func (a *Agent) SetRaftAppliedIndex(applied func() uint64) { a.raftAppliedIndex = applied }
 
 // Init restores durable allocations and starts reconciliation. A runtime
 // listing failure does not fail Init: recorded allocations are kept unobserved
@@ -2145,6 +2153,9 @@ func (a *Agent) runHeartbeatLoop(ctx context.Context) {
 				MemoryCapacity:    a.nodeInfo.MemoryCapacity,
 				CPUAllocatable:    a.nodeInfo.CPUAllocatable,
 				MemoryAllocatable: a.nodeInfo.MemoryAllocatable,
+			}
+			if a.raftAppliedIndex != nil {
+				heartbeat.RaftAppliedIndex = a.raftAppliedIndex()
 			}
 			if metrics, ok := nodecapacity.SampleHostMetrics(); ok {
 				if metrics.CPUValid {

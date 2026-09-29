@@ -37,6 +37,8 @@ func TestMultiNodeFailureRecovery(t *testing.T) {
 	h := newHarness(t, 3)
 	defer h.close()
 	h.waitNodes(3)
+	// Leader failover below needs all three nodes voting.
+	h.waitVoters(3, 3)
 
 	t.Run("persistent state and ambiguous start reconciliation", func(*testing.T) {
 		h.fault(1, "start", "after")
@@ -87,6 +89,50 @@ func TestMultiNodeFailureRecovery(t *testing.T) {
 		h.submit(job("web", "v3", 1, "recreate"))
 		h.waitJob("web", 3, 1)
 	})
+}
+
+// TestMultiNodeVoterMembership checks that the voter set stays bounded and
+// odd: nodes join as non-voters, three of four nodes vote, and removing a voter
+// promotes the remaining non-voter before the removal.
+func TestMultiNodeVoterMembership(t *testing.T) {
+	if testing.Short() {
+		t.Skip("multi-process integration test")
+	}
+	h := newHarness(t, 4)
+	defer h.close()
+	h.waitNodes(4)
+	membership := h.waitVoters(4, 3)
+	var removed, nonvoter string
+	for id, role := range membership {
+		switch {
+		case role == api.ControlPlaneNonvoter:
+			nonvoter = id
+		case role == api.ControlPlaneVoter && removed == "" && !h.isLeader(id):
+			removed = id
+		}
+	}
+	if nonvoter == "" || removed == "" {
+		t.Fatalf("membership = %v, want a non-voter and a non-leader voter", membership)
+	}
+	administrator := client.NewServerClient("", addr(h.nodes[h.endpoint()].ports[1]), &tls.Config{InsecureSkipVerify: true})
+	if err := administrator.UseAdministratorKey(h.adminKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := administrator.RemoveRaftMember(t.Context(), removed); err != nil {
+		t.Fatalf("remove voter: %v", err)
+	}
+	for i := range h.nodes {
+		if h.nodeID(i) == removed {
+			h.stop(i)
+		}
+	}
+	membership = h.waitVoters(3, 3)
+	if membership[nonvoter] != api.ControlPlaneVoter {
+		t.Fatalf("membership = %v, want former non-voter %s promoted", membership, nonvoter)
+	}
+	if role, listed := membership[removed]; listed && role != "" {
+		t.Fatalf("removed node %s still has control-plane role %q", removed, role)
+	}
 }
 
 type node struct {
@@ -276,6 +322,44 @@ func (h *harness) waitNodes(want int) {
 		var v []any
 		return r.StatusCode == 200 && json.NewDecoder(r.Body).Decode(&v) == nil && len(v) >= want
 	}, "node registration did not converge")
+}
+
+// waitVoters waits until members nodes belong to Raft and voters of them vote.
+// It returns each listed node's control-plane role keyed by node ID.
+func (h *harness) waitVoters(members, voters int) map[string]api.ControlPlaneMembership {
+	var last map[string]api.ControlPlaneMembership
+	h.eventually(90*time.Second, func() bool {
+		r, e := h.request(h.endpoint(), "GET", "/v1/nodes", nil)
+		if e != nil {
+			return false
+		}
+		defer func() { _ = r.Body.Close() }()
+		var nodes api.NodeListResponse
+		if r.StatusCode != 200 || json.NewDecoder(r.Body).Decode(&nodes) != nil {
+			return false
+		}
+		last = make(map[string]api.ControlPlaneMembership, len(nodes))
+		gotMembers, gotVoters := 0, 0
+		for _, node := range nodes {
+			last[node.ID.String()] = node.ControlPlane
+			if node.ControlPlane != "" {
+				gotMembers++
+			}
+			if node.ControlPlane == api.ControlPlaneVoter {
+				gotVoters++
+			}
+		}
+		return gotMembers == members && gotVoters == voters
+	}, fmt.Sprintf("control plane did not converge to %d members with %d voters", members, voters))
+	return last
+}
+func (h *harness) nodeID(i int) string {
+	b, _ := os.ReadFile(filepath.Join(h.nodes[i].dir, "node-id"))
+	return strings.TrimSpace(string(b))
+}
+func (h *harness) isLeader(id string) bool {
+	leader := h.leader()
+	return h.nodeID(leader) == id
 }
 func (h *harness) waitJob(name string, revision, desired int) { //nolint:unparam // The name keeps call sites readable; the suite currently uses one job.
 	var last []byte

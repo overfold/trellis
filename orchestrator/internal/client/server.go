@@ -170,6 +170,7 @@ type Heartbeat struct {
 	MemoryUsed        *int64
 	MemoryAvailable   *int64
 	MetricsAt         *time.Time
+	RaftAppliedIndex  uint64
 }
 
 // NewServerClient creates a client for cluster-scoped server APIs.
@@ -423,6 +424,7 @@ func (s *ServerClient) SendHeartbeat(ctx context.Context, id uuid.UUID, heartbea
 		MemoryUsed:        heartbeat.MemoryUsed,
 		MemoryAvailable:   heartbeat.MemoryAvailable,
 		MetricsAt:         heartbeat.MetricsAt,
+		RaftAppliedIndex:  heartbeat.RaftAppliedIndex,
 	}
 	url := fmt.Sprintf("%s/v1/nodes/%s/heartbeat", s.address(), id)
 	if err := s.client.request(ctx, http.MethodPost, url, requestData, nil); err != nil {

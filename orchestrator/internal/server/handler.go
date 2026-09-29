@@ -412,9 +412,20 @@ func (h *Handler) handleListNodes(c *echo.Context) error {
 		return err
 	}
 	nodes := h.server.ListNodes()
+	voters, err := h.server.MemberVoters()
+	if err != nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "read control-plane membership")
+	}
 	result := make(api.NodeListResponse, 0, len(nodes))
 	for _, node := range nodes {
-		result = append(result, *h.convertNode(&node))
+		response := h.convertNode(&node)
+		if voter, member := voters[node.ID.String()]; member {
+			response.ControlPlane = api.ControlPlaneNonvoter
+			if voter {
+				response.ControlPlane = api.ControlPlaneVoter
+			}
+		}
+		result = append(result, *response)
 	}
 	return c.JSON(http.StatusOK, result)
 }
@@ -483,6 +494,7 @@ func (h *Handler) handleHeartbeat(c *echo.Context) error {
 	if err := h.server.Heartbeat(c.Request().Context(), id, request.Allocations, request.Version, request.Volumes, request.Capabilities, resources); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "unable to process heartbeat")
 	}
+	h.server.RecordRaftProgress(id, request.RaftAppliedIndex)
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -635,7 +647,7 @@ func (h *Handler) handleRaftJoin(c *echo.Context) error {
 	if err := h.server.RecordNodeServerAddress(c.Request().Context(), nodeID, request.ServerAddress); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
-	if err := h.server.joiner.AddVoter(nodeID.String(), request.RaftAddress); err != nil {
+	if err := h.server.JoinMember(nodeID, request.RaftAddress); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 	_, caKey, err := h.server.ClusterCA()
@@ -673,7 +685,10 @@ func (h *Handler) handleRaftMemberRemove(c *echo.Context) error {
 	if h.server.joiner == nil {
 		return echo.NewHTTPError(http.StatusServiceUnavailable, "cluster membership changes not available")
 	}
-	if err := h.server.joiner.RemoveServer(id); err != nil {
+	if err := h.server.RemoveMember(c.Request().Context(), id); err != nil {
+		if errors.Is(err, ErrMembershipUnsafe) {
+			return echo.NewHTTPError(http.StatusConflict, err.Error())
+		}
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 	return c.NoContent(http.StatusNoContent)

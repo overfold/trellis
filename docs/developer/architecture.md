@@ -4,7 +4,7 @@
 
 `trellis` composes the control plane and worker agent. The control plane owns desired state, scheduling, service catalog, health-derived status, HTTP endpoints, Prometheus metrics, and reconciliation. The agent owns actual containers, ports, volumes, logs, secrets materialization, and local restart/health loops. `trellisctl` is the human CLI; `trellis-proxy-sync` turns catalog allocation labels into a proxy configuration.
 
-The design is leader-driven. A Raft-backed state store persists jobs, secrets, allocation records, membership-related desired state, and a monotonically meaningful control epoch. Followers serve as cluster members, but only the elected leader reconciles. The server-to-agent protocol includes epoch, allocation generation, job revision, and execution hash to make repeat requests safe and reject stale control traffic.
+The design is leader-driven. A Raft-backed state store persists jobs, secrets, allocation records, membership-related desired state, and a monotonically meaningful control epoch. Followers serve as cluster members, but only the elected leader reconciles. At most five members vote; the rest replicate as non-voters that the leader promotes to keep an odd voter set (see [control-plane membership](control-plane.md#control-plane-membership)). The server-to-agent protocol includes epoch, allocation generation, job revision, and execution hash to make repeat requests safe and reject stale control traffic.
 
 ## Desired and observed state
 

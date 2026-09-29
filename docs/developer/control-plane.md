@@ -4,6 +4,20 @@
 
 Nodes register UUID, agent address, capacity, OS/architecture, labels, volume inventory, and optional WireGuard identity. Periodic heartbeats refresh node status and report allocation generation, task, phase, health, each task's observed namespace-network address when present, ports, capabilities, and version. The control plane retains endpoint observations per task rather than collapsing a multi-task allocation onto whichever task was reported first. A successful heartbeat is acknowledged without returning desired state. After three missed heartbeat intervals a healthy node is marked unhealthy. The leader keeps each node's latest observed allocation generations and their aggregated phase for reconciliation.
 
+## Control-plane membership
+
+Every node runs the same daemon and is a Raft member, but only a bounded set of members vote. The target voter count is the largest odd number not above the member count or five: one member votes in a one- or two-member cluster, three in a three- or four-member cluster, and five from five members up. Five voters tolerate two failures; more would only add write fan-out and quorum size. Even counts are avoided because they tolerate no more failures than one voter fewer.
+
+`POST /v1/raft/join` always adds the node as a non-voter (`AddNonvoter`); a rejoining voter keeps its vote. The leader moves the voter set toward its target, one configuration change at a time, every 10 seconds once it has led for the 30-second recovery grace, and after each removal. Each change is a compare-and-set against the configuration index it was planned from, so concurrent membership changes cannot combine into an unplanned configuration. The planner (`planMembership`) is a pure function of the configuration and the leader's node observations and breaks ties by node ID:
+
+- a non-voter is promoted only if it is eligible: its node is `healthy` (not draining or unhealthy), and its latest heartbeat, at most 30 seconds old, reported a Raft applied index within 256 entries of the leader's applied index at receipt. Promotions only move toward an odd count; a lone eligible non-voter is not promoted to make four voters;
+- surplus voters are demoted, never the leader, preferring gone voters, then ineligible ones;
+- a voter whose node has been silent for 5 minutes (measured from no earlier than the current leader's election) is gone. If an eligible non-voter exists, it is promoted first and the resulting surplus then demotes the gone voter, so the number of reachable voters never shrinks. The gone node stays a member and can vote again later.
+
+Removal (`DELETE /v1/raft/members/{id}`) of a voter promotes an eligible non-voter before removing it, then rebalances. It is refused with `ErrMembershipUnsafe` (`409`) when the reachable remaining voters (the leader, plus voters whose nodes heartbeated within 30 seconds) are not a majority of the remaining voters, because such a configuration would leave the leader unable to commit, including the removal itself. Raft leadership transfer only selects voters.
+
+Heartbeat progress is a leader-local renewable observation; nothing about eligibility is persisted. Configuration changes are ordinary Raft configuration entries, so every member applies the same membership.
+
 ## Scheduling algorithm
 
 For each task-group deficit, `Schedule`:

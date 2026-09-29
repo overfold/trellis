@@ -567,7 +567,7 @@ func TestReplacementStateIsDeterministicAcrossRaftReplayAndSnapshot(t *testing.T
 	followerDir := t.TempDir()
 	followerStore := newReplacementRaftStore(t, followerDir, "", false)
 	followerAddr := followerStore.LocalAddr()
-	if err := leaderStore.AddVoter(followerAddr, followerAddr); err != nil {
+	if err := leaderStore.AddNonvoter(followerAddr, followerAddr); err != nil {
 		t.Fatal(err)
 	}
 	followerState := waitReplicatedState(t, leaderStore, followerStore)
@@ -894,7 +894,7 @@ func TestResetReplacementBackoffThroughClientAndRaft(t *testing.T) {
 	followerDir := t.TempDir()
 	followerStore := newReplacementRaftStore(t, followerDir, "", false)
 	followerAddr := followerStore.LocalAddr()
-	if err := leaderStore.AddVoter(followerAddr, followerAddr); err != nil {
+	if err := leaderStore.AddNonvoter(followerAddr, followerAddr); err != nil {
 		t.Fatal(err)
 	}
 	waitReplicatedState(t, leaderStore, followerStore)
