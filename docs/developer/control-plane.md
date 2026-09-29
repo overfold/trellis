@@ -56,7 +56,7 @@ Operators see the state as `replacement_backoff` in job status (`trellisctl jobs
 
 A node is marked unhealthy after three missed heartbeat intervals (30s). Its non-terminal allocations become lost once the node's last heartbeat is at least the allocation loss timeout old (`DefaultAllocationLossTimeout`, 45s, configurable per server with `allocation_loss_timeout` / `--allocation-loss-timeout` between 30s and 24h) and the leader has held leadership for at least `leaderRecoveryGrace` (30s). The recovery grace applies to the orphan and stale-generation observation stops as well. It avoids duplicating work during transient leadership changes: a new leader first gives nodes a chance to heartbeat to it.
 
-Lost is terminal. Heartbeats never move a lost allocation to another phase, and it never counts toward its group again. When its node returns and reports the lost generation's container `running`, reconciliation treats it as a retained original rather than stopping it immediately as an unowned observation:
+Lost is terminal. Heartbeats never move a lost allocation to another phase, and it never counts toward its group again. While its allocation record is retained, when its node returns and reports the lost generation's container `running`, reconciliation treats it as a retained original rather than stopping it immediately as an unowned observation:
 
 - each group keeps up to `count` minus its running non-draining allocations of its retained originals, in allocation ID order. Originals are kept only while their job and group are desired, and only if they belong to the current revision or the group uses rolling updates. Once enough replacements are `running`, the remaining originals are stopped through the normal `stop_observed` action;
 - placement treats retained originals as occupying their node's host ports, CPU, and memory, so a replacement is not placed where it could not start beside them;
@@ -64,6 +64,8 @@ Lost is terminal. Heartbeats never move a lost allocation to another phase, and 
 - the stops of released originals run before every other action of the pass, so a replacement starts only after the original holding its port is stopped.
 
 These decisions are derived each pass from the allocation snapshot and the latest node observations. Nothing about them is persisted, and scheduler inputs are never mutated. Retained originals are added only to placement occupancy, never to the allocations counted for replica spreading. Any originals not kept by a group are stopped in the same pass.
+
+Terminal retention keeps only the five newest allocation records per task group, including on registered unavailable nodes. If an older pruned allocation is later reported, it has no desired record and is stopped through the normal `stop_observed` orphan path.
 
 ## Catalog and discovery
 

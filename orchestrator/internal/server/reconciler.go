@@ -345,6 +345,11 @@ func (s *Server) Reconcile(ctx context.Context) {
 		baseByPlan[planned] = base
 	}
 	sort.Slice(allocations, func(i, j int) bool { return allocations[i].ID < allocations[j].ID })
+	allocationsByGroup := make(map[string][]*Allocation)
+	for _, allocation := range allocations {
+		key := replacementBackoffKey(allocation.Namespace, allocation.JobName, allocation.TaskGroupName)
+		allocationsByGroup[key] = append(allocationsByGroup[key], allocation)
+	}
 	plannedUpdates := make(map[*Allocation]bool)
 	markUpdated := func(allocation *Allocation) {
 		plannedUpdates[allocation] = true
@@ -395,6 +400,7 @@ func (s *Server) Reconcile(ctx context.Context) {
 		sortRetainedOriginals(retained)
 	}
 	valid := make([]*Allocation, 0, len(allocations))
+	validByGroup := make(map[string][]*Allocation)
 	for _, allocation := range allocations {
 		allocation.mu.Lock()
 		key := jobKey(allocation.Namespace, allocation.JobName)
@@ -530,6 +536,10 @@ func (s *Server) Reconcile(ctx context.Context) {
 		valid = append(valid, allocation)
 		allocation.mu.Unlock()
 	}
+	for _, allocation := range valid {
+		key := replacementBackoffKey(allocation.Namespace, allocation.JobName, allocation.TaskGroupName)
+		validByGroup[key] = append(validByGroup[key], allocation)
+	}
 	occupied := make([]*Allocation, 0, len(allocations))
 	occupiedSet := make(map[*Allocation]bool, len(allocations))
 	for _, allocation := range allocations {
@@ -549,20 +559,18 @@ func (s *Server) Reconcile(ctx context.Context) {
 		namespace := job.Spec.Namespace
 		for _, group := range job.Spec.TaskGroups {
 			backoffKey := replacementBackoffKey(namespace, jobName, group.Name)
-			backoff := planReplacementBackoff(policy, s.replacementBackoffs[backoffKey], namespace, jobName, group.Name, job.Revision, allocations, now)
+			backoff := planReplacementBackoff(policy, s.replacementBackoffs[backoffKey], namespace, jobName, group.Name, job.Revision, allocationsByGroup[backoffKey], now)
 			plannedBackoffs[backoffKey] = backoff
 			var current []*Allocation
 			var pending []*Allocation
 			var draining []*Allocation
-			for _, alloc := range valid {
-				if alloc.Namespace == namespace && alloc.JobName == jobName && alloc.TaskGroupName == group.Name {
-					if alloc.Draining {
-						draining = append(draining, alloc)
-					} else if alloc.Phase == lifecycle.PhasePending {
-						pending = append(pending, alloc)
-					} else {
-						current = append(current, alloc)
-					}
+			for _, alloc := range validByGroup[backoffKey] {
+				if alloc.Draining {
+					draining = append(draining, alloc)
+				} else if alloc.Phase == lifecycle.PhasePending {
+					pending = append(pending, alloc)
+				} else {
+					current = append(current, alloc)
 				}
 			}
 			for len(current) > group.Count {
@@ -690,7 +698,7 @@ func (s *Server) Reconcile(ctx context.Context) {
 		}
 	}
 	actions = append(retainedStops, actions...)
-	pruned := planTerminalPruning(policy.RetainTerminal, allocations, s.nodes, plannedUpdates)
+	pruned := planTerminalPruning(policy.RetainTerminal, allocations, plannedUpdates)
 	prunedSet := make(map[*Allocation]bool, len(pruned))
 	for _, allocation := range pruned {
 		prunedSet[allocation] = true
@@ -839,7 +847,7 @@ func (s *Server) Reconcile(ctx context.Context) {
 			actions[i].Allocation = original
 		}
 	}
-	if len(newAllocations) > 0 || len(pruned) > 0 || len(backoffPuts) > 0 || len(backoffDeletes) > 0 {
+	if len(plannedUpdates) > 0 || len(newAllocations) > 0 || len(pruned) > 0 || len(backoffPuts) > 0 || len(backoffDeletes) > 0 {
 		s.mu.Lock()
 		if len(pruned) > 0 {
 			removed := make(map[*Allocation]bool, len(pruned))
@@ -855,6 +863,7 @@ func (s *Server) Reconcile(ctx context.Context) {
 			s.allocations = kept
 		}
 		s.allocations = append(s.allocations, newAllocations...)
+		s.rebuildAllocationNodeIndexLocked()
 		if len(backoffPuts) > 0 || len(backoffDeletes) > 0 {
 			backoffs := make(map[string]*ReplacementBackoff, len(s.replacementBackoffs)+len(backoffPuts))
 			for key, backoff := range s.replacementBackoffs {

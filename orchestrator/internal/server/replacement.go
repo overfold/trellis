@@ -8,7 +8,6 @@ import (
 	"sort"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/overfold/trellis/internal/api"
 	"github.com/overfold/trellis/internal/lifecycle"
 	"github.com/overfold/trellis/internal/spec"
@@ -235,13 +234,12 @@ func planReplacementBackoff(policy ReplacementPolicy, previous *ReplacementBacko
 // planTerminalPruning selects terminal allocation records to delete so that at
 // most retain stopped, failed, or lost records remain per job task group. The
 // newest records by transition time are retained, with the allocation ID as a
-// deterministic tie-breaker. A record is deleted only when no node could
-// still hold its container or resources: it was never placed, its node has
-// been removed from the cluster, or its node is available and has reported a
-// heartbeat after the allocation became terminal without listing any
-// generation of it. skip excludes allocations that must not be deleted in
-// this pass. The inputs are not mutated.
-func planTerminalPruning(retain int, allocations []*Allocation, nodes map[uuid.UUID]*Node, skip map[*Allocation]bool) []*Allocation {
+// deterministic tie-breaker. A pruned allocation that later reappears in a
+// node heartbeat is no longer desired and reconciliation stops it as an
+// observed orphan, preserving fencing without retaining unbounded history.
+// skip excludes allocations that must not be deleted in this pass. The inputs
+// are not mutated.
+func planTerminalPruning(retain int, allocations []*Allocation, skip map[*Allocation]bool) []*Allocation {
 	if retain < 0 {
 		return nil
 	}
@@ -281,38 +279,13 @@ func planTerminalPruning(retain int, allocations []*Allocation, nodes map[uuid.U
 			return terminal[i].ID > terminal[j].ID
 		})
 		for _, allocation := range terminal[retain:] {
-			if skip[allocation] || !terminalAllocationReleased(allocation, nodes) {
+			if skip[allocation] {
 				continue
 			}
 			pruned = append(pruned, allocation)
 		}
 	}
 	return pruned
-}
-
-func terminalAllocationReleased(allocation *Allocation, nodes map[uuid.UUID]*Node) bool {
-	if allocation.Node == nil {
-		return true
-	}
-	node := nodes[allocation.Node.ID]
-	if node == nil {
-		// The node is no longer registered, so nothing can still hold the
-		// allocation's resources. This matches a leader that reloaded the
-		// record after the removal and sees no node at all.
-		return true
-	}
-	if node.Status != NodeStatusHealthy && node.Status != NodeStatusDraining {
-		return false
-	}
-	if node.observedAt.IsZero() || !node.observedAt.After(allocation.TransitionedAt) {
-		return false
-	}
-	for _, observed := range node.observedAllocations {
-		if observed.ID == allocation.ID {
-			return false
-		}
-	}
-	return true
 }
 
 // ErrTaskGroupNotFound reports that a job or one of its task groups does not

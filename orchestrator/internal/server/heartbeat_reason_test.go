@@ -95,3 +95,33 @@ func TestHeartbeatRejectsInvalidFailureReason(t *testing.T) {
 		}
 	}
 }
+
+func TestHeartbeatRejectsExcessAllocationReports(t *testing.T) {
+	s, node, _ := heartbeatReasonTestServer(lifecycle.PhaseRunning)
+	reports := make([]api.AllocationStatus, maxHeartbeatAllocationStatuses+1)
+	if err := s.Heartbeat(context.Background(), node.ID, reports, "test", nil, nil, nodeResourceObservation{}); err == nil {
+		t.Fatal("oversized heartbeat succeeded")
+	}
+}
+
+func TestHeartbeatHandlerRejectsExcessAllocationReports(t *testing.T) {
+	s, node, _ := heartbeatReasonTestServer(lifecycle.PhaseRunning)
+	body := bytes.NewBufferString(`{"allocations":[`)
+	for i := 0; i <= maxHeartbeatAllocationStatuses; i++ {
+		if i > 0 {
+			body.WriteByte(',')
+		}
+		body.WriteString(`{}`)
+	}
+	body.WriteString(`]}`)
+	e := echo.New()
+	NewHandler(s).Register(e)
+	request := httptest.NewRequest(http.MethodPost, "/v1/nodes/"+node.ID.String()+"/heartbeat", body)
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(context.WithValue(request.Context(), NodeContextKey, node.ID))
+	recorder := httptest.NewRecorder()
+	e.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("heartbeat status = %d, want 413", recorder.Code)
+	}
+}
