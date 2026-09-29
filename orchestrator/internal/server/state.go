@@ -22,9 +22,10 @@ type StateController struct {
 
 const trellisNamespace = "trellis"
 
-// jobRevisionRetention is the maximum number of full historical specs kept
-// for each live job. A substantive apply rewrites the retained window so it
-// also compacts histories created by older, unbounded versions.
+// jobRevisionRetention is the maximum number of job history records (one per
+// job version) kept for each live job. Every apply that changes the spec
+// rewrites the retained window so it also compacts histories created by
+// older, unbounded versions.
 const jobRevisionRetention = 10
 
 // NewStateController creates a typed state controller.
@@ -159,7 +160,7 @@ func (s *StateController) PutJobWithRevision(ctx context.Context, id string, job
 	}
 	jobKey := fmt.Sprintf("%s/%s/jobs/%s", trellisNamespace, s.cluster, url.QueryEscape(id))
 	revisionPrefix := fmt.Sprintf("%s/%s/job-revisions/%s/", trellisNamespace, s.cluster, url.QueryEscape(id))
-	revisionKey := revisionPrefix + fmt.Sprint(record.Revision)
+	revisionKey := revisionPrefix + fmt.Sprint(record.Version)
 	atomic, ok := s.store.(state.AtomicStore)
 	if !ok {
 		return fmt.Errorf("state store does not support atomic job revisions")
@@ -175,7 +176,7 @@ func (s *StateController) PutJobWithRevision(ctx context.Context, id string, job
 		if err != nil {
 			return fmt.Errorf("marshal retained job revision: %w", err)
 		}
-		mutations = append(mutations, state.Mutation{Key: revisionPrefix + fmt.Sprint(retainedRecord.Revision), Value: raw})
+		mutations = append(mutations, state.Mutation{Key: revisionPrefix + fmt.Sprint(retainedRecord.Version), Value: raw})
 	}
 	mutations = append(mutations, state.Mutation{Key: revisionKey, Value: revisionRaw})
 	if err := atomic.Batch(ctx, mutations); err != nil {
@@ -395,14 +396,17 @@ func (s *StateController) get(ctx context.Context, key string, value any) (bool,
 	return true, nil
 }
 
-// JobRevisionRecord stores a historical job spec snapshot.
+// JobRevisionRecord stores a historical job spec snapshot. Records are keyed
+// by job version; Revision is the execution revision that version ran.
 type JobRevisionRecord struct {
+	Version   int           `json:"version"`
 	Revision  int           `json:"revision"`
 	Spec      *spec.JobSpec `json:"spec"`
 	CreatedAt time.Time     `json:"created_at"`
 }
 
-// ListJobRevisions returns the retained revisions for a job in ascending order.
+// ListJobRevisions returns the retained history records for a job in
+// ascending version order.
 func (s *StateController) ListJobRevisions(ctx context.Context, key string) ([]*JobRevisionRecord, error) {
 	prefix := fmt.Sprintf("%s/%s/job-revisions/%s/", trellisNamespace, s.cluster, url.QueryEscape(key))
 	return s.listJobRevisions(ctx, prefix, jobRevisionRetention)
@@ -425,11 +429,13 @@ func (s *StateController) CompactJobRevisions(ctx context.Context, jobs map[stri
 			return fmt.Errorf("job revision is missing its spec")
 		}
 		identity := jobKey(record.Spec.Namespace, record.Spec.Name)
-		if jobs[identity] == nil {
+		// Records without a version predate version-keyed history and are
+		// dropped with the history of deleted jobs.
+		if jobs[identity] == nil || record.Version < 1 {
 			return nil
 		}
 		records := append(retained[identity], &record)
-		sort.Slice(records, func(i, j int) bool { return records[i].Revision < records[j].Revision })
+		sort.Slice(records, func(i, j int) bool { return records[i].Version < records[j].Version })
 		if len(records) > jobRevisionRetention {
 			records = records[1:]
 		}
@@ -470,7 +476,7 @@ func (s *StateController) CompactJobRevisions(ctx context.Context, jobs map[stri
 			if err != nil {
 				return fmt.Errorf("marshal retained job revision: %w", err)
 			}
-			mutations = append(mutations, state.Mutation{Key: prefix + fmt.Sprint(record.Revision), Value: raw})
+			mutations = append(mutations, state.Mutation{Key: prefix + fmt.Sprint(record.Version), Value: raw})
 		}
 	}
 	atomic, ok := s.store.(state.AtomicStore)
@@ -490,8 +496,11 @@ func (s *StateController) listJobRevisions(ctx context.Context, prefix string, l
 		if err := json.Unmarshal(raw, &record); err != nil {
 			return fmt.Errorf("unmarshal job revision: %w", err)
 		}
+		if record.Version < 1 {
+			return nil
+		}
 		result = append(result, &record)
-		sort.Slice(result, func(i, j int) bool { return result[i].Revision < result[j].Revision })
+		sort.Slice(result, func(i, j int) bool { return result[i].Version < result[j].Version })
 		if len(result) > limit {
 			result = result[1:]
 		}

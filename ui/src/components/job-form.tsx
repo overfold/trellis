@@ -5,8 +5,9 @@ import type { JobSpec } from "@/lib/types";
 import starterManifest from "@/lib/starter-manifest.json";
 import { formatJobManifest, parseJobManifest } from "@/lib/manifest";
 import { getManifestSchema, normalizeManifestForAPI } from "@/lib/manifest-schema";
-import { planJob, submitJob } from "@/lib/api";
+import { ApiError, planJob, submitJob } from "@/lib/api";
 import {
+  expectedVersionForPlan,
   formatPlanValue,
   planTitle,
   type ManifestPlan,
@@ -152,7 +153,17 @@ function JobFormPanel({
         if (!plannedSpec) {
           throw new Error("The reviewed manifest is no longer available; review the plan again.");
         }
-        await submitJob(plannedSpec);
+        try {
+          await submitJob(plannedSpec, expectedVersionForPlan(plan));
+        } catch (err) {
+          if (err instanceof ApiError && err.status === 409) {
+            clearPlan();
+            throw new Error(
+              `${plan.namespace}/${plan.job} changed after this plan was reviewed, so nothing was applied (${err.message}). Review the plan again to see the current changes.`,
+            );
+          }
+          throw err;
+        }
         onSuccess();
         onClose();
         return;

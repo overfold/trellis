@@ -17,7 +17,7 @@ func validSnapshotJob(t *testing.T, namespace, name string, revision int) (strin
 		Namespace:  namespace,
 		Name:       name,
 		TaskGroups: []spec.TaskGroupSpec{{Name: "group", Count: 1, Tasks: []spec.TaskSpec{{Name: "task", Image: "example/image:1"}}}},
-	}, Revision: revision})
+	}, Revision: revision, Version: revision})
 	if err != nil {
 		t.Fatal(err)
 	}

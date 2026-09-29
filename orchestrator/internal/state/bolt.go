@@ -384,9 +384,11 @@ func (b *BoltStore) RestoreDesired(cluster string, snapshot *DesiredSnapshot) er
 type persistedJob struct {
 	Spec     *spec.JobSpec `json:"Spec"`
 	Revision int           `json:"Revision"`
+	Version  int           `json:"Version"`
 }
 
 type persistedJobRevision struct {
+	Version   int           `json:"version"`
 	Revision  int           `json:"revision"`
 	Spec      *spec.JobSpec `json:"spec"`
 	CreatedAt time.Time     `json:"created_at"`
@@ -425,7 +427,7 @@ func ValidateDesiredSnapshot(snapshot *DesiredSnapshot, additionalJobValidation 
 	}
 	for key, raw := range snapshot.Jobs {
 		var job persistedJob
-		if key == "" || json.Unmarshal(raw, &job) != nil || job.Spec == nil || job.Revision < 1 {
+		if key == "" || json.Unmarshal(raw, &job) != nil || job.Spec == nil || job.Revision < 1 || job.Version < job.Revision {
 			return fmt.Errorf("invalid job record %q", key)
 		}
 		identity := job.Spec.Name
@@ -442,14 +444,14 @@ func ValidateDesiredSnapshot(snapshot *DesiredSnapshot, additionalJobValidation 
 	for key, raw := range snapshot.JobRevisions {
 		var revision persistedJobRevision
 		lastSlash := strings.LastIndexByte(key, '/')
-		if lastSlash < 1 || json.Unmarshal(raw, &revision) != nil || revision.Spec == nil || revision.Revision < 1 || revision.CreatedAt.IsZero() {
+		if lastSlash < 1 || json.Unmarshal(raw, &revision) != nil || revision.Spec == nil || revision.Revision < 1 || revision.Version < revision.Revision || revision.CreatedAt.IsZero() {
 			return fmt.Errorf("invalid job revision record %q", key)
 		}
 		identity := revision.Spec.Name
 		if revision.Spec.Namespace != "" {
 			identity = revision.Spec.Namespace + "\x00" + revision.Spec.Name
 		}
-		if key[:lastSlash] != url.QueryEscape(identity) || key[lastSlash+1:] != strconv.Itoa(revision.Revision) {
+		if key[:lastSlash] != url.QueryEscape(identity) || key[lastSlash+1:] != strconv.Itoa(revision.Version) {
 			return fmt.Errorf("job revision key %q does not match record identity", key)
 		}
 		if err := validateRestoredJob(revision.Spec, additionalJobValidation); err != nil {
