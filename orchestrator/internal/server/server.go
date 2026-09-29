@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
@@ -415,26 +416,31 @@ const (
 	NodeStatusDraining NodeStatus = "draining"
 )
 
-// NodeSummary is the persisted representation of a node.
+// NodeSummary is the persisted representation of a node. It holds only
+// durable node facts: identity, address, capacity, platform, inventory, and
+// drain intent. Heartbeat observations (last heartbeat time, liveness, host
+// metrics, and observed allocations) live in the leader's memory, so a
+// heartbeat that changes none of these facts does not write to Raft.
 type NodeSummary struct {
-	ID                 uuid.UUID
-	Host               string
-	Port               int
-	CPUCapacity        int
-	MemoryCapacity     int64
-	CPUAllocatable     int
-	MemoryAllocatable  int64
-	OS                 string
-	Arch               string
-	Labels             map[string]string
-	Volumes            []string
-	Capabilities       []spec.NodeCapability
-	Status             NodeStatus
+	ID                uuid.UUID
+	Host              string
+	Port              int
+	CPUCapacity       int
+	MemoryCapacity    int64
+	CPUAllocatable    int
+	MemoryAllocatable int64
+	OS                string
+	Arch              string
+	Labels            map[string]string
+	Volumes           []string
+	Capabilities      []spec.NodeCapability
+	// Draining is the operator's durable drain intent. Liveness (healthy or
+	// unhealthy) is derived from heartbeats and is not persisted.
+	Draining           bool `json:"draining,omitempty"`
 	WireGuardPublicKey string
 	WireGuardEndpoint  string
 	WireGuardPortBase  int
 	WireGuardPortCount int
-	LastHeartbeat      time.Time
 	Version            string `json:"version,omitempty"`
 }
 
@@ -460,7 +466,10 @@ type Allocation struct {
 	Phase         lifecycle.Phase  `json:"phase"`
 	Health        lifecycle.Health `json:"health"`
 	lifecycle.Diagnostic
-	Node      *Node
+	// Node is the canonical in-memory node the allocation is placed on. The
+	// persisted record stores only its ID (see MarshalJSON); Reload rebinds
+	// the pointer, so allocation records never carry node observations.
+	Node      *Node                    `json:"-"`
 	Endpoints []api.AllocationEndpoint `json:"endpoints,omitempty"`
 	Ports     []api.PortMapping        `json:"ports,omitempty"`
 	// Draining marks an allocation being replaced during a rolling update or
@@ -501,8 +510,67 @@ func (a *Allocation) SetHealth(health lifecycle.Health) error {
 	return nil
 }
 
+// allocationRecord has Allocation's fields without its methods, so the
+// custom JSON methods below can reuse the default encoding.
+type allocationRecord Allocation
+
+type persistedAllocation struct {
+	*allocationRecord
+	NodeID *uuid.UUID `json:"node_id,omitempty"`
+}
+
+// MarshalJSON encodes the durable allocation record. The placement node is
+// stored by ID only.
+func (a *Allocation) MarshalJSON() ([]byte, error) {
+	record := persistedAllocation{allocationRecord: (*allocationRecord)(a)}
+	if a.Node != nil {
+		id := a.Node.ID
+		record.NodeID = &id
+	}
+	return json.Marshal(record)
+}
+
+// UnmarshalJSON decodes a durable allocation record. A placed allocation gets
+// a node carrying only its ID; callers bind it to the canonical node.
+func (a *Allocation) UnmarshalJSON(raw []byte) error {
+	record := persistedAllocation{allocationRecord: (*allocationRecord)(a)}
+	if err := json.Unmarshal(raw, &record); err != nil {
+		return err
+	}
+	a.Node = nil
+	if record.NodeID != nil {
+		a.Node = &Node{ID: *record.NodeID}
+	}
+	return nil
+}
+
 func nodeSummary(node *Node) *NodeSummary {
-	return &NodeSummary{ID: node.ID, Host: node.Host, Port: node.Port, CPUCapacity: node.CPUCapacity, MemoryCapacity: node.MemoryCapacity, CPUAllocatable: node.CPUAllocatable, MemoryAllocatable: node.MemoryAllocatable, OS: node.OS, Arch: node.Arch, Labels: node.Labels, Volumes: node.Volumes, Capabilities: node.Capabilities, Status: node.Status, WireGuardPublicKey: node.WireGuardPublicKey, WireGuardEndpoint: node.WireGuardEndpoint, WireGuardPortBase: node.WireGuardPortBase, WireGuardPortCount: node.WireGuardPortCount, LastHeartbeat: node.LastHeartbeat, Version: node.Version}
+	return &NodeSummary{ID: node.ID, Host: node.Host, Port: node.Port, CPUCapacity: node.CPUCapacity, MemoryCapacity: node.MemoryCapacity, CPUAllocatable: node.CPUAllocatable, MemoryAllocatable: node.MemoryAllocatable, OS: node.OS, Arch: node.Arch, Labels: node.Labels, Volumes: node.Volumes, Capabilities: node.Capabilities, Draining: node.Status == NodeStatusDraining, WireGuardPublicKey: node.WireGuardPublicKey, WireGuardEndpoint: node.WireGuardEndpoint, WireGuardPortBase: node.WireGuardPortBase, WireGuardPortCount: node.WireGuardPortCount, Version: node.Version}
+}
+
+// sameNodeSummary reports whether two nodes have identical durable facts.
+func sameNodeSummary(a, b *Node) (bool, error) {
+	aRaw, err := json.Marshal(nodeSummary(a))
+	if err != nil {
+		return false, err
+	}
+	bRaw, err := json.Marshal(nodeSummary(b))
+	if err != nil {
+		return false, err
+	}
+	return bytes.Equal(aRaw, bRaw), nil
+}
+
+// nodeSilentSince returns when the leader last had evidence that a node was
+// alive: its latest heartbeat in this leadership term, or the start of the
+// term when the node has not heartbeated to this leader yet. Heartbeat times
+// are leader observations and are not replicated, so a new leader measures
+// allocation loss from the start of its own term.
+func (s *Server) nodeSilentSince(node *Node) time.Time {
+	if node.LastHeartbeat.Before(s.leaderSince) {
+		return s.leaderSince
+	}
+	return node.LastHeartbeat
 }
 
 func applyNodeSnapshot(node, snapshot *Node) {
@@ -975,7 +1043,7 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 	if nextNode.Status != NodeStatusDraining {
 		nextNode.Status = NodeStatusHealthy
 	}
-	heartbeatAt := time.Now().UTC()
+	heartbeatAt := s.now().UTC()
 	nextNode.LastHeartbeat = heartbeatAt
 	nextNode.Version = version
 	nextNode.CPUCapacity, nextNode.MemoryCapacity = resources.CPUCapacity, resources.MemoryCapacity
@@ -1040,7 +1108,7 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 			if info.Phase == lifecycle.PhaseFailed {
 				reason = string(info.Reason)
 			}
-			_ = a.Transition(info.Phase, time.Now().UTC(), reason, "")
+			_ = a.Transition(info.Phase, heartbeatAt, reason, "")
 		}
 		_ = a.SetHealth(info.Health)
 		sort.Slice(info.Endpoints, func(i, j int) bool { return info.Endpoints[i].Task < info.Endpoints[j].Task })
@@ -1060,7 +1128,22 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 	for _, update := range changed {
 		persisted = append(persisted, update.next)
 	}
-	if err := s.state.PutNodeAndAllocations(ctx, nodeSummary(&nextNode), persisted); err != nil {
+	// Liveness, heartbeat time, host metrics, and observed allocations are
+	// leader observations. Only durable node facts and allocation changes
+	// reach Raft, so a steady-state heartbeat is not a write.
+	s.mu.RLock()
+	nodeUnchanged, err := sameNodeSummary(node, &nextNode)
+	s.mu.RUnlock()
+	if err != nil {
+		return fmt.Errorf("compare node %s: %w", nodeID, err)
+	}
+	switch {
+	case !nodeUnchanged:
+		err = s.state.PutNodeAndAllocations(ctx, nodeSummary(&nextNode), persisted)
+	case len(persisted) > 0:
+		err = s.state.PutAllocations(ctx, persisted)
+	}
+	if err != nil {
 		return fmt.Errorf("persist heartbeat: %w", err)
 	}
 	s.mu.Lock()
@@ -1243,11 +1326,13 @@ func (s *Server) Reload(ctx context.Context) error {
 	}
 	nodes := make(map[uuid.UUID]*Node, len(nodeSummaries))
 	for _, summary := range nodeSummaries {
+		// A node is unhealthy until it heartbeats to this leader; heartbeat
+		// observations are not replicated.
 		status := NodeStatusUnhealthy
-		if summary.Status == NodeStatusDraining {
+		if summary.Draining {
 			status = NodeStatusDraining
 		}
-		nodes[summary.ID] = &Node{ID: summary.ID, Host: summary.Host, Port: summary.Port, CPUCapacity: summary.CPUCapacity, MemoryCapacity: summary.MemoryCapacity, CPUAllocatable: summary.CPUAllocatable, MemoryAllocatable: summary.MemoryAllocatable, OS: summary.OS, Arch: summary.Arch, Labels: summary.Labels, Volumes: summary.Volumes, Capabilities: summary.Capabilities, Status: status, WireGuardPublicKey: summary.WireGuardPublicKey, WireGuardEndpoint: summary.WireGuardEndpoint, WireGuardPortBase: summary.WireGuardPortBase, WireGuardPortCount: summary.WireGuardPortCount, LastHeartbeat: summary.LastHeartbeat, Version: summary.Version}
+		nodes[summary.ID] = &Node{ID: summary.ID, Host: summary.Host, Port: summary.Port, CPUCapacity: summary.CPUCapacity, MemoryCapacity: summary.MemoryCapacity, CPUAllocatable: summary.CPUAllocatable, MemoryAllocatable: summary.MemoryAllocatable, OS: summary.OS, Arch: summary.Arch, Labels: summary.Labels, Volumes: summary.Volumes, Capabilities: summary.Capabilities, Status: status, WireGuardPublicKey: summary.WireGuardPublicKey, WireGuardEndpoint: summary.WireGuardEndpoint, WireGuardPortBase: summary.WireGuardPortBase, WireGuardPortCount: summary.WireGuardPortCount, Version: summary.Version}
 	}
 	allocations := make([]*Allocation, 0, len(allocationMap))
 	for _, allocation := range allocationMap {
@@ -1427,7 +1512,9 @@ func (s *Server) ListJobs(namespace string) api.JobListResponse {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	result := make(api.JobListResponse, 0, len(s.jobs))
-	for key, job := range s.jobs {
+	jobs := make(map[string]*Job)
+	positions := make(map[string]int)
+	for _, job := range s.jobs {
 		if job.Spec.Namespace != namespace {
 			continue
 		}
@@ -1436,24 +1523,26 @@ func (s *Server) ListJobs(namespace string) api.JobListResponse {
 		for _, g := range job.Spec.TaskGroups {
 			r.Desired += g.Count
 		}
-		for _, a := range s.allocations {
-			a.mu.Lock()
-			if jobKey(a.Namespace, a.JobName) != key {
-				a.mu.Unlock()
-				continue
-			}
-			ar := s.allocationResponseLocked(a)
-			r.Allocations = append(r.Allocations, ar)
-			if a.JobRevision == job.Revision && !a.Draining && a.Phase == lifecycle.PhaseRunning {
-				r.Running++
-			}
-			if a.JobRevision == job.Revision && !a.Draining && a.Phase == lifecycle.PhaseRunning && a.Health == lifecycle.HealthHealthy {
-				r.Healthy++
-			}
-			a.mu.Unlock()
-		}
 		r.ReplacementBackoff = s.replacementBackoffResponsesLocked(namespace, name)
+		jobs[name], positions[name] = job, len(result)
 		result = append(result, r)
+	}
+	for _, a := range s.allocations {
+		a.mu.Lock()
+		job := jobs[a.JobName]
+		if a.Namespace != namespace || job == nil {
+			a.mu.Unlock()
+			continue
+		}
+		r := &result[positions[a.JobName]]
+		r.Allocations = append(r.Allocations, s.allocationResponseLocked(a))
+		if a.JobRevision == job.Revision && !a.Draining && a.Phase == lifecycle.PhaseRunning {
+			r.Running++
+		}
+		if a.JobRevision == job.Revision && !a.Draining && a.Phase == lifecycle.PhaseRunning && a.Health == lifecycle.HealthHealthy {
+			r.Healthy++
+		}
+		a.mu.Unlock()
 	}
 	return result
 }

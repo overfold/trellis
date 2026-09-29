@@ -5,7 +5,8 @@ export interface Node {
   host: string;
   port: number;
   status: NodeStatus;
-  last_heartbeat: string;
+  // Absent until the node heartbeats to the current leader.
+  last_heartbeat?: string;
   cpu: number;
   memory: number;
   os?: string;
