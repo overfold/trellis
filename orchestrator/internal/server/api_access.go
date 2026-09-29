@@ -40,46 +40,54 @@ func (s *Server) apiAccessToken(ctx context.Context, access *spec.APIAccessSpec,
 
 type workloadGrant struct {
 	subject auth.CredentialSubject
-	scope   auth.AccessScope
-	access  auth.AccessLevel
+	access  *spec.APIAccessSpec
+}
+
+// grantWithin reports whether a credential's scope and access are no broader
+// than the task group's current api_access.
+func grantWithin(principal auth.Principal, access *spec.APIAccessSpec) bool {
+	if principal.Scope == auth.AccessCluster && access.Scope != spec.APIAccessCluster {
+		return false
+	}
+	return principal.Access != auth.AccessWrite || access.Access == spec.APIAccessWrite
 }
 
 // revokeStaleWorkloadCredentials revokes workload credentials whose
 // allocation record is gone, whose job or task group was deleted (including a
-// job deleted and recreated under the same name), or whose
-// task group no longer grants the same api_access.
+// job deleted and recreated under the same name), or whose task group's
+// api_access was removed or narrowed below the credential's grant. Widening
+// api_access leaves existing credentials in place until their allocations are
+// replaced.
 func (s *Server) revokeStaleWorkloadCredentials(ctx context.Context) {
 	if s.tokenManager == nil {
 		return
 	}
-	s.mu.RLock()
-	grants := make(map[string]workloadGrant)
-	for _, allocation := range s.allocations {
-		allocation.mu.Lock()
-		id, namespace, jobName, groupName, incarnation := allocation.ID, allocation.Namespace, allocation.JobName, allocation.TaskGroupName, allocation.JobIncarnation
-		allocation.mu.Unlock()
-		job := s.jobs[jobKey(namespace, jobName)]
-		if job == nil || job.Incarnation != incarnation {
-			continue
-		}
-		for i := range job.Spec.TaskGroups {
-			group := &job.Spec.TaskGroups[i]
-			if group.Name == groupName && group.APIAccess != nil {
-				grants[id] = workloadGrant{
-					subject: auth.CredentialSubject{Namespace: namespace, Job: jobName, TaskGroup: groupName},
-					scope:   auth.AccessScope(group.APIAccess.Scope),
-					access:  auth.AccessLevel(group.APIAccess.Access),
+	revoked, err := s.tokenManager.RevokeWorkloadCredentials(ctx, func() func(auth.WorkloadCredential) bool {
+		s.mu.RLock()
+		grants := make(map[string]workloadGrant)
+		for _, allocation := range s.allocations {
+			allocation.mu.Lock()
+			id, namespace, jobName, groupName, incarnation := allocation.ID, allocation.Namespace, allocation.JobName, allocation.TaskGroupName, allocation.JobIncarnation
+			allocation.mu.Unlock()
+			job := s.jobs[jobKey(namespace, jobName)]
+			if job == nil || job.Incarnation != incarnation {
+				continue
+			}
+			for i := range job.Spec.TaskGroups {
+				group := &job.Spec.TaskGroups[i]
+				if group.Name == groupName && group.APIAccess != nil {
+					access := *group.APIAccess
+					grants[id] = workloadGrant{subject: auth.CredentialSubject{Namespace: namespace, Job: jobName, TaskGroup: groupName}, access: &access}
+					break
 				}
-				break
 			}
 		}
-	}
-	s.mu.RUnlock()
-
-	revoked, err := s.tokenManager.RevokeWorkloadCredentials(ctx, func(credential auth.WorkloadCredential) bool {
-		grant, ok := grants[credential.AllocationID]
-		principal := credential.Principal
-		return ok && principal.Subject != nil && *principal.Subject == grant.subject && principal.Scope == grant.scope && principal.Access == grant.access
+		s.mu.RUnlock()
+		return func(credential auth.WorkloadCredential) bool {
+			grant, ok := grants[credential.AllocationID]
+			principal := credential.Principal
+			return ok && principal.Subject != nil && *principal.Subject == grant.subject && grantWithin(principal, grant.access)
+		}
 	})
 	if err != nil {
 		s.log.Error("revoke stale workload credentials", "error", err)

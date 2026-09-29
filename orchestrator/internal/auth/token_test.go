@@ -189,6 +189,54 @@ func TestWorkloadTokenRotatesAndRevokesPrevious(t *testing.T) {
 	}
 }
 
+func TestWorkloadTokenRejectsSupersededGeneration(t *testing.T) {
+	ctx := context.Background()
+	store := newMemStore()
+	mgr := NewTokenManager(store, "test")
+	sealer := testSealer(t, store)
+	current, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 2, workloadPrincipal(AccessNamespace, AccessRead))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(AccessNamespace, AccessRead)); err == nil {
+		t.Fatal("stale generation minted a workload token")
+	}
+	if saved, _ := mgr.ValidateToken(ctx, current); saved == nil {
+		t.Fatal("stale generation revoked the current workload token")
+	}
+}
+
+func TestWorkloadTokenLookupFailureDoesNotRotate(t *testing.T) {
+	ctx := context.Background()
+	store := &failingGetStore{memStore: newMemStore()}
+	mgr := NewTokenManager(store, "test")
+	sealer := testSealer(t, store.memStore)
+	first, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(AccessNamespace, AccessRead))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.failPrefix = "trellis/test/tokens/"
+	if _, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(AccessNamespace, AccessRead)); err == nil {
+		t.Fatal("transient token lookup failure was not returned")
+	}
+	store.failPrefix = ""
+	if saved, _ := mgr.ValidateToken(ctx, first); saved == nil {
+		t.Fatal("transient lookup failure rotated the workload token")
+	}
+}
+
+type failingGetStore struct {
+	*memStore
+	failPrefix string
+}
+
+func (s *failingGetStore) Get(ctx context.Context, key string) ([]byte, error) {
+	if s.failPrefix != "" && strings.HasPrefix(key, s.failPrefix) {
+		return nil, errors.New("injected lookup failure")
+	}
+	return s.memStore.Get(ctx, key)
+}
+
 func TestWorkloadTokenReplacesUnrecoverableCredential(t *testing.T) {
 	ctx := context.Background()
 	store := newMemStore()
@@ -313,8 +361,8 @@ func TestRevokeWorkloadCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	revoked, err := mgr.RevokeWorkloadCredentials(ctx, func(credential WorkloadCredential) bool {
-		return credential.AllocationID == "alloc-keep"
+	revoked, err := mgr.RevokeWorkloadCredentials(ctx, func() func(WorkloadCredential) bool {
+		return func(credential WorkloadCredential) bool { return credential.AllocationID == "alloc-keep" }
 	})
 	if err != nil || revoked != 1 {
 		t.Fatalf("RevokeWorkloadCredentials = %d, %v; want 1", revoked, err)

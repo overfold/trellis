@@ -260,8 +260,15 @@ func (m *TokenManager) WorkloadToken(ctx context.Context, sealer Sealer, allocat
 	if err != nil {
 		return "", err
 	}
+	if existing != nil && existing.Generation > generation {
+		return "", fmt.Errorf("allocation generation %d was superseded by generation %d", generation, existing.Generation)
+	}
 	if existing != nil && existing.Generation == generation && samePrincipalGrant(existing.Principal, principal) {
-		if token, ok := m.openWorkloadToken(ctx, sealer, existing); ok {
+		token, ok, err := m.openWorkloadToken(ctx, sealer, existing)
+		if err != nil {
+			return "", err
+		}
+		if ok {
 			return token, nil
 		}
 	}
@@ -310,29 +317,37 @@ func (m *TokenManager) loadWorkloadCredential(ctx context.Context, key string) (
 }
 
 // openWorkloadToken recovers a persisted token. It reports false when the
-// token cannot be recovered or is no longer valid, so the caller replaces it.
-func (m *TokenManager) openWorkloadToken(ctx context.Context, sealer Sealer, credential *WorkloadCredential) (string, bool) {
+// token cannot be recovered (for example after the secrets key changed) or was
+// revoked, so the caller replaces it. Storage errors are returned instead, so a
+// transient failure never rotates a token that running tasks still hold.
+func (m *TokenManager) openWorkloadToken(ctx context.Context, sealer Sealer, credential *WorkloadCredential) (string, bool, error) {
+	principal, err := m.store.Get(ctx, m.tokenKey(credential.TokenHash))
+	if err != nil {
+		return "", false, fmt.Errorf("lookup workload token: %w", err)
+	}
+	if principal == nil {
+		return "", false, nil
+	}
 	raw, err := sealer.Open(credential.SealedToken, m.workloadTokenAAD(credential.AllocationID, credential.Generation, credential.TokenHash))
 	if err != nil {
-		return "", false
+		return "", false, nil
 	}
 	defer clear(raw)
 	hash := sha256.Sum256(raw)
 	if hex.EncodeToString(hash[:]) != credential.TokenHash {
-		return "", false
+		return "", false, nil
 	}
-	token := string(raw)
-	if validated, err := m.ValidateToken(ctx, token); err != nil || validated == nil {
-		return "", false
-	}
-	return token, true
+	return string(raw), true, nil
 }
 
-// RevokeWorkloadCredentials deletes every workload credential for which keep
-// returns false and returns how many were revoked.
-func (m *TokenManager) RevokeWorkloadCredentials(ctx context.Context, keep func(WorkloadCredential) bool) (int, error) {
+// RevokeWorkloadCredentials deletes every workload credential for which the
+// keep function returned by snapshot reports false, and returns how many were
+// revoked. snapshot runs after issuance is locked out, so the desired state it
+// captures is no older than any credential it judges.
+func (m *TokenManager) RevokeWorkloadCredentials(ctx context.Context, snapshot func() func(WorkloadCredential) bool) (int, error) {
 	m.workloadTokensMu.Lock()
 	defer m.workloadTokensMu.Unlock()
+	keep := snapshot()
 
 	records, err := m.store.List(ctx, m.workloadCredentialPrefix())
 	if err != nil {

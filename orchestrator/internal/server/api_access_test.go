@@ -164,10 +164,27 @@ func TestRevokeStaleWorkloadCredentials(t *testing.T) {
 		t.Fatalf("after pruning an allocation: kept valid=%t pruned valid=%t", valid(kept), valid(pruned))
 	}
 
-	s.jobs[jobKey("default", "web")].Spec.TaskGroups[0].APIAccess = &spec.APIAccessSpec{Scope: spec.APIAccessNamespace, Access: spec.APIAccessWrite}
+	s.jobs[jobKey("default", "web")].Spec.TaskGroups[0].APIAccess = &spec.APIAccessSpec{Scope: spec.APIAccessCluster, Access: spec.APIAccessWrite}
+	s.revokeStaleWorkloadCredentials(ctx)
+	if !valid(kept) {
+		t.Fatal("widening api_access revoked a running allocation's workload token")
+	}
+
+	writer, err := s.apiAccessToken(ctx, &spec.APIAccessSpec{Scope: spec.APIAccessCluster, Access: spec.APIAccessWrite}, &api.AllocationRequest{AllocationID: "kept", Generation: 2, Namespace: "default", JobName: "web", GroupName: "app"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.jobs[jobKey("default", "web")].Spec.TaskGroups[0].APIAccess = &spec.APIAccessSpec{Scope: spec.APIAccessCluster, Access: spec.APIAccessRead}
+	s.revokeStaleWorkloadCredentials(ctx)
+	if valid(writer) {
+		t.Fatal("narrowing api_access left a broader workload token valid")
+	}
+
+	s.jobs[jobKey("default", "web")].Spec.TaskGroups[0].APIAccess = nil
+	kept = issue("kept")
 	s.revokeStaleWorkloadCredentials(ctx)
 	if valid(kept) {
-		t.Fatal("changing api_access left the previous workload token valid")
+		t.Fatal("removing api_access left the workload token valid")
 	}
 
 	s.jobs[jobKey("default", "web")].Spec.TaskGroups[0].APIAccess = access
