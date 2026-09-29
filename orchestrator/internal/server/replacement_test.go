@@ -334,7 +334,10 @@ func failActive(t *testing.T, s *Server, now time.Time) *Allocation {
 func TestReconcileDelaysReplacementOfFailedAllocations(t *testing.T) {
 	store := memoryStore{}
 	s, node, clock := newBackoffReconcileServer(t, store)
-	events := s.events.subscribe("default")
+	events, ok := s.events.subscribe("default")
+	if !ok {
+		t.Fatal("subscribe rejected")
+	}
 	ctx := context.Background()
 
 	s.Reconcile(ctx)
@@ -854,7 +857,10 @@ func TestResetReplacementBackoffThroughClientAndRaft(t *testing.T) {
 	if backoff := s.replacementBackoffs[key]; !backoff.active(clock.now) {
 		t.Fatalf("setup: backoff = %#v, want active", backoff)
 	}
-	events := s.events.subscribe("default")
+	events, ok := s.events.subscribe("default")
+	if !ok {
+		t.Fatal("subscribe rejected")
+	}
 
 	httpServer := httptest.NewServer(authenticatedHandler(s, auth.AccessNamespace, auth.AccessWrite, "default"))
 	defer httpServer.Close()

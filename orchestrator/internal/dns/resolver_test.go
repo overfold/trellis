@@ -3,12 +3,15 @@ package dns
 import (
 	"context"
 	"encoding/binary"
+	"io"
 	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/overfold/trellis/internal/api"
 )
@@ -243,6 +246,250 @@ func TestForwardsExternalQueriesToUpstream(t *testing.T) {
 	}
 	if flags := binary.BigEndian.Uint16(resp[2:4]); flags&0x8000 == 0 {
 		t.Fatalf("expected response bit, flags=%#x", flags)
+	}
+}
+
+func TestUDPSlowUpstreamIsConcurrentBoundedAndRecovers(t *testing.T) {
+	upstream, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = upstream.Close() }()
+
+	received := make(chan struct{}, 4)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseUpstream := func() { releaseOnce.Do(func() { close(release) }) }
+	go func() {
+		for {
+			buf := make([]byte, maxDNSMessageSize)
+			n, remote, err := upstream.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			packet := append([]byte(nil), buf[:n]...)
+			received <- struct{}{}
+			go func() {
+				<-release
+				binary.BigEndian.PutUint16(packet[2:4], binary.BigEndian.Uint16(packet[2:4])|0x8000|0x0080)
+				_, _ = upstream.WriteToUDP(packet, remote)
+			}()
+		}
+	}()
+
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	r := NewResolver(nil, &mockLookup{services: &api.ServiceListResponse{}}, nil, "trellis", upstream.LocalAddr().String())
+	r.udpSlots = make(chan struct{}, 2)
+	done := make(chan error, 1)
+	go func() { done <- r.serveUDP(ctx, conn) }()
+	defer func() {
+		cancel()
+		_ = conn.Close()
+		releaseUpstream()
+		<-done
+	}()
+
+	clients := make([]*net.UDPConn, 3)
+	for i := range clients {
+		clients[i], err = net.DialUDP("udp", nil, conn.LocalAddr().(*net.UDPAddr))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func(client *net.UDPConn) { _ = client.Close() }(clients[i])
+	}
+	query := buildQuery("example.com.")
+	for i := 0; i < 2; i++ {
+		if _, err := clients[i].Write(query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-received:
+		case <-time.After(time.Second):
+			t.Fatal("slow upstream queries were handled serially")
+		}
+	}
+
+	if _, err := clients[2].Write(query); err != nil {
+		t.Fatal(err)
+	}
+	response := make([]byte, maxDNSMessageSize)
+	if err := clients[2].SetReadDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	n, err := clients[2].Read(response)
+	if err != nil {
+		t.Fatalf("read overload response: %v", err)
+	}
+	if rcode := binary.BigEndian.Uint16(response[:n][2:4]) & 0x000f; rcode != 2 {
+		t.Fatalf("overload rcode = %d, want SERVFAIL", rcode)
+	}
+
+	releaseUpstream()
+	for i := 0; i < 2; i++ {
+		if err := clients[i].SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := clients[i].Read(response); err != nil {
+			t.Fatalf("read forwarded response: %v", err)
+		}
+	}
+	waitForSlots(t, r.udpSlots, 0)
+	if _, err := clients[2].Write(query); err != nil {
+		t.Fatal(err)
+	}
+	if err := clients[2].SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	n, err = clients[2].Read(response)
+	if err != nil {
+		t.Fatalf("read recovery response: %v", err)
+	}
+	if rcode := binary.BigEndian.Uint16(response[:n][2:4]) & 0x000f; rcode != 0 {
+		t.Fatalf("recovery rcode = %d, want NOERROR", rcode)
+	}
+}
+
+func TestUDPCancellationStopsBlockedUpstreamWorker(t *testing.T) {
+	upstream, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = upstream.Close() }()
+	received := make(chan struct{})
+	go func() {
+		buf := make([]byte, maxDNSMessageSize)
+		if _, _, err := upstream.ReadFromUDP(buf); err == nil {
+			close(received)
+		}
+	}()
+
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	r := NewResolver(nil, &mockLookup{services: &api.ServiceListResponse{}}, nil, "trellis", upstream.LocalAddr().String())
+	done := make(chan error, 1)
+	go func() { done <- r.serveUDP(ctx, conn) }()
+
+	client, err := net.DialUDP("udp", nil, conn.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	if _, err := client.Write(buildQuery("example.com.")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-received:
+	case <-time.After(time.Second):
+		t.Fatal("upstream did not receive query")
+	}
+
+	cancel()
+	_ = conn.Close()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serve UDP: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("UDP server did not cancel blocked upstream worker")
+	}
+}
+
+func TestTCPConnectionBurstIsBoundedAndCancellationClosesConnections(t *testing.T) {
+	listener, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	r := NewResolver(nil, &mockLookup{services: &api.ServiceListResponse{}}, nil, "trellis")
+	r.tcpSlots = make(chan struct{}, 2)
+	done := make(chan error, 1)
+	go func() { done <- r.serveTCP(ctx, listener) }()
+
+	first := dialTCP(t, listener.Addr().String())
+	second := dialTCP(t, listener.Addr().String())
+	waitForSlots(t, r.tcpSlots, 2)
+	for range 32 {
+		conn := dialTCP(t, listener.Addr().String())
+		if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := conn.Read(make([]byte, 1)); err == nil {
+			t.Fatal("overloaded TCP connection remained open")
+		}
+		_ = conn.Close()
+	}
+	if got := len(r.tcpSlots); got != 2 {
+		t.Fatalf("active TCP handlers = %d, want 2", got)
+	}
+
+	_ = first.Close()
+	waitForSlots(t, r.tcpSlots, 1)
+	recovery := dialTCP(t, listener.Addr().String())
+	waitForSlots(t, r.tcpSlots, 2)
+	query := buildQuery("missing.web.acme.trellis.")
+	frame := make([]byte, len(query)+2)
+	binary.BigEndian.PutUint16(frame[:2], uint16(len(query)))
+	copy(frame[2:], query)
+	if _, err := recovery.Write(frame); err != nil {
+		t.Fatal(err)
+	}
+	if err := recovery.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(recovery, frame[:2]); err != nil {
+		t.Fatalf("read recovery frame: %v", err)
+	}
+
+	cancel()
+	_ = listener.Close()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serve TCP: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("TCP server did not close active connections on cancellation")
+	}
+	_ = second.Close()
+	_ = recovery.Close()
+}
+
+func dialTCP(t *testing.T, address string) *net.TCPConn {
+	t.Helper()
+	conn, err := net.DialTCP("tcp", nil, mustResolveTCPAddr(t, address))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return conn
+}
+
+func mustResolveTCPAddr(t *testing.T, address string) *net.TCPAddr {
+	t.Helper()
+	resolved, err := net.ResolveTCPAddr("tcp", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolved
+}
+
+func waitForSlots(t *testing.T, slots chan struct{}, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for len(slots) != want {
+		if time.Now().After(deadline) {
+			t.Fatalf("active slots = %d, want %d", len(slots), want)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 

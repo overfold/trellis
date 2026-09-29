@@ -96,6 +96,21 @@ replace work faster after a real failure. The leader still waits 30 seconds
 after it is elected before marking anything lost. The timeout applies on
 whichever node is leader, so keep it the same on every node.
 
+Each node admits at most 256 concurrent UDP DNS queries and 128 active TCP DNS
+connections. UDP queries above the limit receive `SERVFAIL`; excess TCP
+connections are closed. Admission is released as soon as a query or connection
+finishes, and DNS forwarding is canceled during node shutdown. These fixed
+limits bound work and open connections when workloads flood the node-local
+resolver or an upstream resolver is slow, while preserving the source-network
+namespace check for every admitted discovery query.
+
+Each control-plane process also admits at most 256 simultaneous
+`GET /v1/events` streams. A request above that limit receives `503 Service
+Unavailable` with `Retry-After: 1`; clients should reconnect with backoff. A
+disconnected or canceled stream releases its slot immediately. The limit is per
+process, so clients reconnecting after a leader change are admitted against the
+new leader's independent limit.
+
 Edit this file when changing persistent node configuration, then restart the service:
 
 ```sh
