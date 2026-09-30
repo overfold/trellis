@@ -4,7 +4,7 @@
 
 This example changes one idea from the single-service example: `count` becomes `2`.
 
-Each replica reserves host port 8080. Because one node cannot satisfy the same fixed host-port reservation twice, the two allocations must land on different nodes. This makes the placement consequence of scaling explicit before adding rolling-update overlap.
+Each replica publishes node port 8080. Because one node cannot publish the same node port twice, the two allocations must land on different nodes. This makes the placement consequence of scaling explicit before adding rolling-update overlap.
 
 ## Deploy and inspect placement
 

@@ -53,11 +53,6 @@ func (execRunner) Run(ctx context.Context, name string, args ...string) error {
 // WorkloadDNSAddress is the reserved node-local resolver address injected into workloads.
 const WorkloadDNSAddress = "198.18.0.53"
 
-const (
-	forwardChain = "TRELLIS-FORWARD"
-	inputChain   = "TRELLIS-INPUT"
-)
-
 // WireGuardManager manages allocation networking with WireGuard.
 type WireGuardManager struct {
 	configDir            string
@@ -477,86 +472,6 @@ func (m *WireGuardManager) removeStaleRoutes(ctx context.Context, wg string, rou
 	return nil
 }
 
-func (m *WireGuardManager) reconcileFirewall(ctx context.Context, bridge, wg, cidr, gateway string, apiPort int) error {
-	prefix, err := netip.ParsePrefix(cidr)
-	if err != nil || !prefix.Addr().Is4() {
-		return fmt.Errorf("namespace firewall CIDR must be IPv4: %q", cidr)
-	}
-	prefix = prefix.Masked()
-	gatewayAddress, err := netip.ParseAddr(gateway)
-	if err != nil || !prefix.Contains(gatewayAddress) {
-		return fmt.Errorf("namespace firewall gateway %q must be within %s", gateway, prefix)
-	}
-	cidr = prefix.String()
-	if err := m.ensureJumpChain(ctx, "FORWARD", forwardChain); err != nil {
-		return err
-	}
-	if err := m.ensureJumpChain(ctx, "INPUT", inputChain); err != nil {
-		return err
-	}
-	// Reject packets that claim to come from outside this node's namespace
-	// subnet before they can reach WireGuard or a host-local service.
-	for _, rule := range [][]string{
-		{forwardChain, "-i", bridge, "!", "-s", cidr, "-j", "DROP"},
-		{forwardChain, "-i", bridge, "!", "-o", wg, "-j", "DROP"},
-		{forwardChain, "-o", bridge, "!", "-i", wg, "-j", "DROP"},
-	} {
-		if err := m.ensureFirewallRule(ctx, "-A", rule...); err != nil {
-			return err
-		}
-	}
-	// Host-bound traffic from the bridge is filtered in the Trellis-owned
-	// input chain, which INPUT jumps to first, so an earlier host ACCEPT
-	// rule cannot bypass the per-bridge DROP. Accepts are inserted at the
-	// head of the chain and the DROP is appended, keeping every bridge's
-	// accepts ahead of its DROP.
-	if m.dnsAddress != "" {
-		for _, protocol := range []string{"udp", "tcp"} {
-			rule := []string{inputChain, "-i", bridge, "-s", cidr, "-d", m.dnsAddress, "-p", protocol, "--dport", "53", "-j", "ACCEPT"}
-			if err := m.ensureFirewallRule(ctx, "-I", rule...); err != nil {
-				return err
-			}
-		}
-	}
-	if apiPort > 0 {
-		rule := []string{inputChain, "-i", bridge, "-s", cidr, "-d", gateway, "-p", "tcp", "--dport", fmt.Sprint(apiPort), "-j", "ACCEPT"}
-		if err := m.ensureFirewallRule(ctx, "-I", rule...); err != nil {
-			return err
-		}
-	}
-	return m.ensureFirewallRule(ctx, "-A", inputChain, "-i", bridge, "-j", "DROP")
-}
-
-// ensureFirewallRule adds rule with the given insertion flag (-A or -I) when
-// an identical rule is not already present.
-func (m *WireGuardManager) ensureFirewallRule(ctx context.Context, flag string, rule ...string) error {
-	if m.run.Run(ctx, "iptables", append([]string{"-C"}, rule...)...) == nil {
-		return nil
-	}
-	return m.run.Run(ctx, "iptables", append([]string{flag}, rule...)...)
-}
-
-// ensureJumpChain creates a Trellis-owned chain and makes it the first rule of
-// a built-in chain, so host rules that accept traffic earlier cannot bypass
-// Trellis isolation.
-func (m *WireGuardManager) ensureJumpChain(ctx context.Context, parent, chain string) error {
-	if m.run.Run(ctx, "iptables", "-L", chain, "-n") != nil {
-		if err := m.run.Run(ctx, "iptables", "-N", chain); err != nil {
-			return fmt.Errorf("create Trellis %s chain: %w", parent, err)
-		}
-	}
-	jump := []string{parent, "-j", chain}
-	if m.run.Run(ctx, "iptables", append([]string{"-C"}, jump...)...) == nil {
-		if err := m.run.Run(ctx, "iptables", append([]string{"-D"}, jump...)...); err != nil {
-			return fmt.Errorf("reposition Trellis %s chain: %w", parent, err)
-		}
-	}
-	if err := m.run.Run(ctx, "iptables", "-I", parent, "1", "-j", chain); err != nil {
-		return fmt.Errorf("install Trellis %s chain: %w", parent, err)
-	}
-	return nil
-}
-
 func (m *WireGuardManager) planPath(namespace, networkName string) string {
 	return filepath.Join(m.stateDir, "plans", short("", namespace+"\x00"+networkName)+".json")
 }
@@ -633,6 +548,10 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 	if !safeName.MatchString(namespace) || !safeAllocation.MatchString(allocation) {
 		return nil, fmt.Errorf("namespace and allocation must be safe identifiers")
 	}
+	if err := validPortMappings(request.Ports); err != nil {
+		return nil, err
+	}
+	ports := append([]PortMapping(nil), request.Ports...)
 	var cfg *Config
 	var err error
 	if request.Plan.CIDR == "" {
@@ -654,7 +573,7 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 	ns := m.netnsPath(allocation)
 	// Journal the attachment before creating anything, so an agent that
 	// crashes before it learns the result can still detach by allocation ID.
-	if err := m.recordAttachment(attachmentRecord{AllocationID: allocation, Namespace: namespace, Network: networkName, CIDR: cfg.CIDR, Gateway: cfg.Gateway, APIPort: request.Plan.APIPort}); err != nil {
+	if err := m.recordAttachment(attachmentRecord{AllocationID: allocation, Namespace: namespace, Network: networkName, CIDR: cfg.CIDR, Gateway: cfg.Gateway, APIPort: request.Plan.APIPort, Ports: ports}); err != nil {
 		return nil, err
 	}
 	var lease string
@@ -665,7 +584,7 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 		// Roll back with the same idempotent detach a restarted agent uses.
 		// If that fails, the record stays so a later detach can finish.
 		rollback := Attachment{AllocationID: allocation, Namespace: namespace, Network: networkName, HostVeth: hostVeth,
-			Bridge: bridge, WireGuardInterface: wg, Gateway: cfg.Gateway, APIPort: request.Plan.APIPort, Address: cfg.CIDR, LeasePath: lease}
+			Bridge: bridge, WireGuardInterface: wg, Gateway: cfg.Gateway, APIPort: request.Plan.APIPort, Address: cfg.CIDR, LeasePath: lease, Ports: ports}
 		if err := m.detachLocked(context.WithoutCancel(ctx), rollback); err != nil {
 			retErr = errors.Join(retErr, fmt.Errorf("roll back network attachment: %w", err))
 		}
@@ -762,6 +681,9 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 	if err = m.run.Run(ctx, "ip", "-n", allocation, "route", "replace", "default", "via", cfg.Gateway); err != nil {
 		return nil, err
 	}
+	if err = m.publishPorts(ctx, allocation, address, ports); err != nil {
+		return nil, err
+	}
 	return &Attachment{
 		AllocationID:       allocation,
 		Namespace:          namespace,
@@ -774,6 +696,7 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 		APIPort:            request.Plan.APIPort,
 		Address:            address,
 		LeasePath:          lease,
+		Ports:              ports,
 	}, nil
 }
 

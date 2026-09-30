@@ -8,7 +8,7 @@ Use [Getting Started](getting-started.md) and the [learning path](learning-path.
 
 **Outcome:** expose one stable service endpoint while replicas scale, move between nodes, and roll to new revisions.
 
-Give the serving task group a routing label, expose the application on a fixed host-network port, and define a meaningful health check:
+Give the serving task group a routing label and a meaningful health check, and leave it on the default namespace network:
 
 ```yaml
 labels:
@@ -17,19 +17,25 @@ labels:
 tasks:
   - name: app
     image: registry.example.com/app:v1
-    networking:
-      mode: host
-      ports:
-        - port: 8080
     health_check:
       type: http
       port: 8080
       path: /ready
 ```
 
-Host networking is intentionally literal: Trellis reserves port 8080 on the selected node, and the application itself must listen on 8080. There is no built-in NAT or host-to-container port translation. Replicas that reserve the same port therefore need different nodes, and rolling updates need additional compatible nodes while old and new allocations overlap.
+The replicas need no published node port: the proxy joins the same namespace network and reaches each replica's private address on port 8080 directly, so replicas can share nodes and roll without spare port capacity. Only the proxy publishes its listeners on the node:
 
-Run a trusted controller with `api_access` set to `scope: namespace` and the narrowest required `access` level. It should query allocations by label, include only healthy endpoints, render or update the upstream set, and preserve its last known-good routing state through temporary control-plane failures. Namespace scope grants access only to the controller job's own namespace, which is sufficient for a namespace-local ingress controller. The bundled `trellis-proxy-sync` implements this polling pattern. When an allocation exposes more than one port, select the intended application port explicitly with `-container-port` rather than depending on mapping order.
+```yaml
+tasks:
+  - name: proxy
+    image: registry.example.com/proxy:v1
+    networking:
+      ports:
+        - port: 8443
+          host_port: 443
+```
+
+Run a trusted controller with `api_access` set to `scope: namespace` and the narrowest required `access` level. It should query allocations by label, include only healthy endpoints, render or update the upstream set, and preserve its last known-good routing state through temporary control-plane failures. Namespace scope grants access only to the controller job's own namespace, which is sufficient for a namespace-local ingress controller. The bundled `trellis-proxy-sync` implements this polling pattern. It writes each upstream as the allocation's address and the port the task listens on: the namespace address for namespace-networked backends, reachable from a proxy in the same namespace, or the node address for host-networked ones. Pass the application port with `-container-port`; it selects among an allocation's declared ports and is used directly for backends that declare none.
 
 Give `trellis-proxy-sync` write access to the output config's parent directory, even when the config file already exists and is writable. It writes a temporary file there and renames it over the config so the proxy never reads a partial update. The output must be a regular file (or a symlink to one); missing files are created with mode `0644`, subject to the process umask and parent directory's default ACL. For an existing config, the synchronizer preserves its owner, group, mode, ACLs, and security labels; its process must be permitted to set that metadata.
 
@@ -39,7 +45,7 @@ Keep the public listener itself stable: place it deliberately or put an external
 
 **Outcome:** let services communicate across nodes without exposing their application ports on the node network.
 
-Use `networking.mode: namespace` for tasks that should join the namespace's private mesh:
+Namespace networking is the default; stating `networking.mode: namespace` makes the choice explicit:
 
 ```yaml
 tasks:
@@ -51,7 +57,7 @@ tasks:
 
 Optionally add `runtime: runsc` at the task-group level for additional syscall-level sandboxing.
 
-Enable and configure WireGuard consistently on every node that may run the workload. Healthy allocation endpoints enter Trellis discovery, and DNS names follow the shape:
+Every node runs the WireGuard mesh behind namespace networking; across nodes, allow its UDP range between them as described in [Multi-node clusters](multi-node.md#prepare-the-network-and-configuration). Namespace peers reach each other's listening ports directly, without declaring or publishing them. Healthy allocation endpoints enter Trellis discovery, and DNS names follow the shape:
 
 ```text
 group.job.namespace.trellis
@@ -59,7 +65,7 @@ group.job.namespace.trellis
 
 Use DNS for locating healthy service instances in the caller's own namespace, not for leader election, distributed locking, or application consensus. A namespace-networked workload receives no records when it puts another namespace in the name. Namespace discovery is an availability mechanism; applications that require a single writer or elected primary still need their own coordination protocol.
 
-Use `host` networking instead when a task deliberately needs the node network or a fixed host-port listener. Leave networking omitted for work that needs no external routes. Networking is selected per task, so colocated tasks do not need to share the same exposure model.
+Declare `ports` only for what must be reachable from outside the namespace network; each is published on the node. Use `host` networking when a task deliberately needs the node's network stack, and `mode: none` for work that needs no network at all. Networking is selected per task, so colocated tasks do not need to share the same exposure model.
 
 ## Choose task-group boundaries deliberately
 
@@ -146,7 +152,7 @@ update:
 
 Rolling replacement marks old-revision allocations as draining, starts bounded replacement capacity, and removes old allocations as healthy replacements become available. `max_parallel` limits both not-yet-healthy replacements and temporary live capacity above `count`; a stop must succeed before its capacity can be reused. It is not a percentage.
 
-Rolling updates require spare schedulable capacity and a useful health check. If the group reserves a fixed host port, spare capacity also means another node where that port is available. Recreate updates avoid overlap but can reduce or eliminate service capacity during replacement. In either case, preview with `trellisctl jobs apply --dry-run` before applying and treat rollback as another desired-state revision: restore the earlier image/configuration and apply it again.
+Rolling updates require spare schedulable capacity and a useful health check. If the group publishes or reserves a fixed node port, spare capacity also means another node where that port is available. Recreate updates avoid overlap but can reduce or eliminate service capacity during replacement. In either case, preview with `trellisctl jobs apply --dry-run` before applying and treat rollback as another desired-state revision: restore the earlier image/configuration and apply it again.
 
 ## Switch complete releases with blue/green routing
 

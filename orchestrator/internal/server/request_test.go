@@ -131,7 +131,7 @@ func TestFirstPartyRequestsDecodeStrictly(t *testing.T) {
 		dst  any
 	}{
 		{name: "heartbeat", body: api.HeartbeatRequest{NodeID: uuid.New(), Timestamp: now, CPUUsage: &cpu, MemoryUsed: &memory, MetricsAt: &now, Allocations: []api.AllocationStatus{{ID: "a", Generation: 1, Task: "web"}}}, dst: &api.HeartbeatRequest{}},
-		{name: "registration", body: api.NodeRegistrationRequest{ID: uuid.New(), Host: "node", Port: 8127, Labels: map[string]string{"zone": "a"}, Capabilities: []spec.NodeCapability{spec.CapabilityNamespaceNetworking}}, dst: &api.NodeRegistrationRequest{}},
+		{name: "registration", body: api.NodeRegistrationRequest{ID: uuid.New(), Host: "node", Port: 8127, Labels: map[string]string{"zone": "a"}}, dst: &api.NodeRegistrationRequest{}},
 		{name: "enrollment", body: api.NodeEnrollmentRequest{ServerAdvertise: "a:8128", AgentAdvertise: "a:8127", RaftAdvertise: "a:8129"}, dst: &api.NodeEnrollmentRequest{}},
 		{name: "raft join", body: api.RaftJoinRequest{ServerAddress: "a:8128", RaftAddress: "a:8129"}, dst: &api.RaftJoinRequest{}},
 		{name: "credential", body: api.CredentialCreateRequest{Scope: "namespace", Access: "read", Namespace: "team"}, dst: &api.CredentialCreateRequest{}},

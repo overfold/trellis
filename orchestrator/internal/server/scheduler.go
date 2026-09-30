@@ -101,8 +101,8 @@ func schedule(intent *PlacementIntent) ([]Placement, *placementDiagnostic) {
 			for _, task := range alloc.Tasks {
 				if task.Networking != nil {
 					for _, port := range task.Networking.Ports {
-						if port.Port > 0 {
-							usedPorts[alloc.Node.ID][port.Port] = true
+						if nodePort := port.NodePort(); nodePort > 0 {
+							usedPorts[alloc.Node.ID][nodePort] = true
 						}
 					}
 				}
@@ -121,8 +121,8 @@ func schedule(intent *PlacementIntent) ([]Placement, *placementDiagnostic) {
 	for _, task := range intent.Tasks {
 		if task.Networking != nil {
 			for _, port := range task.Networking.Ports {
-				if port.Port > 0 {
-					requestedPorts[port.Port] = true
+				if nodePort := port.NodePort(); nodePort > 0 {
+					requestedPorts[nodePort] = true
 				}
 			}
 		}

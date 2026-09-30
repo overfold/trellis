@@ -7,13 +7,13 @@ Complete [Getting Started](getting-started.md) first. It establishes the only go
 | Stage | Learn | Run |
 |---|---|---|
 | 1. Minimal workload | Job → task group → task → allocation; revisions and logs | [`examples/hello`](../../examples/hello/) |
-| 2. Healthy service | Host networking, one fixed port reservation, and HTTP health | [`examples/web-service`](../../examples/web-service/) |
-| 3. Replicas and placement | Multiple replicas and the scheduling consequences of fixed host ports | [`examples/replicated-service`](../../examples/replicated-service/) |
+| 2. Healthy service | One published node port and HTTP health | [`examples/web-service`](../../examples/web-service/) |
+| 3. Replicas and placement | Multiple replicas and the scheduling consequences of fixed node ports | [`examples/replicated-service`](../../examples/replicated-service/) |
 | 4. Rolling updates | Healthy overlap, `max_parallel`, and temporary capacity requirements | [`examples/rolling-update`](../../examples/rolling-update/) |
 | 5. Runtime configuration | Namespace-scoped environment/file secrets and rotation | [`examples/secrets`](../../examples/secrets/) |
 | 6. Persistence | Namespace-scoped volume identities, `@/` paths, explicit host paths, locality, and backup responsibility | [`examples/volumes`](../../examples/volumes/) |
 | 7. Colocated tasks | Sidecars and the consequences of shared placement/scaling/lifecycle | [`examples/sidecar`](../../examples/sidecar/) |
-| 8. Namespace networking | Isolated, host, and namespace networking; service discovery | [`examples/namespace-networking`](../../examples/namespace-networking/) |
+| 8. Namespace networking | Namespace, none, and host networking; service discovery | [`examples/namespace-networking`](../../examples/namespace-networking/) |
 | 9. In-cluster automation | Namespace/cluster scope and read/write API access | [`examples/api-access`](../../examples/api-access/) |
 | 10. Release architecture | Rolling, blue/green, and weighted canary composition | [`examples/deployment-strategies`](../../examples/deployment-strategies/) |
 | 11. Stateful compositions | Coupled development stacks, local-volume caveats, application-native HA | [`examples/wordpress`](../../examples/wordpress/), then [`examples/patroni`](../../examples/patroni/) |
@@ -39,11 +39,10 @@ At this stage, understand that the manifest is desired state and the allocation 
 
 The `web-service` example keeps `count: 1` and adds only the pieces needed to make the tutorial application a reachable, application-aware service:
 
-- `networking.mode: host` opts the task into the node network;
-- `networking.ports` reserves the exact `port` the process listens on;
+- `networking.ports` publishes the `port` the process listens on at the same port on its node;
 - the HTTP health check decides when the running task is ready.
 
-Host networking has no Trellis NAT or port translation. The reservation prevents another Trellis task from claiming the same node port, and the process must bind that port itself.
+The task omits `networking.mode`, so it runs in the default `namespace` network with a private address, and Trellis forwards the node port to it. Only one allocation can publish a given node port on a node.
 
 Apply the example and reach the service at the selected node's port 8080. If its health check blocks readiness, `jobs status web-service` includes the relevant allocation diagnostics automatically. Do not add replicas yet; first make the one-allocation service model concrete.
 
@@ -53,7 +52,7 @@ Stages 1 and 2 work on the single node from Getting Started. From stage 3 onward
 
 ## 3. Replicas and placement
 
-The `replicated-service` example changes the healthy service from one desired allocation to two. Both replicas reserve port 8080, so they cannot share a node and require at least two compatible nodes. A three-node cluster, or the local Vagrant lab described in [Multi-node clusters](multi-node.md#try-it-locally-with-vagrant), is enough.
+The `replicated-service` example changes the healthy service from one desired allocation to two. Both replicas publish node port 8080, so they cannot share a node and require at least two compatible nodes. A three-node cluster, or the local Vagrant lab described in [Multi-node clusters](multi-node.md#try-it-locally-with-vagrant), is enough.
 
 This stage is about scheduling rather than rollout policy. Inspect both allocations with:
 
@@ -77,7 +76,7 @@ update:
 
 Change only the tutorial image from `v1` to `v2`, run `jobs apply --dry-run`, then apply again. Trellis starts healthy replacement capacity before completing removal of the old revision.
 
-The fixed host port makes the temporary-capacity cost visible: two old replicas already occupy port 8080 on two nodes, so the first replacement needs another compatible node with that port free. `max_parallel: 1` limits how much replacement capacity can be in flight at once. A three-node cluster has exactly enough nodes to demonstrate this overlap. If placement or health blocks progress, use `jobs status` rather than treating the rollout as an opaque failed command.
+The fixed node port makes the temporary-capacity cost visible: two old replicas already occupy port 8080 on two nodes, so the first replacement needs another compatible node with that port free. `max_parallel: 1` limits how much replacement capacity can be in flight at once. A three-node cluster has exactly enough nodes to demonstrate this overlap. If placement or health blocks progress, use `jobs status` rather than treating the rollout as an opaque failed command.
 
 ## 5. Secrets
 
@@ -107,24 +106,22 @@ Networking is selected per task:
 
 | `networking.mode` | Meaning | When to use it |
 |---|---|---|
-| omitted / `isolated` | Private container namespace without external routes | Jobs that need no network, or custom runtime setup |
-| `host` | Join the node network; may reserve ports used directly by the process | Directly reachable services and simple local communication |
-| `namespace` | Join the private Trellis network for the job namespace | Cross-node communication within the workload namespace |
+| omitted / `namespace` | Join the private Trellis network for the job namespace, with service DNS and internet egress; `ports` are published on the node | Most services, and cross-node communication within the workload namespace |
+| `none` | Loopback only: no DNS, no egress, unreachable | Jobs that need no network |
+| `host` | Join the node network; `ports` reserve node ports the process binds directly | Processes that must share the node's network stack, such as the sidecar example's `127.0.0.1` scrape |
 
-`namespace` is the user-facing semantic mode. Its current implementation uses a WireGuard mesh and therefore requires the corresponding WireGuard node setup, but manifests do not depend on that implementation detail. Adding `runsc` (gVisor) provides additional syscall-level sandboxing and is recommended but not required.
+`namespace` is the user-facing semantic mode. Its implementation uses a WireGuard mesh that every node runs, but manifests do not depend on that implementation detail. Adding `runsc` (gVisor) provides additional syscall-level sandboxing and is recommended but not required.
 
-Host port declarations are valid only with `mode: host`:
+A namespace-networked task publishes a port on its node with `host_port`, which defaults to `port`:
 
 ```yaml
 networking:
-  mode: host
   ports:
     - port: 8080
+      host_port: 80
 ```
 
-There is only one port because host networking has no Trellis NAT or translation layer. The reservation prevents another Trellis task from claiming the same node port; the process must bind it itself.
-
-Namespace-networked tasks do not declare host ports. Healthy allocations enter Trellis DNS discovery using names shaped like:
+Host networking has no translation, so a host-mode port is both the node port Trellis reserves and the port the process binds. Namespace peers do not need published ports; they reach each other's listening ports directly. Healthy allocations enter Trellis DNS discovery using names shaped like:
 
 ```text
 group.job.namespace.trellis
@@ -138,7 +135,7 @@ http://web.namespace-networking.default.trellis:8080/health
 
 That makes both discovery and the private network visible in `trellisctl jobs logs` without introducing an application proxy or special service resource.
 
-The installer sets up WireGuard when namespace networking is enabled and optionally installs gVisor/runsc for additional sandboxing. Across several nodes, the WireGuard UDP range must also be open between them; see [Multi-node clusters](multi-node.md#prepare-the-network-and-configuration). Use `trellisctl jobs status` to see placement and current diagnostics, `jobs logs` to see application-level peer probes, and `jobs status NAME --history` when you need the recorded allocation lifecycle transitions that led to the current state.
+The installer sets up WireGuard on every node and optionally installs gVisor/runsc for additional sandboxing. Across several nodes, the WireGuard UDP range must also be open between them; see [Multi-node clusters](multi-node.md#prepare-the-network-and-configuration). Use `trellisctl jobs status` to see placement and current diagnostics, `jobs logs` to see application-level peer probes, and `jobs status NAME --history` when you need the recorded allocation lifecycle transitions that led to the current state.
 
 Treat discovery as runtime endpoint information, not application consensus. Applications that require a single writer, leader election, or distributed locking still need their own coordination protocol.
 
@@ -166,7 +163,7 @@ Every task in an API-enabled group can read the injected token, so do not add un
 
 Trellis directly implements `recreate` and `rolling`. The dedicated [`rolling-update`](../../examples/rolling-update/) lesson covers the built-in rolling primitive before this stage. Blue/green and canary are compositions of separate jobs plus external routing state.
 
-Read [`deployment-strategies`](../../examples/deployment-strategies/) only after completing the rolling lesson. When these patterns use a shared fixed host port, every simultaneously running allocation needs a node where that port is free; Trellis does not hide this capacity requirement behind a port-forwarding layer.
+Read [`deployment-strategies`](../../examples/deployment-strategies/) only after completing the rolling lesson. When these patterns use a shared fixed node port, every simultaneously running allocation needs a node where that port is free; publishing the port from namespace networking does not remove this capacity requirement.
 
 ## 11. Stateful and HA patterns
 

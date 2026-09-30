@@ -75,7 +75,7 @@ func TestReconcileContinuesAfterWireGuardPortExhaustion(t *testing.T) {
 	defer agent.server.Close()
 	s.wireGuardPortCount = 1
 	s.networkPool = netip.MustParsePrefix("10.64.0.0/10")
-	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now(), Capabilities: []spec.NodeCapability{spec.CapabilityNamespaceNetworking}, WireGuardPortBase: 51820, WireGuardPortCount: 1}
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now(), WireGuardPortBase: 51820, WireGuardPortCount: 1}
 	s.nodes[node.ID] = node
 	if err := s.state.PutNetworkPortRegistration(context.Background(), &NetworkPortRegistration{Namespace: "old", Slot: 0}); err != nil {
 		t.Fatal(err)

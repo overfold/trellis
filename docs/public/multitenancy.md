@@ -27,6 +27,17 @@ Within Trellis, a namespace provides these boundaries:
 
 These controls are meaningful security boundaries for the resources Trellis owns. They do not imply separate physical nodes, kernels, container runtimes, disks, or control planes.
 
+## Networking
+
+The three networking modes grant very different reach:
+
+- **`none`** has loopback only. It cannot reach or be reached by anything.
+- **`namespace`** is separated from other namespaces: the node's Trellis firewall rules drop forwarding from a namespace bridge to any other namespace's bridge or WireGuard interface, admit into the bridge only the namespace's own WireGuard peers, replies, and published ports, and limit traffic from the bridge to the node itself to workload DNS, the API proxy, and replies. Everything else leaving the namespace network is masqueraded to the node's address, so a namespace task can reach whatever the node can: the internet, the node's local network, other nodes' addresses and services, and link-local endpoints such as cloud instance metadata. Published ports accept connections from anywhere that can reach the node, including other namespaces' tasks through a node address.
+- **`host`** is node-level network access. The task runs in the node's network namespace, where every namespace bridge and WireGuard interface lives and every namespace route is installed. Trellis's isolation rules filter traffic forwarded through the node and traffic arriving from a namespace bridge, not connections the node itself opens, so a host-networked task can connect to allocations of **every** namespace present on the node, including through WireGuard to those namespaces' allocations on other nodes. It can also bind any free node port, reach every service listening on the node, and use the node's source address toward the node's network. Trellis removes `CAP_NET_RAW` from every task, so it cannot sniff or inject raw packets on those interfaces, but ordinary connections are not restricted.
+
+Host networking is available to any credential that can write jobs; Trellis applies no admission policy to it. Treat it as granting access to every namespace network on the nodes where it can run.
+
+
 ## Building a tenant-safe frontend
 
 A multitenant frontend should expose its own constrained workload model instead of accepting arbitrary Trellis YAML or canonical JSON and merely replacing the `namespace` field. Validate the resulting canonical model on the trusted backend before calling plan or apply; do not rely only on controls in browser code.
@@ -35,7 +46,8 @@ At minimum, enforce the following rules:
 
 - **Set the namespace server-side.** Derive it from the authenticated tenant and reject a tenant-supplied namespace. Keep tenant-to-namespace ownership in the frontend's own durable state; Trellis namespaces are named boundaries, not lifecycle-managed tenant records.
 - **Reject absolute `host_path` values.** They mount an operator-prepared node path verbatim and deliberately bypass filesystem-level namespace separation. Permit only `@/` paths, optionally with a frontend-assigned prefix or a smaller storage abstraction.
-- **Reject host networking.** `networking.mode: host` joins the node network namespace and exposes the node's network surface. Permit `namespace` where private service connectivity is needed, and `isolated` where no external route is needed.
+- **Reject host networking.** `networking.mode: host` joins the node network namespace and exposes the node's network surface, including every other tenant's namespace network on that node; see [Networking](#networking). Permit `namespace` where connectivity is needed, and `none` where no network is needed. Constrain published node ports (`host_port`) to a range or assignment the frontend owns, since they are a shared node resource.
+- **Decide on egress.** Namespace-networked tasks can reach anything the node can, including cloud instance metadata endpoints and the node's private network. Block what tenants must not reach with host or network firewalling outside Trellis, or select `none` for workloads that need no network.
 - **Do not grant cluster API access.** Reject `api_access.scope: cluster`. For the safest general tenant profile, reject `api_access` entirely: a write credential, including `namespace/write`, lets its holder submit manifests directly and bypass the frontend's policy. If a product deliberately offers namespace API access, constrain it to the minimum access level, place it only in reviewed controller task groups, and treat every task in that group as holding the credential. Each API-enabled allocation receives its own credential, bound to its job and task group; deleting the job, or removing or narrowing `api_access`, revokes it.
 - **Constrain images and runtime.** Apply the product's registry, digest, provenance, and update rules. Prefer `runtime: runsc` on nodes that support it for additional syscall isolation; it is defense in depth, not a replacement for manifest admission.
 - **Enforce resources and scale.** Require CPU and memory values, bound replica counts and aggregate requests, and enforce per-tenant quotas and rate limits in the frontend. Trellis schedules declared resources but does not provide namespace quotas or protect against deliberate under-declaration.
@@ -58,7 +70,7 @@ Namespaces share the cluster's nodes, host kernels, container runtime, image cac
 - node or control-plane failure can affect several tenants;
 - CPU, memory, disk, network, image pulls, and API capacity remain contention and denial-of-service surfaces unless the frontend constrains them. Each task is capped at its declared CPU and memory (memory including swap) and at the node's `task_pids_limit` processes and threads, but those caps bound a single task, not the aggregate a tenant can schedule; on hosts without memory-cgroup swap accounting the swap cap is not enforced;
 - `@/` volumes provide path separation, not encryption, distributed storage, snapshots, or protection from node administrators;
-- namespace networking separates tenant network paths, but workloads still share the host networking stack, DNS forwarders, and Trellis control-plane route;
+- namespace networking separates tenant network paths, but workloads still share the host networking stack, node ports, egress address, DNS forwarders, and Trellis control-plane route;
 - container isolation ultimately depends on the selected OCI runtime and host security. Trellis applies containerd's default seccomp profile (gVisor enforces it for `runsc` workloads only when started with `--oci-seccomp`, relying on its own sandbox otherwise), a default AppArmor profile on AppArmor-enabled hosts for non-`runsc` workloads, removes `CAP_MKNOD` and `CAP_NET_RAW`, and mounts volumes, secret files, and other Trellis-generated bind mounts `nosuid,nodev`, but tasks still run as the image's user (root by default) with containerd's remaining default capabilities on the shared host kernel; and
 - cluster operators retain administrative access to the shared infrastructure.
 
@@ -70,7 +82,7 @@ Use this as a conservative starting point for untrusted tenants:
 
 1. Give each tenant a frontend-owned namespace and no direct Trellis write credential.
 2. Accept a small product-specific workload schema, then set namespace and defaults on the backend.
-3. Permit only `networking.mode: namespace` or `isolated`; reject host networking and host ports.
+3. Permit only `networking.mode: namespace` or `none`; reject host networking, and assign any published `host_port` on the backend.
 4. Permit only `@/` volumes through a quota-aware storage interface; reject absolute host paths.
 5. Omit `api_access` from tenant workloads.
 6. Require reviewed or policy-compliant images, prefer `runsc`, and require bounded CPU, memory, replicas, and request rates.

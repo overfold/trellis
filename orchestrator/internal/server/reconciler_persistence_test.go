@@ -216,7 +216,7 @@ func TestReconcileCommitsNetworkPortRegistrationWithAllocation(t *testing.T) {
 	s := NewServer(slog.Default(), nil, controller, store, "test", "")
 	s.wireGuardPortCount = 8
 	s.networkPorts = map[string]int{"existing": 7}
-	node := &Node{ID: uuid.New(), Status: NodeStatusHealthy, LastHeartbeat: time.Now(), Capabilities: []spec.NodeCapability{spec.CapabilityNamespaceNetworking}}
+	node := &Node{ID: uuid.New(), Status: NodeStatusHealthy, LastHeartbeat: time.Now()}
 	s.nodes[node.ID] = node
 	s.jobs[jobKey("acme", "web")] = &Job{
 		Spec: canonicalTestSpec(&spec.JobSpec{

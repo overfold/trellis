@@ -301,7 +301,6 @@ func NewAgent(log *slog.Logger, runtime runtime.ContainerRuntime, health *health
 		reconciler: reconciler,
 		ports:      ports,
 		volumes:    volumes,
-		network:    network.DisabledManager{},
 		server:     server,
 		nodeInfo:   client.NodeInfo{ID: nodeID, Host: "127.0.0.1", Port: 8127},
 		failed:     make(chan error, 1),
@@ -310,11 +309,10 @@ func NewAgent(log *slog.Logger, runtime runtime.ContainerRuntime, health *health
 	return agent
 }
 
-// SetNetworkManager configures allocation networking.
+// SetNetworkManager configures allocation networking. It is required before
+// the agent starts tasks that use namespace networking.
 func (a *Agent) SetNetworkManager(manager network.Manager) {
-	if manager != nil {
-		a.network = manager
-	}
+	a.network = manager
 }
 
 // SetWireGuardIdentity configures the node WireGuard identity and namespace port range.
@@ -1184,11 +1182,7 @@ func (a *Agent) UpdateNetworkPlan(ctx context.Context, request *api.NetworkPlanR
 	if !active {
 		return nil
 	}
-	updater, ok := a.network.(network.PlanUpdater)
-	if !ok {
-		return network.ErrDisabled
-	}
-	return updater.UpdatePlan(ctx, request.Namespace, request.Plan)
+	return a.network.UpdatePlan(ctx, request.Namespace, request.Plan)
 }
 
 // StopGroup stops all tasks in an allocation group.
@@ -1604,7 +1598,7 @@ func (a *Agent) launchTask(ctx context.Context, launch *taskLaunch) error {
 	for _, p := range taskPorts {
 		port, err := a.ports.Claim(p)
 		if err != nil {
-			return fmt.Errorf("claim port %d: %w", p.HostPort, err)
+			return fmt.Errorf("claim node port %d: %w", p.NodePort(), err)
 		}
 
 		launch.ports = append(launch.ports, port)
@@ -1723,7 +1717,11 @@ func (a *Agent) attachTaskNetwork(ctx context.Context, launch *taskLaunch) error
 	if err := a.persistAllocation(alloc); err != nil {
 		return fmt.Errorf("persist network intent: %w", err)
 	}
-	attachment, err := a.network.Attach(ctx, network.AttachRequest{AllocationID: task.ID, Namespace: task.Namespace, Network: task.Namespace, Plan: *task.NetworkPlan})
+	ports := make([]network.PortMapping, 0, len(launch.ports))
+	for _, port := range launch.ports {
+		ports = append(ports, network.PortMapping{HostPort: port.HostPort, ContainerPort: port.ContainerPort})
+	}
+	attachment, err := a.network.Attach(ctx, network.AttachRequest{AllocationID: task.ID, Namespace: task.Namespace, Network: task.Namespace, Plan: *task.NetworkPlan, Ports: ports})
 	if err != nil {
 		return fmt.Errorf("attach WireGuard network: %w", err)
 	}

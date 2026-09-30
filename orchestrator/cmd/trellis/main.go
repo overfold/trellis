@@ -392,6 +392,13 @@ func run(parent context.Context, cfg *config) error {
 		cfg.DNSListen = net.JoinHostPort(dnsHost, strconv.Itoa(dnsPort))
 	}
 	if cfg.Runtime == "containerd" {
+		// Every node runs namespace networking, the default task network.
+		if goruntime.GOOS != "linux" {
+			return fmt.Errorf("namespace networking requires Linux")
+		}
+		if err := requireCommands("wg", "ip", "iptables"); err != nil {
+			return fmt.Errorf("namespace networking: %w; install wireguard-tools, iproute2, and iptables", err)
+		}
 		if containerruntime.SwapUncapped() {
 			log.Warn("swap is active but swap accounting was not detected in the host memory cgroup; task memory limits may not cap swap")
 		}
@@ -407,6 +414,10 @@ func run(parent context.Context, cfg *config) error {
 	}
 	ag.SetDNSServers([]string{dnsHost})
 	ag.SetNetworkManager(networkManager)
+	if buildTestRuntime != nil && cfg.Runtime == buildTestRuntime.name && buildTestRuntime.network != nil {
+		// A test runtime executes nothing, so it attaches no real networks.
+		ag.SetNetworkManager(buildTestRuntime.network)
+	}
 	endpoint := cfg.WireGuardEndpoint
 	if endpoint == "" {
 		endpoint = net.JoinHostPort(agentHost, strconv.Itoa(cfg.WireGuardPort))
@@ -588,6 +599,8 @@ type testRuntime struct {
 	name     string
 	addFlags func(*pflag.FlagSet)
 	open     func(dataDir string) (containerruntime.ContainerRuntime, io.Closer, error)
+	// network replaces namespace networking for the test runtime.
+	network network.Manager
 }
 
 var buildTestRuntime *testRuntime
@@ -627,19 +640,21 @@ func detectNodeCapabilities() []spec.NodeCapability {
 			capabilities = append(capabilities, spec.CapabilityRunsc)
 		}
 	}
-	if goruntime.GOOS == "linux" && commandsAvailable("wg", "ip", "iptables") {
-		capabilities = append(capabilities, spec.CapabilityNamespaceNetworking)
-	}
 	return capabilities
 }
 
-func commandsAvailable(commands ...string) bool {
+// requireCommands reports the commands that are missing from PATH.
+func requireCommands(commands ...string) error {
+	var missing []string
 	for _, command := range commands {
 		if _, err := exec.LookPath(command); err != nil {
-			return false
+			missing = append(missing, command)
 		}
 	}
-	return true
+	if len(missing) > 0 {
+		return fmt.Errorf("required commands not found in PATH: %s", strings.Join(missing, ", "))
+	}
+	return nil
 }
 
 func waitForRaftSync(ctx context.Context, store *state.RaftStore) error {

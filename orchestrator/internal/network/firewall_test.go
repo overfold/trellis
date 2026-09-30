@@ -10,25 +10,30 @@ import (
 	"testing"
 )
 
-// iptablesModel is an ordered, in-memory model of the iptables filter table.
-// It supports the subset of commands the manager uses so tests can assert
-// chain placement and rule order rather than only the issued commands.
+// iptablesModel is an ordered, in-memory model of the iptables filter and
+// nat tables. It supports the subset of commands the manager uses so tests can
+// assert chain placement and rule order rather than only the issued commands.
+// Filter chains are keyed by name and nat chains by "nat/" and their name.
 type iptablesModel struct {
 	chains map[string][]string
 }
 
 func newIPTablesModel() *iptablesModel {
-	return &iptablesModel{chains: map[string][]string{"INPUT": nil, "FORWARD": nil}}
+	return &iptablesModel{chains: map[string][]string{"INPUT": nil, "FORWARD": nil, "nat/PREROUTING": nil, "nat/OUTPUT": nil, "nat/POSTROUTING": nil}}
 }
 
 func (m *iptablesModel) Run(_ context.Context, name string, args ...string) error {
 	if name != "iptables" {
 		return nil
 	}
+	table := ""
+	if len(args) >= 2 && args[0] == "-t" {
+		table, args = args[1]+"/", args[2:]
+	}
 	if len(args) < 2 {
 		return fmt.Errorf("unsupported iptables command %v", args)
 	}
-	flag, chain := args[0], args[1]
+	flag, chain := args[0], table+args[1]
 	rules, exists := m.chains[chain]
 	if !exists && flag != "-N" {
 		return errors.New("iptables: No chain/target/match by that name")
@@ -69,8 +74,10 @@ func (m *iptablesModel) Run(_ context.Context, name string, args ...string) erro
 			return errors.New("iptables: directory not empty")
 		}
 		for _, other := range m.chains {
-			if slices.Contains(other, "-j "+chain) {
-				return errors.New("iptables: too many links")
+			for _, rule := range other {
+				if rule == "-j "+args[1] || strings.HasSuffix(rule, " -j "+args[1]) {
+					return errors.New("iptables: too many links")
+				}
 			}
 		}
 		delete(m.chains, chain)
@@ -105,8 +112,8 @@ func TestNamespaceFirewallFiltersHostTrafficBeforeHostAcceptRules(t *testing.T) 
 		t.Fatalf("FORWARD = %q, want %q", model.chains["FORWARD"], want)
 	}
 	input := model.chains[inputChain]
-	if len(input) != 8 {
-		t.Fatalf("%s has %d rules after repeated reconciliation, want 8:\n%s", inputChain, len(input), strings.Join(input, "\n"))
+	if len(input) != 10 {
+		t.Fatalf("%s has %d rules after repeated reconciliation, want 10:\n%s", inputChain, len(input), strings.Join(input, "\n"))
 	}
 	for _, bridge := range []string{"tb-acme", "tb-other"} {
 		drop := slices.Index(input, "-i "+bridge+" -j DROP")
@@ -122,8 +129,8 @@ func TestNamespaceFirewallFiltersHostTrafficBeforeHostAcceptRules(t *testing.T) 
 				}
 			}
 		}
-		if accepts != 3 {
-			t.Fatalf("%s has %d ACCEPT rules for %s, want DNS udp/tcp and API:\n%s", inputChain, accepts, bridge, strings.Join(input, "\n"))
+		if accepts != 4 {
+			t.Fatalf("%s has %d ACCEPT rules for %s, want DNS udp/tcp, API, and replies:\n%s", inputChain, accepts, bridge, strings.Join(input, "\n"))
 		}
 	}
 }
@@ -178,7 +185,7 @@ func TestNamespacePathRemovalDeletesTrellisChainsAfterLastPath(t *testing.T) {
 			t.Fatalf("%s kept rule for detached bridge: %q", inputChain, rule)
 		}
 	}
-	if len(model.chains[inputChain]) != 4 || model.chains["INPUT"][0] != "-j "+inputChain {
+	if len(model.chains[inputChain]) != 5 || model.chains["INPUT"][0] != "-j "+inputChain {
 		t.Fatalf("remaining namespace lost its input filtering: INPUT=%q %s=%q", model.chains["INPUT"], inputChain, model.chains[inputChain])
 	}
 

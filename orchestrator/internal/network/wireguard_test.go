@@ -203,8 +203,9 @@ func TestNamespaceFirewallAcceptsDNSOnlyFromNamespaceCIDR(t *testing.T) {
 	}
 	for _, want := range []string{
 		"iptables -I FORWARD 1 -j TRELLIS-FORWARD",
-		"iptables -C TRELLIS-FORWARD -i tb-acme ! -o tw-acme -j DROP",
-		"iptables -C TRELLIS-FORWARD -o tb-acme ! -i tw-acme -j DROP",
+		"iptables -C TRELLIS-FORWARD -i tb-acme -o tb+ -m conntrack ! --ctstate DNAT -j DROP",
+		"iptables -C TRELLIS-FORWARD -i tb-acme -o tw+ -j DROP",
+		"iptables -C TRELLIS-FORWARD -o tb-acme -j DROP",
 	} {
 		if !strings.Contains(commands, want) {
 			t.Errorf("Trellis forwarding isolation does not contain %q:\n%s", want, commands)
@@ -413,7 +414,7 @@ func TestWireGuardDetachPreservesLeaseAndConvergesAfterCleanupFailure(t *testing
 		{
 			name: "firewall rule",
 			failCommand: func(a *Attachment) string {
-				return "iptables -D TRELLIS-FORWARD -i " + a.Bridge + " ! -o " + a.WireGuardInterface + " -j DROP"
+				return "iptables -D TRELLIS-FORWARD -i " + a.Bridge + " -o " + a.WireGuardInterface + " -j ACCEPT"
 			},
 			wantError: "delete firewall rule",
 		},
@@ -453,8 +454,8 @@ func TestWireGuardDetachPreservesLeaseAndConvergesAfterCleanupFailure(t *testing
 				namespaces: map[string]bool{attachment.AllocationID: true},
 				firewallRules: map[string]bool{
 					"TRELLIS-FORWARD -i " + attachment.Bridge + " ! -s 10.42.1.0/24 -j DROP":                          true,
-					"TRELLIS-FORWARD -i " + attachment.Bridge + " ! -o " + attachment.WireGuardInterface + " -j DROP": true,
-					"TRELLIS-FORWARD -o " + attachment.Bridge + " ! -i " + attachment.WireGuardInterface + " -j DROP": true,
+					"TRELLIS-FORWARD -i " + attachment.Bridge + " -o " + attachment.WireGuardInterface + " -j ACCEPT": true,
+					"TRELLIS-FORWARD -o " + attachment.Bridge + " -j DROP":                                            true,
 					"FORWARD -j TRELLIS-FORWARD":                         true,
 					"TRELLIS-INPUT -i " + attachment.Bridge + " -j DROP": true,
 					"INPUT -j TRELLIS-INPUT":                             true,

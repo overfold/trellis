@@ -37,7 +37,6 @@ task_groups:
       - name: app
         image: ghcr.io/overfold/trellis-tutorial:v2
         networking:
-          mode: host
           ports:
             - port: 8080
         resources:
@@ -52,7 +51,7 @@ task_groups:
           threshold: 2
 ```
 
-Because the sample uses host networking and reserves port 8080, its two replicas must run on different nodes. A rolling replacement also needs another compatible node with port 8080 available while old and new allocations overlap.
+The sample omits `networking.mode`, so each task joins its namespace network, and publishes node port 8080 to the task. A node port can be used only once per node, so its two replicas must run on different nodes. A rolling replacement also needs another compatible node with port 8080 available while old and new allocations overlap.
 
 Check locally with `trellisctl jobs apply --check --file trellis.yaml`, preview with `trellisctl jobs apply --dry-run --file trellis.yaml`, and apply with `trellisctl jobs apply --file trellis.yaml`.
 
@@ -87,7 +86,8 @@ Before a job is planned or stored, Trellis resolves every omitted optional field
 | task group `runtime` | `runc` |
 | task group `restart` | `max_restarts: 3`, `window: 10m` |
 | task group `update` | `strategy: recreate`, `max_parallel: 1` (zero also means one) |
-| task `networking` or `networking.mode` | `mode: isolated` |
+| task `networking` or `networking.mode` | `mode: namespace` |
+| namespace-mode port `host_port` | the port's `port` |
 | task `resources` | the cluster's `default_task_cpu` and `default_task_memory` job limits at apply time |
 | `health_check.interval`, `timeout`, `threshold` | `10s`, `5s`, `3` (zero also selects the default) |
 | HTTP `health_check.path` | `/` |
@@ -149,7 +149,7 @@ API-enabled allocations require the servers to be configured with the secrets en
 
 Enabled API access injects `TRELLIS_ADDR`, `TRELLIS_TOKEN`, and `TRELLIS_NAMESPACE`; when TLS is configured, `TRELLIS_CA_CERT` contains the cluster CA PEM. `TRELLIS_NAMESPACE` is initialized to the job namespace even for cluster-scoped credentials.
 
-`TRELLIS_ADDR` is a Trellis-owned workload endpoint, currently exposed as the TLS name `trellis` on the control-plane port. Trellis maps that name to the node-local control plane for host-networked tasks and to the namespace gateway for namespace-networked tasks; the local listener proxies requests to the current leader. API-enabled tasks must therefore select either `networking.mode: host` or `networking.mode: namespace`. Omitted/isolated networking is rejected because it intentionally has no route to the control plane.
+`TRELLIS_ADDR` is a Trellis-owned workload endpoint, currently exposed as the TLS name `trellis` on the control-plane port. Trellis maps that name to the node-local control plane for host-networked tasks and to the namespace gateway for namespace-networked tasks; the local listener proxies requests to the current leader. API-enabled tasks must therefore use `namespace` (the default) or `host` networking. `mode: none` is rejected because it intentionally has no route to the control plane.
 
 `api_access` is a task-group privilege boundary: every task in the group can read the credential. Do not colocate untrusted sidecars with an API-enabled controller. Request the narrowest scope and access level the workload needs.
 
@@ -170,7 +170,7 @@ Task groups are the unit of placement, scaling, updates, restart behavior, and d
 | `name` | Yes | Task identifier, unique within the group. |
 | `image` | Yes | Pullable OCI image reference. Pin a version or digest for reproducible deployment. |
 | `env` | No | Literal environment-variable map. Do not place credentials here. |
-| `networking` | No | Network mode and, for host mode, optional port reservations. |
+| `networking` | No | Network mode and the ports the task listens on. |
 | `resources` | No | CPU in millicores and memory as a byte count or readable size. |
 | `volumes` | No | Namespace-scoped named volume mounts with explicit host and container paths. |
 | `secrets` | No | References to namespace secrets delivered as environment variables or files. |
@@ -180,20 +180,29 @@ Task groups are the unit of placement, scaling, updates, restart behavior, and d
 
 ```yaml
 networking:
-  mode: host
+  mode: namespace
   ports:
     - port: 8080
+      host_port: 80
 ```
 
-`networking.mode` is:
+Each task has its own network attachment; tasks in one group do not share a network namespace, so a sidecar reaches its peer task through the group's network (for example over service DNS), not `localhost`. `networking.mode` is one of:
 
-- `isolated` (the default when omitted): a private container network namespace with no external routes;
-- `host`: join the node network namespace directly;
-- `namespace`: join the private Trellis network belonging to the workload namespace.
+| Mode | Network | Ports |
+| --- | --- | --- |
+| `none` | Loopback only: no DNS, no egress, unreachable from anywhere else. | Not allowed. |
+| `namespace` (the default when omitted) | The private Trellis network of the workload namespace, with service DNS and internet egress. | Published on the node at `host_port`. |
+| `host` | The node's own network stack. | Reserved on the node; the process binds them directly. |
 
-`namespace` deliberately describes the networking semantics rather than the transport implementation. Trellis currently realizes this mode with WireGuard, so participating nodes require the corresponding WireGuard setup. Adding `runsc` (gVisor) is recommended for additional syscall-level sandboxing but is not required.
+**`namespace`** gives the task a private address on the namespace network, which spans every node running an allocation of that namespace. Tasks reach each other by address or through [service discovery](core-concepts.md#networking-and-discovery) DNS; the network is not reachable from other namespaces. Traffic to anything beyond the namespace network, such as the internet, leaves through the node with its source address translated to the node's (masquerade). That egress reaches whatever the node can reach, including its local network, other nodes' addresses, and link-local services such as cloud metadata endpoints. Trellis currently realizes this mode with WireGuard, which every node runs.
 
-Port declarations are valid only with `mode: host`. Host networking has no Trellis NAT or port-forwarding layer, so there is no separate host/container port distinction in desired state. `port` is both the node port Trellis reserves and the port the process must listen on. It must be 1–65535 and unique across all tasks in a task group. A fixed port can be used only once per node, so replicas reserving the same port need distinct nodes.
+Each namespace-mode `ports` entry publishes node port `host_port` to `port`, the port the process listens on inside its network. Omitting `host_port` publishes the same number; the stored job shows the resolved value. Published ports forward TCP and UDP from any of the node's addresses, preserve the client's source address, and are also reachable from the node itself, from host-networked tasks, and from namespace-networked tasks, including other namespaces' and the publishing task's own, through a node address. They are not reachable on `127.0.0.1`. A published port does not need to be declared for namespace-network peers, which reach every listening port directly. Published ports are forwarded before the node's own forwarding rules, like Docker's, so a host firewall does not filter them.
+
+**`host`** joins the node's network namespace. Each `ports` entry reserves `port` on the node for scheduling; `host_port` is not allowed because there is no translation. Host networking is node-level network access: the task can bind any node port, reach every service listening on the node, and open connections into every namespace network present on the node — the namespace bridges and WireGuard interfaces live in the node's network namespace — including namespaces other than its own. See [Multitenancy and trust boundaries](multitenancy.md#networking) before accepting host networking from less-trusted authors.
+
+**`none`** gives the task only loopback. Use it for batch work that needs no network. API access and published ports require another mode.
+
+`port` and `host_port` must be 1–65535. `port` must be unique within a task. The node port of every entry — `host_port` in namespace mode, `port` in host mode — must be unique across all tasks in the task group, and the scheduler places an allocation only on a node where none of its node ports is held by another allocation, in either mode. Replicas publishing or reserving the same node port therefore need distinct nodes, and a rolling replacement needs another node with the port free while old and new allocations overlap.
 
 ### Resources
 

@@ -50,7 +50,7 @@ Before joining nodes, make sure they can reach each other:
 
 Node and Raft transports use mutually authenticated TLS. Each node's `agent_advertise`, `server_advertise`, and `raft_advertise` addresses must be routable from the other nodes; wildcard bind addresses are not valid advertised addresses. The installer auto-detects a private address and accepts `--advertise HOST` when peers cannot reach the detected one.
 
-Namespace networking gives each namespace one stable UDP port from the cluster's WireGuard range: `wireguard_port` (default `51820`) plus the cluster's `wireguard_port_count` (default `256`). Allow that range between every node that may run namespace-networked tasks. `wireguard_pool` (default `10.64.0.0/10`) supplies a `/24` for each namespace on each node; the default pool addresses 16384 namespace-node pairs, and when it is full new placements for another namespace wait instead of reusing an address. `wireguard_endpoint` sets the externally reachable host or base `host:port` other nodes use; Trellis applies each namespace's port offset to that base.
+Namespace networking gives each namespace one stable UDP port from the cluster's WireGuard range: `wireguard_port` (default `51820`) plus the cluster's `wireguard_port_count` (default `256`). Allow that range between every node. Because namespace networking is the default task network, every namespace with desired or running namespace-networked tasks holds one of these ports, so `wireguard_port_count` bounds how many such namespaces a cluster can run at once; when every port is held, new placements for another namespace wait until one is released. `wireguard_pool` (default `10.64.0.0/10`) supplies a `/24` for each namespace on each node; the default pool addresses 16384 namespace-node pairs, and when it is full new placements for another namespace wait instead of reusing an address. `wireguard_endpoint` sets the externally reachable host or base `host:port` other nodes use; Trellis applies each namespace's port offset to that base.
 
 **Cluster settings** are replicated with the rest of the cluster state, so any node can become leader without changing them. The first node's `job_limits`, `wireguard_pool`, and `wireguard_port_count` (or the matching flags) initialize them when it creates the cluster; after that, node configuration no longer changes them, on the first node or any other. Reconciliation settings, such as the allocation loss timeout, start at their defaults and have no node configuration. Inspect them with `trellisctl cluster settings`, change job limits with `trellisctl cluster set-job-limits`, and change reconciliation settings with `trellisctl cluster set-reconciliation` ([CLI](cli.md#inspect-and-change-cluster-settings)). The pool and port count are fixed for the life of the cluster. A node started with different values behaves as follows:
 
@@ -99,7 +99,7 @@ curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/setup
 
 Normal installer-created clusters derive the secrets key ID from the shared key, so no additional argument is needed. If the existing cluster explicitly sets `secrets_key_id` in its node configuration, pass that same value with `--secrets-key-id ID` (or `TRELLIS_SECRETS_KEY_ID`) on the joining node.
 
-The installer shows the complete plan before making changes; choose **Customize** to change it interactively. Namespace networking and gVisor/runsc are installed by default on joining nodes, as on the first node; `--without-networking` and `--without-gvisor` are the automation opt-outs. Delete the temporary transferred copies after setup succeeds.
+The installer shows the complete plan before making changes; choose **Customize** to change it interactively. Namespace networking, which every node requires, and gVisor/runsc are installed on joining nodes, as on the first node; `--without-gvisor` is the automation opt-out. Delete the temporary transferred copies after setup succeeds.
 
 After the daemon starts, verify membership from any operator context:
 
@@ -160,9 +160,9 @@ This lab is not a supported production installation method. Any three compatible
 
 Workload semantics are the same on one node or many, but some constraints only become visible with several nodes. Each is documented with its feature:
 
-- **Fixed host ports** can be used once per node, so replicas reserving the same port need distinct nodes, and rolling updates need a spare node while old and new allocations overlap. See [host networking](job-specification.md#networking-and-ports).
+- **Node ports**, whether published from namespace networking or reserved by host networking, can be used once per node, so replicas using the same node port need distinct nodes, and rolling updates need a spare node while old and new allocations overlap. See [networking and ports](job-specification.md#networking-and-ports).
 - **Named volumes** are bound to the node where they were first placed. Later allocations return to that node, and Trellis does not create a second copy elsewhere if it is lost. See [volumes](job-specification.md#volumes).
-- **Namespace networking** connects tasks across nodes; each participating node needs the WireGuard setup described above. See [namespace networking](learning-path.md#8-namespace-networking-and-discovery).
+- **Namespace networking** connects tasks across nodes; every node runs it and needs the WireGuard UDP range open as described above. See [namespace networking](learning-path.md#8-namespace-networking-and-discovery).
 - **Placement** considers each node's labels, capabilities, capacity, and volume registrations. `trellisctl nodes list` and `nodes status NODE` show what the scheduler sees. See [scheduling](core-concepts.md#scheduling).
 
 ## Maintain a multi-node cluster

@@ -143,7 +143,7 @@ func TestOperationErrorReportsRestartExhaustion(t *testing.T) {
 
 func TestHandleRunRequiresCanonicalTaskGroup(t *testing.T) {
 	canonicalTask := func() spec.TaskSpec {
-		return spec.TaskSpec{Name: "task", Image: "image", Resources: &spec.ResourcesSpec{CPU: 100, Memory: 1 << 20}, Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkIsolated}}
+		return spec.TaskSpec{Name: "task", Image: "image", Resources: &spec.ResourcesSpec{CPU: 100, Memory: 1 << 20}, Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkNone}}
 	}
 	for _, test := range []struct {
 		name   string

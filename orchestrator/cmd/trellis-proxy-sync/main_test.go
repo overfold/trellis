@@ -400,24 +400,32 @@ func TestSelectUpstreamsExcludesStoppedHealthyAllocation(t *testing.T) {
 	}
 
 	got := selectUpstreams(allocs, 8080)
-	if len(got) != 1 || got[0] != (upstream{Address: "10.0.0.2", Port: 32000, Weight: 1}) {
+	if len(got) != 1 || got[0] != (upstream{Address: "10.0.0.2", Port: 8080, Weight: 1}) {
 		t.Fatalf("upstreams = %+v; want only the running healthy allocation", got)
 	}
 }
 
-func TestSelectHostPort(t *testing.T) {
+func TestSelectPort(t *testing.T) {
+	// Namespace addresses are dialed at the listen port, not the host port
+	// published on the node.
 	ports := []api.PortMapping{
 		{HostPort: 31000, ContainerPort: 8080},
 		{HostPort: 32000, ContainerPort: 9090},
 	}
 
-	if got, ok := selectHostPort(ports, 0); !ok || got != 31000 {
-		t.Fatalf("default port = %d, %v; want 31000, true", got, ok)
+	if got, ok := selectPort(ports, 0); !ok || got != 8080 {
+		t.Fatalf("default port = %d, %v; want 8080, true", got, ok)
 	}
-	if got, ok := selectHostPort(ports, 9090); !ok || got != 32000 {
-		t.Fatalf("selected port = %d, %v; want 32000, true", got, ok)
+	if got, ok := selectPort(ports, 9090); !ok || got != 9090 {
+		t.Fatalf("selected port = %d, %v; want 9090, true", got, ok)
 	}
-	if got, ok := selectHostPort(ports, 7070); ok || got != 0 {
+	if got, ok := selectPort(ports, 7070); ok || got != 0 {
 		t.Fatalf("missing port = %d, %v; want 0, false", got, ok)
+	}
+	if got, ok := selectPort(nil, 8080); !ok || got != 8080 {
+		t.Fatalf("undeclared port = %d, %v; want 8080, true", got, ok)
+	}
+	if got, ok := selectPort(nil, 0); ok || got != 0 {
+		t.Fatalf("no port = %d, %v; want 0, false", got, ok)
 	}
 }

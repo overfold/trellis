@@ -17,8 +17,8 @@ func (a *Agent) detachAllocationNetwork(ctx context.Context, allocation *Allocat
 			return recovery.DetachAllocation(ctx, allocation.NetworkIntent.AllocationID)
 		}
 	}
-	// A manager without recovery support, such as the disabled manager,
-	// has nothing to remove for an allocation without an attachment.
+	// A manager without recovery support has nothing to remove for an
+	// allocation without an attachment.
 	return a.network.Detach(ctx, allocation.Network)
 }
 
