@@ -15,12 +15,15 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"github.com/overfold/trellis/internal/api"
 	"github.com/overfold/trellis/internal/auth"
+	"github.com/overfold/trellis/internal/client"
 	"github.com/overfold/trellis/internal/election"
+	"github.com/overfold/trellis/internal/execstream"
 	"github.com/overfold/trellis/internal/server"
 	"github.com/overfold/trellis/internal/storage"
 	"github.com/overfold/trellis/internal/tlsutil"
@@ -283,7 +286,7 @@ func TestControlPlaneFollowerProxiesToLeader(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer workload-token" {
 			t.Errorf("authorization header = %q", got)
 		}
-		if r.Method != http.MethodGet || r.URL.Path != "/v1/jobs" {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/namespaces/default/jobs" {
 			t.Errorf("proxied request = %s %s", r.Method, r.URL.Path)
 		}
 		if r.Header.Get(auth.AdministratorChallengeHeader) != "challenge" || r.Header.Get(auth.AdministratorSignatureHeader) != "signature" {
@@ -301,7 +304,7 @@ func TestControlPlaneFollowerProxiesToLeader(t *testing.T) {
 		http.DefaultTransport,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
-	req := httptest.NewRequest(http.MethodGet, "https://follower.example/v1/jobs", nil)
+	req := httptest.NewRequest(http.MethodGet, "https://follower.example/v1/namespaces/default/jobs", nil)
 	req.Header.Set("Authorization", "Bearer workload-token")
 	req.Header.Set(auth.AdministratorChallengeHeader, "challenge")
 	req.Header.Set(auth.AdministratorSignatureHeader, "signature")
@@ -310,6 +313,57 @@ func TestControlPlaneFollowerProxiesToLeader(t *testing.T) {
 
 	if recorder.Code != http.StatusOK || recorder.Header().Get("X-Executed-By") != "leader" {
 		t.Fatalf("response = %d, headers %v", recorder.Code, recorder.Header())
+	}
+}
+
+// A follower forwards an exec upgrade to the leader and then carries the
+// switched stream in both directions.
+func TestControlPlaneFollowerProxiesExecStream(t *testing.T) {
+	leader := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !execstream.IsUpgradeRequest(r) || r.Header.Get("Authorization") != "Bearer operator-token" {
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		conn, err := execstream.Accept(w)
+		if err != nil {
+			t.Errorf("accept: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		frame, err := execstream.NewReader(conn).Next()
+		if err != nil {
+			t.Errorf("read: %v", err)
+			return
+		}
+		writer := execstream.NewWriter(conn, 0)
+		_ = writer.WriteData(execstream.FrameStdout, frame.Payload)
+		_ = writer.WriteJSON(execstream.FrameExit, api.ExecExit{ExitCode: 2})
+	}))
+	defer leader.Close()
+	follower := httptest.NewUnstartedServer(newControlPlaneProxy(
+		fixedElector{leader: &election.Leader{Address: leader.URL}},
+		"https://follower.example:8128",
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("follower executed request locally") }),
+		http.DefaultTransport,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	))
+	// The API server's read timeout must not end a stream that outlives it.
+	follower.Config.ReadTimeout = 200 * time.Millisecond
+	follower.Start()
+	defer follower.Close()
+
+	stream, err := client.NewNamespaceServerClient("operator-token", follower.URL, "team", nil).Exec(context.Background(), "alloc-1", api.ExecRequest{Command: []string{"cat"}, Stdin: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stream.Close() }()
+	time.Sleep(3 * follower.Config.ReadTimeout)
+	if _, err := stream.Write([]byte("through the follower")); err != nil {
+		t.Fatal(err)
+	}
+	var stdout strings.Builder
+	if code, err := stream.Wait(&stdout, io.Discard); err != nil || code != 2 || stdout.String() != "through the follower" {
+		t.Fatalf("wait = %d, %v; stdout %q", code, err, stdout.String())
 	}
 }
 
@@ -359,7 +413,7 @@ func TestControlPlaneExecutesLocallyOnlyWhenLeaderIsActive(t *testing.T) {
 
 	request := func() *httptest.ResponseRecorder {
 		recorder := httptest.NewRecorder()
-		proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/jobs", strings.NewReader("{}")))
+		proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/namespaces/default/jobs", strings.NewReader("{}")))
 		return recorder
 	}
 	if got := request().Code; got != http.StatusServiceUnavailable {
@@ -383,9 +437,9 @@ func TestEnrollmentCredentialIsNotAdministratorCredential(t *testing.T) {
 	e.Use(leaderAuthMiddleware(auth.NewAdministratorAuthenticator(), func() (ed25519.PublicKey, uint64, bool) {
 		return publicKey, 1, true
 	}, "enroll-secret", nil, nil))
-	e.POST("/v1/jobs", func(c *echo.Context) error { return c.NoContent(http.StatusNoContent) })
+	e.POST("/v1/namespaces/default/jobs", func(c *echo.Context) error { return c.NoContent(http.StatusNoContent) })
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/jobs", nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/namespaces/default/jobs", nil)
 	req.Header.Set("Authorization", "Bearer enroll-secret")
 	rec := httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
@@ -393,7 +447,7 @@ func TestEnrollmentCredentialIsNotAdministratorCredential(t *testing.T) {
 		t.Fatalf("enrollment credential status = %d, want %d", rec.Code, http.StatusUnauthorized)
 	}
 
-	req = httptest.NewRequest(http.MethodPost, "/v1/jobs", nil)
+	req = httptest.NewRequest(http.MethodPost, "/v1/namespaces/default/jobs", nil)
 	req.Header.Set("Authorization", "Bearer former-admin-secret")
 	rec = httptest.NewRecorder()
 	e.ServeHTTP(rec, req)

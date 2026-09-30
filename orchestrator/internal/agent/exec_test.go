@@ -1,11 +1,11 @@
 package agent
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,78 +13,118 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/client"
+	"github.com/overfold/trellis/internal/execstream"
 	"github.com/overfold/trellis/internal/runtime"
 )
 
-type execTestTerminal struct {
-	mu       sync.Mutex
-	exited   bool
-	closed   int
-	closeErr error
+// execTestProcess copies stdin to stdout and exits with exitCode when stdin
+// ends. Without stdin it runs until killed. Resizes are recorded.
+type execTestProcess struct {
+	options  runtime.ExecOptions
+	exitCode int
+	done     chan struct{}
+	once     sync.Once
+	code     int
+
+	mu      sync.Mutex
+	kills   int
+	killErr error
+	resizes []api.ExecResize
 }
 
-func (t *execTestTerminal) Write(p []byte) (int, error) { return len(p), nil }
-func (t *execTestTerminal) Read(int64) ([]byte, int64, bool, *int, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return nil, 0, t.exited, nil, nil
-}
-func (t *execTestTerminal) Resize(context.Context, uint32, uint32) error { return nil }
-func (t *execTestTerminal) Close(context.Context) error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.closed++
-	if t.closeErr != nil {
-		return t.closeErr
+func (p *execTestProcess) run() {
+	if p.options.Stdin == nil {
+		return
 	}
-	t.exited = true
+	_, _ = io.Copy(p.options.Stdout, p.options.Stdin)
+	p.exit(p.exitCode)
+}
+
+func (p *execTestProcess) exit(code int) {
+	p.once.Do(func() {
+		p.code = code
+		close(p.done)
+	})
+}
+
+func (p *execTestProcess) Done() <-chan struct{} { return p.done }
+
+func (p *execTestProcess) ExitCode() (int, error) {
+	<-p.done
+	return p.code, nil
+}
+
+func (p *execTestProcess) Resize(_ context.Context, cols, rows uint32) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.resizes = append(p.resizes, api.ExecResize{Cols: cols, Rows: rows})
 	return nil
 }
 
-func (t *execTestTerminal) closeCount() int {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.closed
+func (p *execTestProcess) Kill(context.Context) error {
+	p.mu.Lock()
+	p.kills++
+	err := p.killErr
+	p.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	p.exit(137)
+	return nil
+}
+
+func (p *execTestProcess) setKillErr(err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.killErr = err
+}
+
+func (p *execTestProcess) killCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.kills
+}
+
+func (p *execTestProcess) resized() []api.ExecResize {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]api.ExecResize(nil), p.resizes...)
 }
 
 type execTestRuntime struct {
 	*failingStopRuntime
-	mu          sync.Mutex
-	execTargets []string
-	metricIDs   []string
-	terminals   map[string][]*execTestTerminal
-	terminalErr error
-	onTerminal  func(containerID string)
+	mu        sync.Mutex
+	metricIDs []string
+	processes map[string][]*execTestProcess
+	startErr  error
+	exitCode  int
+	onStart   func(containerID string)
 }
 
 func newExecTestRuntime() *execTestRuntime {
 	return &execTestRuntime{
 		failingStopRuntime: &failingStopRuntime{reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning}},
-		terminals:          map[string][]*execTestTerminal{},
+		processes:          map[string][]*execTestProcess{},
 	}
 }
 
-func (r *execTestRuntime) ExecOutput(_ context.Context, containerID string, _ []string) ([]byte, []byte, int, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.execTargets = append(r.execTargets, containerID)
-	return []byte(containerID), nil, 0, nil
-}
-
-func (r *execTestRuntime) StartTerminal(_ context.Context, containerID string, _ []string, _ string, _, _ uint32) (runtime.TerminalSession, error) {
-	if r.onTerminal != nil {
-		r.onTerminal(containerID)
+func (r *execTestRuntime) StartExec(_ context.Context, containerID string, options runtime.ExecOptions) (runtime.ExecProcess, error) {
+	if r.onStart != nil {
+		r.onStart(containerID)
 	}
-	if r.terminalErr != nil {
-		return nil, r.terminalErr
+	if r.startErr != nil {
+		return nil, r.startErr
 	}
-	terminal := &execTestTerminal{}
 	r.mu.Lock()
-	r.terminals[containerID] = append(r.terminals[containerID], terminal)
+	process := &execTestProcess{options: options, exitCode: r.exitCode, done: make(chan struct{})}
+	r.processes[containerID] = append(r.processes[containerID], process)
 	r.mu.Unlock()
-	return terminal, nil
+	go process.run()
+	return process, nil
 }
 
 func (r *execTestRuntime) Metrics(_ context.Context, containerID string) (*runtime.ContainerMetrics, error) {
@@ -94,11 +134,31 @@ func (r *execTestRuntime) Metrics(_ context.Context, containerID string) (*runti
 	return &runtime.ContainerMetrics{}, nil
 }
 
-func (r *execTestRuntime) terminal(containerID string) *execTestTerminal {
+func (r *execTestRuntime) process(t *testing.T, containerID string) *execTestProcess {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		r.mu.Lock()
+		processes := r.processes[containerID]
+		r.mu.Unlock()
+		if len(processes) > 0 {
+			return processes[len(processes)-1]
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no exec process started in %s", containerID)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func (r *execTestRuntime) processCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	terminals := r.terminals[containerID]
-	return terminals[len(terminals)-1]
+	count := 0
+	for _, processes := range r.processes {
+		count += len(processes)
+	}
+	return count
 }
 
 func addExecTestTask(agent *Agent, id, taskName string, generation uint64, status string) *Allocation {
@@ -112,6 +172,103 @@ func addExecTestAllocation(agent *Agent, allocID string) {
 	agent.allocations[id] = &Allocation{ID: id, ContainerID: id, AllocationID: allocID, Generation: 1, TaskName: "web", Status: "running"}
 }
 
+func execTestRequest(task string, command ...string) api.AgentExecRequest {
+	return api.AgentExecRequest{ExecRequest: api.ExecRequest{Task: task, Command: command}, Epoch: 1}
+}
+
+// shortenExecTiming makes an agent's stream checks fast. It must be called
+// before the agent serves a stream.
+func shortenExecTiming(agent *Agent) {
+	agent.execTiming.checkInterval = 10 * time.Millisecond
+	agent.execTiming.killWait = 10 * time.Millisecond
+	agent.execTiming.killRetryInterval = 10 * time.Millisecond
+}
+
+// execTestStream is the leader's side of an agent exec stream.
+type execTestStream struct {
+	t      *testing.T
+	conn   io.ReadWriteCloser
+	reader *execstream.Reader
+	writer *execstream.Writer
+}
+
+func serveExecTestAgent(t *testing.T, agent *Agent) string {
+	t.Helper()
+	e := echo.New()
+	NewHandler(agent).Register(e)
+	server := httptest.NewServer(e)
+	t.Cleanup(server.Close)
+	return server.URL
+}
+
+func openExecTestStream(t *testing.T, address, allocID string, request api.AgentExecRequest) *execTestStream {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	conn, err := client.NewAgentClient("", nil).Exec(ctx, uuid.Nil, address, allocID, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return &execTestStream{t: t, conn: conn, reader: execstream.NewReader(conn), writer: execstream.NewWriter(conn, 0)}
+}
+
+func (s *execTestStream) next() execstream.Frame {
+	s.t.Helper()
+	type result struct {
+		frame execstream.Frame
+		err   error
+	}
+	results := make(chan result, 1)
+	go func() {
+		frame, err := s.reader.Next()
+		frame.Payload = append([]byte(nil), frame.Payload...)
+		results <- result{frame: frame, err: err}
+	}()
+	select {
+	case result := <-results:
+		if result.err != nil {
+			s.t.Fatalf("read frame: %v", result.err)
+		}
+		return result.frame
+	case <-time.After(5 * time.Second):
+		s.t.Fatal("timed out waiting for a frame")
+		return execstream.Frame{}
+	}
+}
+
+func (s *execTestStream) expectError(want string) {
+	s.t.Helper()
+	frame := s.next()
+	var streamErr api.ExecStreamError
+	if frame.Type != execstream.FrameError || json.Unmarshal(frame.Payload, &streamErr) != nil || !strings.Contains(streamErr.Message, want) {
+		s.t.Fatalf("frame = %d %q, want error containing %q", frame.Type, frame.Payload, want)
+	}
+}
+
+func waitForExec(t *testing.T, what string, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !condition() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func (a *Agent) execSlots() int {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.execSessionCount
+}
+
+func (a *Agent) execSessionTotal() int {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return len(a.execSessions)
+}
+
 func TestExecTargetsOnlyRunningVerifiedCurrentGenerationTask(t *testing.T) {
 	rt := newExecTestRuntime()
 	agent := newOperationTestAgent(t, rt)
@@ -123,24 +280,22 @@ func TestExecTargetsOnlyRunningVerifiedCurrentGenerationTask(t *testing.T) {
 	addExecTestTask(agent, "allocation-g2-proxy", "proxy", 2, "stopping")
 
 	for i := 0; i < 20; i++ {
-		result, err := agent.ExecAllocation(context.Background(), "allocation", "", []string{"true"})
+		reservation, err := agent.ReserveExec(context.Background(), "allocation", execTestRequest("", "true"))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if result.Stdout != "allocation-g2-web" {
-			t.Fatalf("exec target = %q, want current-generation running task", result.Stdout)
+		if reservation.target.ID != "allocation-g2-web" {
+			t.Fatalf("exec target = %q, want current-generation running task", reservation.target.ID)
 		}
+		agent.ReleaseExec(reservation)
 	}
 	for _, task := range []string{"worker", "sidecar", "proxy", "missing"} {
-		if _, err := agent.ExecAllocation(context.Background(), "allocation", task, []string{"true"}); !errors.Is(err, ErrAllocationNotFound) {
+		if _, err := agent.ReserveExec(context.Background(), "allocation", execTestRequest(task, "true")); !errors.Is(err, ErrAllocationNotFound) {
 			t.Fatalf("exec task %s error = %v, want not found", task, err)
 		}
-		if _, err := agent.CreateExecSession(context.Background(), "allocation", task, []string{"sh"}, "", 80, 24); !errors.Is(err, ErrAllocationNotFound) {
-			t.Fatalf("session task %s error = %v, want not found", task, err)
-		}
 	}
-	if len(rt.terminals) != 0 {
-		t.Fatalf("terminals started in ineligible containers: %v", rt.terminals)
+	if agent.execSlots() != 0 {
+		t.Fatalf("rejected reservations hold %d slots", agent.execSlots())
 	}
 
 	metrics, err := agent.AllocationMetrics(context.Background(), "allocation")
@@ -158,19 +313,17 @@ func TestExecRequiresTaskWhenSeveralTasksRun(t *testing.T) {
 	addExecTestTask(agent, "allocation-g1-web", "web", 1, "running")
 	addExecTestTask(agent, "allocation-g1-worker", "worker", 1, "running")
 
-	if _, err := agent.ExecAllocation(context.Background(), "allocation", "", []string{"true"}); !errors.Is(err, ErrExecTaskRequired) {
+	if _, err := agent.ReserveExec(context.Background(), "allocation", execTestRequest("", "true")); !errors.Is(err, ErrExecTaskRequired) {
 		t.Fatalf("exec error = %v, want task required", err)
 	}
-	if _, err := agent.CreateExecSession(context.Background(), "allocation", "", []string{"sh"}, "", 80, 24); !errors.Is(err, ErrExecTaskRequired) {
-		t.Fatalf("session error = %v, want task required", err)
-	}
-	result, err := agent.ExecAllocation(context.Background(), "allocation", "worker", []string{"true"})
+	reservation, err := agent.ReserveExec(context.Background(), "allocation", execTestRequest("worker", "true"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Stdout != "allocation-g1-worker" {
-		t.Fatalf("exec target = %q, want worker", result.Stdout)
+	if reservation.target.ID != "allocation-g1-worker" {
+		t.Fatalf("exec target = %q, want worker", reservation.target.ID)
 	}
+	agent.ReleaseExec(reservation)
 
 	metrics, err := agent.AllocationMetrics(context.Background(), "allocation")
 	if err != nil {
@@ -180,41 +333,204 @@ func TestExecRequiresTaskWhenSeveralTasksRun(t *testing.T) {
 		t.Fatalf("metrics = %#v, want web and worker in order", metrics)
 	}
 
-	e := echo.New()
-	NewHandler(agent).Register(e)
-	body, err := json.Marshal(api.AgentExecRequest{Command: []string{"true"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	request := httptest.NewRequest(http.MethodPost, "/v1/allocations/allocation/exec", bytes.NewReader(body))
-	request.Header.Set("Content-Type", "application/json")
-	recorder := httptest.NewRecorder()
-	e.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+	_, err = client.NewAgentClient("", nil).Exec(context.Background(), uuid.Nil, serveExecTestAgent(t, agent), "allocation", execTestRequest("", "true"))
+	var httpErr *client.HTTPError
+	if !errors.As(err, &httpErr) || httpErr.Status != http.StatusBadRequest {
+		t.Fatalf("exec error = %v, want 400", err)
 	}
 }
 
-func TestStopClosesOnlyStoppedTaskSessionsEvenWhenStopFails(t *testing.T) {
+func TestExecRequestErrors(t *testing.T) {
+	rt := newExecTestRuntime()
+	agent := newOperationTestAgent(t, rt)
+	addExecTestTask(agent, "allocation-g1-web", "web", 1, "running")
+	if err := agent.AcceptEpoch(5); err != nil {
+		t.Fatal(err)
+	}
+	e := echo.New()
+	NewHandler(agent).Register(e)
+
+	tests := []struct {
+		name    string
+		target  string
+		upgrade bool
+		want    int
+	}{
+		{name: "not an upgrade", target: "/v1/allocations/allocation/exec?command=sh&epoch=5", want: http.StatusBadRequest},
+		{name: "missing command", target: "/v1/allocations/allocation/exec?epoch=5", upgrade: true, want: http.StatusBadRequest},
+		{name: "missing epoch", target: "/v1/allocations/allocation/exec?command=sh", upgrade: true, want: http.StatusBadRequest},
+		{name: "terminal size without tty", target: "/v1/allocations/allocation/exec?command=sh&epoch=5&cols=80", upgrade: true, want: http.StatusBadRequest},
+		{name: "oversized terminal", target: "/v1/allocations/allocation/exec?command=sh&epoch=5&tty=true&cols=1001", upgrade: true, want: http.StatusBadRequest},
+		{name: "stale epoch", target: "/v1/allocations/allocation/exec?command=sh&epoch=4", upgrade: true, want: http.StatusConflict},
+		{name: "unknown allocation", target: "/v1/allocations/missing/exec?command=sh&epoch=5", upgrade: true, want: http.StatusNotFound},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, tt.target, nil)
+			if tt.upgrade {
+				execstream.SetUpgradeHeaders(request)
+			}
+			recorder := httptest.NewRecorder()
+			e.ServeHTTP(recorder, request)
+			if recorder.Code != tt.want {
+				t.Fatalf("status = %d, want %d; body = %s", recorder.Code, tt.want, recorder.Body.String())
+			}
+		})
+	}
+	if rt.processCount() != 0 || agent.execSlots() != 0 {
+		t.Fatalf("rejected requests started %d processes and hold %d slots", rt.processCount(), agent.execSlots())
+	}
+}
+
+func TestExecStreamCarriesInputResizeOutputAndExitStatus(t *testing.T) {
+	rt := newExecTestRuntime()
+	rt.exitCode = 3
+	agent := newOperationTestAgent(t, rt)
+	addExecTestTask(agent, "allocation-g1-web", "web", 1, "running")
+	request := execTestRequest("web", "sh")
+	request.TTY, request.Stdin, request.Term, request.Cols, request.Rows = true, true, "xterm", 100, 40
+	stream := openExecTestStream(t, serveExecTestAgent(t, agent), "allocation", request)
+
+	process := rt.process(t, "allocation-g1-web")
+	if got := process.options; !got.TTY || got.Term != "xterm" || got.Cols != 100 || got.Rows != 40 || strings.Join(got.Command, " ") != "sh" {
+		t.Fatalf("process options = %+v", got)
+	}
+	if err := stream.writer.WriteData(execstream.FrameStdin, []byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	if frame := stream.next(); frame.Type != execstream.FrameStdout || string(frame.Payload) != "hello" {
+		t.Fatalf("frame = %d %q, want stdout echo", frame.Type, frame.Payload)
+	}
+	if err := stream.writer.WriteJSON(execstream.FrameResize, api.ExecResize{Cols: 120, Rows: 50}); err != nil {
+		t.Fatal(err)
+	}
+	waitForExec(t, "resize", func() bool { return len(process.resized()) == 1 })
+	if got := process.resized()[0]; got.Cols != 120 || got.Rows != 50 {
+		t.Fatalf("resize = %+v", got)
+	}
+	if err := stream.writer.WriteFrame(execstream.FrameStdinClose, nil); err != nil {
+		t.Fatal(err)
+	}
+	frame := stream.next()
+	var exit api.ExecExit
+	if frame.Type != execstream.FrameExit || json.Unmarshal(frame.Payload, &exit) != nil || exit.ExitCode != 3 {
+		t.Fatalf("frame = %d %q, want exit status 3", frame.Type, frame.Payload)
+	}
+	waitForExec(t, "session release", func() bool { return agent.execSlots() == 0 && agent.execSessionTotal() == 0 })
+	if process.killCount() != 0 {
+		t.Fatal("exited process was killed")
+	}
+}
+
+func TestExecClientDisconnectKillsProcess(t *testing.T) {
+	rt := newExecTestRuntime()
+	agent := newOperationTestAgent(t, rt)
+	addExecTestTask(agent, "allocation-g1-web", "web", 1, "running")
+	request := execTestRequest("web", "sh")
+	request.Stdin = true
+	stream := openExecTestStream(t, serveExecTestAgent(t, agent), "allocation", request)
+	process := rt.process(t, "allocation-g1-web")
+	waitForExec(t, "session registration", func() bool { return agent.execSessionTotal() == 1 })
+
+	_ = stream.conn.Close()
+	waitForExec(t, "process kill", func() bool { return process.killCount() == 1 })
+	waitForExec(t, "session release", func() bool { return agent.execSlots() == 0 && agent.execSessionTotal() == 0 })
+}
+
+func TestExecStreamRejectsInvalidClientFrames(t *testing.T) {
+	tests := []struct {
+		name  string
+		stdin bool
+		tty   bool
+		send  func(*execstream.Writer) error
+		want  string
+	}{
+		{name: "input without stdin", send: func(w *execstream.Writer) error { return w.WriteData(execstream.FrameStdin, []byte("x")) }, want: "without an open stdin"},
+		{name: "resize without tty", stdin: true, send: func(w *execstream.Writer) error {
+			return w.WriteJSON(execstream.FrameResize, api.ExecResize{Cols: 1, Rows: 1})
+		}, want: "without a tty"},
+		{name: "zero resize", stdin: true, tty: true, send: func(w *execstream.Writer) error {
+			return w.WriteJSON(execstream.FrameResize, api.ExecResize{})
+		}, want: "terminal dimensions"},
+		{name: "output from client", stdin: true, send: func(w *execstream.Writer) error { return w.WriteData(execstream.FrameStdout, []byte("x")) }, want: "unexpected frame type"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rt := newExecTestRuntime()
+			agent := newOperationTestAgent(t, rt)
+			addExecTestTask(agent, "allocation-g1-web", "web", 1, "running")
+			request := execTestRequest("web", "sh")
+			request.Stdin, request.TTY = tt.stdin, tt.tty
+			stream := openExecTestStream(t, serveExecTestAgent(t, agent), "allocation", request)
+			process := rt.process(t, "allocation-g1-web")
+			waitForExec(t, "session registration", func() bool { return agent.execSessionTotal() == 1 })
+			if err := tt.send(stream.writer); err != nil {
+				t.Fatal(err)
+			}
+			stream.expectError(tt.want)
+			if process.killCount() != 1 {
+				t.Fatalf("kills = %d, want 1", process.killCount())
+			}
+		})
+	}
+}
+
+func TestExecStreamEndsOnIdleLifetimeAndNewerEpoch(t *testing.T) {
+	tests := []struct {
+		name   string
+		timing func(*execTiming)
+		fence  bool
+		want   string
+	}{
+		{name: "idle", timing: func(timing *execTiming) { timing.idleTimeout = 50 * time.Millisecond }, want: "without activity"},
+		{name: "lifetime", timing: func(timing *execTiming) { timing.maxLifetime = 50 * time.Millisecond }, want: "maximum lifetime"},
+		{name: "newer epoch", fence: true, want: "leadership changed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rt := newExecTestRuntime()
+			agent := newOperationTestAgent(t, rt)
+			shortenExecTiming(agent)
+			if tt.timing != nil {
+				tt.timing(&agent.execTiming)
+			}
+			addExecTestTask(agent, "allocation-g1-web", "web", 1, "running")
+			stream := openExecTestStream(t, serveExecTestAgent(t, agent), "allocation", execTestRequest("web", "sh"))
+			process := rt.process(t, "allocation-g1-web")
+			if tt.fence {
+				if err := agent.AcceptEpoch(2); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stream.expectError(tt.want)
+			if process.killCount() != 1 {
+				t.Fatalf("kills = %d, want 1", process.killCount())
+			}
+			waitForExec(t, "session release", func() bool { return agent.execSlots() == 0 })
+		})
+	}
+}
+
+func TestStopEndsOnlyStoppedTaskSessionsEvenWhenStopFails(t *testing.T) {
 	rt := newExecTestRuntime()
 	rt.stopErr = errors.New("stop failed")
 	agent := newOperationTestAgent(t, rt)
 	addExecTestTask(agent, "allocation-g1-web", "web", 1, "running")
 	addExecTestTask(agent, "allocation-g1-worker", "worker", 1, "running")
-	for _, task := range []string{"web", "worker"} {
-		if _, err := agent.CreateExecSession(context.Background(), "allocation", task, []string{"sh"}, "", 80, 24); err != nil {
-			t.Fatal(err)
-		}
-	}
+	address := serveExecTestAgent(t, agent)
+	web := openExecTestStream(t, address, "allocation", execTestRequest("web", "sh"))
+	openExecTestStream(t, address, "allocation", execTestRequest("worker", "sh"))
+	waitForExec(t, "session registration", func() bool { return agent.execSessionTotal() == 2 })
 
 	if err := agent.StopAllocation(context.Background(), "allocation-g1-web"); !errors.Is(err, rt.stopErr) {
 		t.Fatalf("stop error = %v, want %v", err, rt.stopErr)
 	}
-	if rt.terminal("allocation-g1-web").closeCount() != 1 {
-		t.Fatal("stopped task session was not closed after the runtime stop failed")
+	if rt.process(t, "allocation-g1-web").killCount() != 1 {
+		t.Fatal("stopped task session was not killed after the runtime stop failed")
 	}
-	if rt.terminal("allocation-g1-worker").closeCount() != 0 {
-		t.Fatal("stopping one task closed a sibling task session")
+	web.expectError("task stopped")
+	if rt.process(t, "allocation-g1-worker").killCount() != 0 {
+		t.Fatal("stopping one task killed a sibling task session")
 	}
 	agent.mu.RLock()
 	defer agent.mu.RUnlock()
@@ -228,87 +544,22 @@ func TestStopClosesOnlyStoppedTaskSessionsEvenWhenStopFails(t *testing.T) {
 	}
 }
 
-func TestExecSessionCreatedDuringStopIsClosed(t *testing.T) {
+func TestExecSessionStartedDuringStopIsKilled(t *testing.T) {
 	rt := newExecTestRuntime()
 	agent := newOperationTestAgent(t, rt)
 	addExecTestTask(agent, "allocation-g1-web", "web", 1, "running")
-	rt.onTerminal = func(string) {
+	rt.onStart = func(string) {
 		if err := agent.markAllocationStopping("allocation-g1-web"); err != nil {
 			t.Error(err)
 		}
 	}
 
-	if _, err := agent.CreateExecSession(context.Background(), "allocation", "web", []string{"sh"}, "", 80, 24); !errors.Is(err, ErrAllocationNotFound) {
-		t.Fatalf("session error = %v, want not found", err)
+	stream := openExecTestStream(t, serveExecTestAgent(t, agent), "allocation", execTestRequest("web", "sh"))
+	stream.expectError("task stopped")
+	if rt.process(t, "allocation-g1-web").killCount() != 1 {
+		t.Fatal("process started during stop was not killed")
 	}
-	if rt.terminal("allocation-g1-web").closeCount() != 1 {
-		t.Fatal("terminal started during stop was not closed")
-	}
-	if len(agent.execSessions) != 0 {
-		t.Fatalf("sessions = %d, want none", len(agent.execSessions))
-	}
-}
-
-func TestReapExecSessionsReleasesExitedAndIdleSessions(t *testing.T) {
-	rt := newExecTestRuntime()
-	agent := newOperationTestAgent(t, rt)
-	addExecTestTask(agent, "allocation-g1-web", "web", 1, "running")
-	ids := map[string]string{}
-	for _, name := range []string{"exited", "idle", "active"} {
-		response, err := agent.CreateExecSession(context.Background(), "allocation", "web", []string{"sh"}, "", 80, 24)
-		if err != nil {
-			t.Fatal(err)
-		}
-		ids[name] = response.ID
-	}
-	exited := agent.execSessions[ids["exited"]].Terminal.(*execTestTerminal)
-	exited.mu.Lock()
-	exited.exited = true
-	exited.mu.Unlock()
-
-	start := time.Now()
-	agent.reapExecSessions(context.Background(), start)
-	if len(agent.execSessions) != 3 {
-		t.Fatalf("sessions after first reap = %d, want 3", len(agent.execSessions))
-	}
-	if _, err := agent.ReadExecSession("allocation", ids["exited"], 0); err != nil {
-		t.Fatalf("exited session output unavailable during retention: %v", err)
-	}
-
-	later := start.Add(execSessionIdleTimeout)
-	agent.execSessions[ids["active"]].lastActive.Store(execClockNanos(later.Add(-time.Minute)))
-	agent.reapExecSessions(context.Background(), later)
-	if len(agent.execSessions) != 1 || agent.execSessions[ids["active"]] == nil {
-		t.Fatalf("sessions after reap = %v, want only the active session", agent.execSessions)
-	}
-	idle := rt.terminals["allocation-g1-web"][1]
-	if idle.closeCount() != 1 {
-		t.Fatal("idle session was not terminated")
-	}
-	if _, err := agent.ReadExecSession("allocation", ids["exited"], 0); !errors.Is(err, ErrExecSessionNotFound) {
-		t.Fatalf("reaped session read error = %v, want not found", err)
-	}
-}
-
-func TestReapExecSessionsEnforcesMaximumLifetimeDespiteActivity(t *testing.T) {
-	rt := newExecTestRuntime()
-	agent := newOperationTestAgent(t, rt)
-	addExecTestTask(agent, "allocation-g1-web", "web", 1, "running")
-	response, err := agent.CreateExecSession(context.Background(), "allocation", "web", []string{"sh"}, "", 80, 24)
-	if err != nil {
-		t.Fatal(err)
-	}
-	session := agent.execSessions[response.ID]
-	expires := session.createdAt.Add(execSessionMaxLifetime)
-	session.lastActive.Store(execClockNanos(expires))
-
-	agent.reapExecSessions(context.Background(), expires)
-	if len(agent.execSessions) != 0 || agent.execSessionCount != 0 {
-		t.Fatalf("sessions after maximum lifetime = %d tracked, %d reserved; want none", len(agent.execSessions), agent.execSessionCount)
-	}
-	if rt.terminal("allocation-g1-web").closeCount() != 1 {
-		t.Fatal("maximum-lifetime session was not terminated")
-	}
+	waitForExec(t, "session release", func() bool { return agent.execSlots() == 0 && agent.execSessionTotal() == 0 })
 }
 
 func TestExecSessionPerAllocationLimitReturnsTooManyRequests(t *testing.T) {
@@ -316,129 +567,102 @@ func TestExecSessionPerAllocationLimitReturnsTooManyRequests(t *testing.T) {
 	agent := newOperationTestAgent(t, rt)
 	addExecTestTask(agent, "allocation-g1-web", "web", 1, "running")
 	for i := 0; i < execSessionPerAllocationLimit; i++ {
-		if _, err := agent.CreateExecSession(context.Background(), "allocation", "web", []string{"sh"}, "", 80, 24); err != nil {
-			t.Fatalf("create session %d: %v", i, err)
+		if _, err := agent.ReserveExec(context.Background(), "allocation", execTestRequest("web", "sh")); err != nil {
+			t.Fatalf("reserve session %d: %v", i, err)
 		}
 	}
 
-	e := echo.New()
-	NewHandler(agent).Register(e)
-	body := bytes.NewBufferString(`{"task":"web","command":["sh"]}`)
-	request := httptest.NewRequest(http.MethodPost, "/v1/allocations/allocation/exec/sessions", body)
-	request.Header.Set("Content-Type", "application/json")
-	recorder := httptest.NewRecorder()
-	e.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusTooManyRequests {
-		t.Fatalf("status = %d, want 429; body = %s", recorder.Code, recorder.Body.String())
+	_, err := client.NewAgentClient("", nil).Exec(context.Background(), uuid.Nil, serveExecTestAgent(t, agent), "allocation", execTestRequest("web", "sh"))
+	var httpErr *client.HTTPError
+	if !errors.As(err, &httpErr) || httpErr.Status != http.StatusTooManyRequests {
+		t.Fatalf("exec error = %v, want 429", err)
 	}
-	if !strings.Contains(recorder.Body.String(), "allocation allocation has 8 interactive sessions (maximum 8)") {
-		t.Fatalf("overload response is not actionable: %s", recorder.Body.String())
+	if !strings.Contains(httpErr.Message(), "allocation allocation has 8 exec sessions (maximum 8)") {
+		t.Fatalf("overload response is not actionable: %s", httpErr.Message())
 	}
 }
 
-func TestFailedExecSessionStartReleasesCapacity(t *testing.T) {
+func TestFailedExecStartReleasesCapacity(t *testing.T) {
 	rt := newExecTestRuntime()
-	rt.terminalErr = errors.New("runtime refused terminal")
+	rt.startErr = errors.New("executable file not found")
 	agent := newOperationTestAgent(t, rt)
 	addExecTestTask(agent, "allocation-g1-web", "web", 1, "running")
 
-	if _, err := agent.CreateExecSession(context.Background(), "allocation", "web", []string{"sh"}, "", 80, 24); !errors.Is(err, rt.terminalErr) {
-		t.Fatalf("create error = %v, want runtime failure", err)
-	}
-	if agent.execSessionCount != 0 || len(agent.execSessionsByAllocation) != 0 {
-		t.Fatalf("failed start left %d reserved with counts %v", agent.execSessionCount, agent.execSessionsByAllocation)
-	}
+	stream := openExecTestStream(t, serveExecTestAgent(t, agent), "allocation", execTestRequest("web", "missing"))
+	stream.expectError("start exec in task web: executable file not found")
+	waitForExec(t, "slot release", func() bool { return agent.execSlots() == 0 && len(agent.execSessionsByAllocation) == 0 })
 }
 
-func TestExecSessionGlobalLimitIsAtomicAndFailedClosesRetainCapacity(t *testing.T) {
+func TestExecSessionGlobalLimitIsAtomicAndFailedKillsRetainCapacity(t *testing.T) {
 	rt := newExecTestRuntime()
 	agent := newOperationTestAgent(t, rt)
+	shortenExecTiming(agent)
 	for i := 0; i <= execSessionGlobalLimit/execSessionPerAllocationLimit; i++ {
 		addExecTestAllocation(agent, fmt.Sprintf("allocation-%d", i))
 	}
 
-	type result struct {
-		allocation string
-		response   *api.ExecSessionResponse
-		err        error
-	}
-	results := make(chan result, execSessionGlobalLimit+1)
+	results := make(chan error, execSessionGlobalLimit+1)
+	reservations := make(chan *ExecReservation, execSessionGlobalLimit+1)
 	var wg sync.WaitGroup
 	for i := 0; i < execSessionGlobalLimit+1; i++ {
 		allocation := fmt.Sprintf("allocation-%d", i/execSessionPerAllocationLimit)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			response, err := agent.CreateExecSession(context.Background(), allocation, "web", []string{"sh"}, "", 80, 24)
-			results <- result{allocation: allocation, response: response, err: err}
-		}()
+		wg.Go(func() {
+			reservation, err := agent.ReserveExec(context.Background(), allocation, execTestRequest("web", "sh"))
+			if err == nil {
+				reservations <- reservation
+			}
+			results <- err
+		})
 	}
 	wg.Wait()
 	close(results)
-
-	created := make([]result, 0, execSessionGlobalLimit)
+	close(reservations)
 	rejected := 0
-	for result := range results {
-		if result.err == nil {
-			created = append(created, result)
+	for err := range results {
+		if err == nil {
 			continue
 		}
-		if !errors.Is(result.err, ErrExecSessionLimit) || !strings.Contains(result.err.Error(), "node has 64 interactive sessions (maximum 64)") {
-			t.Fatalf("unexpected concurrent create error: %v", result.err)
+		if !errors.Is(err, ErrExecSessionLimit) || !strings.Contains(err.Error(), "node has 64 exec sessions (maximum 64)") {
+			t.Fatalf("unexpected concurrent reserve error: %v", err)
 		}
 		rejected++
 	}
-	if len(created) != execSessionGlobalLimit || rejected != 1 || agent.execSessionCount != execSessionGlobalLimit {
-		t.Fatalf("created = %d, rejected = %d, reserved = %d; want 64, 1, 64", len(created), rejected, agent.execSessionCount)
+	if rejected != 1 || agent.execSlots() != execSessionGlobalLimit {
+		t.Fatalf("rejected = %d, reserved = %d; want 1, 64", rejected, agent.execSlots())
+	}
+	for reservation := range reservations {
+		agent.ReleaseExec(reservation)
 	}
 
-	for _, session := range agent.execSessions {
-		terminal := session.Terminal.(*execTestTerminal)
-		terminal.mu.Lock()
-		terminal.closeErr = errors.New("persistent kill failure")
-		terminal.mu.Unlock()
+	// A process that survives its kill keeps its slot until it exits.
+	address := serveExecTestAgent(t, agent)
+	stream := openExecTestStream(t, address, "allocation-0", api.AgentExecRequest{ExecRequest: api.ExecRequest{Command: []string{"sh"}}, Epoch: 1})
+	process := rt.process(t, "allocation-0-web")
+	process.setKillErr(errors.New("persistent kill failure"))
+	waitForExec(t, "session registration", func() bool { return agent.execSessionTotal() == 1 })
+	_ = stream.conn.Close()
+	waitForExec(t, "kill retries", func() bool { return process.killCount() >= 3 })
+	if agent.execSlots() != 1 {
+		t.Fatalf("reserved = %d after failed kills, want 1", agent.execSlots())
 	}
-	for _, session := range created {
-		if err := agent.CloseExecSession(context.Background(), session.allocation, session.response.ID); err == nil {
-			t.Fatal("close succeeded despite persistent kill failure")
-		}
-	}
-	if len(agent.execSessions) != execSessionGlobalLimit || agent.execSessionCount != execSessionGlobalLimit {
-		t.Fatalf("failed closes left %d tracked and %d reserved; want %d", len(agent.execSessions), agent.execSessionCount, execSessionGlobalLimit)
-	}
-	if _, err := agent.CreateExecSession(context.Background(), "allocation-8", "web", []string{"sh"}, "", 80, 24); !errors.Is(err, ErrExecSessionLimit) {
-		t.Fatalf("create after failed closes error = %v, want global limit", err)
-	}
-
-	for _, session := range agent.execSessions {
-		terminal := session.Terminal.(*execTestTerminal)
-		terminal.mu.Lock()
-		terminal.closeErr = nil
-		terminal.mu.Unlock()
-	}
-	agent.reapExecSessions(context.Background(), time.Now())
-	if len(agent.execSessions) != 0 || agent.execSessionCount != 0 || len(agent.execSessionsByAllocation) != 0 {
-		t.Fatalf("successful retry left %d tracked, %d reserved, counts %v", len(agent.execSessions), agent.execSessionCount, agent.execSessionsByAllocation)
-	}
+	process.setKillErr(nil)
+	waitForExec(t, "slot release", func() bool { return agent.execSlots() == 0 && len(agent.execSessionsByAllocation) == 0 })
 }
 
-func TestCloseExecSessionsTerminatesAndRefusesSessions(t *testing.T) {
+func TestCloseExecSessionsEndsAndRefusesSessions(t *testing.T) {
 	rt := newExecTestRuntime()
 	agent := newOperationTestAgent(t, rt)
 	addExecTestTask(agent, "allocation-g1-web", "web", 1, "running")
-	if _, err := agent.CreateExecSession(context.Background(), "allocation", "web", []string{"sh"}, "", 80, 24); err != nil {
-		t.Fatal(err)
-	}
+	stream := openExecTestStream(t, serveExecTestAgent(t, agent), "allocation", execTestRequest("web", "sh"))
+	waitForExec(t, "session registration", func() bool { return agent.execSessionTotal() == 1 })
 
 	agent.CloseExecSessions(context.Background())
-	if rt.terminal("allocation-g1-web").closeCount() != 1 || len(agent.execSessions) != 0 {
+	if rt.process(t, "allocation-g1-web").killCount() != 1 || agent.execSessionTotal() != 0 {
 		t.Fatal("shutdown left exec sessions running")
 	}
-	if _, err := agent.CreateExecSession(context.Background(), "allocation", "web", []string{"sh"}, "", 80, 24); !errors.Is(err, ErrAgentShuttingDown) {
+	stream.expectError("shutting down")
+	if _, err := agent.ReserveExec(context.Background(), "allocation", execTestRequest("web", "sh")); !errors.Is(err, ErrAgentShuttingDown) {
 		t.Fatalf("session after shutdown error = %v, want refusal", err)
-	}
-	if rt.terminal("allocation-g1-web").closeCount() != 1 || len(agent.execSessions) != 0 {
-		t.Fatal("session started during shutdown was not closed")
 	}
 }
 
@@ -448,14 +672,8 @@ func TestExecRejectsRecordWhoseContainerStopped(t *testing.T) {
 	agent := newOperationTestAgent(t, rt)
 	addExecTestTask(agent, "allocation-g1-web", "web", 1, "running")
 
-	if _, err := agent.ExecAllocation(context.Background(), "allocation", "web", []string{"true"}); !errors.Is(err, ErrAllocationNotFound) {
+	if _, err := agent.ReserveExec(context.Background(), "allocation", execTestRequest("web", "true")); !errors.Is(err, ErrAllocationNotFound) {
 		t.Fatalf("exec error = %v, want not found", err)
-	}
-	if _, err := agent.CreateExecSession(context.Background(), "allocation", "web", []string{"sh"}, "", 80, 24); !errors.Is(err, ErrAllocationNotFound) {
-		t.Fatalf("session error = %v, want not found", err)
-	}
-	if len(rt.execTargets) != 0 || len(rt.terminals) != 0 {
-		t.Fatal("exec reached a stopped container")
 	}
 }
 
@@ -483,79 +701,12 @@ func TestStoppingNewerGenerationDoesNotHideRunningGeneration(t *testing.T) {
 	addExecTestTask(agent, "allocation-g1-web", "web", 1, "running")
 	addExecTestTask(agent, "allocation-g2-web", "web", 2, "stopping")
 
-	result, err := agent.ExecAllocation(context.Background(), "allocation", "", []string{"true"})
+	reservation, err := agent.ReserveExec(context.Background(), "allocation", execTestRequest("", "true"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Stdout != "allocation-g1-web" {
-		t.Fatalf("exec target = %q, want running generation", result.Stdout)
-	}
-}
-
-func TestCancelledExecSessionCreateClosesTerminal(t *testing.T) {
-	rt := newExecTestRuntime()
-	agent := newOperationTestAgent(t, rt)
-	addExecTestTask(agent, "allocation-g1-web", "web", 1, "running")
-	ctx, cancel := context.WithCancel(context.Background())
-	rt.onTerminal = func(string) { cancel() }
-
-	if _, err := agent.CreateExecSession(ctx, "allocation", "web", []string{"sh"}, "", 80, 24); !errors.Is(err, context.Canceled) {
-		t.Fatalf("session error = %v, want cancellation", err)
-	}
-	if rt.terminal("allocation-g1-web").closeCount() != 1 || len(agent.execSessions) != 0 {
-		t.Fatal("abandoned session create kept its terminal")
-	}
-}
-
-func TestFailedExecSessionCloseStaysTrackedForRetry(t *testing.T) {
-	rt := newExecTestRuntime()
-	agent := newOperationTestAgent(t, rt)
-	addExecTestTask(agent, "allocation-g1-web", "web", 1, "running")
-	response, err := agent.CreateExecSession(context.Background(), "allocation", "web", []string{"sh"}, "", 80, 24)
-	if err != nil {
-		t.Fatal(err)
-	}
-	terminal := rt.terminal("allocation-g1-web")
-	terminal.mu.Lock()
-	terminal.closeErr = errors.New("kill failed")
-	terminal.mu.Unlock()
-
-	if err := agent.CloseExecSession(context.Background(), "allocation", response.ID); err == nil {
-		t.Fatal("close succeeded despite kill failure")
-	}
-	if agent.execSessions[response.ID] == nil {
-		t.Fatal("session whose kill failed is no longer tracked")
-	}
-	if _, err := agent.ReadExecSession("allocation", response.ID, 0); err != nil {
-		t.Fatal(err)
-	}
-	if err := agent.WriteExecSession("allocation", response.ID, []byte("ls\n")); !errors.Is(err, ErrExecSessionNotFound) {
-		t.Fatalf("write to closing session error = %v, want not found", err)
-	}
-
-	terminal.mu.Lock()
-	terminal.closeErr = nil
-	terminal.mu.Unlock()
-	agent.reapExecSessions(context.Background(), time.Now())
-	if agent.execSessions[response.ID] != nil || terminal.closeCount() != 2 {
-		t.Fatalf("reaper did not retry the failed close (closes = %d)", terminal.closeCount())
-	}
-}
-
-func TestFailedCloseAtShutdownIsNotTrackedAgain(t *testing.T) {
-	rt := newExecTestRuntime()
-	agent := newOperationTestAgent(t, rt)
-	addExecTestTask(agent, "allocation-g1-web", "web", 1, "running")
-	if _, err := agent.CreateExecSession(context.Background(), "allocation", "web", []string{"sh"}, "", 80, 24); err != nil {
-		t.Fatal(err)
-	}
-	terminal := rt.terminal("allocation-g1-web")
-	terminal.mu.Lock()
-	terminal.closeErr = errors.New("kill failed")
-	terminal.mu.Unlock()
-
-	agent.CloseExecSessions(context.Background())
-	if len(agent.execSessions) != 0 {
-		t.Fatal("session re-tracked after shutdown")
+	defer agent.ReleaseExec(reservation)
+	if reservation.target.ID != "allocation-g1-web" {
+		t.Fatalf("exec target = %q, want running generation", reservation.target.ID)
 	}
 }

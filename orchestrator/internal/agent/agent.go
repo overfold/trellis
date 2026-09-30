@@ -36,12 +36,14 @@ type Agent struct {
 	nodeID       uuid.UUID
 	allocations  map[string]*Allocation
 	execSessions map[string]*execSession
-	// execSessionCount includes sessions being started or closed as well as
-	// sessions in execSessions, so failed cleanup cannot free admission capacity.
+	// execSessionCount includes sessions being started and sessions whose
+	// process has not yet exited as well as sessions in execSessions, so a
+	// failed kill cannot free admission capacity.
 	execSessionCount         int
 	execSessionsByAllocation map[string]int
 	// execSessionsClosed refuses new exec sessions once the agent shuts down.
 	execSessionsClosed bool
+	execTiming         execTiming
 	healthProbe        string
 
 	log *slog.Logger
@@ -203,9 +205,7 @@ var (
 	ErrInvalidGeneration = errors.New("generation must be greater than zero")
 	// ErrExecutionConflict indicates conflicting allocation execution metadata.
 	ErrExecutionConflict = errors.New("allocation execution metadata conflict")
-	// ErrExecSessionNotFound indicates that an interactive exec session does not exist.
-	ErrExecSessionNotFound = errors.New("exec session not found")
-	// ErrExecSessionLimit indicates that interactive exec admission is full.
+	// ErrExecSessionLimit indicates that exec session admission is full.
 	ErrExecSessionLimit = errors.New("exec session limit reached")
 	// ErrAgentShuttingDown indicates that the agent refuses new work while it shuts down.
 	ErrAgentShuttingDown = errors.New("agent is shutting down")
@@ -289,6 +289,7 @@ func NewAgent(log *slog.Logger, runtime runtime.ContainerRuntime, health *health
 		allocations:              make(map[string]*Allocation),
 		execSessions:             make(map[string]*execSession),
 		execSessionsByAllocation: make(map[string]int),
+		execTiming:               defaultExecTiming,
 		healthProbe:              filepath.Join(filepath.Dir(executable), "trellis-health-probe"),
 		operations:               make(map[string]*allocationOperation),
 		starts:                   make(map[string]*groupStart),
@@ -413,7 +414,6 @@ func (a *Agent) Init(ctx context.Context) error {
 	go a.runRecoveryRetry(ctx)
 	go a.runHeartbeatLoop(ctx)
 	go a.reconciler.Run(ctx)
-	go a.runExecSessionReaper(ctx)
 	return nil
 }
 

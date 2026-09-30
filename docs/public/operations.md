@@ -86,8 +86,8 @@ limits bound work and open connections when workloads flood the node-local
 resolver or an upstream resolver is slow, while preserving the source-network
 namespace check for every admitted discovery query.
 
-Each control-plane process also admits at most 256 simultaneous
-`GET /v1/events` streams. A request above that limit receives `503 Service
+Each control-plane process also admits at most 256 simultaneous event
+streams (`GET /v1/events` and `GET /v1/namespaces/{namespace}/events`). A request above that limit receives `503 Service
 Unavailable` with `Retry-After: 1`; clients should reconnect with backoff. A
 disconnected or canceled stream releases its slot immediately. The limit is per
 process, so clients reconnecting after a leader change are admitted against the
@@ -292,7 +292,7 @@ trellisctl --namespace default secrets describe db-password
 trellisctl --namespace default secrets delete db-password
 ```
 
-Use `--expected-version N` for compare-and-swap (`0` means create only). Values are capped at 65,536 bytes. Rotation affects newly started allocations, so apply a workload revision or replace the consuming allocations afterward.
+Use `--expected-version N` for compare-and-swap (`0` means create only). Values are capped at 65,536 bytes. Secrets are namespace-scoped: a `namespace/write` credential may set and delete secrets in its own namespace, a `namespace/read` credential may list and describe their metadata, and cluster-scoped credentials may do the same in any namespace. No credential can read a stored value back. Rotation affects newly started allocations, so apply a workload revision or replace the consuming allocations afterward.
 
 Allocation secret files are held on a verified tmpfs rather than a durable node filesystem. Linux can swap tmpfs pages, so disable swap or configure encrypted swap when secrets must also be protected from offline swap inspection. Environment delivery does not persist plaintext in containerd's OCI metadata, but the running application necessarily receives the value in its process environment; use file delivery when the application supports it. Trellis sets mounted secret ownership to the numeric UID/GID resolved from the image configuration, preserving owner-only access for non-root images.
 

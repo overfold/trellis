@@ -930,11 +930,11 @@ func TestResetReplacementBackoffRequiresWriteAccess(t *testing.T) {
 		want      int
 	}{
 		{name: "read credential", access: auth.AccessRead, namespace: "default", want: http.StatusForbidden},
-		{name: "other namespace", access: auth.AccessWrite, namespace: "other", want: http.StatusNotFound},
+		{name: "other namespace", access: auth.AccessWrite, namespace: "other", want: http.StatusForbidden},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodPost, "/v1/jobs/web/groups/api/replacement-backoff/reset", nil)
+			req := httptest.NewRequest(http.MethodPost, "/v1/namespaces/default/jobs/web/groups/api/replacement-backoff/reset", nil)
 			authenticatedHandler(s, auth.AccessNamespace, tt.access, tt.namespace).ServeHTTP(rec, req)
 			if rec.Code != tt.want {
 				t.Fatalf("status = %d, want %d; body: %s", rec.Code, tt.want, rec.Body.String())

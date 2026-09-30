@@ -6,20 +6,8 @@ import (
 	"os"
 	"text/tabwriter"
 
-	"github.com/overfold/trellis/internal/client"
 	"github.com/spf13/cobra"
 )
-
-func secretClient() (*client.ServerClient, error) {
-	if config.Namespace == "" {
-		return nil, fmt.Errorf("--namespace is required")
-	}
-	tlsCfg, err := buildCLITLSConfig()
-	if err != nil {
-		return nil, err
-	}
-	return client.NewNamespaceServerClient(config.ClusterToken, config.ServerAddr, config.Namespace, tlsCfg), nil
-}
 
 func NewSecretsCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "secrets", Short: "Manage namespace-scoped secrets"}
@@ -49,7 +37,7 @@ func newSecretsSetCmd() *cobra.Command {
 		if len(value) > 64<<10 {
 			return fmt.Errorf("secret exceeds 65536 bytes")
 		}
-		c, err := secretClient()
+		c, err := namespaceClient(cmd.Context())
 		if err != nil {
 			return err
 		}
@@ -57,7 +45,7 @@ func newSecretsSetCmd() *cobra.Command {
 		if cmd.Flags().Changed("expected-version") {
 			expectedPtr = &expected
 		}
-		meta, err := c.SetSecret(cmd.Context(), config.Namespace, args[0], value, expectedPtr)
+		meta, err := c.SetSecret(cmd.Context(), args[0], value, expectedPtr)
 		if err != nil {
 			return err
 		}
@@ -104,11 +92,11 @@ func readSecretFile(path string) ([]byte, error) {
 
 func newSecretsListCmd() *cobra.Command {
 	return &cobra.Command{Use: "list", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		c, err := secretClient()
+		c, err := namespaceClient(cmd.Context())
 		if err != nil {
 			return err
 		}
-		items, err := c.ListSecrets(cmd.Context(), config.Namespace)
+		items, err := c.ListSecrets(cmd.Context())
 		if err != nil {
 			return err
 		}
@@ -130,11 +118,11 @@ func newSecretsListCmd() *cobra.Command {
 
 func newSecretsDescribeCmd() *cobra.Command {
 	return &cobra.Command{Use: "describe NAME", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		c, err := secretClient()
+		c, err := namespaceClient(cmd.Context())
 		if err != nil {
 			return err
 		}
-		meta, err := c.GetSecretMetadata(cmd.Context(), config.Namespace, args[0])
+		meta, err := c.GetSecretMetadata(cmd.Context(), args[0])
 		if err != nil {
 			return err
 		}
@@ -148,11 +136,11 @@ func newSecretsDescribeCmd() *cobra.Command {
 
 func newSecretsDeleteCmd() *cobra.Command {
 	return &cobra.Command{Use: "delete NAME", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		c, err := secretClient()
+		c, err := namespaceClient(cmd.Context())
 		if err != nil {
 			return err
 		}
-		if err := c.DeleteSecret(cmd.Context(), config.Namespace, args[0]); err != nil {
+		if err := c.DeleteSecret(cmd.Context(), args[0]); err != nil {
 			return err
 		}
 		_, err = fmt.Fprintln(cmd.OutOrStdout(), "Secret deleted. Running allocations retain values already delivered.")

@@ -2,9 +2,11 @@ package agent
 
 import (
 	"context"
-	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"fmt"
-	"math"
+	"io"
+	"net"
 	"sort"
 	"strings"
 	"sync"
@@ -14,62 +16,79 @@ import (
 	"github.com/containerd/errdefs"
 	"github.com/google/uuid"
 	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/execstream"
 	"github.com/overfold/trellis/internal/runtime"
 )
 
+// execTiming bounds exec streams. Tests shorten it.
+type execTiming struct {
+	// idleTimeout ends a stream that carried no input, output, or resize for
+	// this long. It also bounds how long one output frame may wait for the
+	// peer to accept it.
+	idleTimeout time.Duration
+	// maxLifetime bounds a stream even while it remains active.
+	maxLifetime time.Duration
+	// checkInterval is how often a stream checks its timeouts and whether a
+	// newer leader has fenced this agent.
+	checkInterval time.Duration
+	// killWait is how long ending a stream waits for its killed process to
+	// exit before retrying the kill in the background.
+	killWait time.Duration
+	// killRetryInterval spaces kills of a process that survived the first
+	// one. Its session keeps its admission slot until it exits.
+	killRetryInterval time.Duration
+}
+
+var defaultExecTiming = execTiming{
+	idleTimeout:       30 * time.Minute,
+	maxLifetime:       8 * time.Hour,
+	checkInterval:     5 * time.Second,
+	killWait:          5 * time.Second,
+	killRetryInterval: 30 * time.Second,
+}
+
 const (
-	// execSessionIdleTimeout closes a live terminal nobody has written to,
-	// read from, or resized for this long.
-	execSessionIdleTimeout = 30 * time.Minute
-	// execSessionExitRetention keeps an exited terminal's final output
-	// readable for this long before its buffer is released.
-	execSessionExitRetention = 2 * time.Minute
-	// execSessionMaxLifetime bounds a terminal even while it remains active.
-	execSessionMaxLifetime  = 8 * time.Hour
-	execSessionReapInterval = 30 * time.Second
+	// execSessionCloseTimeout bounds each step of ending a stream: killing
+	// the process and delivering the final frame.
 	execSessionCloseTimeout = 5 * time.Second
-	// A terminal retains up to 2 MiB of output in addition to its runtime
-	// process, so admission is bounded both per node agent and allocation.
+	// execStdinQueue bounds the stdin frames a stream accepts ahead of the
+	// process; beyond it the stream stops reading and TCP pushes back.
+	execStdinQueue = 4
+	// Each session holds a runtime process, two connections through the
+	// leader, and a bounded stdin queue, so admission is bounded both per
+	// node agent and per allocation.
 	execSessionGlobalLimit        = 64
 	execSessionPerAllocationLimit = 8
+	// agentExecStartTimeout bounds creating and starting an exec process.
+	agentExecStartTimeout = 30 * time.Second
 )
 
-// execSession is an interactive terminal bound to one task record and container.
+// Stream end causes reported to the client in an error frame.
+var (
+	errExecIdle           = errors.New("exec session closed after a period without activity")
+	errExecLifetime       = errors.New("exec session reached its maximum lifetime")
+	errExecLeaderChanged  = errors.New("exec session ended because control-plane leadership changed")
+	errExecTaskStopped    = errors.New("exec session ended because its task stopped")
+	errExecAgentShutdown  = errors.New("exec session ended because the node agent is shutting down")
+	errExecPeerDisconnect = errors.New("exec client disconnected")
+)
+
+// execSession is a live exec stream bound to one task record and container.
 type execSession struct {
 	AllocationID string
 	TaskID       string
 	ContainerID  string
-	Terminal     runtime.TerminalSession
-
-	// lastActive holds execClockNanos so session use needs only a read lock.
-	lastActive atomic.Int64
-	// closeFailed marks a session whose termination failed; the reaper
-	// retries it regardless of client activity.
-	closeFailed atomic.Bool
-	createdAt   time.Time
-	exitedAt    time.Time
+	cancel       context.CancelCauseFunc
+	// finished is closed once the stream has ended and its process has been
+	// killed or has exited.
+	finished chan struct{}
 }
 
-// execClock anchors session activity times so idleness is measured on the
-// monotonic clock and wall-clock steps cannot expire or extend sessions.
+// execClock anchors stream activity times so idleness is measured on the
+// monotonic clock and wall-clock steps cannot expire or extend streams.
 var execClock = time.Now()
 
 func execClockNanos(t time.Time) int64 { return int64(t.Sub(execClock)) }
-
-// expired reports whether the session should be reaped. It must be called
-// with the agent lock held.
-func (s *execSession) expired(now time.Time) bool {
-	if s.closeFailed.Load() {
-		return true
-	}
-	if now.Sub(s.createdAt) >= execSessionMaxLifetime {
-		return true
-	}
-	if !s.exitedAt.IsZero() {
-		return now.Sub(s.exitedAt) >= execSessionExitRetention
-	}
-	return time.Duration(execClockNanos(now)-s.lastActive.Load()) >= execSessionIdleTimeout
-}
 
 // execTarget identifies the task record and container an exec request addresses.
 type execTarget struct {
@@ -168,72 +187,38 @@ func (a *Agent) selectRunningExecTarget(ctx context.Context, allocID, task strin
 	return target, nil
 }
 
-// ExecAllocation runs a command in an allocation task container and returns its output.
-func (a *Agent) ExecAllocation(ctx context.Context, allocID, task string, command []string) (*api.AgentExecResponse, error) {
-	target, err := a.selectRunningExecTarget(ctx, allocID, task)
-	if err != nil {
-		return nil, err
-	}
-	stdout, stderr, exitCode, err := a.runtime.ExecOutput(ctx, target.ContainerID, command)
-	if err != nil {
-		return nil, fmt.Errorf("exec in container %s: %w", target.ContainerID, err)
-	}
-	return &api.AgentExecResponse{
-		Stdout:   string(stdout),
-		Stderr:   string(stderr),
-		ExitCode: exitCode,
-	}, nil
+// ExecReservation is an admitted exec stream whose process has not started.
+type ExecReservation struct {
+	allocationID string
+	target       execTarget
+	request      api.AgentExecRequest
 }
 
-// CreateExecSession starts a persistent interactive terminal in an allocation task.
-func (a *Agent) CreateExecSession(ctx context.Context, allocID, task string, command []string, term string, cols, rows uint32) (*api.ExecSessionResponse, error) {
-	target, err := a.selectRunningExecTarget(ctx, allocID, task)
+// ReserveExec fences an exec request to its leadership epoch, resolves its
+// running target, and claims an admission slot. The caller must pass the
+// reservation to RunExec or ReleaseExec.
+func (a *Agent) ReserveExec(ctx context.Context, allocID string, request api.AgentExecRequest) (*ExecReservation, error) {
+	if err := a.AcceptEpoch(request.Epoch); err != nil {
+		return nil, err
+	}
+	target, err := a.selectRunningExecTarget(ctx, allocID, request.Task)
 	if err != nil {
 		return nil, err
 	}
 	if err := a.reserveExecSession(allocID); err != nil {
 		return nil, err
 	}
-	terminal, err := a.runtime.StartTerminal(ctx, target.ContainerID, command, term, cols, rows)
-	if err != nil {
-		a.releaseExecSession(allocID)
-		return nil, fmt.Errorf("start terminal in container %s: %w", target.ContainerID, err)
-	}
-	sessionID := uuid.NewString()
-	now := time.Now()
-	session := &execSession{
-		AllocationID: allocID, TaskID: target.ID, ContainerID: target.ContainerID, Terminal: terminal,
-		createdAt: now,
-	}
-	session.lastActive.Store(execClockNanos(now))
-	// StartTerminal outlives the request; a caller that gave up never learns
-	// the session ID, so the terminal must not be kept.
-	if err := ctx.Err(); err != nil {
-		a.discardExecSession(ctx, sessionID, session)
-		return nil, err
-	}
-	a.mu.Lock()
-	if a.execSessionsClosed {
-		a.mu.Unlock()
-		a.discardExecSession(ctx, sessionID, session)
-		return nil, ErrAgentShuttingDown
-	}
-	// A stop marks the record stopping before it closes the record's sessions,
-	// so a session registered here is either closed by that stop or refused.
-	current := a.allocations[target.ID]
-	if current == nil || current.ContainerID != target.ContainerID || current.Generation != target.Generation || !execTargetable(current) {
-		a.mu.Unlock()
-		a.discardExecSession(ctx, sessionID, session)
-		return nil, fmt.Errorf("%w: allocation %s task %s stopped while starting exec session", ErrAllocationNotFound, allocID, target.TaskName)
-	}
-	a.execSessions[sessionID] = session
-	a.mu.Unlock()
-	return &api.ExecSessionResponse{ID: sessionID}, nil
+	return &ExecReservation{allocationID: allocID, target: target, request: request}, nil
+}
+
+// ReleaseExec returns the admission slot of a reservation that will not run.
+func (a *Agent) ReleaseExec(reservation *ExecReservation) {
+	a.releaseExecSession(reservation.allocationID)
 }
 
 // reserveExecSession claims capacity before a runtime process is created.
-// Sessions being started and sessions whose close is in progress or failed
-// remain counted even though they are temporarily absent from execSessions.
+// A slot stays claimed until the session's process has exited, so a process
+// that survives a failed kill cannot free admission capacity.
 func (a *Agent) reserveExecSession(allocID string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -241,10 +226,10 @@ func (a *Agent) reserveExecSession(allocID string) error {
 		return ErrAgentShuttingDown
 	}
 	if a.execSessionCount >= execSessionGlobalLimit {
-		return fmt.Errorf("%w: node has %d interactive sessions (maximum %d)", ErrExecSessionLimit, a.execSessionCount, execSessionGlobalLimit)
+		return fmt.Errorf("%w: node has %d exec sessions (maximum %d)", ErrExecSessionLimit, a.execSessionCount, execSessionGlobalLimit)
 	}
 	if count := a.execSessionsByAllocation[allocID]; count >= execSessionPerAllocationLimit {
-		return fmt.Errorf("%w: allocation %s has %d interactive sessions (maximum %d)", ErrExecSessionLimit, allocID, count, execSessionPerAllocationLimit)
+		return fmt.Errorf("%w: allocation %s has %d exec sessions (maximum %d)", ErrExecSessionLimit, allocID, count, execSessionPerAllocationLimit)
 	}
 	a.execSessionCount++
 	a.execSessionsByAllocation[allocID]++
@@ -261,181 +246,323 @@ func (a *Agent) releaseExecSession(allocID string) {
 	}
 }
 
-// useExecSession returns a session addressed through allocID and records
-// activity on it. A session whose close failed only allows reads.
-func (a *Agent) useExecSession(allocID, sessionID string, mutate bool) (*execSession, error) {
+// execActivity records the last time a stream carried traffic.
+type execActivity struct{ last atomic.Int64 }
+
+func (t *execActivity) touch() { t.last.Store(execClockNanos(time.Now())) }
+
+func (t *execActivity) idle(now time.Time) time.Duration {
+	return time.Duration(execClockNanos(now) - t.last.Load())
+}
+
+// activityWriter records output as stream activity.
+type activityWriter struct {
+	w        io.Writer
+	activity *execActivity
+}
+
+func (w activityWriter) Write(p []byte) (int, error) {
+	w.activity.touch()
+	return w.w.Write(p)
+}
+
+// RunExec starts the reserved process and serves its stream on conn until
+// the process exits, the client disconnects, or the stream is ended by a
+// timeout, a stop of its task, a newer leader, or agent shutdown. conn is
+// closed on return.
+func (a *Agent) RunExec(conn net.Conn, reservation *ExecReservation) {
+	defer func() { _ = conn.Close() }()
+	request, target := reservation.request, reservation.target
+	timing := a.execTiming
+	writer := execstream.NewWriter(conn, timing.idleTimeout)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	createdAt := time.Now()
+	activity := &execActivity{}
+	activity.touch()
+
+	options := runtime.ExecOptions{
+		Command: request.Command,
+		TTY:     request.TTY,
+		Term:    request.Term,
+		Cols:    request.Cols,
+		Rows:    request.Rows,
+		Stdout:  activityWriter{w: writer.Stream(execstream.FrameStdout), activity: activity},
+		Stderr:  activityWriter{w: writer.Stream(execstream.FrameStderr), activity: activity},
+	}
+	var stdinReader *io.PipeReader
+	var stdinWriter *io.PipeWriter
+	if request.Stdin {
+		stdinReader, stdinWriter = io.Pipe()
+		options.Stdin = stdinReader
+		defer func() { _ = stdinReader.Close() }()
+	}
+	startCtx, cancelStart := context.WithTimeout(ctx, agentExecStartTimeout)
+	process, err := a.runtime.StartExec(startCtx, target.ContainerID, options)
+	cancelStart()
+	if err != nil {
+		a.releaseExecSession(reservation.allocationID)
+		a.log.Warn("start exec process", "allocation", reservation.allocationID, "task", target.TaskName, "error", err)
+		a.finishExecStream(conn, writer, execstream.FrameError, api.ExecStreamError{Message: fmt.Sprintf("start exec in task %s: %v", target.TaskName, err)}, execSessionCloseTimeout)
+		return
+	}
+
+	sessionID := uuid.NewString()
+	session := &execSession{
+		AllocationID: reservation.allocationID, TaskID: target.ID, ContainerID: target.ContainerID,
+		cancel: cancel, finished: make(chan struct{}),
+	}
+	// end forgets the session once its process is gone, so a stop waiting
+	// for it is not held up while the final frame is delivered.
+	end := sync.OnceFunc(func() {
+		a.mu.Lock()
+		delete(a.execSessions, sessionID)
+		a.mu.Unlock()
+		close(session.finished)
+	})
+	defer end()
+	if err := a.registerExecSession(sessionID, session, target); err != nil {
+		cancel(err)
+	} else {
+		go a.readExecInput(ctx, cancel, conn, request, process, stdinWriter, activity)
+	}
+
+	ticker := time.NewTicker(timing.checkInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-process.Done():
+			a.releaseExecSession(reservation.allocationID)
+			end()
+			code, err := process.ExitCode()
+			if err != nil {
+				a.finishExecStream(conn, writer, execstream.FrameError, api.ExecStreamError{Message: fmt.Sprintf("exec process status unavailable: %v", err)}, execSessionCloseTimeout)
+				return
+			}
+			a.finishExecStream(conn, writer, execstream.FrameExit, api.ExecExit{ExitCode: code}, timing.idleTimeout)
+			return
+		case <-ctx.Done():
+			a.killExecProcess(reservation.allocationID, process, timing)
+			end()
+			cause := context.Cause(ctx)
+			if errors.Is(cause, errExecPeerDisconnect) {
+				return
+			}
+			a.finishExecStream(conn, writer, execstream.FrameError, api.ExecStreamError{Message: cause.Error()}, execSessionCloseTimeout)
+			return
+		case now := <-ticker.C:
+			switch {
+			case activity.idle(now) >= timing.idleTimeout:
+				cancel(errExecIdle)
+			case now.Sub(createdAt) >= timing.maxLifetime:
+				cancel(errExecLifetime)
+			case a.currentEpoch() > request.Epoch:
+				cancel(errExecLeaderChanged)
+			}
+		}
+	}
+}
+
+func (a *Agent) currentEpoch() uint64 {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	session := a.execSessions[sessionID]
-	if session == nil || session.AllocationID != allocID || (mutate && session.closeFailed.Load()) {
-		return nil, fmt.Errorf("%w: %s", ErrExecSessionNotFound, sessionID)
-	}
-	session.lastActive.Store(execClockNanos(time.Now()))
-	return session, nil
+	return a.epoch
 }
 
-// WriteExecSession writes raw bytes to an interactive terminal.
-func (a *Agent) WriteExecSession(allocID, sessionID string, data []byte) error {
-	session, err := a.useExecSession(allocID, sessionID, true)
-	if err != nil {
-		return err
-	}
-	if _, err := session.Terminal.Write(data); err != nil {
-		return fmt.Errorf("write exec session %s: %w", sessionID, err)
-	}
-	return nil
-}
-
-// ReadExecSession reads terminal bytes produced since offset.
-func (a *Agent) ReadExecSession(allocID, sessionID string, offset int64) (*api.ExecSessionOutputResponse, error) {
-	session, err := a.useExecSession(allocID, sessionID, false)
-	if err != nil {
-		return nil, err
-	}
-	data, next, exited, exitCode, err := session.Terminal.Read(offset)
-	if err != nil {
-		return nil, fmt.Errorf("read exec session %s: %w", sessionID, err)
-	}
-	return &api.ExecSessionOutputResponse{
-		DataBase64: base64.StdEncoding.EncodeToString(data),
-		NextOffset: next,
-		Exited:     exited,
-		ExitCode:   exitCode,
-	}, nil
-}
-
-// ResizeExecSession updates the terminal dimensions.
-func (a *Agent) ResizeExecSession(ctx context.Context, allocID, sessionID string, cols, rows uint32) error {
-	session, err := a.useExecSession(allocID, sessionID, true)
-	if err != nil {
-		return err
-	}
-	if err := session.Terminal.Resize(ctx, cols, rows); err != nil {
-		return fmt.Errorf("resize exec session %s: %w", sessionID, err)
-	}
-	return nil
-}
-
-// CloseExecSession terminates and forgets an interactive terminal.
-func (a *Agent) CloseExecSession(ctx context.Context, allocID, sessionID string) error {
+// registerExecSession tracks a started session so a stop of its task or
+// agent shutdown ends it. A stop marks the record stopping before it ends
+// the record's sessions, so a session registered here is either ended by
+// that stop or refused.
+func (a *Agent) registerExecSession(sessionID string, session *execSession, target execTarget) error {
 	a.mu.Lock()
-	session := a.execSessions[sessionID]
-	if session == nil || session.AllocationID != allocID {
-		a.mu.Unlock()
-		return fmt.Errorf("%w: %s", ErrExecSessionNotFound, sessionID)
+	defer a.mu.Unlock()
+	if a.execSessionsClosed {
+		return errExecAgentShutdown
 	}
-	delete(a.execSessions, sessionID)
-	a.mu.Unlock()
-	if err := a.closeTerminal(ctx, sessionID, session); err != nil {
-		return fmt.Errorf("close exec session %s: %w", sessionID, err)
+	current := a.allocations[target.ID]
+	if current == nil || current.ContainerID != target.ContainerID || current.Generation != target.Generation || !execTargetable(current) {
+		return errExecTaskStopped
 	}
+	a.execSessions[sessionID] = session
 	return nil
 }
 
-// closeExecSessionsForTask closes the sessions running in one task record's container.
+// readExecInput applies client frames to the process until the client
+// disconnects or sends an invalid frame. Stdin is handed to a writer
+// goroutine through a bounded queue so resizes are not stuck behind input
+// the process has not read yet.
+func (a *Agent) readExecInput(ctx context.Context, cancel context.CancelCauseFunc, conn net.Conn, request api.AgentExecRequest, process runtime.ExecProcess, stdin *io.PipeWriter, activity *execActivity) {
+	var queue chan []byte
+	if stdin != nil {
+		queue = make(chan []byte, execStdinQueue)
+		go func(queue <-chan []byte) {
+			for data := range queue {
+				if _, err := stdin.Write(data); err != nil {
+					break
+				}
+			}
+			// An abandoned queue has no further input, so the process sees
+			// the end of its stdin either way.
+			_ = stdin.Close()
+		}(queue)
+	}
+	closeQueue := func() {
+		if queue != nil {
+			close(queue)
+			queue = nil
+		}
+	}
+	defer closeQueue()
+	stdinOpen := stdin != nil
+	reader := execstream.NewReader(conn)
+	for {
+		frame, err := reader.Next()
+		if err != nil {
+			if errors.Is(err, io.EOF) || ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+				cancel(errExecPeerDisconnect)
+			} else {
+				cancel(fmt.Errorf("read exec stream: %w", err))
+			}
+			return
+		}
+		activity.touch()
+		switch frame.Type {
+		case execstream.FrameStdin:
+			if !stdinOpen {
+				cancel(errors.New("exec stream sent input without an open stdin"))
+				return
+			}
+			select {
+			case queue <- append([]byte(nil), frame.Payload...):
+			case <-ctx.Done():
+				return
+			}
+		case execstream.FrameStdinClose:
+			if !stdinOpen {
+				cancel(errors.New("exec stream closed stdin that is not open"))
+				return
+			}
+			stdinOpen = false
+			closeQueue()
+		case execstream.FrameResize:
+			var resize api.ExecResize
+			if err := json.Unmarshal(frame.Payload, &resize); err != nil {
+				cancel(errors.New("exec stream sent an invalid resize frame"))
+				return
+			}
+			if !request.TTY {
+				cancel(errors.New("exec stream resized a process without a tty"))
+				return
+			}
+			if err := execstream.ValidateResize(resize); err != nil {
+				cancel(err)
+				return
+			}
+			resizeCtx, cancelResize := context.WithTimeout(ctx, execSessionCloseTimeout)
+			err := process.Resize(resizeCtx, resize.Cols, resize.Rows)
+			cancelResize()
+			if err != nil {
+				a.log.Warn("resize exec terminal", "error", err)
+			}
+		default:
+			cancel(fmt.Errorf("exec stream sent unexpected frame type %d", frame.Type))
+			return
+		}
+	}
+}
+
+// killExecProcess kills a session's process and releases its admission slot
+// once it exits. A process that does not exit promptly keeps its slot while
+// kills are retried in the background.
+func (a *Agent) killExecProcess(allocID string, process runtime.ExecProcess, timing execTiming) {
+	kill := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), execSessionCloseTimeout)
+		defer cancel()
+		if err := process.Kill(ctx); err != nil {
+			a.log.Warn("kill exec process", "allocation", allocID, "error", err)
+		}
+	}
+	kill()
+	timer := time.NewTimer(timing.killWait)
+	defer timer.Stop()
+	select {
+	case <-process.Done():
+		a.releaseExecSession(allocID)
+		return
+	case <-timer.C:
+	}
+	go func() {
+		retry := time.NewTicker(timing.killRetryInterval)
+		defer retry.Stop()
+		for {
+			select {
+			case <-process.Done():
+				a.releaseExecSession(allocID)
+				return
+			case <-retry.C:
+				kill()
+			}
+		}
+	}()
+}
+
+// finishExecStream writes a stream's final frame, waiting at most wait for
+// the peer to accept it; the caller then closes the connection.
+func (a *Agent) finishExecStream(conn net.Conn, writer *execstream.Writer, frameType execstream.FrameType, value any, wait time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = writer.WriteJSON(frameType, value)
+	}()
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		_ = conn.Close()
+		<-done
+	}
+}
+
+// closeExecSessionsForTask ends the sessions running in one task record's container.
 func (a *Agent) closeExecSessionsForTask(ctx context.Context, taskID, containerID string) {
-	a.closeExecSessions(ctx, func(session *execSession) bool {
+	a.closeExecSessions(ctx, errExecTaskStopped, func(session *execSession) bool {
 		return session.TaskID == taskID && session.ContainerID == containerID
 	})
 }
 
-// closeExecSessions forgets and terminates every session match selects.
-// match is called with the agent lock held.
-func (a *Agent) closeExecSessions(ctx context.Context, match func(*execSession) bool) {
-	a.mu.Lock()
-	sessions := make(map[string]*execSession)
-	for id, session := range a.execSessions {
-		if match(session) {
-			sessions[id] = session
-			delete(a.execSessions, id)
-		}
-	}
-	a.mu.Unlock()
-	var wg sync.WaitGroup
-	for id, session := range sessions {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			a.discardExecSession(ctx, id, session)
-		}()
-	}
-	wg.Wait()
-}
-
-// discardExecSession terminates an untracked session, logging a failure.
-func (a *Agent) discardExecSession(ctx context.Context, sessionID string, session *execSession) {
-	if err := a.closeTerminal(ctx, sessionID, session); err != nil {
-		a.log.Warn("close exec session", "allocation", session.AllocationID, "session", sessionID, "error", err)
-	}
-}
-
-// closeTerminal terminates a session that has been removed from the session
-// map. If termination fails, the session is tracked again, marked so the
-// reaper retries it instead of leaving its process unowned.
-func (a *Agent) closeTerminal(ctx context.Context, sessionID string, session *execSession) error {
-	closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), execSessionCloseTimeout)
-	defer cancel()
-	err := session.Terminal.Close(closeCtx)
-	if err != nil {
-		session.closeFailed.Store(true)
-		a.mu.Lock()
-		// Nothing retries after shutdown, so the failure is only reported.
-		if _, exists := a.execSessions[sessionID]; !exists && !a.execSessionsClosed {
-			a.execSessions[sessionID] = session
-		}
-		a.mu.Unlock()
-	} else {
-		a.releaseExecSession(session.AllocationID)
-	}
-	return err
-}
-
-// reapExecSessions releases exited sessions after their retention period and
-// closes live sessions that have been idle too long.
-func (a *Agent) reapExecSessions(ctx context.Context, now time.Time) {
-	// Observe exits without the agent lock; terminal reads can wait on output.
+// closeExecSessions ends every session match selects and waits, until ctx
+// ends, for their processes to be killed. match is called with the agent
+// lock held.
+func (a *Agent) closeExecSessions(ctx context.Context, cause error, match func(*execSession) bool) {
 	a.mu.RLock()
-	sessions := make([]*execSession, 0, len(a.execSessions))
+	var sessions []*execSession
 	for _, session := range a.execSessions {
-		sessions = append(sessions, session)
+		if match(session) {
+			sessions = append(sessions, session)
+		}
 	}
 	a.mu.RUnlock()
-	exited := make(map[*execSession]bool)
 	for _, session := range sessions {
-		if _, _, done, _, err := session.Terminal.Read(math.MaxInt64); err == nil && done {
-			exited[session] = true
+		session.cancel(cause)
+	}
+	for _, session := range sessions {
+		select {
+		case <-session.finished:
+		case <-ctx.Done():
+			return
 		}
 	}
-	a.closeExecSessions(ctx, func(session *execSession) bool {
-		if exited[session] && session.exitedAt.IsZero() {
-			session.exitedAt = now
-		}
-		return session.expired(now)
-	})
 }
 
-// CloseExecSessions terminates every interactive session and refuses new
-// ones. Sessions are not recovered after a restart, so the agent calls this
-// on shutdown while its runtime is still available.
+// CloseExecSessions ends every exec session and refuses new ones. Sessions
+// are not recovered after a restart, so the agent calls this on shutdown
+// while its runtime is still available.
 func (a *Agent) CloseExecSessions(ctx context.Context) {
 	a.mu.Lock()
 	a.execSessionsClosed = true
 	a.mu.Unlock()
-	a.closeExecSessions(ctx, func(*execSession) bool { return true })
-}
-
-// runExecSessionReaper bounds session lifetimes until ctx ends.
-func (a *Agent) runExecSessionReaper(ctx context.Context) {
-	ticker := time.NewTicker(execSessionReapInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case now := <-ticker.C:
-			a.reapExecSessions(ctx, now)
-		}
-	}
+	a.closeExecSessions(ctx, errExecAgentShutdown, func(*execSession) bool { return true })
 }
 
 // AllocationMetrics returns resource usage for the running tasks of an

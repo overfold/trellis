@@ -133,8 +133,8 @@ api_access:
 
 `scope` is `namespace` or `cluster`. `access` is `read` or `write`; write includes read capability.
 
-- `namespace/read` is appropriate for discovery, observers, and namespace-local read-only controllers.
-- `namespace/write` is appropriate for trusted controllers that deliberately mutate jobs in their own namespace.
+- `namespace/read` is appropriate for discovery, observers, and namespace-local read-only controllers. It may list jobs, allocations, and secret metadata in the job's namespace.
+- `namespace/write` is appropriate for trusted controllers that deliberately mutate jobs or secrets in their own namespace.
 - `cluster/read` can inspect cluster-scoped state.
 - `cluster/write` is the normal high-privilege operator/controller credential for cluster-wide mutations.
 - omitted means no API credential is injected.
@@ -281,7 +281,7 @@ Job, namespace, group, task, secret, and volume identifiers accept letters, digi
 
 The server also applies operator-configured admission limits after resolving default resources. Defaults are 500 replicas per task group, 64 task groups per job, 32 tasks per task group, 1,000 desired allocations per job, 10,000 desired allocations per namespace, 1,000,000 millicores per task, and 1 TiB memory per task. Operators may choose different values; see [Cluster settings](operations.md#cluster-settings). A manifest can therefore satisfy the structural schema yet exceed the target cluster's policy.
 
-The YAML schema is intended for VS Code, Neovim, Zed, and other editors that support YAML language-server schemas. Checked-in beginner/intermediate examples use a stable raw-GitHub `yaml-language-server` schema URL, so completion and basic diagnostics continue to work when a manifest is copied out of the repository. Schema diagnostics are structural assistance only; `trellisctl jobs apply --check`, `/v1/jobs/plan`, and apply use Trellis's authoritative validator, which reports all independently actionable validation issues with paths and error codes.
+The YAML schema is intended for VS Code, Neovim, Zed, and other editors that support YAML language-server schemas. Checked-in beginner/intermediate examples use a stable raw-GitHub `yaml-language-server` schema URL, so completion and basic diagnostics continue to work when a manifest is copied out of the repository. Schema diagnostics are structural assistance only; `trellisctl jobs apply --check`, `POST /v1/namespaces/{namespace}/jobs/plan`, and apply use Trellis's authoritative validator, which reports all independently actionable validation issues with paths and error codes.
 
 Follow checked-in examples in learning order from the [examples index](../../examples/README.md), rather than copying an advanced architecture as a first workload.
 

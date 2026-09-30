@@ -18,6 +18,7 @@ import (
 	"github.com/overfold/trellis/internal/auth"
 	"github.com/overfold/trellis/internal/catalog"
 	"github.com/overfold/trellis/internal/client"
+	"github.com/overfold/trellis/internal/execstream"
 	"github.com/overfold/trellis/internal/plan"
 	secretstore "github.com/overfold/trellis/internal/secrets"
 	"github.com/overfold/trellis/internal/spec"
@@ -65,14 +66,6 @@ func authorization(c *echo.Context) requestAuthorization {
 		return requestAuthorization{scope: scope, access: access, namespace: namespace}
 	}
 	return requestAuthorization{}
-}
-
-func requestNamespace(c *echo.Context) string {
-	authz := authorization(c)
-	if authz.scope == auth.AccessNamespace {
-		return authz.namespace
-	}
-	return c.Request().Header.Get("X-Trellis-Namespace")
 }
 
 func requireRoot(c *echo.Context, message string) error {
@@ -159,27 +152,31 @@ func (h *Handler) Register(e *echo.Echo) {
 	v1.POST("/nodes/:id/heartbeat", h.handleHeartbeat)
 	v1.POST("/nodes/:id/drain", h.handleDrainNode)
 	v1.DELETE("/nodes/:id/drain", h.handleUndrainNode)
-	v1.GET("/jobs", h.handleListJobs)
-	v1.POST("/jobs", h.handleRegisterJob)
-	v1.POST("/jobs/plan", h.handlePlanJob)
-	v1.GET("/jobs/:name", h.handleGetJob)
-	v1.DELETE("/jobs/:name", h.handleDeleteJob)
-	v1.POST("/jobs/:name/restart", h.handleRestartJob)
-	v1.POST("/jobs/:name/groups/:group/replacement-backoff/reset", h.handleResetReplacementBackoff)
-	v1.GET("/jobs/:name/versions", h.handleListJobVersions)
 	v1.GET("/namespaces", h.handleListNamespaces)
-	v1.GET("/allocations", h.handleListAllocations)
-	v1.DELETE("/allocations/:id", h.handleStopAllocation)
-	v1.GET("/allocations/:id/events", h.handleAllocationEvents)
-	v1.GET("/allocations/:id/logs", h.handleAllocationLogs)
-	v1.POST("/allocations/:id/exec", h.handleExecAllocation)
-	v1.POST("/allocations/:id/exec/sessions", h.handleCreateExecSession)
-	v1.POST("/allocations/:id/exec/sessions/:session/input", h.handleExecSessionInput)
-	v1.GET("/allocations/:id/exec/sessions/:session/output", h.handleExecSessionOutput)
-	v1.POST("/allocations/:id/exec/sessions/:session/resize", h.handleExecSessionResize)
-	v1.DELETE("/allocations/:id/exec/sessions/:session", h.handleExecSessionClose)
-	v1.GET("/allocations/:id/metrics", h.handleAllocationMetrics)
-	v1.GET("/events", h.handleEvents)
+	v1.GET("/allocations", h.handleListClusterAllocations)
+	v1.GET("/events", h.handleClusterEvents)
+
+	// Every namespaced resource names its namespace in the path.
+	ns := v1.Group("/namespaces/:namespace")
+	ns.GET("/jobs", h.handleListJobs)
+	ns.POST("/jobs", h.handleRegisterJob)
+	ns.POST("/jobs/plan", h.handlePlanJob)
+	ns.GET("/jobs/:name", h.handleGetJob)
+	ns.DELETE("/jobs/:name", h.handleDeleteJob)
+	ns.POST("/jobs/:name/restart", h.handleRestartJob)
+	ns.POST("/jobs/:name/groups/:group/replacement-backoff/reset", h.handleResetReplacementBackoff)
+	ns.GET("/jobs/:name/versions", h.handleListJobVersions)
+	ns.GET("/allocations", h.handleListAllocations)
+	ns.DELETE("/allocations/:id", h.handleStopAllocation)
+	ns.GET("/allocations/:id/events", h.handleAllocationEvents)
+	ns.GET("/allocations/:id/logs", h.handleAllocationLogs)
+	ns.GET("/allocations/:id/exec", h.handleExec)
+	ns.GET("/allocations/:id/metrics", h.handleAllocationMetrics)
+	ns.GET("/events", h.handleEvents)
+	ns.PUT("/secrets/:name", h.handleSetSecret)
+	ns.GET("/secrets", h.handleListSecrets)
+	ns.GET("/secrets/:name", h.handleGetSecret)
+	ns.DELETE("/secrets/:name", h.handleDeleteSecret)
 	v1.GET("/internal/discovery", h.handleListDiscovery)
 	v1.POST("/raft/join", h.handleRaftJoin)
 	v1.DELETE("/raft/members/:id", h.handleRaftMemberRemove)
@@ -189,10 +186,6 @@ func (h *Handler) Register(e *echo.Echo) {
 	v1.PUT("/cluster/settings/reconciliation", h.handleUpdateReconciliationSettings)
 	v1.GET("/backup", h.handleBackupCreate)
 	v1.POST("/backup/restore", h.handleBackupRestore)
-	v1.PUT("/namespaces/:namespace/secrets/:name", h.handleSetSecret)
-	v1.GET("/namespaces/:namespace/secrets", h.handleListSecrets)
-	v1.GET("/namespaces/:namespace/secrets/:name", h.handleGetSecret)
-	v1.DELETE("/namespaces/:namespace/secrets/:name", h.handleDeleteSecret)
 }
 
 func (h *Handler) handleCreateCredential(c *echo.Context) error {
@@ -200,8 +193,8 @@ func (h *Handler) handleCreateCredential(c *echo.Context) error {
 		return err
 	}
 	var request api.CredentialCreateRequest
-	if err := c.Bind(&request); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	if err := decodeJSON(c, &request, maxSmallRequestBytes); err != nil {
+		return err
 	}
 	scope := auth.AccessScope(request.Scope)
 	access := auth.AccessLevel(request.Access)
@@ -238,10 +231,8 @@ func (h *Handler) handleUpdateJobLimits(c *echo.Context) error {
 		return err
 	}
 	var limits spec.Limits
-	decoder := json.NewDecoder(http.MaxBytesReader(c.Response(), c.Request().Body, 64<<10))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&limits); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid job limits")
+	if err := decodeJSON(c, &limits, maxSmallRequestBytes); err != nil {
+		return err
 	}
 	settings, err := h.server.UpdateJobLimits(c.Request().Context(), limits)
 	return clusterSettingsResponse(c, settings, err)
@@ -252,10 +243,8 @@ func (h *Handler) handleUpdateReconciliationSettings(c *echo.Context) error {
 		return err
 	}
 	var reconciliation api.ReconciliationSettings
-	decoder := json.NewDecoder(http.MaxBytesReader(c.Response(), c.Request().Body, 64<<10))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&reconciliation); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid reconciliation settings")
+	if err := decodeJSON(c, &reconciliation, maxSmallRequestBytes); err != nil {
+		return err
 	}
 	settings, err := h.server.UpdateReconciliationSettings(c.Request().Context(), ReconciliationSettingsFromAPI(reconciliation))
 	return clusterSettingsResponse(c, settings, err)
@@ -289,10 +278,9 @@ func (h *Handler) handleBackupRestore(c *echo.Context) error {
 	if err := requireRoot(c, "backup operations require the administrator credential"); err != nil {
 		return err
 	}
-	c.Request().Body = http.MaxBytesReader(c.Response(), c.Request().Body, 64<<20)
 	var backup api.BackupSnapshot
-	if err := c.Bind(&backup); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid backup snapshot")
+	if err := decodeJSON(c, &backup, maxBackupRequestBytes); err != nil {
+		return err
 	}
 	if err := h.server.Restore(c.Request().Context(), &backup); err != nil {
 		return echo.NewHTTPError(http.StatusConflict, err.Error())
@@ -300,33 +288,22 @@ func (h *Handler) handleBackupRestore(c *echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
-func secretNamespace(c *echo.Context) (string, error) {
-	c.Response().Header().Set("Cache-Control", "no-store")
-	ns := c.Param("namespace")
-	if !spec.ValidIdentifier(ns) {
-		return "", echo.NewHTTPError(http.StatusBadRequest, "invalid namespace")
-	}
-	if requested := requestNamespace(c); requested != "" && requested != ns {
-		return "", echo.NewHTTPError(http.StatusForbidden, "namespace does not match selected namespace")
-	}
-	return ns, nil
-}
+// Secrets are namespace-scoped and write-only: no endpoint returns a secret
+// value, whatever the caller's scope. Values reach tasks only through
+// leader-to-agent delivery.
 
 func (h *Handler) handleSetSecret(c *echo.Context) error {
-	if err := requireClusterWrite(c, "setting secrets requires cluster/write authorization"); err != nil {
-		return err
-	}
-	ns, err := secretNamespace(c)
+	c.Response().Header().Set("Cache-Control", "no-store")
+	ns, err := namespaceWrite(c, "setting secrets requires write authorization")
 	if err != nil {
 		return err
 	}
 	if !spec.ValidIdentifier(c.Param("name")) {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid secret name")
 	}
-	c.Request().Body = http.MaxBytesReader(c.Response(), c.Request().Body, 96<<10)
 	var request api.SecretWriteRequest
-	if err := c.Bind(&request); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	if err := decodeJSON(c, &request, maxSecretRequestBytes); err != nil {
+		return err
 	}
 	decodedSize := base64.StdEncoding.DecodedLen(len(request.ValueBase64))
 	if strings.HasSuffix(request.ValueBase64, "=") {
@@ -354,10 +331,8 @@ func (h *Handler) handleSetSecret(c *echo.Context) error {
 }
 
 func (h *Handler) handleListSecrets(c *echo.Context) error {
-	if err := requireClusterRead(c, "secret metadata requires cluster/read authorization"); err != nil {
-		return err
-	}
-	ns, err := secretNamespace(c)
+	c.Response().Header().Set("Cache-Control", "no-store")
+	ns, err := namespaceParam(c)
 	if err != nil {
 		return err
 	}
@@ -369,10 +344,8 @@ func (h *Handler) handleListSecrets(c *echo.Context) error {
 }
 
 func (h *Handler) handleGetSecret(c *echo.Context) error {
-	if err := requireClusterRead(c, "secret metadata requires cluster/read authorization"); err != nil {
-		return err
-	}
-	ns, err := secretNamespace(c)
+	c.Response().Header().Set("Cache-Control", "no-store")
+	ns, err := namespaceParam(c)
 	if err != nil {
 		return err
 	}
@@ -387,10 +360,8 @@ func (h *Handler) handleGetSecret(c *echo.Context) error {
 }
 
 func (h *Handler) handleDeleteSecret(c *echo.Context) error {
-	if err := requireClusterWrite(c, "deleting secrets requires cluster/write authorization"); err != nil {
-		return err
-	}
-	ns, err := secretNamespace(c)
+	c.Response().Header().Set("Cache-Control", "no-store")
+	ns, err := namespaceWrite(c, "deleting secrets requires write authorization")
 	if err != nil {
 		return err
 	}
@@ -403,7 +374,11 @@ func (h *Handler) handleDeleteSecret(c *echo.Context) error {
 }
 
 func (h *Handler) handleAllocationEvents(c *echo.Context) error {
-	events, ok := h.server.AllocationEvents(requestNamespace(c), c.Param("id"))
+	ns, err := namespaceParam(c)
+	if err != nil {
+		return err
+	}
+	events, ok := h.server.AllocationEvents(ns, c.Param("id"))
 	if !ok {
 		return echo.NewHTTPError(http.StatusNotFound, "allocation not found")
 	}
@@ -414,6 +389,10 @@ func (h *Handler) handleAllocationEvents(c *echo.Context) error {
 }
 
 func (h *Handler) handleAllocationLogs(c *echo.Context) error {
+	ns, err := namespaceParam(c)
+	if err != nil {
+		return err
+	}
 	tail, err := strconv.Atoi(c.QueryParam("tail"))
 	if c.QueryParam("tail") == "" {
 		tail, err = 100, nil
@@ -421,7 +400,7 @@ func (h *Handler) handleAllocationLogs(c *echo.Context) error {
 	if err != nil || tail < 0 {
 		return echo.NewHTTPError(http.StatusBadRequest, "tail must be a non-negative integer")
 	}
-	logs, err := h.server.AllocationTaskLogsForNamespace(c.Request().Context(), requestNamespace(c), c.Param("id"), c.QueryParam("task"), c.QueryParam("follow") == "true", tail)
+	logs, err := h.server.AllocationTaskLogsForNamespace(c.Request().Context(), ns, c.Param("id"), c.QueryParam("task"), c.QueryParam("follow") == "true", tail)
 	if errors.Is(err, ErrTaskSelection) {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
@@ -490,8 +469,8 @@ func (h *Handler) handleListNodes(c *echo.Context) error {
 
 func (h *Handler) handleRegisterNode(c *echo.Context) error {
 	var request api.NodeRegistrationRequest
-	if err := c.Bind(&request); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	if err := decodeJSON(c, &request, maxDefaultRequestBytes); err != nil {
+		return err
 	}
 	if err := requireExactNode(c, request.ID, "node registration identity does not match certificate"); err != nil {
 		return err
@@ -531,14 +510,9 @@ func (h *Handler) handleHeartbeat(c *echo.Context) error {
 	if err := requireExactNode(c, id, "heartbeat identity does not match certificate"); err != nil {
 		return err
 	}
-	c.Request().Body = http.MaxBytesReader(c.Response(), c.Request().Body, maxHeartbeatBodyBytes)
 	var request api.HeartbeatRequest
-	if err := c.Bind(&request); err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			return echo.NewHTTPError(http.StatusRequestEntityTooLarge, "heartbeat request body is too large")
-		}
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	if err := decodeJSON(c, &request, maxHeartbeatBodyBytes); err != nil {
+		return err
 	}
 	if len(request.Allocations) > maxHeartbeatAllocationStatuses {
 		return echo.NewHTTPError(http.StatusRequestEntityTooLarge, "heartbeat contains too many allocation status reports")
@@ -557,11 +531,19 @@ func (h *Handler) handleHeartbeat(c *echo.Context) error {
 }
 
 func (h *Handler) handleListJobs(c *echo.Context) error {
-	return c.JSON(http.StatusOK, h.server.ListJobs(requestNamespace(c)))
+	ns, err := namespaceParam(c)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, h.server.ListJobs(ns))
 }
 
 func (h *Handler) handleGetJob(c *echo.Context) error {
-	status, ok := h.server.GetJob(requestNamespace(c), c.Param("name"))
+	ns, err := namespaceParam(c)
+	if err != nil {
+		return err
+	}
+	status, ok := h.server.GetJob(ns, c.Param("name"))
 	if !ok {
 		return echo.NewHTTPError(http.StatusNotFound, "job not found")
 	}
@@ -569,10 +551,11 @@ func (h *Handler) handleGetJob(c *echo.Context) error {
 }
 
 func (h *Handler) handleDeleteJob(c *echo.Context) error {
-	if err := requireWrite(c, "deleting jobs requires write authorization"); err != nil {
+	ns, err := namespaceWrite(c, "deleting jobs requires write authorization")
+	if err != nil {
 		return err
 	}
-	if err := h.server.DeleteJob(c.Request().Context(), requestNamespace(c), c.Param("name")); err != nil {
+	if err := h.server.DeleteJob(c.Request().Context(), ns, c.Param("name")); err != nil {
 		return echo.NewHTTPError(http.StatusNotFound, "job not found")
 	}
 	return c.NoContent(http.StatusNoContent)
@@ -586,17 +569,31 @@ func validationResponse(c *echo.Context, err error) error {
 	return echo.NewHTTPError(http.StatusUnprocessableEntity, err.Error())
 }
 
-func (h *Handler) handlePlanJob(c *echo.Context) error {
+// decodeJobRequest decodes and canonicalizes a job submission addressed to
+// the {namespace} path parameter, whose spec must name the same namespace. A
+// nil request with a nil error means the validation response was written.
+func (h *Handler) decodeJobRequest(c *echo.Context, ns string) (*api.JobRegistrationRequest, error) {
 	var request api.JobRegistrationRequest
-	if err := c.Bind(&request); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	if err := decodeJSON(c, &request, maxJobRequestBytes); err != nil {
+		return nil, err
 	}
 	if err := h.server.CanonicalizeJob(&request.Spec); err != nil {
-		return validationResponse(c, err)
+		return nil, validationResponse(c, err)
 	}
-	selected := requestNamespace(c)
-	if selected != "" && selected != request.Spec.Namespace {
-		return echo.NewHTTPError(http.StatusForbidden, "manifest namespace does not match selected namespace")
+	if request.Spec.Namespace != ns {
+		return nil, echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("spec.namespace %q does not match request namespace %q", request.Spec.Namespace, ns))
+	}
+	return &request, nil
+}
+
+func (h *Handler) handlePlanJob(c *echo.Context) error {
+	ns, err := namespaceParam(c)
+	if err != nil {
+		return err
+	}
+	request, err := h.decodeJobRequest(c, ns)
+	if err != nil || request == nil {
+		return err
 	}
 	if err := h.server.ValidateNamespaceAllocationLimit(request.Spec.Namespace, &request.Spec); err != nil {
 		return validationResponse(c, err)
@@ -613,24 +610,18 @@ func (h *Handler) handlePlanJob(c *echo.Context) error {
 }
 
 func (h *Handler) handleRegisterJob(c *echo.Context) error {
-	if err := requireWrite(c, "applying jobs requires write authorization"); err != nil {
+	ns, err := namespaceWrite(c, "applying jobs requires write authorization")
+	if err != nil {
 		return err
 	}
-	var request api.JobRegistrationRequest
-	if err := c.Bind(&request); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
-	}
-	if err := h.server.CanonicalizeJob(&request.Spec); err != nil {
-		return validationResponse(c, err)
-	}
-	selected := requestNamespace(c)
-	if selected != "" && selected != request.Spec.Namespace {
-		return echo.NewHTTPError(http.StatusForbidden, "manifest namespace does not match selected namespace")
+	request, err := h.decodeJobRequest(c, ns)
+	if err != nil || request == nil {
+		return err
 	}
 	if err := requireAPIAccessDelegation(c, &request.Spec); err != nil {
 		return err
 	}
-	result, err := h.server.RegisterJob(c.Request().Context(), request.Spec.Namespace, &request.Spec, request.ExpectedVersion)
+	result, err := h.server.RegisterJob(c.Request().Context(), ns, &request.Spec, request.ExpectedVersion)
 	if errors.Is(err, ErrJobVersionConflict) {
 		return echo.NewHTTPError(http.StatusConflict, err.Error())
 	}
@@ -641,12 +632,29 @@ func (h *Handler) handleRegisterJob(c *echo.Context) error {
 }
 
 func (h *Handler) handleListAllocations(c *echo.Context) error {
+	ns, err := namespaceParam(c)
+	if err != nil {
+		return err
+	}
+	return h.listAllocations(c, ns)
+}
+
+// handleListClusterAllocations lists allocations across every namespace and
+// therefore requires cluster scope.
+func (h *Handler) handleListClusterAllocations(c *echo.Context) error {
+	if err := requireClusterRead(c, "listing allocations across namespaces requires cluster scope"); err != nil {
+		return err
+	}
+	return h.listAllocations(c, "")
+}
+
+func (h *Handler) listAllocations(c *echo.Context, ns string) error {
 	var filter *AllocationListFilter
 	job, label := c.QueryParam("job"), c.QueryParam("label")
 	if job != "" || label != "" {
 		filter = &AllocationListFilter{Job: job, Label: label}
 	}
-	allocations := h.server.ListAllocations(requestNamespace(c), filter)
+	allocations := h.server.ListAllocations(ns, filter)
 	if allocations == nil {
 		allocations = api.AllocationListResponse{}
 	}
@@ -672,8 +680,8 @@ func (h *Handler) handleListDiscovery(c *echo.Context) error {
 
 func (h *Handler) handleRaftJoin(c *echo.Context) error {
 	var request api.RaftJoinRequest
-	if err := c.Bind(&request); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	if err := decodeJSON(c, &request, maxSmallRequestBytes); err != nil {
+		return err
 	}
 	if request.RaftAddress == "" || request.ServerAddress == "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "raft_address and server_address are required")
@@ -725,8 +733,8 @@ func (h *Handler) handleEnrollNode(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusForbidden, "node enrollment requires the enrollment credential")
 	}
 	var request api.NodeEnrollmentRequest
-	if err := c.Bind(&request); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	if err := decodeJSON(c, &request, maxSmallRequestBytes); err != nil {
+		return err
 	}
 	response, err := h.server.EnrollNode(c.Request().Context(), request.ServerAdvertise, request.AgentAdvertise, request.RaftAdvertise)
 	if err != nil {
@@ -792,24 +800,26 @@ func (h *Handler) convertNode(node *Node) *api.NodeResponse {
 }
 
 func (h *Handler) handleRestartJob(c *echo.Context) error {
-	if err := requireWrite(c, "restarting jobs requires write authorization"); err != nil {
+	ns, err := namespaceWrite(c, "restarting jobs requires write authorization")
+	if err != nil {
 		return err
 	}
-	if err := h.server.RestartJob(c.Request().Context(), requestNamespace(c), c.Param("name")); err != nil {
+	if err := h.server.RestartJob(c.Request().Context(), ns, c.Param("name")); err != nil {
 		return echo.NewHTTPError(http.StatusNotFound, err.Error())
 	}
 	return c.NoContent(http.StatusAccepted)
 }
 
 func (h *Handler) handleResetReplacementBackoff(c *echo.Context) error {
-	if err := requireWrite(c, "resetting replacement backoff requires write authorization"); err != nil {
+	ns, err := namespaceWrite(c, "resetting replacement backoff requires write authorization")
+	if err != nil {
 		return err
 	}
 	name, group := c.Param("name"), c.Param("group")
 	if !spec.ValidIdentifier(name) || !spec.ValidIdentifier(group) {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid job or task group name")
 	}
-	if err := h.server.ResetReplacementBackoff(c.Request().Context(), requestNamespace(c), name, group); err != nil {
+	if err := h.server.ResetReplacementBackoff(c.Request().Context(), ns, name, group); err != nil {
 		if errors.Is(err, ErrTaskGroupNotFound) {
 			return echo.NewHTTPError(http.StatusNotFound, "task group not found")
 		}
@@ -819,7 +829,11 @@ func (h *Handler) handleResetReplacementBackoff(c *echo.Context) error {
 }
 
 func (h *Handler) handleListJobVersions(c *echo.Context) error {
-	versions, err := h.server.ListJobVersions(c.Request().Context(), requestNamespace(c), c.Param("name"))
+	ns, err := namespaceParam(c)
+	if err != nil {
+		return err
+	}
+	versions, err := h.server.ListJobVersions(c.Request().Context(), ns, c.Param("name"))
 	if err != nil {
 		return echo.NewHTTPError(http.StatusNotFound, err.Error())
 	}
@@ -827,134 +841,69 @@ func (h *Handler) handleListJobVersions(c *echo.Context) error {
 }
 
 func (h *Handler) handleStopAllocation(c *echo.Context) error {
-	if err := requireWrite(c, "stopping allocations requires write authorization"); err != nil {
+	ns, err := namespaceWrite(c, "stopping allocations requires write authorization")
+	if err != nil {
 		return err
 	}
-	if err := h.server.StopAllocationByID(c.Request().Context(), requestNamespace(c), c.Param("id")); err != nil {
+	if err := h.server.StopAllocationByID(c.Request().Context(), ns, c.Param("id")); err != nil {
 		return echo.NewHTTPError(http.StatusNotFound, err.Error())
 	}
 	return c.NoContent(http.StatusNoContent)
 }
 
-func (h *Handler) handleExecAllocation(c *echo.Context) error {
-	if err := requireWrite(c, "exec requires write authorization"); err != nil {
+// handleExec opens an exec stream. Request, authorization, lookup, and
+// admission errors are ordinary HTTP responses; once the connection is
+// upgraded the leader relays frames between the client and the agent.
+func (h *Handler) handleExec(c *echo.Context) error {
+	ns, err := namespaceWrite(c, "exec requires write authorization")
+	if err != nil {
 		return err
 	}
-	var request api.ExecRequest
-	if err := c.Bind(&request); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	if !execstream.IsUpgradeRequest(c.Request()) {
+		return echo.NewHTTPError(http.StatusBadRequest, "exec requires an HTTP/1.1 upgrade to "+execstream.Protocol)
 	}
-	if len(request.Command) == 0 {
-		return echo.NewHTTPError(http.StatusBadRequest, "command is required")
-	}
-	result, err := h.server.ExecAllocation(c.Request().Context(), requestNamespace(c), c.Param("id"), request.Task, request.Command)
+	request, err := execstream.DecodeRequest(c.QueryParams())
 	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+	stream, err := h.server.OpenExec(c.Request().Context(), ns, c.Param("id"), request)
+	if err != nil {
+		switch {
+		case errors.Is(err, errExecRelayLimit):
+			return echo.NewHTTPError(http.StatusTooManyRequests, err.Error())
+		case errors.Is(err, errExecNoTerm):
+			return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error())
+		}
 		return h.agentRequestError(err, noRunningTaskMessage(c.Param("id"), request.Task))
 	}
-	return c.JSON(http.StatusOK, result)
-}
-
-func (h *Handler) handleCreateExecSession(c *echo.Context) error {
-	if err := requireWrite(c, "interactive exec requires write authorization"); err != nil {
-		return err
-	}
-	var request api.ExecSessionCreateRequest
-	if err := c.Bind(&request); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
-	}
-	if len(request.Command) == 0 {
-		return echo.NewHTTPError(http.StatusBadRequest, "command is required")
-	}
-	if request.Cols == 0 {
-		request.Cols = 80
-	}
-	if request.Rows == 0 {
-		request.Rows = 24
-	}
-	if request.Cols > 1000 || request.Rows > 1000 {
-		return echo.NewHTTPError(http.StatusBadRequest, "terminal dimensions are too large")
-	}
-	result, err := h.server.CreateExecSession(c.Request().Context(), requestNamespace(c), c.Param("id"), &request)
+	defer stream.Close()
+	conn, err := execstream.Accept(c.Response())
 	if err != nil {
-		return h.agentRequestError(err, noRunningTaskMessage(c.Param("id"), request.Task))
+		h.server.log.Warn("accept exec stream", "allocation", c.Param("id"), "error", err)
+		return nil
 	}
-	return c.JSON(http.StatusCreated, result)
-}
-
-func (h *Handler) handleExecSessionInput(c *echo.Context) error {
-	if err := requireWrite(c, "interactive exec requires write authorization"); err != nil {
-		return err
-	}
-	var request api.ExecSessionInputRequest
-	if err := c.Bind(&request); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
-	}
-	if err := h.server.WriteExecSession(c.Request().Context(), requestNamespace(c), c.Param("id"), c.Param("session"), &request); err != nil {
-		return h.agentRequestError(err, "")
-	}
-	return c.NoContent(http.StatusNoContent)
-}
-
-func (h *Handler) handleExecSessionOutput(c *echo.Context) error {
-	if err := requireWrite(c, "interactive exec requires write authorization"); err != nil {
-		return err
-	}
-	offset, err := strconv.ParseInt(c.QueryParam("offset"), 10, 64)
-	if c.QueryParam("offset") == "" {
-		offset, err = 0, nil
-	}
-	if err != nil || offset < 0 {
-		return echo.NewHTTPError(http.StatusBadRequest, "offset must be a non-negative integer")
-	}
-	result, err := h.server.ReadExecSession(c.Request().Context(), requestNamespace(c), c.Param("id"), c.Param("session"), offset)
-	if err != nil {
-		return h.agentRequestError(err, "")
-	}
-	return c.JSON(http.StatusOK, result)
-}
-
-func (h *Handler) handleExecSessionResize(c *echo.Context) error {
-	if err := requireWrite(c, "interactive exec requires write authorization"); err != nil {
-		return err
-	}
-	var request api.ExecSessionResizeRequest
-	if err := c.Bind(&request); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
-	}
-	if request.Cols == 0 || request.Rows == 0 || request.Cols > 1000 || request.Rows > 1000 {
-		return echo.NewHTTPError(http.StatusBadRequest, "terminal dimensions must be between 1 and 1000")
-	}
-	if err := h.server.ResizeExecSession(c.Request().Context(), requestNamespace(c), c.Param("id"), c.Param("session"), &request); err != nil {
-		return h.agentRequestError(err, "")
-	}
-	return c.NoContent(http.StatusNoContent)
-}
-
-func (h *Handler) handleExecSessionClose(c *echo.Context) error {
-	if err := requireWrite(c, "interactive exec requires write authorization"); err != nil {
-		return err
-	}
-	if err := h.server.CloseExecSession(c.Request().Context(), requestNamespace(c), c.Param("id"), c.Param("session")); err != nil {
-		return h.agentRequestError(err, "")
-	}
-	return c.NoContent(http.StatusNoContent)
+	stream.Relay(conn)
+	return nil
 }
 
 func (h *Handler) handleAllocationMetrics(c *echo.Context) error {
-	metrics, err := h.server.AllocationMetrics(c.Request().Context(), requestNamespace(c), c.Param("id"))
+	ns, err := namespaceParam(c)
+	if err != nil {
+		return err
+	}
+	metrics, err := h.server.AllocationMetrics(c.Request().Context(), ns, c.Param("id"))
 	if err != nil {
 		return h.agentRequestError(err, fmt.Sprintf("allocation %s is not running on its node", c.Param("id")))
 	}
 	return c.JSON(http.StatusOK, metrics)
 }
 
-// agentRequestError maps a failed exec, exec session, or allocation metrics
-// request to its public status. Control-plane lookup failures keep their
-// meaning, and the agent's rejections of the request itself pass through.
-// When notRunning is set, an agent 404 means the control plane knows the
-// allocation but its node has no running target, so it becomes a 409 with
-// that message; otherwise an agent 404 (an unknown exec session) passes
-// through. Transport failures and other agent failures are logged and
+// agentRequestError maps a failed exec or allocation metrics request to its
+// public status. Control-plane lookup failures keep their meaning, and the
+// agent's rejections of the request itself pass through. When notRunning is
+// set, an agent 404 means the control plane knows the allocation but its
+// node has no running target, so it becomes a 409 with that message;
+// otherwise an agent 404 passes through. Transport failures and other agent failures are logged and
 // reported without their details.
 func (h *Handler) agentRequestError(err error, notRunning string) error {
 	var agentErr *client.HTTPError
@@ -991,7 +940,24 @@ func noRunningTaskMessage(id, task string) string {
 }
 
 func (h *Handler) handleEvents(c *echo.Context) error {
-	ch, ok := h.server.events.subscribe(requestNamespace(c))
+	ns, err := namespaceParam(c)
+	if err != nil {
+		return err
+	}
+	return h.streamEvents(c, ns)
+}
+
+// handleClusterEvents streams events from every namespace and therefore
+// requires cluster scope.
+func (h *Handler) handleClusterEvents(c *echo.Context) error {
+	if err := requireClusterRead(c, "streaming events across namespaces requires cluster scope"); err != nil {
+		return err
+	}
+	return h.streamEvents(c, "")
+}
+
+func (h *Handler) streamEvents(c *echo.Context, ns string) error {
+	ch, ok := h.server.events.subscribe(ns)
 	if !ok {
 		c.Response().Header().Set("Retry-After", "1")
 		return echo.NewHTTPError(http.StatusServiceUnavailable, "event subscriber limit reached")

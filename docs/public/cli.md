@@ -49,17 +49,19 @@ local node run file
 
 The selected context itself comes from `current_context`, then `TRELLIS_CONTEXT`, then the explicit `--context` flag.
 
+Job, exec, and secret commands act on one namespace. The effective namespace is `--namespace` (or `TRELLIS_NAMESPACE`, or the context's saved namespace). When none is set, a namespace-scoped credential selects its own namespace; a cluster-scoped credential must name one, and the command fails with `--namespace is required` rather than guessing. `jobs apply` uses the manifest's `namespace` and rejects a manifest whose namespace differs from an explicitly selected one.
+
 ## Discover known namespaces
 
 Namespaces are isolation and authorization boundaries, not lifecycle-managed objects. Trellis therefore does not require a separate create/delete step before applying a job to a namespace.
 
-To discover namespace names currently referenced by desired jobs and visible to the current credential:
+To discover namespace names that currently have desired jobs, secrets, or namespace-scoped credentials, as visible to the current credential:
 
 ```sh
 trellisctl namespaces list
 ```
 
-A namespace-scoped credential sees only its own namespace. A cluster-scoped credential sees the known desired-job namespaces across the cluster. Applying a job to a new valid namespace is still allowed; after the job exists, that namespace appears in discovery. Use `--output json` when automation needs the array directly.
+A namespace-scoped credential sees only its own namespace. A cluster-scoped credential sees every such namespace across the cluster. Applying a job to, storing a secret in, or minting a credential for a new valid namespace is still allowed; afterwards that namespace appears in discovery. Use `--output json` when automation needs the array directly.
 
 ## Apply manifest sources
 
@@ -102,7 +104,7 @@ Preview what would change compared with the current job:
 trellisctl jobs apply --dry-run --file trellis.yaml
 ```
 
-The CLI parses the human-authored YAML locally, converts it to canonical JSON, and, unless `--check` was requested, sends that model to the control plane. `--dry-run` calls `POST /v1/jobs/plan`, where Trellis validates the canonical model and computes the semantic plan against authoritative current state; `trellisctl` does not maintain a second planning implementation.
+The CLI parses the human-authored YAML locally, converts it to canonical JSON, and, unless `--check` was requested, sends that model to the control plane. `--dry-run` calls `POST /v1/namespaces/{namespace}/jobs/plan`, where Trellis validates the canonical model and computes the semantic plan against authoritative current state; `trellisctl` does not maintain a second planning implementation.
 
 The plan is semantic rather than a textual YAML diff. Task groups are identified by name, so merely reordering them does not look like a deployment. Ordered fields inside a group remain positional where order participates in Trellis semantics. Example output:
 
@@ -192,7 +194,7 @@ trellisctl jobs logs web --allocation a1b2c3d4 --task app --follow
 
 ## Run commands and open an allocation terminal
 
-`trellisctl exec` targets a Trellis allocation directly. Without a TTY it runs one command, writes the remote stdout/stderr to the matching local streams, and returns the remote exit status:
+`trellisctl exec` targets a Trellis allocation directly. It runs one command over a single bidirectional stream: output is written to the matching local streams as it is produced, and the remote exit status becomes `trellisctl`'s exit status:
 
 ```sh
 trellisctl exec a1b2c3d4 -- /app/bin/migrate --check
@@ -204,13 +206,21 @@ When the allocation contains multiple tasks, select one explicitly:
 trellisctl exec --task app a1b2c3d4 -- /app/bin/status
 ```
 
-For an interactive container terminal, add `-it` (or `--tty --stdin`) and provide the shell or program to start:
+Add `-i` (`--stdin`) to forward local stdin to the command; the end of local input closes the command's stdin:
+
+```sh
+trellisctl exec -i --task app a1b2c3d4 -- sh -c 'cat > /tmp/seed.sql' < seed.sql
+```
+
+For an interactive container terminal, add `-it` (`--stdin --tty`) and provide the shell or program to start:
 
 ```sh
 trellisctl exec -it --task app a1b2c3d4 -- /bin/sh
 ```
 
-Exec starts the command in the selected task's container process context: it inherits the task's environment variables, OCI user, and working directory. This is true for both one-shot and TTY exec. Trellis deliberately does not choose a shell for the caller, so the command after `--` is always required. TTY mode uses the persistent exec-session API, forwards terminal bytes in both directions, restores the local terminal on exit, and tracks local terminal-size changes. For TTY sessions, `TERM` is the one intentional environment override: it defaults to the local `TERM`, then `xterm-256color` when the local environment does not provide one; override it with `--term` when needed. A node permits up to 64 interactive sessions, with at most 8 for one allocation; sessions expire after eight hours even if active. If either admission limit is full, `exec -it` reports the agent's overload response so you can close another session or retry later.
+Exec starts the command in the selected task's container process context: it inherits the task's environment variables, OCI user, and working directory, with or without a terminal. Trellis deliberately does not choose a shell for the caller, so the command after `--` is always required. `-t` requires a local terminal on stdin; with `-it`, the local terminal is switched to raw mode and restored on exit, and local terminal-size changes are sent to the remote terminal. With a terminal, remote stdout and stderr are one stream. For TTY sessions, `TERM` is the one intentional environment override: it defaults to the local `TERM`, then `xterm-256color` when the local environment does not provide one; override it with `--term` when needed.
+
+Interrupting `trellisctl` or losing its connection kills the remote command. A session with no input, output, or resize for 30 minutes is closed, and a session lasts at most eight hours even while active. A node permits up to 64 exec sessions, with at most 8 for one allocation; if either limit is full, `exec` reports the overload so you can end another session or retry later. If control-plane leadership changes during a session, the session ends with an error rather than hanging; run the command again once a leader is available.
 
 ## Delete and wait for removal
 

@@ -42,7 +42,6 @@ func TestSecretMetadataEndpointsNeverReturnPlaintext(t *testing.T) {
 	}
 	for _, path := range []string{"/v1/namespaces/default/secrets", "/v1/namespaces/default/secrets/token"} {
 		req := scopedRequest(t, http.MethodGet, path, "", auth.AccessCluster, auth.AccessRead, "")
-		req.Header.Set("X-Trellis-Namespace", "default")
 		rec := httptest.NewRecorder()
 		e.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
@@ -61,7 +60,6 @@ func TestSecretHandlerEnforcesExactDecodedSizeBoundary(t *testing.T) {
 		encoded := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{'x'}, size))
 		body := fmt.Sprintf(`{"value_base64":%q}`, encoded)
 		req := scopedRequest(t, http.MethodPut, "/v1/namespaces/default/secrets/"+name, body, auth.AccessCluster, auth.AccessWrite, "")
-		req.Header.Set("X-Trellis-Namespace", "default")
 		rec := httptest.NewRecorder()
 		e.ServeHTTP(rec, req)
 		return rec

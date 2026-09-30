@@ -16,5 +16,10 @@ func (h *Handler) handleListNamespaces(c *echo.Context) error {
 	if !authz.root && authz.scope != auth.AccessCluster {
 		return echo.NewHTTPError(http.StatusForbidden, "namespace discovery requires an authenticated scoped credential")
 	}
-	return c.JSON(http.StatusOK, h.server.ListNamespaces())
+	namespaces, err := h.server.ListNamespaces(c.Request().Context())
+	if err != nil {
+		h.server.log.Error("list namespaces", "error", err)
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "unable to list namespaces")
+	}
+	return c.JSON(http.StatusOK, namespaces)
 }

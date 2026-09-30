@@ -333,50 +333,48 @@ type AllocationMetricsResponse struct {
 // AllocationMetricsListResponse is the response returned when listing allocation metrics.
 type AllocationMetricsListResponse = []AllocationMetricsResponse
 
-// ExecRequest is the body for an allocation exec call.
+// ExecRequest starts an exec stream in an allocation task. It is carried in
+// the query string of the upgrade request; see package execstream.
 type ExecRequest struct {
-	Task    string   `json:"task,omitempty"`
-	Command []string `json:"command"`
+	// Task selects the task; it may be empty when the allocation has one task.
+	Task string
+	// Command is the argv to run. Trellis never adds a shell.
+	Command []string
+	// TTY allocates a terminal. Terminal output is delivered as stdout.
+	TTY bool
+	// Stdin attaches the stream's stdin frames to the process. Without it
+	// the process has no standard input.
+	Stdin bool
+	// Term sets TERM in a TTY process.
+	Term string
+	// Cols and Rows are the initial terminal size of a TTY process.
+	Cols uint32
+	Rows uint32
 }
 
-// ExecResponse is the response from an allocation exec call.
-type ExecResponse struct {
-	Stdout   string `json:"stdout"`
-	Stderr   string `json:"stderr"`
-	ExitCode int    `json:"exit_code"`
+// AgentExecRequest is an ExecRequest forwarded by the leader to an agent.
+// Task is always resolved, and Epoch fences the stream to the leadership
+// term that opened it.
+type AgentExecRequest struct {
+	ExecRequest
+	Epoch uint64
 }
 
-// ExecSessionCreateRequest starts an interactive TTY session in an allocation task.
-type ExecSessionCreateRequest struct {
-	Task    string   `json:"task,omitempty"`
-	Command []string `json:"command"`
-	Term    string   `json:"term,omitempty"`
-	Cols    uint32   `json:"cols,omitempty"`
-	Rows    uint32   `json:"rows,omitempty"`
-}
-
-// ExecSessionResponse identifies a live interactive exec session.
-type ExecSessionResponse struct {
-	ID string `json:"id"`
-}
-
-// ExecSessionInputRequest appends terminal input bytes encoded as base64.
-type ExecSessionInputRequest struct {
-	DataBase64 string `json:"data_base64"`
-}
-
-// ExecSessionResizeRequest updates the terminal dimensions.
-type ExecSessionResizeRequest struct {
+// ExecResize is the payload of an exec stream resize frame.
+type ExecResize struct {
 	Cols uint32 `json:"cols"`
 	Rows uint32 `json:"rows"`
 }
 
-// ExecSessionOutputResponse returns terminal bytes since a byte offset.
-type ExecSessionOutputResponse struct {
-	DataBase64 string `json:"data_base64,omitempty"`
-	NextOffset int64  `json:"next_offset"`
-	Exited     bool   `json:"exited"`
-	ExitCode   *int   `json:"exit_code,omitempty"`
+// ExecExit is the payload of an exec stream exit frame.
+type ExecExit struct {
+	ExitCode int `json:"exit_code"`
+}
+
+// ExecStreamError is the payload of an exec stream error frame. It ends the
+// stream without an exit status.
+type ExecStreamError struct {
+	Message string `json:"message"`
 }
 
 // EventType identifies the kind of a cluster event.

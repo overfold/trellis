@@ -33,7 +33,12 @@ func TestSetSecretBuildsValidRequestWithoutImmutableBase64Copy(t *testing.T) {
 			ValueBase64     string  `json:"value_base64"`
 			ExpectedVersion *uint64 `json:"expected_version"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		if r.URL.Path != "/v1/namespaces/default/secrets/token" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&request); err != nil {
 			t.Fatal(err)
 		}
 		if request.ValueBase64 != "c2VjcmV0" || request.ExpectedVersion == nil || *request.ExpectedVersion != 7 {
@@ -43,9 +48,9 @@ func TestSetSecretBuildsValidRequestWithoutImmutableBase64Copy(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"namespace": "default", "name": "token", "version": 8})
 	}))
 	defer server.Close()
-	c := NewServerClient("", server.URL, nil)
+	c := NewNamespaceServerClient("", server.URL, "default", nil)
 	expected := uint64(7)
-	metadata, err := c.SetSecret(context.Background(), "default", "token", []byte("secret"), &expected)
+	metadata, err := c.SetSecret(context.Background(), "token", []byte("secret"), &expected)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -22,8 +22,40 @@ func namespaceTestServer() *Server {
 }
 
 func TestListNamespacesReturnsSortedUniqueDesiredNamespaces(t *testing.T) {
-	got := namespaceTestServer().ListNamespaces()
+	got, err := namespaceTestServer().ListNamespaces(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
 	want := api.NamespaceListResponse{"alpha", "zeta"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("namespaces = %#v, want %#v", got, want)
+	}
+}
+
+func TestListNamespacesIncludesSecretAndCredentialNamespaces(t *testing.T) {
+	s, _ := newAPIAccessServer(t)
+	s.jobs = namespaceTestServer().jobs
+	ctx := t.Context()
+	if _, err := s.SetSecret(ctx, "vault", "token", []byte("value"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetSecret(ctx, "alpha", "shared", []byte("value"), nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, principal := range []auth.Principal{
+		{Kind: auth.CredentialOperator, Scope: auth.AccessNamespace, Access: auth.AccessRead, Namespace: "team"},
+		{Kind: auth.CredentialOperator, Scope: auth.AccessCluster, Access: auth.AccessWrite},
+	} {
+		if _, err := s.tokenManager.CreateToken(ctx, principal); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := s.ListNamespaces(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := api.NamespaceListResponse{"alpha", "team", "vault", "zeta"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("namespaces = %#v, want %#v", got, want)
 	}

@@ -276,6 +276,7 @@ func run(parent context.Context, cfg *config) error {
 		ServerID:  id.String(),
 		Bootstrap: cfg.Join == "",
 		TLS:       peerTLS,
+		Logger:    log,
 	})
 	if err != nil {
 		return fmt.Errorf("init raft store: %w", err)
