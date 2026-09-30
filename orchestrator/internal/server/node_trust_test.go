@@ -41,7 +41,9 @@ func newNodeTrustFixture(t *testing.T) *nodeTrustFixture {
 		t.Fatal(err)
 	}
 	f := &nodeTrustFixture{store: memoryStore{}, now: time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC), caCert: caCert, caKey: caKey}
-	f.server = &Server{storage: local, state: NewStateController(f.store, "test"), now: func() time.Time { return f.now }}
+	// Enrollment reads tokens before taking the mutation lock, so the fixture
+	// needs a store that synchronizes reads with concurrent batch writes.
+	f.server = &Server{storage: local, state: NewStateController(&auditStore{memoryStore: f.store}, "test"), now: func() time.Time { return f.now }}
 	f.certificateFor = func(id uuid.UUID) *x509.Certificate {
 		t.Helper()
 		certPEM, _, err := tlsutil.GenerateNodeCert(caCert, caKey, id)
@@ -198,6 +200,8 @@ func TestSingleUseJoinTokenEnrollsOnceUnderConcurrency(t *testing.T) {
 				mu.Lock()
 				enrolled++
 				mu.Unlock()
+			} else if !errors.Is(err, ErrInvalidJoinToken) {
+				t.Errorf("enrollment error = %v, want ErrInvalidJoinToken", err)
 			}
 		})
 	}
