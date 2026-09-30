@@ -74,17 +74,19 @@ const (
 	// TaskNetworkDefault means the author omitted mode; canonicalization
 	// resolves it to DefaultTaskNetworkMode.
 	TaskNetworkDefault TaskNetworkMode = ""
-	// TaskNetworkIsolated gives the container a private network namespace with no external routes.
-	TaskNetworkIsolated TaskNetworkMode = "isolated"
-	// TaskNetworkHost joins the host network namespace directly.
+	// TaskNetworkNone gives the container a private network namespace with
+	// only loopback: no DNS, no egress, and no inbound reachability.
+	TaskNetworkNone TaskNetworkMode = "none"
+	// TaskNetworkHost joins the node's network namespace directly.
 	TaskNetworkHost TaskNetworkMode = "host"
-	// TaskNetworkWireGuard joins the Trellis namespace network, currently implemented with WireGuard.
+	// TaskNetworkWireGuard joins the Trellis namespace network, implemented
+	// with WireGuard, with service DNS, NAT egress, and published ports.
 	TaskNetworkWireGuard TaskNetworkMode = "namespace"
 )
 
 // Valid reports whether m is a supported task network mode.
 func (m TaskNetworkMode) Valid() bool {
-	return m == TaskNetworkDefault || m == TaskNetworkIsolated || m == TaskNetworkHost || m == TaskNetworkWireGuard
+	return m == TaskNetworkDefault || m == TaskNetworkNone || m == TaskNetworkHost || m == TaskNetworkWireGuard
 }
 
 // HealthCheckType identifies a supported health-check implementation.
@@ -179,10 +181,21 @@ type SecretRefSpec struct {
 	Mode   uint32       `yaml:"mode,omitempty" json:"mode,omitempty"`
 }
 
-// PortSpec reserves the single user-facing port used directly by a host-networked task.
+// PortSpec declares a port a task listens on. In namespace networking it is
+// published on the node at HostPort; in host networking the task binds Port on
+// the node directly and HostPort is unset.
 type PortSpec struct {
 	Port     int `yaml:"port" json:"port"`
-	HostPort int `yaml:"-" json:"-"`
+	HostPort int `yaml:"host_port,omitempty" json:"host_port,omitempty"`
+}
+
+// NodePort returns the node port p occupies: HostPort when it is published
+// from a task network namespace, otherwise Port bound directly on the node.
+func (p PortSpec) NodePort() int {
+	if p.HostPort > 0 {
+		return p.HostPort
+	}
+	return p.Port
 }
 
 // ResourcesSpec describes task CPU and memory requirements.

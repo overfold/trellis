@@ -10,7 +10,7 @@ update:
   max_parallel: 1
 ```
 
-A rolling update starts healthy replacement capacity before removing all old capacity. Because every replica reserves host port 8080, an old and new allocation cannot overlap on the same node. With two existing replicas, the first replacement therefore needs a third compatible node with port 8080 free.
+A rolling update starts healthy replacement capacity before removing all old capacity. Because every replica publishes node port 8080, an old and new allocation cannot overlap on the same node. With two existing replicas, the first replacement therefore needs a third compatible node with port 8080 free.
 
 ## Deploy the first revision
 

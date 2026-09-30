@@ -67,8 +67,8 @@ func TestValidateRejectsInvalidJobs(t *testing.T) {
 		{"invalid port", func(j *JobSpec) {
 			j.TaskGroups[0].Tasks[0].Networking = &TaskNetworkingSpec{Mode: TaskNetworkHost, Ports: []PortSpec{{Port: 70000}}}
 		}},
-		{"port without host networking", func(j *JobSpec) {
-			j.TaskGroups[0].Tasks[0].Networking = &TaskNetworkingSpec{Ports: []PortSpec{{Port: 8080}}}
+		{"port without network", func(j *JobSpec) {
+			j.TaskGroups[0].Tasks[0].Networking = &TaskNetworkingSpec{Mode: TaskNetworkNone, Ports: []PortSpec{{Port: 8080}}}
 		}},
 		{"invalid networking", func(j *JobSpec) { j.TaskGroups[0].Tasks[0].Networking = &TaskNetworkingSpec{Mode: "bridge"} }},
 		{"reserved health probe volume path", func(j *JobSpec) {

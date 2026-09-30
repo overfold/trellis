@@ -8,7 +8,6 @@ import (
 	"io/fs"
 	"net/netip"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -30,6 +29,8 @@ type attachmentRecord struct {
 	CIDR         string `json:"cidr,omitempty"`
 	Gateway      string `json:"gateway"`
 	APIPort      int    `json:"api_port"`
+	// Ports are published node ports whose NAT rules detach removes.
+	Ports []PortMapping `json:"ports,omitempty"`
 }
 
 func (m *WireGuardManager) journalPath(allocationID string) string {
@@ -112,6 +113,7 @@ func (m *WireGuardManager) DetachAllocation(ctx context.Context, allocationID st
 		Address:      record.CIDR,
 		Gateway:      record.Gateway,
 		APIPort:      record.APIPort,
+		Ports:        record.Ports,
 	})
 }
 
@@ -198,7 +200,8 @@ func (m *WireGuardManager) loadNamespaceCIDRsLocked() {
 	}
 }
 
-// detachLocked removes an allocation's veth and network namespace. When its
+// detachLocked removes an allocation's published ports, veth, and network
+// namespace. When its
 // lease is the last one, it removes the shared namespace path before releasing
 // that lease, then removes the attachment record. Each step tolerates a
 // resource that is already gone, so a retry after a partial attach, detach, or
@@ -207,6 +210,12 @@ func (m *WireGuardManager) loadNamespaceCIDRsLocked() {
 func (m *WireGuardManager) detachLocked(ctx context.Context, a Attachment) error {
 	if !safeAllocation.MatchString(a.AllocationID) || !safeName.MatchString(a.Namespace) || !safeName.MatchString(a.Network) {
 		return fmt.Errorf("network attachment has unsafe identifiers")
+	}
+	// Stop publishing ports before the address they forward to is released.
+	if len(a.Ports) > 0 {
+		if err := m.unpublishPorts(ctx, a.AllocationID); err != nil {
+			return err
+		}
 	}
 	hostVeth := a.HostVeth
 	if hostVeth == "" {
@@ -316,25 +325,8 @@ func (m *WireGuardManager) removeNamespacePathLocked(ctx context.Context, a Atta
 	if address, err := netip.ParsePrefix(a.Address); err == nil {
 		cidr = address.Masked().String()
 	}
-	rules := make([][]string, 0, 7)
-	if cidr != "" {
-		rules = append(rules, []string{forwardChain, "-i", bridge, "!", "-s", cidr, "-j", "DROP"})
-	}
-	rules = append(rules,
-		[]string{forwardChain, "-i", bridge, "!", "-o", wg, "-j", "DROP"},
-		[]string{forwardChain, "-o", bridge, "!", "-i", wg, "-j", "DROP"},
-	)
-	if cidr != "" && m.dnsAddress != "" {
-		for _, protocol := range []string{"udp", "tcp"} {
-			rules = append(rules, []string{inputChain, "-i", bridge, "-s", cidr, "-d", m.dnsAddress, "-p", protocol, "--dport", "53", "-j", "ACCEPT"})
-		}
-	}
-	if cidr != "" && a.APIPort > 0 {
-		rules = append(rules, []string{inputChain, "-i", bridge, "-s", cidr, "-d", a.Gateway, "-p", "tcp", "--dport", fmt.Sprint(a.APIPort), "-j", "ACCEPT"})
-	}
-	rules = append(rules, []string{inputChain, "-i", bridge, "-j", "DROP"})
-	for _, rule := range rules {
-		if err := m.deleteFirewallRule(ctx, rule...); err != nil {
+	for _, rule := range namespaceRules(bridge, wg, cidr, a.Gateway, m.dnsAddress, a.APIPort) {
+		if err := m.deleteRule(ctx, rule.table, rule.args...); err != nil {
 			return err
 		}
 	}
@@ -343,10 +335,8 @@ func (m *WireGuardManager) removeNamespacePathLocked(ctx context.Context, a Atta
 		return err
 	}
 	if !otherPath {
-		for _, jump := range [][2]string{{"FORWARD", forwardChain}, {"INPUT", inputChain}} {
-			if err := m.removeJumpChain(ctx, jump[0], jump[1]); err != nil {
-				return err
-			}
+		if err := m.removeChains(ctx); err != nil {
+			return err
 		}
 	}
 	if err := m.deleteLink(ctx, wg, "WireGuard interface"); err != nil {
@@ -412,55 +402,6 @@ func (m *WireGuardManager) deleteLink(ctx context.Context, name, resource string
 			return fmt.Errorf("delete %s %s: %w (verify absence: %v)", resource, name, err, inspectErr)
 		}
 		return fmt.Errorf("delete %s %s: %w", resource, name, err)
-	}
-	return nil
-}
-
-// removeJumpChain removes a built-in chain's jump to a Trellis-owned chain
-// and then the chain itself; every step tolerates prior removal. It runs only
-// after the last namespace path on the node is gone, so the chain is flushed
-// first in case a rule from an earlier plan (such as a changed API port) was
-// left behind.
-func (m *WireGuardManager) removeJumpChain(ctx context.Context, parent, chain string) error {
-	if err := m.deleteFirewallRule(ctx, parent, "-j", chain); err != nil {
-		return err
-	}
-	if err := m.run.Run(ctx, "iptables", "-F", chain); err != nil {
-		inspectErr := m.run.Run(ctx, "iptables", "-L", chain, "-n")
-		absent := explicitAbsence(err, "No chain/target/match by that name") ||
-			explicitAbsence(inspectErr, "No chain/target/match by that name")
-		if ctx.Err() != nil || !absent {
-			return fmt.Errorf("flush Trellis %s chain: %w", parent, err)
-		}
-	}
-	if err := m.run.Run(ctx, "iptables", "-X", chain); err != nil {
-		inspectErr := m.run.Run(ctx, "iptables", "-L", chain, "-n")
-		absent := explicitAbsence(err, "No chain/target/match by that name") ||
-			explicitAbsence(inspectErr, "No chain/target/match by that name")
-		if ctx.Err() != nil || !absent {
-			if inspectErr != nil {
-				return fmt.Errorf("delete Trellis %s chain: %w (verify absence: %v)", parent, err, inspectErr)
-			}
-			return fmt.Errorf("delete Trellis %s chain: %w", parent, err)
-		}
-	}
-	return nil
-}
-
-func (m *WireGuardManager) deleteFirewallRule(ctx context.Context, args ...string) error {
-	if err := m.run.Run(ctx, "iptables", append([]string{"-D"}, args...)...); err != nil {
-		inspectErr := m.run.Run(ctx, "iptables", append([]string{"-C"}, args...)...)
-		var exitErr *exec.ExitError
-		absent := explicitAbsence(err, "Bad rule", "does a matching rule exist") ||
-			explicitAbsence(inspectErr, "Bad rule", "does a matching rule exist") ||
-			errors.As(inspectErr, &exitErr) && exitErr.ExitCode() == 1
-		if ctx.Err() == nil && absent {
-			return nil
-		}
-		if inspectErr != nil {
-			return fmt.Errorf("delete firewall rule %s: %w (verify absence: %v)", strings.Join(args, " "), err, inspectErr)
-		}
-		return fmt.Errorf("delete firewall rule %s: %w", strings.Join(args, " "), err)
 	}
 	return nil
 }

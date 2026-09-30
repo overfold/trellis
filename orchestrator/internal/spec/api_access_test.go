@@ -32,9 +32,14 @@ func TestValidateRejectsAPIAccessWithoutRoutableNetworking(t *testing.T) {
 	job := &JobSpec{Namespace: "default", Name: "api-client", TaskGroups: []TaskGroupSpec{{
 		Name: "client", Count: 1,
 		APIAccess: &APIAccessSpec{Scope: APIAccessNamespace, Access: APIAccessRead},
-		Tasks:     []TaskSpec{{Name: "client", Image: "example/client:1"}},
+		Tasks:     []TaskSpec{{Name: "client", Image: "example/client:1", Networking: &TaskNetworkingSpec{Mode: TaskNetworkNone}}},
 	}}}
 	if err := Validate(job); err == nil {
 		t.Fatal("expected api_access without host or namespace networking to be rejected")
+	}
+	// Omitted networking resolves to namespace mode, which can reach the API.
+	job.TaskGroups[0].Tasks[0].Networking = nil
+	if err := Validate(job); err != nil {
+		t.Fatalf("api_access with default networking rejected: %v", err)
 	}
 }

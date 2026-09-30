@@ -47,7 +47,6 @@ Options:
   --ca-cert-file FILE           Pin the existing cluster node CA certificate
   --secrets-key-file FILE       Read the existing cluster secrets key from FILE
   --secrets-key-id ID           Existing cluster key ID when it was explicitly configured
-  --with-networking             Install WireGuard dependencies for namespace networking
   --with-gvisor                 Install gVisor/runsc
   -y, --yes                     Apply the displayed plan without confirmation
   -h, --help                    Show this help
@@ -65,7 +64,6 @@ join_token_file=""
 ca_cert_file=""
 join_secrets_file=""
 join_secrets_key_id="${TRELLIS_SECRETS_KEY_ID:-}"
-with_networking=false
 with_gvisor=false
 assume_yes=false
 administrator_private_key="${TRELLIS_ADMINISTRATOR_KEY:-}"
@@ -78,7 +76,6 @@ while [ "$#" -gt 0 ]; do
         --ca-cert-file) [ "$#" -ge 2 ] || ui_die "--ca-cert-file requires a path"; ca_cert_file="$2"; shift 2 ;;
         --secrets-key-file) [ "$#" -ge 2 ] || ui_die "--secrets-key-file requires a path"; join_secrets_file="$2"; shift 2 ;;
         --secrets-key-id) [ "$#" -ge 2 ] || ui_die "--secrets-key-id requires a value"; join_secrets_key_id="$2"; shift 2 ;;
-        --with-networking) with_networking=true; shift ;;
         --with-gvisor) with_gvisor=true; shift ;;
         -y|--yes) assume_yes=true; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -92,7 +89,6 @@ load_install_state
 
 # An interrupted setup keeps the features it already installed. Explicit flags
 # may add capabilities, but rerunning the installer never silently removes them.
-[ "$NETWORKING_ENABLED" != true ] || with_networking=true
 [ "$GVISOR_ENABLED" != true ] || with_gvisor=true
 
 # Recognize complete installs that predate the install-state file without claiming
@@ -143,6 +139,9 @@ fetch_latest_release
 
 containerd_action="reuse existing installation"
 if ! command -v containerd >/dev/null 2>&1; then containerd_action="install automatically"; fi
+# Every node runs namespace networking, the default task network.
+networking_action="reuse existing installation"
+if ! networking_tools_present; then networking_action="install automatically"; fi
 cluster_action="create a new cluster"
 if [ "$existing_config" = true ]; then
     cluster_action="reuse existing node configuration"
@@ -161,7 +160,7 @@ ui_detail "Version       ${RELEASE_TAG}"
 ui_detail "Node address  ${advertise_host}"
 ui_detail "Cluster       ${cluster_action}"
 ui_detail "containerd    ${containerd_action}"
-ui_detail "Networking    $([ "$with_networking" = true ] && printf 'enabled' || printf 'disabled')"
+ui_detail "WireGuard     ${networking_action}"
 ui_detail "gVisor        $([ "$with_gvisor" = true ] && printf 'enabled' || printf 'disabled')"
 
 if [ "$assume_yes" != true ]; then
@@ -185,6 +184,11 @@ if command -v containerd >/dev/null 2>&1; then
     fi
 else
     install_containerd
+fi
+if networking_tools_present; then
+    ui_step "WireGuard, iproute2, and iptables are ready"
+else
+    install_networking
 fi
 
 WORK_TMP="$(mktemp -d)"
@@ -276,9 +280,8 @@ if grep -q '^join_token: ' "$CONFIG_FILE"; then
     ui_step "Removed the consumed join token from the node configuration"
 fi
 
-if [ "$with_networking" = true ] && [ "$NETWORKING_ENABLED" != true ]; then install_networking; fi
 if [ "$with_gvisor" = true ] && [ "$GVISOR_ENABLED" != true ]; then install_gvisor; fi
-if [ "$with_networking" = true ] || [ "$with_gvisor" = true ]; then
+if [ "$with_gvisor" = true ]; then
     systemctl restart trellis
     wait_for_service "$WORK_TMP" || ui_die "Trellis did not become healthy after dependency setup."
 fi

@@ -1,4 +1,4 @@
-// Package network manages isolated allocation networking.
+// Package network manages allocation namespace networking.
 package network
 
 import "context"
@@ -17,10 +17,18 @@ type Plan struct {
 	Peers                           []PeerPlan
 }
 
+// PortMapping publishes HostPort on the node to ContainerPort at the
+// allocation's namespace address.
+type PortMapping struct {
+	HostPort      int `json:"host_port"`
+	ContainerPort int `json:"container_port"`
+}
+
 // AttachRequest contains the information needed to attach an allocation.
 type AttachRequest struct {
 	AllocationID, Namespace, Network string
 	Plan                             Plan
+	Ports                            []PortMapping
 }
 
 // Attachment records resources created for an allocation network.
@@ -36,12 +44,15 @@ type Attachment struct {
 	APIPort            int
 	Address            string
 	LeasePath          string
+	Ports              []PortMapping
 }
 
-// Manager attaches and detaches allocation networks.
+// Manager attaches and detaches allocation networks and reconciles peers on
+// an already attached namespace network. Every node provides one.
 type Manager interface {
 	Attach(context.Context, AttachRequest) (*Attachment, error)
 	Detach(context.Context, *Attachment) error
+	UpdatePlan(context.Context, string, Plan) error
 }
 
 // AttachmentIntent is what an allocation records before Attach, so an
@@ -63,26 +74,3 @@ type AttachmentRecovery interface {
 	// describes records it could not read.
 	Attachments(context.Context) ([]string, error)
 }
-
-// PlanUpdater reconciles peers on an already attached namespace network.
-type PlanUpdater interface {
-	UpdatePlan(context.Context, string, Plan) error
-}
-
-// DisabledManager rejects network attachment when networking is disabled.
-type DisabledManager struct{}
-
-// Attach returns ErrDisabled.
-func (DisabledManager) Attach(context.Context, AttachRequest) (*Attachment, error) {
-	return nil, ErrDisabled
-}
-
-// Detach is a no-op when networking is disabled.
-func (DisabledManager) Detach(context.Context, *Attachment) error { return nil }
-
-type disabledError struct{}
-
-func (disabledError) Error() string { return "WireGuard networking is not configured on this node" }
-
-// ErrDisabled indicates that networking is not configured.
-var ErrDisabled error = disabledError{}

@@ -2,7 +2,7 @@
 
 ## Registration and heartbeats
 
-Nodes register UUID, agent address, capacity, OS/architecture, labels, volume inventory, and optional WireGuard identity. Periodic heartbeats refresh node status and report allocation generation, task, phase, health, each task's observed namespace-network address when present, ports, capabilities, and version. The control plane retains endpoint observations per task rather than collapsing a multi-task allocation onto whichever task was reported first. A successful heartbeat is acknowledged without returning desired state. After three missed heartbeat intervals a healthy node is marked unhealthy. The leader keeps each node's latest observed allocation generations and their aggregated phase for reconciliation.
+Nodes register UUID, agent address, capacity, OS/architecture, labels, volume inventory, and WireGuard identity. Periodic heartbeats refresh node status and report allocation generation, task, phase, health, each task's observed namespace-network address when present, ports, capabilities, and version. The control plane retains endpoint observations per task rather than collapsing a multi-task allocation onto whichever task was reported first. A successful heartbeat is acknowledged without returning desired state. After three missed heartbeat intervals a healthy node is marked unhealthy. The leader keeps each node's latest observed allocation generations and their aggregated phase for reconciliation.
 
 ### What a heartbeat persists
 

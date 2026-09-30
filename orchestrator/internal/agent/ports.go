@@ -68,14 +68,27 @@ func (p *PortManager) check(hostPort int) (bool, error) {
 	}
 	_ = listener.Close()
 
+	// Published ports forward UDP too, so a UDP listener also holds the port.
+	conn, err := net.ListenPacket("udp", addr)
+	if err != nil {
+		var errno syscall.Errno
+		if errors.As(err, &errno) && errno == syscall.EADDRINUSE {
+			return true, nil
+		}
+
+		return true, err
+	}
+	_ = conn.Close()
+
 	return false, nil
 }
 
-// Claim reserves a host port.
+// Claim reserves the node port of portSpec: its host_port when published
+// from a task network namespace, otherwise the port bound on the node.
 func (p *PortManager) Claim(portSpec spec.PortSpec) (*runtime.Port, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	hostPort := portSpec.Port
+	hostPort := portSpec.NodePort()
 	if hostPort == 0 {
 
 		for {
@@ -111,9 +124,13 @@ func (p *PortManager) Claim(portSpec spec.PortSpec) (*runtime.Port, error) {
 
 	}
 
+	containerPort := portSpec.Port
+	if containerPort == 0 {
+		containerPort = hostPort
+	}
 	port := &runtime.Port{
 		HostPort:      hostPort,
-		ContainerPort: hostPort,
+		ContainerPort: containerPort,
 	}
 
 	p.claims[hostPort] = port
