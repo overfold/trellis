@@ -20,8 +20,7 @@ Trellis is a focused container orchestrator built on containerd. Preserve the de
 - Keep the core modular, understandable, and narrow in scope. Do not introduce Kubernetes-style resources or opinionated platform abstractions unless the task explicitly calls for them.
 - Keep Trellis non-opinionated. Reverse proxies and similar infrastructure are ordinary workloads; higher-level deployment opinions belong outside the core.
 - Consumers own representation; Trellis owns meaning. The control-plane API consumes canonical JSON. YAML is a first-party human-authoring format and must be converted before reaching the API.
-- Keep first-party terminology aligned across the API, `trellisctl`, dashboard, docs, schemas, and examples.
-- Keep the bundled dashboard close to a visual `trellisctl`: expose Trellis primitives clearly instead of hiding them behind higher-level product abstractions.
+- Keep first-party terminology aligned across the API, `trellisctl`, docs, schemas, and examples.
 
 Trellis is experimental and pre-1.0. Prefer a clean current design over speculative compatibility. Do not add aliases, migrations, fallback paths, or compatibility shims solely for hypothetical older clients or persisted state unless the task explicitly requires them.
 
@@ -41,7 +40,6 @@ Respect these boundaries when changing orchestrator code:
 - `orchestrator/internal/health` and `orchestrator/internal/lifecycle`: health and allocation lifecycle semantics.
 - `orchestrator/internal/secrets` and `orchestrator/internal/auth`: secret storage/delivery and authorization.
 - `orchestrator/internal/client`: HTTP clients used by first-party consumers.
-- `ui/`: Next.js operations dashboard and server-side API forwarding layer.
 
 Do not blur durable desired state with renewable observations. Allocation lifecycle and health are separate concepts.
 
@@ -65,16 +63,6 @@ When changing public wire behavior, update the relevant server handler, `interna
 
 When changing manifest semantics, update `internal/spec`, validation/defaulting, tests, generated schemas, `docs/public/job-specification.md`, and affected examples together.
 
-## UI changes
-
-The dashboard is under `ui/` and uses Next.js, React, TypeScript, Tailwind CSS, ESLint, and npm's lockfile.
-
-- Preserve the canonical Trellis hierarchy and vocabulary from `docs/public/user-model.md`.
-- Keep the UI operational and primitive-oriented rather than adding deployment opinions that Trellis itself does not own.
-- Reuse existing components and data-fetching patterns before creating new abstractions.
-- Handle loading, empty, error, and destructive-action states deliberately.
-- Keep authenticated control-plane access behind the existing server-side forwarding layer in `ui/src/app/api`.
-
 ## Documentation and examples
 
 `docs/README.md` is the authoritative documentation index.
@@ -82,7 +70,7 @@ The dashboard is under `ui/` and uses Next.js, React, TypeScript, Tailwind CSS, 
 - `docs/public/getting-started.md` is the only installation/first-workload walkthrough.
 - `examples/hello/` is the only first-workload example.
 - Keep beginner, intermediate, and advanced examples distinct; do not present architectural patterns as beginner defaults.
-- Keep documented commands and screenshots/descriptions consistent with the current CLI and dashboard.
+- Keep documented commands and output descriptions consistent with the current CLI.
 - Internal Raft, RPC, storage, and execution mechanics belong in developer docs or clearly advanced operator material.
 - If a user-facing behavior changes, update the relevant docs in the same change.
 
@@ -134,25 +122,13 @@ sudo "$(command -v go)" test -tags=containerd_e2e ./internal/runtime -run TestCo
 
 If an environment-specific suite cannot be run locally, say so explicitly in the handoff; do not imply it passed.
 
-### UI
-
-From `ui/`:
-
-```sh
-npm ci
-npm run lint
-npm run build
-```
-
-`npm ci` is normally needed once per clean checkout; do not replace the lockfile-driven install with an ad hoc dependency update unless dependency changes are part of the task.
-
 ## Change checklist
 
 Before considering a change complete:
 
 - The implementation follows the README design principles and the architecture boundaries above.
 - New behavior has focused tests, including regression coverage for bug fixes where practical.
-- Public API, CLI, manifest, dashboard, docs, schema, and example surfaces remain consistent where the change crosses those boundaries.
+- Public API, CLI, manifest, docs, schema, and example surfaces remain consistent where the change crosses those boundaries.
 - Generated schema files are regenerated when their source changes and pass the schema check.
 - Relevant unit, lint, build, and integration checks have been run, or any environment-limited checks are called out.
 - The diff contains no unrelated cleanup or compatibility code that the task did not require.

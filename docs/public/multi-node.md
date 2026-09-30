@@ -14,7 +14,7 @@ Every machine runs the same `trellis` daemon. There are no separate server and w
 
 Trellis chooses the voters itself. A node always joins as a non-voter, and the leader promotes healthy nodes that have caught up with the replicated state until the cluster has the right number of voters. `trellisctl nodes list` shows each node's role in the **Control plane** column.
 
-Any node accepts control-plane requests. Followers proxy ordinary operator and administrator requests to the current leader, so `trellisctl` contexts, the dashboard, and in-cluster `TRELLIS_ADDR` clients can point at any reachable node and do not need reconfiguring when leadership moves. Certificate-authenticated node requests are redirected instead, preserving the caller's node certificate end to end. `trellisctl` also retries administrator-signed requests automatically if leadership changes mid-request.
+Any node accepts control-plane requests. Followers proxy ordinary operator and administrator requests to the current leader, so `trellisctl` contexts and in-cluster `TRELLIS_ADDR` clients can point at any reachable node and do not need reconfiguring when leadership moves. Certificate-authenticated node requests are redirected instead, preserving the caller's node certificate end to end. `trellisctl` also retries administrator-signed requests automatically if leadership changes mid-request.
 
 ## Choose a cluster size
 
@@ -100,7 +100,7 @@ curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/setup
 
 Normal installer-created clusters derive the secrets key ID from the shared key, so no additional argument is needed. If the existing cluster explicitly sets `secrets_key_id` in its node configuration, pass that same value with `--secrets-key-id ID` (or `TRELLIS_SECRETS_KEY_ID`) on the joining node.
 
-The installer shows the complete plan before making changes; choose **Customize** to change it interactively. Namespace networking and gVisor/runsc are installed by default on joining nodes, as on the first node; `--without-networking` and `--without-gvisor` are the automation opt-outs. The dashboard remains opt-in through **Customize**, `--with-dashboard`, or `--dashboard-write`. Delete the temporary transferred copies after setup succeeds.
+The installer shows the complete plan before making changes; choose **Customize** to change it interactively. Namespace networking and gVisor/runsc are installed by default on joining nodes, as on the first node; `--without-networking` and `--without-gvisor` are the automation opt-outs. Delete the temporary transferred copies after setup succeeds.
 
 After the daemon starts, verify membership from any operator context:
 

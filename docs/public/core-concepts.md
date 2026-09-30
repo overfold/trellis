@@ -1,6 +1,6 @@
 # Core concepts
 
-Start with the [Trellis user model](user-model.md) for the vocabulary shared by manifests, the CLI, dashboard, and examples. This page explains how those user-facing concepts behave.
+Start with the [Trellis user model](user-model.md) for the vocabulary shared by manifests, the CLI, and examples. This page explains how those user-facing concepts behave.
 
 ## Cluster and nodes
 
@@ -44,7 +44,7 @@ Those generation/fencing details are useful diagnostics, but they are not separa
 
 Each task selects its attachment through `networking.mode`. Omission or `isolated` gives the task a private container network with no external routes; `host` joins the node network directly and bypasses Trellis tenant networking; `namespace` joins the private Trellis network for the workload namespace. Namespace networking is currently implemented with a separate WireGuard pathway per namespace: each active namespace has its own bridge, subnet, WireGuard interface, peer set, and UDP port on a node. The port remains stable while that namespace has desired or active networked allocations and is released after the last one is gone. `runsc` (gVisor) can be added for additional syscall-level sandboxing but is not required. Nodes report these capabilities when they register and on heartbeats. Trellis derives placement requirements from `runtime: runsc` and `networking.mode: namespace`; users do not maintain a separate capability requirement list. Host-port reservations belong under that task's `networking` block and are valid only in host mode. Healthy allocation endpoints enter the service catalog. Namespace-networked workloads can resolve healthy services in their own namespace as `group.job.namespace.trellis`; cross-namespace names return no records. Trellis configures one workload DNS endpoint consistently for containers: authorized discovery names are answered locally and ordinary DNS names are forwarded to the node's upstream resolvers.
 
-If desired replicas cannot be placed, Trellis keeps an allocation in `pending` for each unmet replica and records the current scheduler filter in its diagnostic. The reasons distinguish unavailable healthy nodes, constraint mismatches, unavailable volume owners, missing capabilities, host-port conflicts, and insufficient CPU or memory. `trellisctl jobs status` and the dashboard display the reason and explanatory message. The pending record is reused while conditions remain unchanged and becomes the placed allocation when eligibility returns, avoiding duplicate records and repeated diagnostic churn.
+If desired replicas cannot be placed, Trellis keeps an allocation in `pending` for each unmet replica and records the current scheduler filter in its diagnostic. The reasons distinguish unavailable healthy nodes, constraint mismatches, unavailable volume owners, missing capabilities, host-port conflicts, and insufficient CPU or memory. `trellisctl jobs status` displays the reason and explanatory message. The pending record is reused while conditions remain unchanged and becomes the placed allocation when eligibility returns, avoiding duplicate records and repeated diagnostic churn.
 
 ## Persistence and secrets
 

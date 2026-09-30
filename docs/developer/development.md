@@ -2,7 +2,7 @@
 
 ## Toolchains
 
-The orchestrator module targets Go 1.26.4. The dashboard uses Next.js 16, React 19, TypeScript, Tailwind CSS, ESLint, and npm's lockfile.
+The orchestrator module targets Go 1.26.4.
 
 ```sh
 cd orchestrator
@@ -12,11 +12,6 @@ golangci-lint run
 
 go build ./cmd/trellis ./cmd/trellisctl ./cmd/trellis-proxy-sync
 CGO_ENABLED=0 go build ./cmd/trellis-health-probe
-
-cd ../ui
-npm ci
-npm run lint
-npm run build
 ```
 
 Containerd end-to-end tests need a Linux host, containerd, permissions on its socket, and `CONTAINERD_ADDRESS`. Build the task-local probe first and pass its host path to the suite:
@@ -62,4 +57,3 @@ The Vagrant environment provisions `control`, `worker-1`, and `worker-2` Debian 
 - `cmd/trellis`: production node composition and flags.
 - `cmd/trellisctl`: CLI, precedence-aware config, TLS setup.
 - `cmd/trellis-proxy-sync`: polling service-catalog consumer for external proxies.
-- `ui/src/app/api`: dashboard's authenticated server-side forwarding layer.
