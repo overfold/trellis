@@ -10,11 +10,11 @@ You need a Debian or Ubuntu x86-64 machine with `sudo`. The installer can instal
 curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/setup.sh | sudo bash
 ```
 
-The default plan is the feature-complete beginner path: create a new single-node cluster, auto-detect a reachable node address, and install the namespace-networking dependencies and gVisor/runsc. The plan is shown before anything changes. Press Enter to install it, or choose **Customize** to change the cluster mode, address, networking, or gVisor. You do not need to discover command-line flags just to make a different first-install choice.
+The default plan is the feature-complete beginner path: create a new single-node cluster, auto-detect a reachable node address, and install the namespace-networking dependencies (WireGuard, iproute2, and iptables, which every node needs) and gVisor/runsc. The plan is shown before anything changes. Press Enter to install it, or choose **Customize** to change the cluster mode, address, or gVisor. You do not need to discover command-line flags just to make a different first-install choice.
 
-For automation, the same choices are available as flags. `--without-networking` and `--without-gvisor` opt out of the two default capabilities.
+For automation, the same choices are available as flags. `--without-gvisor` opts out of gVisor.
 
-The installer keeps the administrator key and node-enrollment credential separate, then uses the key transiently to mint a normal `cluster/write` operator credential and saves a `local` context for the user who invoked `sudo`. It displays the base64 PKCS#8 Ed25519 private key once so you can move it to an operator password manager; the daemon receives and replicates only the public key. Routine `trellisctl` commands therefore do **not** need `sudo` and do not receive either privileged secret.
+The installer uses the administrator key transiently to mint a normal `cluster/write` operator credential and saves a `local` context for the user who invoked `sudo`. It displays the base64 PKCS#8 Ed25519 private key once so you can move it to an operator password manager; the daemon receives and replicates only the public key. Routine `trellisctl` commands therefore do **not** need `sudo` and do not receive the administrator key.
 
 Verify the service and saved context:
 
@@ -24,7 +24,7 @@ trellisctl context current
 trellisctl nodes list
 ```
 
-`trellis`, `trellisctl`, and the internal `trellis-health-probe` helper are installed in `/usr/local/bin`. The daemon mounts the helper read-only into managed tasks for HTTP and TCP health checks; it is not an operator CLI. The daemon keeps the managed enrollment credential root-readable under `/etc/trellis`, but never the administrator private key; your user context contains the scoped operator token plus the cluster CA.
+`trellis`, `trellisctl`, and the internal `trellis-health-probe` helper are installed in `/usr/local/bin`. The daemon mounts the helper read-only into managed tasks for HTTP and TCP health checks; it is not an operator CLI. The daemon keeps its configuration and secrets key root-readable under `/etc/trellis`, but never the administrator private key; your user context contains the scoped operator token plus the cluster CA. Adding nodes later uses short-lived join tokens that the administrator mints on demand; see [Multi-node clusters](multi-node.md#add-a-node).
 
 ## 2. Create the first manifest
 
@@ -45,7 +45,7 @@ task_groups:
           memory: 64MiB
 ```
 
-This is one job containing one task group, one desired allocation, and one task. It intentionally has no networking, explicit health check, volume, secret, API access, or update policy yet. A running task without an explicit health check is considered healthy.
+This is one job containing one task group, one desired allocation, and one task. It intentionally declares no networking, ports, explicit health check, volume, secret, API access, or update policy yet; the task gets the default private namespace network without being reachable from outside it. A running task without an explicit health check is considered healthy.
 
 The image is a tiny first-party tutorial workload. It stays running and emits a recognizable `Trellis tutorial v1` log line, so the first deployment has something concrete to inspect. The same file is maintained at [`examples/hello/trellis.yaml`](../../examples/hello/trellis.yaml).
 
@@ -105,6 +105,6 @@ You have now completed the full workload lifecycle: install → connect → depl
 - Image-pull failures usually mean the node cannot reach GHCR or the image/tag is unavailable.
 - `trellisctl context current` and `trellisctl nodes list` verify the saved operator connection.
 
-Continue with the [learning path](learning-path.md). It reuses the tutorial application and adds concepts one at a time: first host networking and `/health`, then replicas and placement, then rolling-update overlap before moving on to secrets, volumes, sidecars, namespace networking, API access, release patterns, and stateful architectures.
+Continue with the [learning path](learning-path.md). It reuses the tutorial application and adds concepts one at a time: first a published port and `/health`, then replicas and placement, then rolling-update overlap before moving on to secrets, volumes, sidecars, namespace networking, API access, release patterns, and stateful architectures.
 
 [Documentation index](../README.md) · [Next: Learning path](learning-path.md)

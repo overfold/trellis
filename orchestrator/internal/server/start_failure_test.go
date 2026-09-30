@@ -17,8 +17,8 @@ func newStartingTestServer(t *testing.T, attempt int) (*Server, *testAgent, *Nod
 	t.Helper()
 	s, agent := newTestServerWithAgent()
 	t.Cleanup(agent.server.Close)
-	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
-	s.nodes[node.ID] = node
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
+	addTestNode(s, node, s.now())
 	tasks := []spec.TaskSpec{{Name: "app", Image: "app"}}
 	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "web", Count: 1, Tasks: tasks}}}), Revision: 1}
 	allocation := &Allocation{
@@ -75,7 +75,7 @@ func TestHeartbeatCountsStartFailureOnce(t *testing.T) {
 	s, _, node, allocation := newStartingTestServer(t, 0)
 	ctx := context.Background()
 	for range 2 {
-		if err := s.Heartbeat(ctx, node.ID, startFailure(allocation, 0), "test", nil, nil, nodeResourceObservation{}); err != nil {
+		if err := heartbeatAndApply(t, s, node.ID, startFailure(allocation, 0), "test", nodeResourceObservation{}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -91,14 +91,14 @@ func TestHeartbeatCountsStartFailureOnce(t *testing.T) {
 	}
 	// A report for an attempt the control plane already counted, or has not
 	// sent, is ignored.
-	if err := s.Heartbeat(ctx, node.ID, startFailure(allocation, 5), "test", nil, nil, nodeResourceObservation{}); err != nil {
+	if err := heartbeatAndApply(t, s, node.ID, startFailure(allocation, 5), "test", nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
 	}
 	if allocation.Attempt != 1 {
 		t.Fatalf("unrelated attempt counted: attempt=%d", allocation.Attempt)
 	}
 	for attempt := 1; attempt < maxExecutionAttempts; attempt++ {
-		if err := s.Heartbeat(ctx, node.ID, startFailure(allocation, attempt), "test", nil, nil, nodeResourceObservation{}); err != nil {
+		if err := heartbeatAndApply(t, s, node.ID, startFailure(allocation, attempt), "test", nodeResourceObservation{}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -110,7 +110,7 @@ func TestHeartbeatCountsStartFailureOnce(t *testing.T) {
 func TestHeartbeatRunningResetsStartAttempts(t *testing.T) {
 	s, _, node, allocation := newStartingTestServer(t, 3)
 	running := []nodeapi.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
-	if err := s.Heartbeat(context.Background(), node.ID, running, "test", nil, nil, nodeResourceObservation{}); err != nil {
+	if err := heartbeatAndApply(t, s, node.ID, running, "test", nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
 	}
 	if allocation.Phase != lifecycle.PhaseRunning || allocation.Attempt != 0 || allocation.NextRetryAt != nil {
@@ -124,7 +124,7 @@ func TestHeartbeatRejectsInvalidStartFailure(t *testing.T) {
 		"running phase": {ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy, StartFailure: &nodeapi.StartFailure{}},
 		"long message":  {ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown, StartFailure: &nodeapi.StartFailure{Message: strings.Repeat("x", nodeapi.MaxStartFailureMessageBytes+1)}},
 	} {
-		if err := s.Heartbeat(context.Background(), node.ID, []nodeapi.AllocationStatus{status}, "test", nil, nil, nodeResourceObservation{}); err == nil {
+		if err := heartbeatAndApply(t, s, node.ID, []nodeapi.AllocationStatus{status}, "test", nodeResourceObservation{}); err == nil {
 			t.Fatalf("%s: heartbeat accepted invalid start failure", name)
 		}
 	}
@@ -134,14 +134,14 @@ func TestHeartbeatTerminalStartFailureFailsAllocation(t *testing.T) {
 	s, _, node, allocation := newStartingTestServer(t, 1)
 	statuses := startFailure(allocation, 1)
 	statuses[0].StartFailure.Code = nodeapi.OperationRestartExhausted
-	if err := s.Heartbeat(context.Background(), node.ID, statuses, "test", nil, nil, nodeResourceObservation{}); err != nil {
+	if err := heartbeatAndApply(t, s, node.ID, statuses, "test", nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
 	}
 	if allocation.Phase != lifecycle.PhaseFailed || allocation.Reason != string(nodeapi.OperationRestartExhausted) || allocation.NextRetryAt != nil {
 		t.Fatalf("after terminal failure: phase=%s reason=%s retry=%v", allocation.Phase, allocation.Reason, allocation.NextRetryAt)
 	}
 	statuses[0].StartFailure.Code = nodeapi.OperationFailed
-	if err := s.Heartbeat(context.Background(), node.ID, statuses, "test", nil, nil, nodeResourceObservation{}); err == nil {
+	if err := heartbeatAndApply(t, s, node.ID, statuses, "test", nodeResourceObservation{}); err == nil {
 		t.Fatal("heartbeat accepted a start failure with a non-terminal code")
 	}
 }

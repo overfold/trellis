@@ -43,7 +43,7 @@ var enumValues = map[reflect.Type][]string{
 	reflect.TypeOf(spec.Runtime("")):         {"", "runc", "runsc"},
 	reflect.TypeOf(spec.APIAccessScope("")):  {"namespace", "cluster"},
 	reflect.TypeOf(spec.APIAccessLevel("")):  {"read", "write"},
-	reflect.TypeOf(spec.TaskNetworkMode("")): {"", "isolated", "host", "namespace"},
+	reflect.TypeOf(spec.TaskNetworkMode("")): {"", "none", "namespace", "host"},
 	reflect.TypeOf(spec.HealthCheckType("")): {"http", "tcp", "script"},
 	reflect.TypeOf(spec.SecretTarget("")):    {"env", "file"},
 }
@@ -204,6 +204,7 @@ func applySemanticConstraints(root schema) {
 	patchDef(root, "ResourcesSpec", "memory", schema{"minimum": 1})
 
 	patchDef(root, "PortSpec", "port", schema{"minimum": 1, "maximum": 65535})
+	patchDef(root, "PortSpec", "host_port", schema{"minimum": 1, "maximum": 65535})
 	patchDef(root, "HealthCheckSpec", "port", schema{"minimum": 0, "maximum": 65535})
 	patchDef(root, "HealthCheckSpec", "interval", schema{"minimum": 0})
 	patchDef(root, "HealthCheckSpec", "timeout", schema{"minimum": 0})
@@ -267,12 +268,17 @@ func addNetworkingConditions(networking schema) {
 	networking["allOf"] = []schema{
 		{
 			"if": schema{
-				"not": schema{
-					"required":   []string{"mode"},
-					"properties": schema{"mode": schema{"const": "host"}},
-				},
+				"required":   []string{"mode"},
+				"properties": schema{"mode": schema{"const": "none"}},
 			},
 			"then": schema{"properties": schema{"ports": schema{"maxItems": 0}}},
+		},
+		{
+			"if": schema{
+				"required":   []string{"mode"},
+				"properties": schema{"mode": schema{"const": "host"}},
+			},
+			"then": schema{"properties": schema{"ports": schema{"items": schema{"not": schema{"required": []string{"host_port"}}}}}},
 		},
 	}
 }
@@ -320,15 +326,16 @@ func describeAuthoringFields(root schema) {
 	describeDef(root, "TaskSpec", "name", "Task identifier, unique within this task group.")
 	describeDef(root, "TaskSpec", "image", "Pullable OCI image reference. Pin a version or digest for reproducible deployments.")
 	describeDef(root, "TaskSpec", "env", "Literal environment variables. Keep credentials in Trellis secrets instead of manifest text.")
-	describeDef(root, "TaskSpec", "networking", "Network attachment and, for host mode, direct node-port reservations.")
+	describeDef(root, "TaskSpec", "networking", "Network attachment mode and the ports the task listens on.")
 	describeDef(root, "TaskSpec", "volumes", "Namespace-scoped named volumes. First placement registers a volume to one node; later allocations using the same namespace/name are scheduled there.")
 	describeDef(root, "TaskSpec", "resources", "CPU and memory requested from the scheduler for each task instance.")
 	describeDef(root, "TaskSpec", "health_check", "Optional HTTP, TCP, or script readiness/health observation. A running task without one is considered healthy.")
 	describeDef(root, "TaskSpec", "secrets", "Stored namespace secrets delivered to the task as environment variables or files.")
 
-	describeDef(root, "TaskNetworkingSpec", "mode", "Network attachment: isolated, host, or the private Trellis namespace network. Omit for isolated; Trellis stores the resolved mode.")
-	describeDef(root, "TaskNetworkingSpec", "ports", "Direct host-port reservations. Valid only with mode: host; Trellis does not perform NAT or port translation.")
-	describeDef(root, "PortSpec", "port", "Node port Trellis reserves and the process must bind directly when using host networking.")
+	describeDef(root, "TaskNetworkingSpec", "mode", "Network attachment: none (loopback only), namespace (the private Trellis namespace network with service DNS, NAT egress, and published ports), or host (the node's network stack). Omit for namespace; Trellis stores the resolved mode.")
+	describeDef(root, "TaskNetworkingSpec", "ports", "Ports the task listens on, unique on the node within the task group. Namespace mode publishes each on the node; host mode reserves each node port for scheduling. Not allowed with mode none.")
+	describeDef(root, "PortSpec", "port", "Port the task process listens on. In host mode it is also the node port Trellis reserves.")
+	describeDef(root, "PortSpec", "host_port", "Namespace mode only: node port that forwards to port, preserving the client source address. Omit to publish on the same number as port; Trellis stores the resolved value.")
 	describeDef(root, "ResourcesSpec", "cpu", "CPU request in millicores; 1000 represents one CPU core.")
 	describeDef(root, "ResourcesSpec", "memory", "Memory request as bytes or a readable decimal/binary size such as 500MB or 256MiB.")
 

@@ -100,8 +100,7 @@ func (s *StateController) GetNodeServerAddress(ctx context.Context, id string) (
 
 // PutNodeCertificateFingerprint binds an immutable node ID to one certificate.
 func (s *StateController) PutNodeCertificateFingerprint(ctx context.Context, id, fingerprint string) error {
-	key := fmt.Sprintf("%s/%s/node-certificate-fingerprints/%s", trellisNamespace, s.cluster, id)
-	if err := s.put(ctx, key, fingerprint); err != nil {
+	if err := s.put(ctx, s.nodeCertificateFingerprintKey(id), fingerprint); err != nil {
 		return fmt.Errorf("put node certificate fingerprint: %w", err)
 	}
 	return nil
@@ -109,9 +108,8 @@ func (s *StateController) PutNodeCertificateFingerprint(ctx context.Context, id,
 
 // GetNodeCertificateFingerprint returns the certificate bound to a node ID.
 func (s *StateController) GetNodeCertificateFingerprint(ctx context.Context, id string) (string, bool, error) {
-	key := fmt.Sprintf("%s/%s/node-certificate-fingerprints/%s", trellisNamespace, s.cluster, id)
 	var fingerprint string
-	found, err := s.get(ctx, key, &fingerprint)
+	found, err := s.get(ctx, s.nodeCertificateFingerprintKey(id), &fingerprint)
 	if err != nil {
 		return "", false, fmt.Errorf("get node certificate fingerprint: %w", err)
 	}
@@ -274,16 +272,27 @@ func (s *StateController) PutNodeAndAllocations(ctx context.Context, node *NodeS
 	if node == nil {
 		return fmt.Errorf("node is required")
 	}
+	return s.PutNodesAndAllocations(ctx, []*NodeSummary{node}, allocations)
+}
+
+// PutNodesAndAllocations commits node summaries and allocation updates as one
+// durable state transition, in the order given.
+func (s *StateController) PutNodesAndAllocations(ctx context.Context, nodes []*NodeSummary, allocations []*Allocation) error {
+	if len(nodes) == 0 && len(allocations) == 0 {
+		return nil
+	}
 	atomic, ok := s.store.(state.AtomicStore)
 	if !ok {
 		return fmt.Errorf("state store does not support atomic node updates")
 	}
-	nodeRaw, err := json.Marshal(node)
-	if err != nil {
-		return fmt.Errorf("marshal node %s: %w", node.ID, err)
+	mutations := make([]state.Mutation, 0, len(nodes)+len(allocations))
+	for _, node := range nodes {
+		raw, err := json.Marshal(node)
+		if err != nil {
+			return fmt.Errorf("marshal node %s: %w", node.ID, err)
+		}
+		mutations = append(mutations, state.Mutation{Key: fmt.Sprintf("%s/%s/nodes/%s", trellisNamespace, s.cluster, node.ID), Value: raw})
 	}
-	mutations := make([]state.Mutation, 0, len(allocations)+1)
-	mutations = append(mutations, state.Mutation{Key: fmt.Sprintf("%s/%s/nodes/%s", trellisNamespace, s.cluster, node.ID), Value: nodeRaw})
 	for _, allocation := range allocations {
 		raw, err := json.Marshal(allocation)
 		if err != nil {
@@ -292,7 +301,7 @@ func (s *StateController) PutNodeAndAllocations(ctx context.Context, node *NodeS
 		mutations = append(mutations, state.Mutation{Key: s.allocationKey(allocation.ID), Value: raw})
 	}
 	if err := atomic.Batch(ctx, mutations); err != nil {
-		return fmt.Errorf("put node and allocations: %w", err)
+		return fmt.Errorf("put nodes and allocations: %w", err)
 	}
 	return nil
 }

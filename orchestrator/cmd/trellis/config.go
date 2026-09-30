@@ -43,7 +43,7 @@ type nodeConfigFile struct {
 	DataDir            *string              `yaml:"data_dir"`
 	Cluster            *string              `yaml:"cluster"`
 	AdminPublicKey     *string              `yaml:"administrator_public_key"`
-	EnrollmentToken    *string              `yaml:"enrollment_token"`
+	JoinToken          *string              `yaml:"join_token"`
 	NodeSigningMode    *string              `yaml:"node_signing_mode"`
 	ContainerdSock     *string              `yaml:"containerd_socket"`
 	Runtime            *string              `yaml:"runtime"`
@@ -92,7 +92,7 @@ func loadNodeConfig(path string, cfg *config, flags *pflag.FlagSet) error {
 	setString("data-dir", parsed.DataDir, &cfg.DataDir)
 	setString("cluster", parsed.Cluster, &cfg.Cluster)
 	setString("administrator-public-key", parsed.AdminPublicKey, &cfg.AdminPublicKey)
-	setString("enrollment-token", parsed.EnrollmentToken, &cfg.EnrollmentToken)
+	setString("join-token", parsed.JoinToken, &cfg.JoinToken)
 	setString("node-signing-mode", parsed.NodeSigningMode, &cfg.SigningMode)
 	setString("containerd-sock", parsed.ContainerdSock, &cfg.ContainerdSock)
 	setString("runtime", parsed.Runtime, &cfg.Runtime)

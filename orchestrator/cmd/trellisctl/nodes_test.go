@@ -92,3 +92,18 @@ func TestPrintNodeStatusShowsPlacementMetadata(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveRemovalTargetAcceptsUnregisteredUUID(t *testing.T) {
+	registered := api.NodeResponse{ID: uuid.MustParse("11111111-1111-1111-1111-111111111111"), Host: "node-a", Port: 8128}
+	nodes := api.NodeListResponse{registered}
+	if id, display, err := resolveRemovalTarget(nodes, "node-a"); err != nil || id != registered.ID.String() || display != "node-a:8128" {
+		t.Fatalf("registered target = %q, %q, %v", id, display, err)
+	}
+	enrolled := "33333333-3333-3333-3333-333333333333"
+	if id, _, err := resolveRemovalTarget(nodes, enrolled); err != nil || id != enrolled {
+		t.Fatalf("unregistered UUID target = %q, %v; want the UUID itself", id, err)
+	}
+	if _, _, err := resolveRemovalTarget(nodes, "3333"); err == nil {
+		t.Fatal("unregistered prefix resolved to a removal target")
+	}
+}

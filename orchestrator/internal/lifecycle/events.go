@@ -38,6 +38,16 @@ func (r *RingBuffer) Append(e Event) {
 	}
 }
 
+// Clone returns an independent copy of the buffer. A nil buffer clones to nil.
+func (r *RingBuffer) Clone() *RingBuffer {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return &RingBuffer{entries: r.entries, head: r.head, count: r.count}
+}
+
 // Entries returns a snapshot of recorded events in chronological order.
 func (r *RingBuffer) Entries() []Event {
 	r.mu.Lock()

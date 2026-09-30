@@ -20,8 +20,12 @@ import (
 // changing. The caller must keep the borrowed values stable for the duration
 // of the call.
 type reconcilePlanInput struct {
-	Now                   time.Time
-	LeaderSince           time.Time
+	Now         time.Time
+	LeaderSince time.Time
+	// Heartbeats holds the latest heartbeat this leader received from each
+	// node in the current term. Node statuses were derived from the same
+	// view.
+	Heartbeats            map[uuid.UUID]time.Time
 	Limits                spec.Limits
 	Policy                ReplacementPolicy
 	AllocationLossTimeout time.Duration
@@ -126,7 +130,7 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 	}
 	recoveryElapsed := now.Sub(in.LeaderSince) >= leaderRecoveryGrace
 	lossTimedOut := func(node *Node) bool {
-		return recoveryElapsed && node != nil && now.Sub(nodeSilentSince(node, in.LeaderSince)) >= in.AllocationLossTimeout
+		return recoveryElapsed && node != nil && now.Sub(silentSince(in.Heartbeats[node.ID], in.LeaderSince)) >= in.AllocationLossTimeout
 	}
 
 	jobKeys := make([]string, 0, len(in.Jobs))
@@ -157,10 +161,9 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 
 	allocations := make([]*Allocation, len(in.Allocations))
 	for i, snapshot := range in.Allocations {
-		planned, err := cloneAllocationForReconcile(snapshot)
-		if err != nil {
-			return nil, fmt.Errorf("copy allocation %s reconciliation snapshot: %w", snapshot.ID, err)
-		}
+		// Working copies share the snapshot's detached node, which planning
+		// only reads.
+		planned := snapshot.cloneOnto(snapshot.Node)
 		allocations[i] = planned
 		plan.Source[planned] = snapshot
 	}
@@ -637,11 +640,7 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 	updates := make([]*Allocation, 0, len(plan.Updated)+len(plan.NewAllocations))
 	updates = append(updates, plan.Updated...)
 	for _, allocation := range plan.NewAllocations {
-		persisted, err := cloneAllocationForReconcile(allocation)
-		if err != nil {
-			return nil, fmt.Errorf("snapshot new allocation %s for persistence: %w", allocation.ID, err)
-		}
-		updates = append(updates, persisted)
+		updates = append(updates, allocation.Clone())
 	}
 	prunedIDs := make([]string, len(plan.Pruned))
 	for i, allocation := range plan.Pruned {

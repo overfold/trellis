@@ -16,8 +16,8 @@ The first workload deliberately omits ports, health-check settings, secrets, vol
 
 | Order | Example | Adds | Prerequisites |
 | --- | --- | --- | --- |
-| 2 | [`web-service/`](web-service/) | One reachable service, task-level host networking, one fixed port reservation, and HTTP health. | One healthy node. |
-| 3 | [`replicated-service/`](replicated-service/) | A second replica and the placement consequences of a shared fixed host port. | At least two schedulable nodes. |
+| 2 | [`web-service/`](web-service/) | One reachable service, one published node port, and HTTP health. | One healthy node. |
+| 3 | [`replicated-service/`](replicated-service/) | A second replica and the placement consequences of a shared fixed node port. | At least two schedulable nodes. |
 | 4 | [`rolling-update/`](rolling-update/) | Rolling replacement and explicit overlap/capacity requirements. | Two running replicas plus a third compatible node for old/new overlap. |
 | 5 | [`secrets/`](secrets/) | Namespace-scoped secrets delivered as an environment variable and a file. | Shared node secrets-encryption key. |
 | 6 | [`volumes/`](volumes/) | Trellis-managed and absolute host paths, durable volume registrations, and placement constraints. | Prepared node path and label. |

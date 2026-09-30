@@ -298,6 +298,10 @@ EOF
     write_install_state
 }
 
+networking_tools_present() {
+    command -v wg >/dev/null 2>&1 && command -v ip >/dev/null 2>&1 && command -v iptables >/dev/null 2>&1
+}
+
 install_networking() {
     detect_distro
     ui_step "Installing namespace-networking dependencies"

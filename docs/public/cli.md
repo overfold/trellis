@@ -298,7 +298,8 @@ namespaces list
 nodes list, status
 cluster settings
 secrets set, list, describe
-credentials create
+credentials create, list
+nodes join-token create, list
 ```
 
 For example:

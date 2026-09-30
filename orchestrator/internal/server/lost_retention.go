@@ -60,8 +60,8 @@ func allocationHostPorts(allocation *Allocation) map[int]bool {
 			continue
 		}
 		for _, port := range task.Networking.Ports {
-			if port.Port > 0 {
-				ports[port.Port] = true
+			if nodePort := port.NodePort(); nodePort > 0 {
+				ports[nodePort] = true
 			}
 		}
 	}

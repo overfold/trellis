@@ -319,10 +319,10 @@ func listXattrNames(list func([]byte) (int, error)) (map[string]struct{}, error)
 func selectUpstreams(allocs []api.AllocationResponse, containerPort int) []upstream {
 	var upstreams []upstream
 	for _, alloc := range allocs {
-		if alloc.Phase != api.PhaseRunning || alloc.Health != api.HealthHealthy || alloc.Address == "" || len(alloc.Ports) == 0 {
+		if alloc.Phase != "running" || alloc.Health != "healthy" || alloc.Address == "" {
 			continue
 		}
-		port, ok := selectHostPort(alloc.Ports, containerPort)
+		port, ok := selectPort(alloc.Ports, containerPort)
 		if !ok {
 			continue
 		}
@@ -341,16 +341,22 @@ func selectUpstreams(allocs []api.AllocationResponse, containerPort int) []upstr
 	return upstreams
 }
 
-func selectHostPort(ports []api.PortMapping, containerPort int) (int, bool) {
+// selectPort returns the port to dial at an allocation's address: the port
+// the task listens on. Host-networked tasks listen on the node port itself;
+// namespace-networked tasks listen on it at their namespace address, where
+// the published host port does not apply. An allocation that declares no
+// ports is dialed at containerPort, since namespace peers need no declared
+// port to reach it.
+func selectPort(ports []api.PortMapping, containerPort int) (int, bool) {
+	if len(ports) == 0 {
+		return containerPort, containerPort > 0
+	}
 	if containerPort == 0 {
-		if len(ports) == 0 || ports[0].HostPort <= 0 {
-			return 0, false
-		}
-		return ports[0].HostPort, true
+		return ports[0].ContainerPort, ports[0].ContainerPort > 0
 	}
 	for _, port := range ports {
-		if port.ContainerPort == containerPort && port.HostPort > 0 {
-			return port.HostPort, true
+		if port.ContainerPort == containerPort {
+			return port.ContainerPort, true
 		}
 	}
 	return 0, false

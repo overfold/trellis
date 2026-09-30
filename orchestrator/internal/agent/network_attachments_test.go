@@ -54,6 +54,10 @@ func (m *recoveringNetworkManager) Attach(_ context.Context, request network.Att
 		NetworkNamespace: "/var/run/netns/" + request.AllocationID, Address: "10.42.0.2/24"}, nil
 }
 
+func (m *recoveringNetworkManager) UpdatePlan(context.Context, string, network.Plan) error {
+	return nil
+}
+
 func (m *recoveringNetworkManager) Detach(_ context.Context, attachment *network.Attachment) error {
 	if attachment == nil {
 		return nil

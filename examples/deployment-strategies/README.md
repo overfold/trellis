@@ -4,7 +4,7 @@
 
 This directory compares three release patterns. Trellis implements `recreate` and `rolling` as task-group update strategies. Blue/green and canary releases are compositions of independent jobs plus an external, label-driven proxy; `blue_green` and `canary` are not valid strategy values.
 
-Every manifest in this directory uses host networking and reserves port 80. Trellis does not translate host ports, so every simultaneously running allocation needs a distinct node where port 80 is free. These examples are therefore intentionally capacity-expensive: they make the overlap required by each release pattern visible instead of hiding it behind a networking abstraction.
+Every manifest in this directory uses host networking and reserves node port 80, so every simultaneously running allocation needs a distinct node where port 80 is free. Publishing port 80 from namespace networking has the same one-per-node constraint. These examples are therefore intentionally capacity-expensive: they make the overlap required by each release pattern visible instead of hiding it behind a networking abstraction.
 
 The fixtures use explicit nginx version tags so the release changes remain readable. Tags can still be repointed; replace them with qualified image digests before adapting these patterns to production.
 

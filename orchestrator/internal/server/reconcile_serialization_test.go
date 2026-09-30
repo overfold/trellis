@@ -19,8 +19,8 @@ import (
 func TestReconcileDoesNotMutateStoredJobSpec(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()
-	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
-	s.nodes[node.ID] = node
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
+	addTestNode(s, node, s.now())
 	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}
 	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(jobSpec), Revision: 1}
 	before, err := json.Marshal(jobSpec)
@@ -67,8 +67,8 @@ func newAbortFixture(t *testing.T) (*Server, *bytes.Buffer, *prometheus.Registry
 	s.log = slog.New(slog.NewTextHandler(logs, nil))
 	registry := prometheus.NewRegistry()
 	RegisterMetrics(s, registry)
-	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
-	s.nodes[node.ID] = node
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
+	addTestNode(s, node, s.now())
 	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}
 	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(jobSpec), Revision: 1}
 	pending := &Allocation{ID: "pending", Namespace: "default", JobName: "web", TaskGroupName: "api", Tasks: jobSpec.TaskGroups[0].Tasks, Generation: 1, JobRevision: 1, Phase: lifecycle.PhasePending, Health: lifecycle.HealthUnknown}
@@ -78,10 +78,7 @@ func newAbortFixture(t *testing.T) (*Server, *bytes.Buffer, *prometheus.Registry
 
 func planAbortFixture(t *testing.T, s *Server) (*reconcilePlan, map[*Allocation]*Allocation) {
 	t.Helper()
-	input, originals, err := s.reconcilePlanInputLocked(s.now(), nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	input, originals := s.reconcilePlanInputLocked(s.now(), s.liveness.heartbeats(), nil, nil)
 	plan, err := planReconciliation(input)
 	if err != nil {
 		t.Fatal(err)
@@ -139,8 +136,8 @@ func TestReconcileAbortsWhenPlannedNodeRemoved(t *testing.T) {
 func TestStopAllocationByIDWaitsForNodeActionsAndReplaces(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()
-	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
-	s.nodes[node.ID] = node
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
+	addTestNode(s, node, s.now())
 	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}
 	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(jobSpec), Revision: 1}
 	original := &Allocation{ID: "original", Namespace: "default", JobName: "web", TaskGroupName: "api", Tasks: jobSpec.TaskGroups[0].Tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
@@ -177,8 +174,8 @@ func TestStopAllocationByIDWaitsForNodeActionsAndReplaces(t *testing.T) {
 func TestRestartJobReconcilesImmediately(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()
-	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
-	s.nodes[node.ID] = node
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
+	addTestNode(s, node, s.now())
 	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}
 	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(jobSpec), Revision: 1}
 	original := &Allocation{ID: "original", Namespace: "default", JobName: "web", TaskGroupName: "api", Tasks: jobSpec.TaskGroups[0].Tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}

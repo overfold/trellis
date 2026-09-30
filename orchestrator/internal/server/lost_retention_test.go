@@ -34,10 +34,10 @@ func newLostReturnFixture(t *testing.T, tasks []spec.TaskSpec, withNodeB bool) *
 	t.Cleanup(agent.server.Close)
 	now := s.now()
 	s.leaderSince = now.Add(-leaderRecoveryGrace - time.Second)
-	nodeA := &Node{ID: lostNodeAID, Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: now}
-	s.nodes[nodeA.ID] = nodeA
+	nodeA := &Node{ID: lostNodeAID, Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
+	addTestNode(s, nodeA, now)
 	if withNodeB {
-		s.nodes[lostNodeBID] = &Node{ID: lostNodeBID, Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: now}
+		addTestNode(s, &Node{ID: lostNodeBID, Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}, now)
 	}
 	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{
 		Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: tasks}},
@@ -69,7 +69,7 @@ func (f *lostReturnFixture) addAllocation(id string, node *Node, phase lifecycle
 func (f *lostReturnFixture) heartbeatA(t *testing.T) {
 	t.Helper()
 	statuses := []nodeapi.AllocationStatus{{ID: "original", Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
-	if err := f.s.Heartbeat(context.Background(), f.nodeA.ID, statuses, "test", nil, nil, nodeResourceObservation{}); err != nil {
+	if err := heartbeatAndApply(t, f.s, f.nodeA.ID, statuses, "test", nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
 	}
 	if f.original.Phase != lifecycle.PhaseLost {
@@ -189,9 +189,9 @@ func TestReconcileKeepsLostOriginalUntilReplacementRuns(t *testing.T) {
 	})
 	t.Run("original reported starting is not retained", func(t *testing.T) {
 		f := newLostReturnFixture(t, tasks, true)
-		if err := f.s.Heartbeat(context.Background(), f.nodeA.ID, []nodeapi.AllocationStatus{
+		if err := heartbeatAndApply(t, f.s, f.nodeA.ID, []nodeapi.AllocationStatus{
 			{ID: "original", Generation: 1, Task: "app", Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown},
-		}, "test", nil, nil, nodeResourceObservation{}); err != nil {
+		}, "test", nodeResourceObservation{}); err != nil {
 			t.Fatal(err)
 		}
 
@@ -330,8 +330,7 @@ func TestReconcileLostOriginalHostPortConflict(t *testing.T) {
 }
 
 func TestScheduleAroundRetainedDoesNotMutateInputs(t *testing.T) {
-	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
-	node := &Node{ID: lostNodeAID, Status: NodeStatusHealthy, LastHeartbeat: now}
+	node := &Node{ID: lostNodeAID, Status: NodeStatusHealthy}
 	tasks := []spec.TaskSpec{{Name: "app", Image: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkHost, Ports: []spec.PortSpec{{Port: 8080}}}, Volumes: []spec.VolumeSpec{{Name: "data", HostPath: "@/data", ContainerPath: "/data"}}}}
 	original := &Allocation{ID: "original", Namespace: "default", JobName: "web", TaskGroupName: "app", Tasks: tasks, Node: node, Generation: 1, Phase: lifecycle.PhaseLost}
 	owners := map[string]uuid.UUID{}
@@ -390,10 +389,11 @@ func TestReconcileAllocationLossTimeout(t *testing.T) {
 			now := s.now()
 			s.leaderSince = now.Add(-tc.leaderFor)
 			node := &Node{ID: lostNodeAID, Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
+			var heartbeat time.Time
 			if tc.silentFor >= 0 {
-				node.LastHeartbeat = now.Add(-tc.silentFor)
+				heartbeat = now.Add(-tc.silentFor)
 			}
-			s.nodes[node.ID] = node
+			addTestNode(s, node, heartbeat)
 			tasks := []spec.TaskSpec{{Name: "app", Image: "app"}}
 			s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{
 				Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: tasks}},

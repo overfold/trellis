@@ -16,7 +16,7 @@ import (
 var planNow = time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 
 func planTestNode(id byte, status NodeStatus) *Node {
-	return &Node{ID: uuid.UUID{id}, Host: "10.0.0.1", Port: 8127, Status: status, LastHeartbeat: planNow}
+	return &Node{ID: uuid.UUID{id}, Host: "10.0.0.1", Port: 8127, Status: status}
 }
 
 func planTestJob(name string, count, revision int, strategy spec.UpdateStrategy) *Job {
@@ -33,13 +33,16 @@ func planTestAllocation(id string, node *Node, phase lifecycle.Phase, revision i
 
 func planTestInput(jobs map[string]*Job, nodes []*Node, allocations ...*Allocation) *reconcilePlanInput {
 	nodeMap := make(map[uuid.UUID]*Node, len(nodes))
+	heartbeats := make(map[uuid.UUID]time.Time, len(nodes))
 	for _, node := range nodes {
 		nodeMap[node.ID] = node
+		heartbeats[node.ID] = planNow
 	}
 	suffix := 0
 	return &reconcilePlanInput{
 		Now:                   planNow,
 		LeaderSince:           planNow.Add(-time.Hour),
+		Heartbeats:            heartbeats,
 		Limits:                spec.DefaultLimits(),
 		Policy:                DefaultReplacementPolicy(),
 		AllocationLossTimeout: DefaultAllocationLossTimeout,
@@ -160,9 +163,10 @@ func TestPlanReconciliation(t *testing.T) {
 			name: "marks allocations lost after the node loss timeout",
 			input: func() *reconcilePlanInput {
 				gone := planTestNode(2, NodeStatusUnhealthy)
-				gone.LastHeartbeat = planNow.Add(-DefaultAllocationLossTimeout)
-				return planTestInput(map[string]*Job{jobKey("default", "web"): planTestJob("web", 1, 1, "")}, []*Node{gone},
+				input := planTestInput(map[string]*Job{jobKey("default", "web"): planTestJob("web", 1, 1, "")}, []*Node{gone},
 					planTestAllocation("a", gone, lifecycle.PhaseRunning, 1))
+				input.Heartbeats[gone.ID] = planNow.Add(-DefaultAllocationLossTimeout)
+				return input
 			},
 			updates: []plannedUpdate{{ID: "a", Phase: lifecycle.PhaseLost, Reason: "node_unavailable"}},
 			created: []plannedUpdate{{ID: "default-web-app-00000001", Phase: lifecycle.PhasePending, Reason: "no_healthy_nodes"}},
@@ -171,9 +175,9 @@ func TestPlanReconciliation(t *testing.T) {
 			name: "keeps allocations on a silent node within the leader recovery grace",
 			input: func() *reconcilePlanInput {
 				gone := planTestNode(2, NodeStatusUnhealthy)
-				gone.LastHeartbeat = planNow.Add(-DefaultAllocationLossTimeout)
 				input := planTestInput(map[string]*Job{jobKey("default", "web"): planTestJob("web", 1, 1, "")}, []*Node{gone},
 					planTestAllocation("a", gone, lifecycle.PhaseRunning, 1))
+				input.Heartbeats[gone.ID] = planNow.Add(-DefaultAllocationLossTimeout)
 				input.LeaderSince = planNow.Add(-time.Second)
 				return input
 			},

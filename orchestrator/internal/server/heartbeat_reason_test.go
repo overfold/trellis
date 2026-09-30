@@ -25,11 +25,12 @@ func heartbeatReasonTestServer(phase lifecycle.Phase) (*Server, *Node, *Allocati
 		Phase: phase, Health: lifecycle.HealthHealthy,
 	}
 	s := &Server{
-		now:   time.Now,
-		state: NewStateController(memoryStore{}, "test"),
-		nodes: map[uuid.UUID]*Node{node.ID: node}, allocations: []*Allocation{allocation},
-		catalog: catalog.New(),
+		now:         time.Now,
+		state:       NewStateController(memoryStore{}, "test"),
+		allocations: []*Allocation{allocation},
+		catalog:     catalog.New(),
 	}
+	addTestNode(s, node, time.Time{})
 	return s, node, allocation
 }
 
@@ -46,6 +47,7 @@ func postHeartbeat(t *testing.T, s *Server, nodeID uuid.UUID, allocations []node
 	request = request.WithContext(context.WithValue(request.Context(), NodeContextKey, nodeID))
 	recorder := httptest.NewRecorder()
 	e.ServeHTTP(recorder, request)
+	applyTestObservations(s)
 	return recorder.Code
 }
 
@@ -101,7 +103,7 @@ func TestHeartbeatRejectsInvalidFailureReason(t *testing.T) {
 func TestHeartbeatRejectsExcessAllocationReports(t *testing.T) {
 	s, node, _ := heartbeatReasonTestServer(lifecycle.PhaseRunning)
 	reports := make([]nodeapi.AllocationStatus, maxHeartbeatAllocationStatuses+1)
-	if err := s.Heartbeat(context.Background(), node.ID, reports, "test", nil, nil, nodeResourceObservation{}); err == nil {
+	if err := heartbeatAndApply(t, s, node.ID, reports, "test", nodeResourceObservation{}); err == nil {
 		t.Fatal("oversized heartbeat succeeded")
 	}
 }

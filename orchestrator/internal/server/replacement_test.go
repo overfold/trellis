@@ -278,7 +278,10 @@ func TestPlanTerminalPruningKeepsNewestAndSkipsCurrentUpdates(t *testing.T) {
 	}
 }
 
-type backoffTestClock struct{ now time.Time }
+type backoffTestClock struct {
+	now    time.Time
+	server *Server
+}
 
 func newBackoffReconcileServer(t *testing.T, store state.Store) (*Server, *Node, *backoffTestClock) {
 	t.Helper()
@@ -286,17 +289,18 @@ func newBackoffReconcileServer(t *testing.T, store state.Store) (*Server, *Node,
 	t.Cleanup(agent.server.Close)
 	clock := &backoffTestClock{now: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)}
 	s := NewServer(slog.Default(), nil, NewStateController(store, "test"), store, "test", "")
+	clock.server = s
 	s.client = newTestAgentClient()
 	s.now = func() time.Time { return clock.now }
-	node := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000001"), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: clock.now}
-	s.nodes[node.ID] = node
+	node := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000001"), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
+	addTestNode(s, node, clock.now)
 	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}), Revision: 1}
 	return s, node, clock
 }
 
 func (c *backoffTestClock) advance(node *Node, d time.Duration) {
 	c.now = c.now.Add(d)
-	node.LastHeartbeat = c.now
+	setTestHeartbeat(c.server, node.ID, c.now)
 }
 
 func activeAllocations(s *Server) []*Allocation {
@@ -954,7 +958,7 @@ func TestReconcilePrunesRecordsOfRemovedAndUnavailableNodes(t *testing.T) {
 	s, node, clock := newBackoffReconcileServer(t, store)
 	ctx := context.Background()
 	removed := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000002"), Status: NodeStatusHealthy}
-	down := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000003"), Status: NodeStatusUnhealthy, LastHeartbeat: clock.now.Add(-time.Hour)}
+	down := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000003"), Status: NodeStatusUnhealthy}
 	for _, n := range []*Node{removed, down} {
 		s.nodes[n.ID] = n
 		if err := s.state.PutNode(ctx, n.ID.String(), nodeSummary(n)); err != nil {

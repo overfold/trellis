@@ -4,11 +4,10 @@
 
 This example adds the first service-specific concerns to the minimal workload without introducing scaling or rollout strategy yet:
 
-- task-level `networking.mode: host` makes the tutorial application reachable through the node network;
-- `port: 8080` reserves the port the process actually binds;
+- `networking.ports` publishes port 8080, where the tutorial application listens, on the node that runs it;
 - an HTTP health check keeps the allocation unready until `/health` succeeds.
 
-Host networking does not perform NAT or port translation. A declared port must therefore match the port the process binds.
+The task omits `networking.mode`, so it joins the default `namespace` network: it gets a private address, and Trellis forwards node port 8080 to it. Add `host_port` to publish on a different node port, for example `host_port: 80`. See [Networking and ports](../../docs/public/job-specification.md#networking-and-ports) for the other modes.
 
 ## Deploy and inspect
 
@@ -19,7 +18,7 @@ trellisctl jobs apply --file examples/web-service/trellis.yaml --wait
 trellisctl jobs status web-service
 ```
 
-The allocations listed by `jobs status` show the selected node and reserved host port. From a trusted test network, open `http://NODE_ADDRESS:8080` or query `/health` to verify that the service is reachable. This example deliberately serves plaintext HTTP; do not expose it to an untrusted network without placing it behind TLS.
+The allocations listed by `jobs status` show the selected node and the published node port. From a trusted test network, open `http://NODE_ADDRESS:8080` or query `/health` to verify that the service is reachable. This example deliberately serves plaintext HTTP; do not expose it to an untrusted network without placing it behind TLS.
 
 If the health check does not succeed, `jobs status` includes the failure details automatically; pair it with logs when needed:
 
@@ -34,4 +33,4 @@ Remove it when finished:
 trellisctl jobs delete web-service --wait
 ```
 
-Next, continue to [`replicated-service`](../replicated-service/) to add a second replica and learn the placement consequences of a fixed host port before introducing rolling replacement.
+Next, continue to [`replicated-service`](../replicated-service/) to add a second replica and learn the placement consequences of a fixed node port before introducing rolling replacement.

@@ -101,8 +101,8 @@ func schedule(intent *PlacementIntent) ([]Placement, *placementDiagnostic) {
 			for _, task := range alloc.Tasks {
 				if task.Networking != nil {
 					for _, port := range task.Networking.Ports {
-						if port.Port > 0 {
-							usedPorts[alloc.Node.ID][port.Port] = true
+						if nodePort := port.NodePort(); nodePort > 0 {
+							usedPorts[alloc.Node.ID][nodePort] = true
 						}
 					}
 				}
@@ -121,8 +121,8 @@ func schedule(intent *PlacementIntent) ([]Placement, *placementDiagnostic) {
 	for _, task := range intent.Tasks {
 		if task.Networking != nil {
 			for _, port := range task.Networking.Ports {
-				if port.Port > 0 {
-					requestedPorts[port.Port] = true
+				if nodePort := port.NodePort(); nodePort > 0 {
+					requestedPorts[nodePort] = true
 				}
 			}
 		}
@@ -151,7 +151,7 @@ func schedule(intent *PlacementIntent) ([]Placement, *placementDiagnostic) {
 			}
 			portsAvailable := true
 			for port := range requestedPorts {
-				if usedPorts[node.ID][port] {
+				if usedPorts[node.ID][port] || nodeReservesPort(node, port) {
 					portsAvailable = false
 					break
 				}
@@ -238,7 +238,7 @@ func diagnosePlacement(nodes []*Node, intent *PlacementIntent, volumeOwners map[
 	}
 	candidates = filterNodes(candidates, func(node *Node) bool {
 		for port := range requestedPorts {
-			if usedPorts[node.ID][port] {
+			if usedPorts[node.ID][port] || nodeReservesPort(node, port) {
 				return false
 			}
 		}
@@ -371,4 +371,12 @@ func placementUtilization(node *Node, usedCPU, requestedCPU int, usedMemory, req
 		}
 	}
 	return max(cpuRatio, memoryRatio)
+}
+
+// nodeReservesPort reports whether port is in the node's namespace WireGuard
+// listen range. Publishing such a port would forward the node's WireGuard
+// traffic to a task, and a host-networked task binding it would block a
+// namespace network.
+func nodeReservesPort(node *Node, port int) bool {
+	return node.WireGuardPortCount > 0 && port >= node.WireGuardPortBase && port < node.WireGuardPortBase+node.WireGuardPortCount
 }

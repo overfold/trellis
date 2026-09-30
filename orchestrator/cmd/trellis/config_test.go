@@ -14,7 +14,7 @@ func TestLoadNodeConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "trellis.yaml")
 	if err := os.WriteFile(path, []byte(`cluster: production
 administrator_public_key: test-public-key
-enrollment_token: trls_enroll_test
+join_token: trls_join_test
 node_signing_mode: managed
 agent_advertise: node-a:8127
 wireguard_port: 51900
@@ -33,7 +33,7 @@ resources:
 	if err := loadNodeConfig(path, cfg, pflag.NewFlagSet("test", pflag.ContinueOnError)); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Cluster != "production" || cfg.AdminPublicKey != "test-public-key" || cfg.EnrollmentToken != "trls_enroll_test" || cfg.SigningMode != "managed" || cfg.AgentAdvertise != "node-a:8127" || cfg.WireGuardPort != 51900 || cfg.WireGuardPortCount != 64 {
+	if cfg.Cluster != "production" || cfg.AdminPublicKey != "test-public-key" || cfg.JoinToken != "trls_join_test" || cfg.SigningMode != "managed" || cfg.AgentAdvertise != "node-a:8127" || cfg.WireGuardPort != 51900 || cfg.WireGuardPortCount != 64 {
 		t.Fatalf("unexpected config: %#v", cfg)
 	}
 	if cfg.Explicit != (explicitClusterSettings{WireGuardPortCount: true}) {

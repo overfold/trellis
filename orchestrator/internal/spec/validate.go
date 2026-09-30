@@ -155,7 +155,7 @@ func Validate(job *JobSpec) error {
 		}
 
 		tasks := make(map[string]struct{})
-		hostPorts := make(map[int]struct{})
+		hostPorts := make(map[int]struct{}) // node ports across the task group
 		for j, task := range group.Tasks {
 			taskPath := fmt.Sprintf("%s.tasks[%d]", groupPath, j)
 			if task.Name != "" {
@@ -262,20 +262,43 @@ func Validate(job *JobSpec) error {
 			}
 
 			if task.Networking != nil {
-				if !task.Networking.Mode.Valid() {
-					add(taskPath+".networking.mode", "unsupported", fmt.Sprintf("unsupported networking mode %q", task.Networking.Mode))
+				mode := task.Networking.Mode
+				if !mode.Valid() {
+					add(taskPath+".networking.mode", "unsupported", fmt.Sprintf("unsupported networking mode %q", mode))
 				}
-				if task.Networking.Mode != TaskNetworkHost && len(task.Networking.Ports) > 0 {
-					add(taskPath+".networking.ports", "invalid", "ports require networking mode host")
+				if mode == TaskNetworkNone && len(task.Networking.Ports) > 0 {
+					add(taskPath+".networking.ports", "invalid", "ports are not allowed with networking mode none")
 				}
+				taskPorts := make(map[int]struct{})
 				for k, port := range task.Networking.Ports {
-					path := fmt.Sprintf("%s.networking.ports[%d].port", taskPath, k)
+					path := fmt.Sprintf("%s.networking.ports[%d]", taskPath, k)
+					duplicate := false
 					if port.Port < 1 || port.Port > 65535 {
-						add(path, "out_of_range", "must be between 1 and 65535")
-					} else if _, exists := hostPorts[port.Port]; exists {
-						add(path, "duplicate", fmt.Sprintf("duplicate host port %d in task group", port.Port))
+						add(path+".port", "out_of_range", "must be between 1 and 65535")
+					} else if _, duplicate = taskPorts[port.Port]; duplicate {
+						add(path+".port", "duplicate", fmt.Sprintf("duplicate port %d in task", port.Port))
 					} else {
-						hostPorts[port.Port] = struct{}{}
+						taskPorts[port.Port] = struct{}{}
+					}
+					switch {
+					case port.HostPort != 0 && mode == TaskNetworkHost:
+						add(path+".host_port", "invalid", "host_port is not allowed with networking mode host")
+					case port.HostPort < 0 || port.HostPort > 65535:
+						add(path+".host_port", "out_of_range", "must be between 1 and 65535")
+					}
+					// The node port is host_port when set, and otherwise port,
+					// which namespace networking also publishes by default.
+					nodePort, nodePath := port.Port, path+".port"
+					if port.HostPort != 0 {
+						nodePort, nodePath = port.HostPort, path+".host_port"
+					}
+					if nodePort < 1 || nodePort > 65535 || duplicate && port.HostPort == 0 {
+						continue
+					}
+					if _, exists := hostPorts[nodePort]; exists {
+						add(nodePath, "duplicate", fmt.Sprintf("duplicate node port %d in task group", nodePort))
+					} else {
+						hostPorts[nodePort] = struct{}{}
 					}
 				}
 			}
@@ -284,7 +307,7 @@ func Validate(job *JobSpec) error {
 				if task.Networking != nil {
 					mode = task.Networking.Mode
 				}
-				if mode != TaskNetworkHost && mode != TaskNetworkWireGuard {
+				if mode == TaskNetworkNone {
 					add(taskPath+".networking.mode", "incompatible", "api_access requires host or namespace networking")
 				}
 			}

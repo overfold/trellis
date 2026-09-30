@@ -50,6 +50,6 @@ Back up both host paths using database-aware procedures; copying a live MariaDB 
 trellisctl --namespace default jobs delete wordpress
 ```
 
-Before production, separate MariaDB into a managed or replicated database service, use isolated networking and TLS, place the web tier behind the reverse-proxy pattern, pin images by digest, and test password rotation and restores. Scaling only the stateless WordPress tier requires separate task groups/jobs because a Trellis task group scales every contained task together.
+Before production, separate MariaDB into a managed or replicated database service, use namespace networking and TLS, place the web tier behind the reverse-proxy pattern, pin images by digest, and test password rotation and restores. Scaling only the stateless WordPress tier requires separate task groups/jobs because a Trellis task group scales every contained task together.
 
 [Examples index](../README.md) · [Next: Patroni architecture](../patroni/)

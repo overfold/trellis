@@ -153,6 +153,11 @@
     "PortSpec": {
       "additionalProperties": false,
       "properties": {
+        "host_port": {
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        },
         "port": {
           "maximum": 65535,
           "minimum": 1,
@@ -328,21 +333,44 @@
       "allOf": [
         {
           "if": {
-            "not": {
-              "properties": {
-                "mode": {
-                  "const": "host"
-                }
-              },
-              "required": [
-                "mode"
-              ]
-            }
+            "properties": {
+              "mode": {
+                "const": "none"
+              }
+            },
+            "required": [
+              "mode"
+            ]
           },
           "then": {
             "properties": {
               "ports": {
                 "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "host"
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          },
+          "then": {
+            "properties": {
+              "ports": {
+                "items": {
+                  "not": {
+                    "required": [
+                      "host_port"
+                    ]
+                  }
+                }
               }
             }
           }
@@ -352,9 +380,9 @@
         "mode": {
           "enum": [
             "",
-            "isolated",
-            "host",
-            "namespace"
+            "none",
+            "namespace",
+            "host"
           ],
           "type": "string"
         },

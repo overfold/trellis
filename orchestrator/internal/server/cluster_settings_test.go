@@ -293,11 +293,8 @@ func TestUpdateReconciliationSettingsIsReplicatedToLaterLeaders(t *testing.T) {
 		t.Fatalf("later leader reconciliation = %+v, want %+v", got, reconciliation)
 	}
 	follower.mu.Lock()
-	input, _, err := follower.reconcilePlanInputLocked(follower.now(), nil, nil)
+	input, _ := follower.reconcilePlanInputLocked(follower.now(), nil, nil, nil)
 	follower.mu.Unlock()
-	if err != nil {
-		t.Fatal(err)
-	}
 	if input.AllocationLossTimeout != reconciliation.AllocationLossTimeout || input.Policy != reconciliation.replacementPolicy() {
 		t.Fatalf("planner input = %s/%+v, want the replicated settings", input.AllocationLossTimeout, input.Policy)
 	}

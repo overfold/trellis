@@ -27,6 +27,10 @@ func HandleWhoAmI(c *echo.Context) error {
 		createdAt := principal.CreatedAt
 		response.CreatedAt = &createdAt
 	}
+	if !principal.ExpiresAt.IsZero() {
+		expiresAt := principal.ExpiresAt
+		response.ExpiresAt = &expiresAt
+	}
 	if principal.Subject != nil {
 		response.Subject = &api.CredentialSubjectResponse{
 			Namespace: principal.Subject.Namespace,

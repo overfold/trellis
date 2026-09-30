@@ -172,8 +172,8 @@ func TestReconcileWithholdsPlacementWhenSubnetPoolIsExhausted(t *testing.T) {
 	s.wireGuardPortCount = 8
 	// A /23 addresses two namespaces on one node.
 	s.networkPool = netip.MustParsePrefix("10.64.0.0/23")
-	node := &Node{ID: subnetNodeA, Status: NodeStatusHealthy, LastHeartbeat: time.Now(), WireGuardPortBase: 51820, WireGuardPortCount: 8, CPUCapacity: 4000, MemoryCapacity: 4 << 30, CPUAllocatable: 4000, MemoryAllocatable: 4 << 30, Capabilities: []spec.NodeCapability{spec.CapabilityNamespaceNetworking}}
-	s.nodes[node.ID] = node
+	node := &Node{ID: subnetNodeA, Status: NodeStatusHealthy, WireGuardPortBase: 51820, WireGuardPortCount: 8, CPUCapacity: 4000, MemoryCapacity: 4 << 30, CPUAllocatable: 4000, MemoryAllocatable: 4 << 30}
+	addTestNode(s, node, time.Now())
 	for _, namespace := range []string{"acme", "globex", "initech"} {
 		s.jobs[jobKey(namespace, "web")] = &Job{
 			Spec: canonicalTestSpec(&spec.JobSpec{

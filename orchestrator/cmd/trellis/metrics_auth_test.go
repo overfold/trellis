@@ -33,7 +33,7 @@ func TestMetricsRequireClusterScopedCredential(t *testing.T) {
 	}
 	control := server.NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), nil, server.NewStateController(store, "test"), store, "test", "")
 	e := echo.New()
-	e.Use(leaderAuthMiddleware(auth.NewAdministratorAuthenticator(), func() (ed25519.PublicKey, uint64, bool) { return nil, 0, false }, "", tokens, nil))
+	e.Use(leaderAuthMiddleware(auth.NewAdministratorAuthenticator(), func() (ed25519.PublicKey, uint64, bool) { return nil, 0, false }, tokens, nil))
 	server.NewHandler(control).Register(e)
 
 	for _, tc := range []struct {

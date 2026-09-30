@@ -115,14 +115,24 @@ func (r *firstHealthProbeRuntime) Exec(context.Context, string, []string) (int, 
 	return 0, nil
 }
 
+// noopNetworkManager attaches nothing; tests embed it and override the
+// operations they observe.
+type noopNetworkManager struct{}
+
+func (noopNetworkManager) Attach(context.Context, network.AttachRequest) (*network.Attachment, error) {
+	return nil, errors.New("attach not expected")
+}
+func (noopNetworkManager) Detach(context.Context, *network.Attachment) error      { return nil }
+func (noopNetworkManager) UpdatePlan(context.Context, string, network.Plan) error { return nil }
+
 type blockingRecoveryDetach struct {
-	network.DisabledManager
+	noopNetworkManager
 	entered chan struct{}
 	release chan struct{}
 }
 
 type blockingAttachNetworkManager struct {
-	network.DisabledManager
+	noopNetworkManager
 	entered chan struct{}
 	release chan struct{}
 }
@@ -312,6 +322,7 @@ func (m *countingNetworkManager) Detach(context.Context, *network.Attachment) er
 	m.detachCount++
 	return nil
 }
+func (*countingNetworkManager) UpdatePlan(context.Context, string, network.Plan) error { return nil }
 
 func (r *blockingStartRuntime) Create(_ context.Context, options runtime.CreateOptions) (string, error) {
 	r.labels[options.ID] = options.Labels
@@ -333,13 +344,15 @@ func (staticNetworkManager) Attach(_ context.Context, request network.AttachRequ
 	return &network.Attachment{AllocationID: request.AllocationID, NetworkNamespace: "/var/run/netns/" + request.AllocationID}, nil
 }
 
-func (staticNetworkManager) Detach(context.Context, *network.Attachment) error { return nil }
+func (staticNetworkManager) Detach(context.Context, *network.Attachment) error      { return nil }
+func (staticNetworkManager) UpdatePlan(context.Context, string, network.Plan) error { return nil }
 
 func newOperationTestAgent(t *testing.T, rt runtime.ContainerRuntime) *Agent {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	reconciler := NewAllocationReconciler(rt, nil)
 	agent := NewAgent(log, rt, health.NewHealthManager(log, rt, nil), reconciler, NewPortManager(rt, 0, 0, 0), NewVolumeManager(t.TempDir()), nil, uuid.New())
+	agent.SetNetworkManager(staticNetworkManager{})
 	agent.secretBase = t.TempDir()
 	agent.secretStatfs = func(_ string, stat *syscall.Statfs_t) error {
 		stat.Type = tmpfsMagic
@@ -402,7 +415,7 @@ func TestRunAllocationRejectsSameGenerationRevisionConflict(t *testing.T) {
 }
 
 func TestRunAllocationMountsHealthProbeForEveryNetworkAndRuntime(t *testing.T) {
-	for _, mode := range []spec.TaskNetworkMode{spec.TaskNetworkHost, spec.TaskNetworkIsolated, spec.TaskNetworkWireGuard} {
+	for _, mode := range []spec.TaskNetworkMode{spec.TaskNetworkHost, spec.TaskNetworkNone, spec.TaskNetworkWireGuard} {
 		for _, taskRuntime := range []string{"runc", "runsc"} {
 			t.Run(string(mode)+"/"+taskRuntime, func(t *testing.T) {
 				rt := &blockingStartRuntime{

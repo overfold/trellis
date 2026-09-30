@@ -2,6 +2,7 @@ package server
 
 import (
 	"math"
+	"slices"
 	"testing"
 
 	"github.com/google/uuid"
@@ -382,6 +383,63 @@ func TestScheduleReservesHostPortsWithinBatch(t *testing.T) {
 	placements := Schedule(&PlacementIntent{Count: 3, Nodes: []*Node{a, b}, Tasks: tasks})
 	if len(placements) != 2 || placements[0].NodeID != a.ID || placements[1].NodeID != b.ID {
 		t.Fatalf("expected one placement per node, got %#v", placements)
+	}
+}
+
+func TestScheduleEnforcesNodePortsAcrossNetworkModes(t *testing.T) {
+	a := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000001"), Status: NodeStatusHealthy}
+	b := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000002"), Status: NodeStatusHealthy}
+	published := func(port, hostPort int) []spec.TaskSpec {
+		return []spec.TaskSpec{{Name: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard, Ports: []spec.PortSpec{{Port: port, HostPort: hostPort}}}}}
+	}
+	host := func(port int) []spec.TaskSpec {
+		return []spec.TaskSpec{{Name: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkHost, Ports: []spec.PortSpec{{Port: port}}}}}
+	}
+	for _, test := range []struct {
+		name      string
+		occupying []spec.TaskSpec
+		requested []spec.TaskSpec
+		wantNodes []uuid.UUID
+	}{
+		{name: "published port conflicts with host port", occupying: host(80), requested: published(8080, 80), wantNodes: []uuid.UUID{b.ID}},
+		{name: "host port conflicts with published port", occupying: published(8080, 80), requested: host(80), wantNodes: []uuid.UUID{b.ID}},
+		{name: "published ports conflict", occupying: published(8080, 80), requested: published(9090, 80), wantNodes: []uuid.UUID{b.ID}},
+		{name: "same listen port on different node ports", occupying: published(8080, 80), requested: published(8080, 81), wantNodes: []uuid.UUID{a.ID, b.ID}},
+		{name: "listen port does not occupy the node", occupying: published(8080, 80), requested: host(8080), wantNodes: []uuid.UUID{a.ID, b.ID}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			occupied := &Allocation{Node: a, Tasks: test.occupying}
+			placements := Schedule(&PlacementIntent{Count: 2, Nodes: []*Node{a, b}, Allocations: []*Allocation{occupied}, Tasks: test.requested})
+			var nodes []uuid.UUID
+			for _, placement := range placements {
+				nodes = append(nodes, placement.NodeID)
+			}
+			if !slices.Equal(nodes, test.wantNodes) {
+				t.Fatalf("placements = %v, want %v", nodes, test.wantNodes)
+			}
+		})
+	}
+}
+
+func TestScheduleKeepsWireGuardPortRangeFree(t *testing.T) {
+	a := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000001"), Status: NodeStatusHealthy, WireGuardPortBase: 51820, WireGuardPortCount: 8}
+	b := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000002"), Status: NodeStatusHealthy, WireGuardPortBase: 52820, WireGuardPortCount: 8}
+	for _, tasks := range [][]spec.TaskSpec{
+		{{Name: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard, Ports: []spec.PortSpec{{Port: 8080, HostPort: 51827}}}}},
+		{{Name: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkHost, Ports: []spec.PortSpec{{Port: 51820}}}}},
+	} {
+		placements, diagnostic := schedule(&PlacementIntent{Count: 2, Nodes: []*Node{a, b}, Tasks: tasks})
+		if len(placements) != 1 || placements[0].NodeID != b.ID {
+			t.Fatalf("placements = %#v, want only the node whose WireGuard range excludes the port", placements)
+		}
+		if diagnostic == nil || diagnostic.Reason != "host_port_conflict" {
+			t.Fatalf("diagnostic = %#v, want host_port_conflict", diagnostic)
+		}
+	}
+	// The port just past the range is free.
+	tasks := []spec.TaskSpec{{Name: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkHost, Ports: []spec.PortSpec{{Port: 51828}}}}}
+	if placements := Schedule(&PlacementIntent{Count: 1, Nodes: []*Node{a}, Tasks: tasks}); len(placements) != 1 {
+		t.Fatalf("placements = %#v, want the port after the WireGuard range", placements)
 	}
 }
 

@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
-	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -63,7 +62,7 @@ type config struct {
 	ConfigFile                                                                     string
 	AgentListen, AgentAdvertise, ServerListen, ServerAdvertise                     string
 	RaftListen, RaftAdvertise, Join                                                string
-	DataDir, Cluster, AdminPublicKey, EnrollmentToken, SigningMode, ContainerdSock string
+	DataDir, Cluster, AdminPublicKey, JoinToken, SigningMode, ContainerdSock       string
 	Runtime                                                                        string
 	WireGuardPool, WireGuardEndpoint                                               string
 	WireGuardPort, WireGuardPortCount                                              int
@@ -118,7 +117,7 @@ func main() {
 	f.StringVar(&cfg.DataDir, "data-dir", "/var/lib/trellis/data", "Directory for local state and volumes")
 	f.StringVar(&cfg.Cluster, "cluster", "default", "Cluster name")
 	f.StringVar(&cfg.AdminPublicKey, "administrator-public-key", "", "Base64 PKIX Ed25519 public key used to initialize administrator request verification")
-	f.StringVar(&cfg.EnrollmentToken, "enrollment-token", "", "Managed-mode node enrollment credential")
+	f.StringVar(&cfg.JoinToken, "join-token", "", "Administrator-minted join token used once to enroll this node in a managed-mode cluster")
 	f.StringVar(&cfg.SigningMode, "node-signing-mode", "managed", "Node certificate signing mode: managed or external")
 	f.StringVar(&cfg.ContainerdSock, "containerd-sock", "/run/containerd/containerd.sock", "Containerd socket path")
 	f.StringVar(&cfg.Runtime, "runtime", "containerd", "Workload runtime: containerd")
@@ -168,8 +167,8 @@ func run(parent context.Context, cfg *config) error {
 	if err := validateRuntime(cfg.Runtime); err != nil {
 		return err
 	}
-	if cfg.SigningMode == "managed" && cfg.EnrollmentToken == "" {
-		return fmt.Errorf("enrollment_token or --enrollment-token is required in managed mode")
+	if cfg.JoinToken != "" && (cfg.Join == "" || cfg.SigningMode != "managed") {
+		return fmt.Errorf("join_token or --join-token is used only to join a managed-mode cluster")
 	}
 	if cfg.WireGuardPort < 1 || cfg.WireGuardPort > 65535 {
 		return fmt.Errorf("--wireguard-port must be between 1 and 65535")
@@ -271,19 +270,23 @@ func run(parent context.Context, cfg *config) error {
 		return fmt.Errorf("client TLS config: %w", err)
 	}
 
+	raftPeers := server.NewRaftPeerAuthorizer()
 	raftStore, err := state.NewRaftStore(state.RaftConfig{
-		DataDir:   cfg.DataDir,
-		BindAddr:  cfg.RaftListen,
-		Advertise: cfg.RaftAdvertise,
-		ServerID:  id.String(),
-		Bootstrap: cfg.Join == "",
-		TLS:       peerTLS,
-		Logger:    log,
+		DataDir:       cfg.DataDir,
+		BindAddr:      cfg.RaftListen,
+		Advertise:     cfg.RaftAdvertise,
+		ServerID:      id.String(),
+		Bootstrap:     cfg.Join == "",
+		TLS:           peerTLS,
+		AuthorizePeer: raftPeers.Authorize,
+		Logger:        log,
 	})
 	if err != nil {
 		return fmt.Errorf("init raft store: %w", err)
 	}
 	defer func() { _ = raftStore.Close() }()
+	stateCtl := server.NewStateController(raftStore, cfg.Cluster)
+	raftPeers.Bind(stateCtl, raftStore.Membership)
 
 	if cfg.Join != "" && (!raftStore.HadExistingState() || (cfg.SigningMode == "managed" && len(tlsMaterials.CAKey) == 0)) {
 		log.Info("joining cluster", "address", cfg.Join)
@@ -291,6 +294,7 @@ func run(parent context.Context, cfg *config) error {
 		if err != nil {
 			return fmt.Errorf("join cluster: %w", err)
 		}
+		raftPeers.TrustJoinMembers(joinResponse.Members)
 		if cfg.SigningMode == "managed" {
 			if joinResponse.CAKey == "" {
 				return fmt.Errorf("join cluster: managed signing key was not returned after admission")
@@ -310,7 +314,6 @@ func run(parent context.Context, cfg *config) error {
 		return fmt.Errorf("wait for raft synchronization: %w", err)
 	}
 
-	stateCtl := server.NewStateController(raftStore, cfg.Cluster)
 	control := server.NewServer(log, local, stateCtl, raftStore, cfg.Cluster, cfg.ServerAdvertise)
 	if cfg.SecretsKey != "" {
 		key, keyID, err := loadSecretsKey(cfg.SecretsKey, cfg.SecretsKeyID)
@@ -394,6 +397,13 @@ func run(parent context.Context, cfg *config) error {
 		cfg.DNSListen = net.JoinHostPort(dnsHost, strconv.Itoa(dnsPort))
 	}
 	if cfg.Runtime == "containerd" {
+		// Every node runs namespace networking, the default task network.
+		if goruntime.GOOS != "linux" {
+			return fmt.Errorf("namespace networking requires Linux")
+		}
+		if err := requireCommands("wg", "ip", "iptables"); err != nil {
+			return fmt.Errorf("namespace networking: %w; install wireguard-tools, iproute2, and iptables", err)
+		}
 		if containerruntime.SwapUncapped() {
 			log.Warn("swap is active but swap accounting was not detected in the host memory cgroup; task memory limits may not cap swap")
 		}
@@ -409,6 +419,10 @@ func run(parent context.Context, cfg *config) error {
 	}
 	ag.SetDNSServers([]string{dnsHost})
 	ag.SetNetworkManager(networkManager)
+	if buildTestRuntime != nil && cfg.Runtime == buildTestRuntime.name && buildTestRuntime.network != nil {
+		// A test runtime executes nothing, so it attaches no real networks.
+		ag.SetNetworkManager(buildTestRuntime.network)
+	}
 	endpoint := cfg.WireGuardEndpoint
 	if endpoint == "" {
 		endpoint = net.JoinHostPort(agentHost, strconv.Itoa(cfg.WireGuardPort))
@@ -482,7 +496,7 @@ func run(parent context.Context, cfg *config) error {
 	}()
 
 	leaderHTTP := echo.New()
-	leaderHTTP.Use(middleware.Recover(), leaderAuthMiddleware(auth.NewAdministratorAuthenticator(), control.AdministratorVerification, cfg.EnrollmentToken, control.TokenManager(), control.AuthorizeNodeCertificate))
+	leaderHTTP.Use(middleware.Recover(), leaderAuthMiddleware(auth.NewAdministratorAuthenticator(), control.AdministratorVerification, control.TokenManager(), control.AuthorizeNodeCertificate))
 	leaderHTTP.GET("/v1/auth/whoami", server.HandleWhoAmI)
 	server.NewHandler(control).Register(leaderHTTP)
 	apiProxy := newControlPlaneProxy(elector, cfg.ServerAdvertise, leaderHTTP, newHTTPTransport(clientTLS), log)
@@ -590,6 +604,8 @@ type testRuntime struct {
 	name     string
 	addFlags func(*pflag.FlagSet)
 	open     func(dataDir string) (containerruntime.ContainerRuntime, io.Closer, error)
+	// network replaces namespace networking for the test runtime.
+	network network.Manager
 }
 
 var buildTestRuntime *testRuntime
@@ -629,19 +645,21 @@ func detectNodeCapabilities() []spec.NodeCapability {
 			capabilities = append(capabilities, spec.CapabilityRunsc)
 		}
 	}
-	if goruntime.GOOS == "linux" && commandsAvailable("wg", "ip", "iptables") {
-		capabilities = append(capabilities, spec.CapabilityNamespaceNetworking)
-	}
 	return capabilities
 }
 
-func commandsAvailable(commands ...string) bool {
+// requireCommands reports the commands that are missing from PATH.
+func requireCommands(commands ...string) error {
+	var missing []string
 	for _, command := range commands {
 		if _, err := exec.LookPath(command); err != nil {
-			return false
+			missing = append(missing, command)
 		}
 	}
-	return true
+	if len(missing) > 0 {
+		return fmt.Errorf("required commands not found in PATH: %s", strings.Join(missing, ", "))
+	}
+	return nil
 }
 
 func waitForRaftSync(ctx context.Context, store *state.RaftStore) error {
@@ -738,11 +756,14 @@ func loadOrBootstrapTLS(ctx context.Context, log *slog.Logger, cfg *config, loca
 		if cfg.CACert == "" {
 			return nil, uuid.Nil, fmt.Errorf("managed enrollment requires ca_cert to pin the existing cluster CA")
 		}
+		if cfg.JoinToken == "" {
+			return nil, uuid.Nil, fmt.Errorf("managed enrollment requires join_token or --join-token; mint one with 'trellisctl nodes join-token create'")
+		}
 		caCert, err := os.ReadFile(cfg.CACert)
 		if err != nil {
 			return nil, uuid.Nil, fmt.Errorf("read pinned CA cert: %w", err)
 		}
-		resp, err := joinClusterTLS(ctx, log, cfg.Join, cfg.EnrollmentToken, caCert, cfg.ServerAdvertise, cfg.AgentAdvertise, cfg.RaftAdvertise)
+		resp, err := joinClusterTLS(ctx, log, cfg.Join, cfg.JoinToken, caCert, cfg.ServerAdvertise, cfg.AgentAdvertise, cfg.RaftAdvertise)
 		if err != nil {
 			return nil, uuid.Nil, fmt.Errorf("join cluster for TLS: %w", err)
 		}
@@ -838,7 +859,7 @@ func saveTLSToStorage(local *storage.LocalStorage, m *tlsutil.Materials) error {
 	return local.Put("tls/node-key", string(m.Key))
 }
 
-func joinClusterTLS(ctx context.Context, log *slog.Logger, joinAddr, enrollmentToken string, caCert []byte, serverAdvertise, agentAdvertise, raftAdvertise string) (*nodeapi.NodeEnrollmentResponse, error) {
+func joinClusterTLS(ctx context.Context, log *slog.Logger, joinAddr, joinToken string, caCert []byte, serverAdvertise, agentAdvertise, raftAdvertise string) (*nodeapi.NodeEnrollmentResponse, error) {
 	body, err := json.Marshal(nodeapi.NodeEnrollmentRequest{ServerAdvertise: serverAdvertise, AgentAdvertise: agentAdvertise, RaftAdvertise: raftAdvertise})
 	if err != nil {
 		return nil, err
@@ -855,7 +876,7 @@ func joinClusterTLS(ctx context.Context, log *slog.Logger, joinAddr, enrollmentT
 	for i := 0; ; i++ {
 		req, _ := http.NewRequestWithContext(ctx, "POST", base+"/v1/nodes/enroll", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+enrollmentToken)
+		req.Header.Set("Authorization", "Bearer "+joinToken)
 		resp, err := httpClient.Do(req)
 		if err == nil {
 			respBody, _ := io.ReadAll(resp.Body)
@@ -867,6 +888,9 @@ func joinClusterTLS(ctx context.Context, log *slog.Logger, joinAddr, enrollmentT
 				}
 				log.Info("received TLS materials from cluster")
 				return &joinResp, nil
+			}
+			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+				return nil, fmt.Errorf("enrollment rejected with status %d: the join token is invalid, expired, revoked, or exhausted; mint a new one with 'trellisctl nodes join-token create'", resp.StatusCode)
 			}
 			err = fmt.Errorf("join returned status %d", resp.StatusCode)
 		}
@@ -908,6 +932,9 @@ func joinClusterRaft(ctx context.Context, log *slog.Logger, joinAddr, serverAddr
 				}
 				log.Info("joined cluster successfully")
 				return &joinResponse, nil
+			}
+			if resp.StatusCode == http.StatusForbidden {
+				return nil, fmt.Errorf("raft join rejected with status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 			}
 			err = fmt.Errorf("join returned status %d", resp.StatusCode)
 		}
@@ -1060,7 +1087,7 @@ func nodeControlPlaneRoute(r *http.Request) bool {
 		(r.Method == http.MethodPost && path == "/v1/raft/join")
 }
 
-func leaderAuthMiddleware(administrator *auth.AdministratorAuthenticator, administratorVerification func() (ed25519.PublicKey, uint64, bool), enrollmentToken string, tokenManager *auth.TokenManager, authorizeNodeCertificate func(context.Context, uuid.UUID, *x509.Certificate) bool) echo.MiddlewareFunc {
+func leaderAuthMiddleware(administrator *auth.AdministratorAuthenticator, administratorVerification func() (ed25519.PublicKey, uint64, bool), tokenManager *auth.TokenManager, authorizeNodeCertificate func(context.Context, uuid.UUID, *x509.Certificate) bool) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c *echo.Context) error {
 			if c.Request().URL.Path == "/v1/auth/administrator/challenge" {
@@ -1079,8 +1106,10 @@ func leaderAuthMiddleware(administrator *auth.AdministratorAuthenticator, admini
 				return c.JSON(http.StatusCreated, api.AdministratorChallengeResponse{Challenge: challenge, ExpiresAt: expiresAt})
 			}
 			key := strings.TrimPrefix(c.Request().Header.Get("Authorization"), "Bearer ")
-			if enrollmentToken != "" && c.Request().URL.Path == "/v1/nodes/enroll" && subtle.ConstantTimeCompare([]byte(key), []byte(enrollmentToken)) == 1 {
-				ctx := context.WithValue(c.Request().Context(), server.EnrollmentContextKey, true)
+			// Enrollment authenticates only with a join token, which the
+			// handler validates and consumes. No other credential applies.
+			if c.Request().Method == http.MethodPost && c.Request().URL.Path == "/v1/nodes/enroll" {
+				ctx := context.WithValue(c.Request().Context(), server.JoinTokenContextKey, key)
 				c.SetRequest(c.Request().WithContext(ctx))
 				return next(c)
 			}

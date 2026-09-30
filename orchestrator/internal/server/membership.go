@@ -22,7 +22,7 @@ const (
 	raftCatchUpLag = 256
 	// recentHeartbeat bounds how old a node's last heartbeat, and the Raft
 	// progress it reported, may be for the node to count as reachable.
-	recentHeartbeat = 3 * heartbeatInterval
+	recentHeartbeat = livenessWindow
 	// voterLossTimeout is how long a voter's node must be silent before its
 	// vote is handed to a healthy non-voter. The replaced node stays a member
 	// and can vote again later.
@@ -50,13 +50,7 @@ func (s *Server) RecordRaftProgress(id uuid.UUID, applied uint64) {
 	if s.joiner == nil || applied == 0 {
 		return
 	}
-	progress := raftProgress{applied: applied, leaderApplied: s.joiner.AppliedIndex(), at: s.now()}
-	s.mu.Lock()
-	if s.raftProgress == nil {
-		s.raftProgress = make(map[uuid.UUID]raftProgress)
-	}
-	s.raftProgress[id] = progress
-	s.mu.Unlock()
+	s.liveness.recordRaftProgress(id, raftProgress{applied: applied, leaderApplied: s.joiner.AppliedIndex(), at: s.now()})
 }
 
 // voterTarget returns the desired number of voters for a membership size: the
@@ -198,17 +192,13 @@ func (s *Server) memberStates(members []state.RaftMember) []memberState {
 			result = append(result, current)
 			continue
 		}
-		progress, reported := s.raftProgress[id]
+		progress, reported := s.liveness.raftProgress(id)
+		heartbeat := s.liveness.lastHeartbeat(id)
 		caughtUp := reported && now.Sub(progress.at) <= recentHeartbeat && progress.leaderApplied <= progress.applied+raftCatchUpLag
-		current.Eligible = node.Status == NodeStatusHealthy && caughtUp
-		current.Live = now.Sub(node.LastHeartbeat) <= recentHeartbeat
-		// A new leader may hold old heartbeat times until nodes report to it,
-		// so silence is measured from no earlier than its election.
-		silentSince := node.LastHeartbeat
-		if s.leaderSince.After(silentSince) {
-			silentSince = s.leaderSince
-		}
-		current.Gone = now.Sub(silentSince) >= voterLossTimeout
+		current.Live = heartbeatLive(heartbeat, now)
+		current.Eligible = livenessStatus(node.Status, heartbeat, now) == NodeStatusHealthy && caughtUp
+		// Silence is measured from no earlier than this leader's election.
+		current.Gone = now.Sub(silentSince(heartbeat, s.leaderSince)) >= voterLossTimeout
 		result = append(result, current)
 	}
 	return result
@@ -220,15 +210,35 @@ func (s *Server) memberStates(members []state.RaftMember) []memberState {
 // allows one uncommitted configuration change at a time and fails in-flight
 // changes on leadership loss, and a new leader re-reads the configuration.
 
-// JoinMember admits an authenticated node to Raft as a non-voter. The leader
-// promotes it once it is healthy and caught up if the voter set needs it.
-func (s *Server) JoinMember(id uuid.UUID, raftAddress string) error {
+// JoinMember admits an authenticated node to Raft as a non-voter and returns
+// the member IDs after admission. The leader promotes it once it is healthy
+// and caught up if the voter set needs it. A removed identity is refused
+// under membershipMu, which RemoveMember holds while recording removals, so a
+// join cannot race a removal back into the configuration.
+func (s *Server) JoinMember(ctx context.Context, id uuid.UUID, raftAddress string) ([]string, error) {
 	if s.joiner == nil {
-		return fmt.Errorf("cluster join not available")
+		return nil, fmt.Errorf("cluster join not available")
 	}
 	s.membershipMu.Lock()
 	defer s.membershipMu.Unlock()
-	return s.joiner.AddNonvoter(id.String(), raftAddress)
+	if removed, err := s.state.NodeRemoved(ctx, id.String()); err != nil {
+		return nil, err
+	} else if removed {
+		return nil, fmt.Errorf("node %s: %w", id, ErrNodeRemoved)
+	}
+	if err := s.joiner.AddNonvoter(id.String(), raftAddress); err != nil {
+		return nil, err
+	}
+	members, err := s.joiner.Membership()
+	if err != nil {
+		return nil, fmt.Errorf("read Raft membership: %w", err)
+	}
+	ids := make([]string, 0, len(members))
+	for _, member := range members {
+		ids = append(ids, member.ID)
+	}
+	slices.Sort(ids)
+	return ids, nil
 }
 
 // ReconcileMembership moves the voter set toward its desired size one change
@@ -285,14 +295,21 @@ func (s *Server) applyMembershipChange(change membershipChange) error {
 	return nil
 }
 
-// RemoveMember permanently removes a Raft member. Before a voter is removed, a
-// healthy caught-up non-voter is promoted in its place so the number of live
-// voters does not shrink. The removal is refused, before any change, if the
-// voters that would remain could not form a quorum from the members known to
-// be live. Removing an absent member succeeds, so retries are safe. Any
-// resulting surplus voter is demoted by the membership loop, which the removal
-// wakes.
-func (s *Server) RemoveMember(_ context.Context, id string) error {
+// RemoveMember permanently removes a node. It first records a durable
+// tombstone for the node UUID, which revokes the node's certificate on every
+// node-authenticated path (control-plane API, agent API, enrollment, Raft
+// join, and inbound Raft streams), and then removes it from Raft. Before a
+// voter is removed, a healthy caught-up non-voter is promoted in its place so
+// the number of live voters does not shrink. The removal is refused, before
+// any change, for the current leader, and if the voters that would remain
+// could not form a quorum from the members known to be live. Removing an absent member still records the
+// tombstone and succeeds, so retries are safe. Any resulting surplus voter is
+// demoted by the membership loop, which the removal wakes.
+func (s *Server) RemoveMember(ctx context.Context, id string) error {
+	nodeID, err := uuid.Parse(id)
+	if err != nil || nodeID == uuid.Nil || nodeID.String() != id {
+		return ErrInvalidNodeID
+	}
 	if s.joiner == nil {
 		return fmt.Errorf("cluster membership changes not available")
 	}
@@ -304,11 +321,15 @@ func (s *Server) RemoveMember(_ context.Context, id string) error {
 	}
 	members := s.memberStates(current)
 	index := slices.IndexFunc(members, func(member memberState) bool { return member.ID == id })
-	if index < 0 {
-		return nil
+	if index >= 0 && members[index].Leader {
+		// The tombstone would make followers reject this leader's new Raft
+		// streams before its own removal entry could commit.
+		return fmt.Errorf("%w: %s is the current leader; transfer leadership first", ErrMembershipUnsafe, id)
 	}
-	if members[index].Voter {
-		replacement, promote := planReplacement(members, id)
+	var replacement membershipChange
+	promote := false
+	if index >= 0 && members[index].Voter {
+		replacement, promote = planReplacement(members, id)
 		if promote {
 			// Check the configuration the removal would leave before changing
 			// anything, counting the eligible, and so live, replacement.
@@ -317,6 +338,16 @@ func (s *Server) RemoveMember(_ context.Context, id string) error {
 		if err := checkRemovalQuorum(members, id); err != nil {
 			return err
 		}
+	}
+	// Revoke before changing Raft: if a later step fails, the node is already
+	// unable to authenticate or rejoin, and a retry completes the removal.
+	if err := s.state.PutNodeTombstone(ctx, id, NodeTombstone{RemovedAt: s.now().UTC()}); err != nil {
+		return fmt.Errorf("record removal of node %s: %w", id, err)
+	}
+	if index < 0 {
+		return nil
+	}
+	if members[index].Voter {
 		if promote {
 			if err := s.applyMembershipChange(replacement); err != nil {
 				return err
@@ -326,11 +357,7 @@ func (s *Server) RemoveMember(_ context.Context, id string) error {
 	if err := s.joiner.RemoveServer(id); err != nil {
 		return fmt.Errorf("remove Raft member %s: %w", id, err)
 	}
-	if nodeID, err := uuid.Parse(id); err == nil {
-		s.mu.Lock()
-		delete(s.raftProgress, nodeID)
-		s.mu.Unlock()
-	}
+	s.liveness.forgetRaftProgress(nodeID)
 	s.wakeMembership()
 	return nil
 }

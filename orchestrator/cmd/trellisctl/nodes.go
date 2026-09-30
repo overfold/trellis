@@ -25,6 +25,7 @@ func NewNodesCmd() *cobra.Command {
 	cmd.AddCommand(NewNodesDrainCmd())
 	cmd.AddCommand(NewNodesUndrainCmd())
 	cmd.AddCommand(NewNodesRemoveCmd())
+	cmd.AddCommand(NewNodesJoinTokenCmd())
 	cmd.AddCommand(NewNodesLeadershipTransferCmd())
 	return cmd
 }
@@ -67,22 +68,41 @@ func NewNodesRemoveCmd() *cobra.Command {
 		Use:   "remove NODE",
 		Args:  cobra.ExactArgs(1),
 		Short: "Permanently remove a node from the cluster",
+		Long:  "Permanently remove a node from the cluster. The node's identity is revoked: its certificate is rejected by every node-authenticated API and Raft stream, and it cannot rejoin. To return the machine to the cluster, wipe its data directory and enroll it again with a new join token.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			serverClient, err := administratorServerClient()
 			if err != nil {
 				return err
 			}
-			node, err := resolveNodeWithClient(cmd, serverClient, args[0])
+			nodes, err := serverClient.ListNodes(cmd.Context())
 			if err != nil {
 				return err
 			}
-			if err := serverClient.RemoveRaftMember(cmd.Context(), node.ID.String()); err != nil {
+			id, display, err := resolveRemovalTarget(nodes, args[0])
+			if err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Node %s removed from the cluster.\n", nodeDisplay(node))
+			if err := serverClient.RemoveRaftMember(cmd.Context(), id); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Node %s removed from the cluster.\n", display)
 			return err
 		},
 	}
+}
+
+// resolveRemovalTarget resolves a node reference for removal. A complete UUID
+// that is not a registered node is still accepted, so an identity that enrolled
+// but never registered can be revoked.
+func resolveRemovalTarget(nodes api.NodeListResponse, ref string) (string, string, error) {
+	node, err := resolveNodeReference(nodes, ref)
+	if err == nil {
+		return node.ID.String(), nodeDisplay(node), nil
+	}
+	if id, parseErr := uuid.Parse(strings.TrimSpace(ref)); parseErr == nil {
+		return id.String(), id.String(), nil
+	}
+	return "", "", err
 }
 
 func NewNodesDrainCmd() *cobra.Command {

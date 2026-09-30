@@ -53,3 +53,20 @@ func TestRingBufferWraps(t *testing.T) {
 		t.Errorf("newest entry reason: expected %q, got %q", lastExpected, entries[EventRingSize-1].Reason)
 	}
 }
+
+func TestRingBufferCloneIsIndependent(t *testing.T) {
+	var original RingBuffer
+	original.Append(Event{Phase: PhasePlaced})
+	clone := original.Clone()
+	clone.Append(Event{Phase: PhaseStarting})
+	original.Append(Event{Phase: PhaseFailed})
+	if got := original.Entries(); len(got) != 2 || got[1].Phase != PhaseFailed {
+		t.Fatalf("original entries = %v", got)
+	}
+	if got := clone.Entries(); len(got) != 2 || got[1].Phase != PhaseStarting {
+		t.Fatalf("clone entries = %v", got)
+	}
+	if (*RingBuffer)(nil).Clone() != nil {
+		t.Fatal("nil buffer cloned to non-nil")
+	}
+}

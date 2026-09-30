@@ -110,12 +110,17 @@ type RaftJoinRequest struct {
 }
 
 // RaftJoinResponse returns managed signing material only after the node's
-// certificate-bound identity has been admitted as a Raft voter.
+// certificate-bound identity has been admitted as a Raft member. Members lists
+// the Raft member node IDs at admission; a new member accepts inbound Raft
+// streams only from these nodes until it has replicated the cluster's own
+// membership and certificate bindings.
 type RaftJoinResponse struct {
-	CAKey string `json:"ca_key,omitempty"`
+	CAKey   string   `json:"ca_key,omitempty"`
+	Members []string `json:"members"`
 }
 
-// NodeEnrollmentRequest asks a managed cluster to issue one node identity.
+// NodeEnrollmentRequest asks a managed cluster to issue one node identity. The
+// request authenticates with a join token as its bearer credential.
 type NodeEnrollmentRequest struct {
 	ServerAdvertise string `json:"server_advertise"`
 	AgentAdvertise  string `json:"agent_advertise"`
