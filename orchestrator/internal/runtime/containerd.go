@@ -1141,8 +1141,8 @@ func (c *ContainerdRuntime) StartExec(ctx context.Context, containerID string, o
 		processSpec.Env = append(env, "TERM="+options.Term)
 	}
 	if options.TTY && options.Cols > 0 && options.Rows > 0 {
-		// The console starts at this size, so the process never observes a
-		// default size before the resize below.
+		// The console is created at this size. Resizing after Start would
+		// race a short-lived process's exit.
 		processSpec.ConsoleSize = &specs.Box{Width: uint(options.Cols), Height: uint(options.Rows)}
 	}
 
@@ -1186,12 +1186,6 @@ func (c *ContainerdRuntime) StartExec(ctx context.Context, containerID string, o
 	if err := process.Start(ctx); err != nil {
 		killExecProcess(ctx, process, exitCh)
 		return nil, fmt.Errorf("starting exec for %s: %w", containerID, err)
-	}
-	if options.TTY && options.Cols > 0 && options.Rows > 0 {
-		if err := process.Resize(ctx, options.Cols, options.Rows); err != nil {
-			killExecProcess(ctx, process, exitCh)
-			return nil, fmt.Errorf("resize terminal exec for %s: %w", containerID, err)
-		}
 	}
 
 	result := &containerdExecProcess{process: process, done: make(chan struct{})}
