@@ -280,12 +280,21 @@ func (r *AllocationReconciler) restart(ctx context.Context, allocID string) erro
 		r.mu.Unlock()
 		return nil
 	}
+	previousAttempts, previousWindow := state.attempts, state.window
 	state.attempts, state.window = attempts, window
 	healthManaged := state.healthManaged
 	r.mu.Unlock()
-	// Restart accounting is best effort; the restart itself must proceed.
+	// Consume the budget durably before touching the runtime. Otherwise an
+	// agent crash after Restart can reload the old counter and exceed the
+	// generation's restart policy.
 	if err := r.publishRestartState(allocID, attempts, window, false); err != nil {
-		r.log.Error("record restart attempt", "alloc", allocID, "error", err)
+		r.mu.Lock()
+		if current := r.states[allocID]; current == state {
+			state.restarting = false
+			state.attempts, state.window = previousAttempts, previousWindow
+		}
+		r.mu.Unlock()
+		return fmt.Errorf("record restart attempt for alloc %s: %w", allocID, err)
 	}
 
 	if err := r.runtime.Restart(ctx, allocID); err != nil {

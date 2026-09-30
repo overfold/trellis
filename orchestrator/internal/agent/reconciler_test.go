@@ -58,6 +58,22 @@ type statusRecorder struct {
 	exhaustedErr error
 }
 
+type durableRestartRecorder struct {
+	attempts int
+	window   time.Time
+	fail     bool
+}
+
+func (s *durableRestartRecorder) OnReconciledStatus(string, string) {}
+
+func (s *durableRestartRecorder) OnRestartState(_ string, attempts int, window time.Time, _ bool) error {
+	if s.fail {
+		return errors.New("disk full")
+	}
+	s.attempts, s.window = attempts, window
+	return nil
+}
+
 type inFlightHealthRuntime struct {
 	*reconcilerRuntime
 	started chan struct{}
@@ -125,6 +141,37 @@ func TestAllocationReconcilerRestartsStoppedAllocation(t *testing.T) {
 	}
 	if got := subscriber.statuses[len(subscriber.statuses)-1]; got != "healthy" {
 		t.Fatalf("status = %q, want healthy", got)
+	}
+}
+
+func TestAllocationReconcilerPersistsAttemptBeforeRuntimeRestart(t *testing.T) {
+	policy := &spec.RestartPolicySpec{MaxRestarts: 1, Window: time.Hour}
+	rt := &reconcilerRuntime{status: runtime.StatusStopped}
+	durable := &durableRestartRecorder{fail: true}
+	r := NewAllocationReconciler(rt, durable)
+	r.TrackRecovered("alloc-1", false, policy, durable.attempts, durable.window, false)
+
+	if err := r.Reconcile(context.Background(), "alloc-1"); err == nil {
+		t.Fatal("reconcile succeeded although the restart attempt was not persisted")
+	}
+	if rt.restartCount != 0 || durable.attempts != 0 {
+		t.Fatalf("restart count = %d, durable attempts = %d; want neither changed", rt.restartCount, durable.attempts)
+	}
+
+	// Simulate an agent crash and recovery from the unchanged durable record.
+	// Exactly one restart remains available; the failed write must not have
+	// caused an unrecorded runtime restart before the crash.
+	durable.fail = false
+	recovered := NewAllocationReconciler(rt, durable)
+	recovered.TrackRecovered("alloc-1", false, policy, durable.attempts, durable.window, false)
+	if err := recovered.Reconcile(context.Background(), "alloc-1"); err != nil {
+		t.Fatalf("reconcile after recovery: %v", err)
+	}
+	if err := recovered.Reconcile(context.Background(), "alloc-1"); err != nil {
+		t.Fatalf("exhaust budget after recovery: %v", err)
+	}
+	if rt.restartCount != 1 || durable.attempts != 1 {
+		t.Fatalf("restart count = %d, durable attempts = %d; want one budgeted restart", rt.restartCount, durable.attempts)
 	}
 }
 

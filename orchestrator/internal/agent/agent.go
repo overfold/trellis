@@ -574,20 +574,25 @@ func (a *Agent) recoverContainer(container runtime.ContainerInfo, allocation *Al
 		_ = a.reconciler.Untrack(allocation.ID)
 		allocation.unobserved = false
 	}
-	if allocation.ContainerOwnershipUnverified {
-		if !a.containerMatchesAllocation(container, allocation) {
-			allocation.Status = "stopping"
-			a.adoptPorts(allocation)
-			a.mu.Lock()
-			a.allocations[allocation.ID] = allocation
-			a.mu.Unlock()
-			return
+	if !a.containerMatchesAllocation(container, allocation) {
+		// Container IDs are not sufficient proof of ownership after an agent
+		// restart. Preserve the record and every resource until a later
+		// observation proves that the full execution identity matches.
+		allocation.ContainerOwnershipUnverified = true
+		allocation.Status = "stopping"
+		a.adoptPorts(allocation)
+		a.mu.Lock()
+		a.allocations[allocation.ID] = allocation
+		persistErr := a.persistAllocation(allocation)
+		a.mu.Unlock()
+		if persistErr != nil {
+			a.log.Error("record recovered container ownership mismatch", "allocation", allocation.AllocationID, "error", persistErr)
 		}
-		// The runtime reports this record's own container with matching
-		// identity labels, so the ambiguous create is resolved. The record
-		// is saved verified below.
-		allocation.ContainerOwnershipUnverified = false
+		return
 	}
+	// Every recovered container has now proven its ownership. This also
+	// resolves a create whose result was previously ambiguous.
+	allocation.ContainerOwnershipUnverified = false
 	stopping := allocation.Status == "stopping"
 	restartSuppressed := stopping || allocation.Draining
 	// An exhausted restart budget is terminal for this generation: keep
@@ -2134,6 +2139,8 @@ func (a *Agent) OnRestartState(allocID string, attempts int, window time.Time, e
 	if allocation == nil {
 		return nil
 	}
+	previousAttempts, previousWindow, previousExhausted := allocation.RestartAttempts, allocation.RestartWindow, allocation.RestartExhausted
+	previousStatus, previousHealth := allocation.Status, allocation.Health
 	allocation.RestartAttempts, allocation.RestartWindow, allocation.RestartExhausted = attempts, window, exhausted
 	if exhausted {
 		// The container stopped and will not be restarted; stop probing it.
@@ -2141,8 +2148,8 @@ func (a *Agent) OnRestartState(allocID string, attempts int, window time.Time, e
 		a.health.DeregisterTask(allocID)
 	}
 	if err := a.persistAllocation(allocation); err != nil {
-		// Keep reporting the accurate in-memory observation; the reconciler
-		// logs the error and retries persisting an exhaustion on its next pass.
+		allocation.RestartAttempts, allocation.RestartWindow, allocation.RestartExhausted = previousAttempts, previousWindow, previousExhausted
+		allocation.Status, allocation.Health = previousStatus, previousHealth
 		return fmt.Errorf("persist restart tracking for %s: %w", allocID, err)
 	}
 	return nil

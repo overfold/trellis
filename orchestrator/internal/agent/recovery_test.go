@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -28,6 +29,16 @@ func (r *listingRecoveryRuntime) ListManaged(context.Context, string) ([]runtime
 		return nil, r.listErr
 	}
 	return r.containers, nil
+}
+
+func (r *listingRecoveryRuntime) Inspect(ctx context.Context, id string) (*runtime.ContainerInfo, error) {
+	for _, container := range r.containers {
+		if container.ID == id {
+			container.Status = r.status
+			return &container, nil
+		}
+	}
+	return r.reconcilerRuntime.Inspect(ctx, id)
 }
 
 func (r *listingRecoveryRuntime) Stop(context.Context, string) error {
@@ -55,8 +66,8 @@ func recoveryTestLabels(allocation *Allocation) map[string]string {
 	return map[string]string{
 		"trellis.cluster":               "test",
 		"trellis.allocation-id":         allocation.AllocationID,
-		"trellis.allocation-generation": "1",
-		"trellis.job-revision":          "1",
+		"trellis.allocation-generation": strconv.FormatUint(allocation.Generation, 10),
+		"trellis.job-revision":          strconv.Itoa(allocation.JobRevision),
 		"trellis.execution-hash":        allocation.ExecutionHash,
 		"trellis.namespace":             allocation.Namespace,
 		"trellis.job":                   allocation.JobName,
@@ -386,6 +397,7 @@ func TestRunAllocationObservesRecoveredAllocationOnDemand(t *testing.T) {
 	}
 
 	rt.status = runtime.StatusRunning
+	rt.containers = []runtime.ContainerInfo{{ID: "task", Labels: recoveryTestLabels(record)}}
 	task := &spec.TaskSpec{Name: "task", Image: "image"}
 	if err := agent.startTask(context.Background(), &taskStart{ID: "task", AllocationID: "allocation", Generation: 1, JobRevision: 1, ExecutionHash: "hash", Namespace: "default", JobName: "job", GroupName: "group", Spec: task}); err != nil {
 		t.Fatalf("start retry for observed running allocation: %v", err)
@@ -696,7 +708,7 @@ func TestStopGroupDoesNotReStopRecordedTasksWhileListingIncomplete(t *testing.T)
 	}
 }
 
-func TestRecoverClearsOwnershipFlagOnlyForMatchingContainer(t *testing.T) {
+func TestRecoverVerifiesEveryContainerBeforeRuntimeOperations(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		mutate  func(map[string]string)
@@ -707,58 +719,77 @@ func TestRecoverClearsOwnershipFlagOnlyForMatchingContainer(t *testing.T) {
 		{name: "different generation", mutate: func(labels map[string]string) { labels["trellis.allocation-generation"] = "2" }},
 		{name: "different task", mutate: func(labels map[string]string) { labels["trellis.task"] = "other" }},
 	} {
-		for _, retry := range []bool{false, true} {
-			name := tc.name
-			if retry {
-				name += " after failed listing"
-			}
-			t.Run(name, func(t *testing.T) {
-				rt := &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{}}
-				record := recoveryTestAllocation(18090)
-				record.ContainerOwnershipUnverified = true
-				labels := recoveryTestLabels(record)
-				if tc.mutate != nil {
-					tc.mutate(labels)
+		for _, initiallyUnverified := range []bool{false, true} {
+			for _, retry := range []bool{false, true} {
+				name := tc.name
+				if initiallyUnverified {
+					name += " with ambiguous create"
+				} else {
+					name += " with ordinary durable record"
 				}
-				rt.status = runtime.StatusRunning
-				rt.containers = []runtime.ContainerInfo{{ID: "task", Status: runtime.StatusRunning, Labels: labels}}
 				if retry {
-					rt.listErr = errors.New("containerd unavailable")
+					name += " after failed listing"
 				}
-				agent, local := newRecoveryTestAgent(t, rt, record)
-				err := agent.recover(context.Background())
-				if retry {
-					if err != nil {
-						t.Fatalf("recover with failed listing: %v", err)
+				t.Run(name, func(t *testing.T) {
+					rt := &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{}}
+					record := recoveryTestAllocation(18090)
+					record.ContainerOwnershipUnverified = initiallyUnverified
+					labels := recoveryTestLabels(record)
+					if tc.mutate != nil {
+						tc.mutate(labels)
+					}
+					rt.status = runtime.StatusRunning
+					rt.containers = []runtime.ContainerInfo{{ID: "task", Status: runtime.StatusRunning, Labels: labels}}
+					if retry {
+						rt.listErr = errors.New("containerd unavailable")
+					}
+					agent, local := newRecoveryTestAgent(t, rt, record)
+					err := agent.recover(context.Background())
+					if retry {
+						if err != nil {
+							t.Fatalf("recover with failed listing: %v", err)
+						}
+						var persisted Allocation
+						if err := local.Get(allocationRecordKey("task"), &persisted); err != nil || persisted.ContainerOwnershipUnverified != initiallyUnverified {
+							t.Fatalf("unobserved record = %+v (%v), want ownership flag %t", persisted, err, initiallyUnverified)
+						}
+						rt.listErr = nil
+						agent.retryRecovery(context.Background())
+					} else if err != nil {
+						t.Fatalf("recover: %v", err)
+					}
+
+					recovered := agent.allocations["task"]
+					if recovered == nil || recovered.ContainerOwnershipUnverified == tc.cleared {
+						t.Fatalf("recovered allocation = %+v, want ownership verified %t", recovered, tc.cleared)
 					}
 					var persisted Allocation
-					if err := local.Get(allocationRecordKey("task"), &persisted); err != nil || !persisted.ContainerOwnershipUnverified {
-						t.Fatalf("unobserved record = %+v (%v), want flag kept", persisted, err)
+					if err := local.Get(allocationRecordKey("task"), &persisted); err != nil || persisted.ContainerOwnershipUnverified == tc.cleared {
+						t.Fatalf("persisted allocation = %+v (%v), want ownership verified %t", persisted, err, tc.cleared)
 					}
-					rt.listErr = nil
-					agent.retryRecovery(context.Background())
-				} else if err != nil {
-					t.Fatalf("recover: %v", err)
-				}
-
-				recovered := agent.allocations["task"]
-				if recovered == nil || recovered.ContainerOwnershipUnverified == tc.cleared {
-					t.Fatalf("recovered allocation = %+v, want ownership verified %t", recovered, tc.cleared)
-				}
-				var persisted Allocation
-				if err := local.Get(allocationRecordKey("task"), &persisted); err != nil || persisted.ContainerOwnershipUnverified == tc.cleared {
-					t.Fatalf("persisted allocation = %+v (%v), want ownership verified %t", persisted, err, tc.cleared)
-				}
-				agent.mu.RLock()
-				targets, _ := agent.execTargetsLocked("allocation")
-				agent.mu.RUnlock()
-				if tc.cleared && (recovered.Status != "running" || len(targets) != 1 || targets[0].ContainerID != "task") {
-					t.Fatalf("exec targets = %#v for %s allocation, want the recovered container", targets, recovered.Status)
-				}
-				if !tc.cleared && (recovered.Status != "stopping" || len(targets) != 0) {
-					t.Fatalf("mismatched container: status %s, exec targets %#v; want stopping with none", recovered.Status, targets)
-				}
-			})
+					agent.mu.RLock()
+					targets, _ := agent.execTargetsLocked("allocation")
+					agent.mu.RUnlock()
+					if tc.cleared && (recovered.Status != "running" || len(targets) != 1 || targets[0].ContainerID != "task") {
+						t.Fatalf("exec targets = %#v for %s allocation, want the recovered container", targets, recovered.Status)
+					}
+					if !tc.cleared && (recovered.Status != "stopping" || len(targets) != 0) {
+						t.Fatalf("mismatched container: status %s, exec targets %#v; want stopping with none", recovered.Status, targets)
+					}
+					if !tc.cleared {
+						if _, tracked := agent.reconciler.states["task"]; tracked {
+							t.Fatal("mismatched container was tracked for health or restart reconciliation")
+						}
+						err := agent.StopAllocation(context.Background(), "task")
+						if !errors.Is(err, ErrExecutionConflict) {
+							t.Fatalf("stop mismatched container: %v, want execution conflict", err)
+						}
+						if rt.stopCount != 0 || rt.removeCount != 0 || !portClaimed(agent, 18090) {
+							t.Fatalf("stop=%d remove=%d port retained=%t; want no runtime cleanup and retained resources", rt.stopCount, rt.removeCount, portClaimed(agent, 18090))
+						}
+					}
+				})
+			}
 		}
 	}
 }
