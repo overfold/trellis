@@ -1,8 +1,6 @@
 package server
 
 import (
-	"time"
-
 	"github.com/overfold/trellis/internal/lifecycle"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -150,7 +148,7 @@ func (c *metricsCollector) Collect(ch chan<- prometheus.Metric) {
 	c.init()
 
 	s := c.server
-	now := time.Now()
+	now := s.now()
 	heartbeats := s.liveness.heartbeats()
 
 	s.mu.RLock()

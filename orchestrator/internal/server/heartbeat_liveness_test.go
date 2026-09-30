@@ -274,7 +274,7 @@ func TestObservationCommitsAreOrderedAndBounded(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	s.applyObservations(context.Background())
+	applyTestObservations(s)
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -357,5 +357,52 @@ func TestNewLeadershipTermResetsLivenessAndObservations(t *testing.T) {
 	}
 	if nodes := s.ListNodes(); nodes[0].Status != NodeStatusHealthy {
 		t.Fatalf("node after its first heartbeat of the term = %+v, want healthy", nodes[0])
+	}
+}
+
+// A report received before the node registered again must not roll back the
+// facts the registration committed.
+func TestReportFromBeforeReregistrationIsNotApplied(t *testing.T) {
+	ctx := context.Background()
+	s := NewServer(slog.Default(), nil, NewStateController(memoryStore{}, "test"), memoryStore{}, "test", "")
+	s.catalog = newNopCatalog()
+	node := uuid.New()
+	if err := s.RegisterNode(ctx, &NodeRegistration{ID: node, Host: "node", Port: 8127, CPUCapacity: 1000, CPUAllocatable: 1000}); err != nil {
+		t.Fatal(err)
+	}
+	stale := nodeResourceObservation{CPUCapacity: 1000, CPUAllocatable: 1000}
+	if err := s.Heartbeat(ctx, node, nil, "old", nil, nil, stale); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RegisterNode(ctx, &NodeRegistration{ID: node, Host: "node", Port: 8127, CPUCapacity: 4000, CPUAllocatable: 4000}); err != nil {
+		t.Fatal(err)
+	}
+	applyTestObservations(s)
+	nodes, err := s.state.ListNodes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.ListNodes()[0]; got.CPUCapacity != 4000 || got.Version == "old" || nodes[node.String()].CPUCapacity != 4000 {
+		t.Fatalf("node after stale report = memory %+v durable %+v, want the re-registered capacity", got.Node, nodes[node.String()])
+	}
+}
+
+// Observed transitions are stamped when applied, so a report that waited in
+// the queue never records a transition before changes committed meanwhile.
+func TestObservedTransitionIsStampedWhenApplied(t *testing.T) {
+	f := newLivenessFixture(t)
+	received := f.clock.Now()
+	starting := &Allocation{ID: "web-1", Tasks: []spec.TaskSpec{{Name: "server"}}, Node: f.node, Generation: 1, Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown,
+		Diagnostic: lifecycle.Diagnostic{CreatedAt: received, TransitionedAt: received}}
+	f.s.allocations = []*Allocation{starting}
+	report := []api.AllocationStatus{{ID: starting.ID, Generation: 1, Task: "server", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
+	f.heartbeatPromptly(t, "test", report)
+	f.clock.advance(time.Minute)
+	applyTestObservations(f.s)
+	if starting.Phase != lifecycle.PhaseRunning || !starting.TransitionedAt.Equal(f.clock.Now()) {
+		t.Fatalf("transition = %s at %s, want running at the apply time %s", starting.Phase, starting.TransitionedAt, f.clock.Now())
+	}
+	if events := starting.Events.Entries(); len(events) != 1 || !events[0].At.Equal(f.clock.Now()) {
+		t.Fatalf("events = %+v, want one transition event at the apply time", events)
 	}
 }

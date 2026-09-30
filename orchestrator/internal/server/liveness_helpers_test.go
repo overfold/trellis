@@ -43,6 +43,15 @@ func heartbeatAndApply(t testing.TB, s *Server, nodeID uuid.UUID, actual []api.A
 	if err := s.Heartbeat(context.Background(), nodeID, actual, version, nil, nil, resources); err != nil {
 		return err
 	}
-	s.applyObservations(context.Background())
+	applyTestObservations(s)
 	return nil
+}
+
+// applyTestObservations applies queued heartbeat reports, first indexing
+// allocations a test placed directly in s.allocations.
+func applyTestObservations(s *Server) {
+	s.mu.Lock()
+	s.rebuildAllocationNodeIndexLocked()
+	s.mu.Unlock()
+	s.applyObservations(context.Background())
 }

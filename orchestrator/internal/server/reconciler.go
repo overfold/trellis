@@ -131,7 +131,7 @@ func (s *Server) persistAllocationUpdate(ctx context.Context, allocation *Alloca
 	defer s.mutationMu.Unlock()
 	s.mu.RLock()
 	allocation.mu.Lock()
-	next := allocation.Clone()
+	next := allocation.cloneRecord()
 	allocation.mu.Unlock()
 	s.mu.RUnlock()
 	if err := update(next); err != nil {

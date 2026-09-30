@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -43,7 +44,9 @@ type allocationGeneration struct {
 // Each report is a complete snapshot of the node, so a newer report of the
 // same node supersedes an older one that has not been applied yet.
 type nodeObservation struct {
-	node         uuid.UUID
+	node uuid.UUID
+	// registration is the node registration the report was stamped under.
+	registration uint64
 	at           time.Time
 	version      string
 	volumes      []string
@@ -196,9 +199,19 @@ func (s *Server) applyObservationBatch(ctx context.Context, batch []*nodeObserva
 		s.discardObservations("term_changed", len(batch))
 		return
 	}
+	// Transitions are stamped when they are applied, not when the report was
+	// received: every change committed before this point carries an earlier
+	// time, so an observation never moves a transition or retry time back.
+	appliedAt := s.now().UTC()
 	updates := make([]*observationUpdate, 0, len(batch))
 	for _, observation := range batch {
-		update := s.planObservation(observation)
+		if registration, registered := s.liveness.currentRegistration(observation.node); !registered || registration != observation.registration {
+			// The node registered again after this report was received; the
+			// registration's facts are newer than the report's.
+			s.discardObservations("reregistered", 1)
+			continue
+		}
+		update := s.planObservation(observation, appliedAt)
 		if update == nil {
 			s.discardObservations("node_removed", 1)
 			continue
@@ -217,32 +230,29 @@ func (s *Server) applyObservationBatch(ctx context.Context, batch []*nodeObserva
 }
 
 // planObservation computes a node's state after its report. It returns nil
-// when the node is no longer registered.
-func (s *Server) planObservation(observation *nodeObservation) *observationUpdate {
+// when the node is no longer registered. Only allocations whose record the
+// report changes are copied.
+func (s *Server) planObservation(observation *nodeObservation, appliedAt time.Time) *observationUpdate {
 	s.mu.RLock()
+	defer s.mu.RUnlock()
 	node := s.nodes[observation.node]
 	if node == nil {
-		s.mu.RUnlock()
 		return nil
 	}
 	next := node.Clone()
 	previous := nodeSummary(next)
-	assigned := s.allocationsByNode[observation.node]
-	if s.allocationsByNode == nil {
-		for _, allocation := range s.allocations {
-			if allocation.Node != nil && allocation.Node.ID == observation.node {
-				assigned = append(assigned, allocation)
-			}
-		}
-	}
-	currents := make([]*Allocation, len(assigned))
-	snapshots := make([]*Allocation, len(assigned))
-	for i, allocation := range assigned {
+	update := &observationUpdate{observation: observation, node: node, next: next}
+	for _, allocation := range s.allocationsByNode[observation.node] {
 		allocation.mu.Lock()
-		currents[i], snapshots[i] = allocation, allocation.cloneOnto(next)
+		scratch := observationScratch(allocation)
+		if observeAllocation(scratch, observation, appliedAt) && !scratch.sameObservedState(allocation) {
+			changed := allocation.cloneOnto(next)
+			changed.applyObservedState(scratch)
+			update.allocations = append(update.allocations, allocationObservationUpdate{current: allocation, next: changed})
+		}
 		allocation.mu.Unlock()
 	}
-	s.mu.RUnlock()
+	sort.Slice(update.allocations, func(i, j int) bool { return update.allocations[i].next.ID < update.allocations[j].next.ID })
 
 	next.Version = observation.version
 	next.Volumes = observation.volumes
@@ -254,18 +264,41 @@ func (s *Server) planObservation(observation *nodeObservation) *observationUpdat
 	next.MemoryAvailable, next.MetricsAt = resources.MemoryAvailable, resources.MetricsAt
 	next.observedAllocations = observation.observed
 	next.observedAt = observation.at
-
-	update := &observationUpdate{observation: observation, node: node, next: next}
 	if summary := nodeSummary(next); !summary.equal(previous) {
 		update.summary = summary
 	}
-	for i, snapshot := range snapshots {
-		if observeAllocation(snapshot, observation) && !snapshot.sameRecord(currents[i]) {
-			update.allocations = append(update.allocations, allocationObservationUpdate{current: currents[i], next: snapshot})
-		}
-	}
-	sort.Slice(update.allocations, func(i, j int) bool { return update.allocations[i].next.ID < update.allocations[j].next.ID })
 	return update
+}
+
+// observationScratch copies the fields a report can change into a scratch
+// allocation. It shares Tasks, Endpoints, and Ports with a read-only:
+// observeAllocation replaces those, never edits them. The caller holds
+// a.mu.
+func observationScratch(a *Allocation) *Allocation {
+	return &Allocation{ID: a.ID, Generation: a.Generation, Tasks: a.Tasks, Phase: a.Phase, Health: a.Health, Diagnostic: a.Diagnostic, Endpoints: a.Endpoints, Ports: a.Ports}
+}
+
+// sameObservedState reports whether the fields a report can change are equal.
+func (a *Allocation) sameObservedState(b *Allocation) bool {
+	return a.Phase == b.Phase && a.Health == b.Health && sameDiagnostic(a.Diagnostic, b.Diagnostic) && sameEndpoints(a, b)
+}
+
+// applyObservedState copies a scratch allocation's observed fields, and the
+// events its transitions recorded, onto a.
+func (a *Allocation) applyObservedState(scratch *Allocation) {
+	a.Phase, a.Health = scratch.Phase, scratch.Health
+	a.Diagnostic = scratch.Diagnostic
+	a.NextRetryAt = clonePointer(scratch.NextRetryAt)
+	a.Endpoints, a.Ports = cloneEndpoints(scratch.Endpoints), slices.Clone(scratch.Ports)
+	if scratch.Events == nil {
+		return
+	}
+	for _, event := range scratch.Events.Entries() {
+		if a.Events == nil {
+			a.Events = &lifecycle.RingBuffer{}
+		}
+		a.Events.Append(event)
+	}
 }
 
 // observeAllocation applies a node's report to a copy of one of its assigned
@@ -273,8 +306,7 @@ func (s *Server) planObservation(observation *nodeObservation) *observationUpdat
 // match every other observation path: a report is keyed by allocation ID and
 // generation, a phase advances only along lifecycle.CanObserve, and a start
 // failure counts once, for the attempt it ran.
-func observeAllocation(a *Allocation, observation *nodeObservation) bool {
-	heartbeatAt := observation.at
+func observeAllocation(a *Allocation, observation *nodeObservation, heartbeatAt time.Time) bool {
 	info, ok := observation.allocations[allocationGeneration{id: a.ID, generation: a.Generation}]
 	if !ok {
 		if a.Phase != lifecycle.PhaseRunning && a.Phase != lifecycle.PhaseStarting {

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/lifecycle"
 	"github.com/overfold/trellis/internal/spec"
 )
 
@@ -53,6 +54,17 @@ func cloneEndpoints(endpoints []api.AllocationEndpoint) []api.AllocationEndpoint
 // node: allocation.mu for a canonical allocation and s.mu for its node.
 func (a *Allocation) Clone() *Allocation {
 	return a.cloneOnto(a.Node.Clone())
+}
+
+// cloneRecord deep-copies the allocation for a write that keeps its
+// placement. The copy's Node carries only the node ID, which is all the
+// record persists. The caller holds allocation.mu and s.mu.
+func (a *Allocation) cloneRecord() *Allocation {
+	var node *Node
+	if a.Node != nil {
+		node = &Node{ID: a.Node.ID}
+	}
+	return a.cloneOnto(node)
 }
 
 // cloneOnto deep-copies the allocation record and places the copy on node.
@@ -107,22 +119,31 @@ func (a *Allocation) sameRecord(b *Allocation) bool {
 		a.JobRevision == b.JobRevision &&
 		a.Phase == b.Phase &&
 		a.Health == b.Health &&
-		a.CreatedAt.Equal(b.CreatedAt) &&
+		sameDiagnostic(a.Diagnostic, b.Diagnostic) &&
+		a.Draining == b.Draining &&
+		a.DrainSequence == b.DrainSequence &&
+		a.DrainReason == b.DrainReason &&
+		sameEndpoints(a, b) &&
+		// Tasks are copied from the job specification and never edited in
+		// place, so a structural comparison is exact.
+		reflect.DeepEqual(a.Tasks, b.Tasks)
+}
+
+func sameDiagnostic(a, b lifecycle.Diagnostic) bool {
+	return a.CreatedAt.Equal(b.CreatedAt) &&
 		a.TransitionedAt.Equal(b.TransitionedAt) &&
 		a.Reason == b.Reason &&
 		a.Message == b.Message &&
 		a.Attempt == b.Attempt &&
-		equalTimePointers(a.NextRetryAt, b.NextRetryAt) &&
-		a.Draining == b.Draining &&
-		a.DrainSequence == b.DrainSequence &&
-		a.DrainReason == b.DrainReason &&
-		slices.Equal(a.Ports, b.Ports) &&
+		equalTimePointers(a.NextRetryAt, b.NextRetryAt)
+}
+
+// sameEndpoints compares the observed task endpoints and ports.
+func sameEndpoints(a, b *Allocation) bool {
+	return slices.Equal(a.Ports, b.Ports) &&
 		slices.EqualFunc(a.Endpoints, b.Endpoints, func(x, y api.AllocationEndpoint) bool {
 			return x.Task == y.Task && x.Address == y.Address && slices.Equal(x.Ports, y.Ports)
-		}) &&
-		// Tasks are copied from the job specification and never edited in
-		// place, so a structural comparison is exact.
-		reflect.DeepEqual(a.Tasks, b.Tasks)
+		})
 }
 
 // equal reports whether two node summaries hold the same durable facts.

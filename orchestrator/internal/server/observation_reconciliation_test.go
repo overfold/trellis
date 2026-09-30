@@ -43,7 +43,7 @@ func TestHeartbeatReturnsNoContent(t *testing.T) {
 	if recorder.Code != http.StatusNoContent || recorder.Body.Len() != 0 {
 		t.Fatalf("heartbeat response = status %d body %q, want empty 204", recorder.Code, recorder.Body.String())
 	}
-	s.applyObservations(context.Background())
+	applyTestObservations(s)
 	if node.CPUCapacity != 2000 || node.CPUAllocatable != 1900 || node.CPUUsage == nil || *node.CPUUsage != usage {
 		t.Fatalf("node CPU observation = %#v", node)
 	}

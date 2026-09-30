@@ -47,7 +47,7 @@ func postHeartbeat(t *testing.T, s *Server, nodeID uuid.UUID, allocations []api.
 	request = request.WithContext(context.WithValue(request.Context(), NodeContextKey, nodeID))
 	recorder := httptest.NewRecorder()
 	e.ServeHTTP(recorder, request)
-	s.applyObservations(context.Background())
+	applyTestObservations(s)
 	return recorder.Code
 }
 

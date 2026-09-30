@@ -1043,9 +1043,11 @@ func (s *Server) Heartbeat(_ context.Context, nodeID uuid.UUID, actual []api.All
 	if err != nil {
 		return err
 	}
-	if !s.liveness.stamp(nodeID, receivedAt) {
+	registration, registered := s.liveness.stamp(nodeID, receivedAt)
+	if !registered {
 		return fmt.Errorf("%w: %s", ErrNodeNotFound, nodeID)
 	}
+	observation.registration = registration
 	if s.observations.submit(observation) && s.metrics != nil {
 		s.metrics.ObservationsSuperseded.Inc()
 	}
@@ -1592,12 +1594,12 @@ func (s *Server) persistJobRestart(ctx context.Context, namespace, name string) 
 	incarnation := job.Incarnation
 	allocations := append([]*Allocation(nil), s.allocations...)
 
-	// Copying an allocation copies its node, which s.mu guards.
+	// Copying an allocation reads its node's ID, which s.mu guards.
 	updates := make([]*Allocation, 0)
 	for _, alloc := range allocations {
 		alloc.mu.Lock()
 		if alloc.Namespace == namespace && alloc.JobName == name && alloc.JobIncarnation == incarnation && alloc.Node != nil && alloc.DrainReason != "restart" && activeAllocationPhase(alloc.Phase) {
-			update := alloc.Clone()
+			update := alloc.cloneRecord()
 			alloc.mu.Unlock()
 			update.Draining = true
 			update.DrainSequence++

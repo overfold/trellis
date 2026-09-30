@@ -59,7 +59,7 @@ func TestHeartbeatRejectsZeroPathID(t *testing.T) {
 	if recorder.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want %d; body: %s", recorder.Code, http.StatusForbidden, recorder.Body.String())
 	}
-	s.applyObservations(context.Background())
+	applyTestObservations(s)
 	if heartbeat := s.liveness.lastHeartbeat(uuid.Nil); zeroNode.Version != "before" || !heartbeat.Equal(initialHeartbeat) {
 		t.Fatalf("rejected heartbeat updated zero-ID node: version=%q heartbeat=%s", zeroNode.Version, heartbeat)
 	}

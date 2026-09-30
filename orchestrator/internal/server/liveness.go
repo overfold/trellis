@@ -37,6 +37,10 @@ type livenessRecord struct {
 	// raft is the node's latest reported Raft progress.
 	raft    raftProgress
 	hasRaft bool
+	// registration counts the node's registrations with this server. A
+	// heartbeat report carries the count it was stamped under, so a report
+	// from before a re-registration is never applied after it.
+	registration uint64
 }
 
 // track makes the registered node set exactly the given nodes, as reloaded
@@ -61,8 +65,8 @@ func (l *nodeLiveness) track(nodes []uuid.UUID) {
 func (l *nodeLiveness) startTerm() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	for id := range l.nodes {
-		l.nodes[id] = &livenessRecord{}
+	for id, record := range l.nodes {
+		l.nodes[id] = &livenessRecord{registration: record.registration}
 	}
 }
 
@@ -79,24 +83,36 @@ func (l *nodeLiveness) register(id uuid.UUID, at time.Time) {
 		record = &livenessRecord{}
 		l.nodes[id] = record
 	}
+	record.registration++
 	if at.After(record.heartbeat) {
 		record.heartbeat = at
 	}
 }
 
-// stamp records a heartbeat received at the given time and reports whether
-// the node is registered.
-func (l *nodeLiveness) stamp(id uuid.UUID, at time.Time) bool {
+// stamp records a heartbeat received at the given time. It reports whether
+// the node is registered and the registration the heartbeat belongs to.
+func (l *nodeLiveness) stamp(id uuid.UUID, at time.Time) (uint64, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	record := l.nodes[id]
 	if record == nil {
-		return false
+		return 0, false
 	}
 	if at.After(record.heartbeat) {
 		record.heartbeat = at
 	}
-	return true
+	return record.registration, true
+}
+
+// currentRegistration returns a node's registration count and whether the
+// node is registered.
+func (l *nodeLiveness) currentRegistration(id uuid.UUID) (uint64, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if record := l.nodes[id]; record != nil {
+		return record.registration, true
+	}
+	return 0, false
 }
 
 // recordRaftProgress keeps a registered node's latest Raft progress report.
