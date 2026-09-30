@@ -126,7 +126,7 @@ Job limits and namespace-network settings are cluster-wide semantics, so they li
 }
 ```
 
-Memory values are byte counts. `PUT /v1/cluster/settings/job-limits` requires an administrator-signed request and replaces the complete `job_limits` object (unknown fields are rejected with `400`). It returns the updated settings, `422` when the limits are invalid (every value positive, defaults no larger than their maximums), and `409` when the new limits would stop admitting a job that is currently desired, naming the jobs; shrink or delete those jobs first. A job apply that races the change is checked against the limits current when it commits. The `network` settings are fixed when the cluster is created, because every namespace subnet and WireGuard port slot is derived from them; the leader rejects node registrations whose WireGuard port count differs from `wireguard_port_count`.
+Memory values are byte counts. `PUT /v1/cluster/settings/job-limits` requires an administrator-signed request and replaces the complete `job_limits` object (unknown fields are rejected with `400`). It returns the updated settings, `422` when the limits are invalid (every value positive, defaults no larger than their maximums), and `409` when the new limits would stop admitting a job that is currently desired, naming the jobs; shrink or delete those jobs first. A job apply that races the change is checked against the limits current when it commits. The `network` settings are fixed when the cluster is created, because every namespace subnet and WireGuard port slot is assigned from them; the leader rejects node registrations whose WireGuard port count differs from `wireguard_port_count`.
 
 ## Administrator, enrollment, and cluster-internal endpoints
 

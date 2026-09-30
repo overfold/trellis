@@ -31,7 +31,7 @@ var (
 // node is leader. They live in the replicated cluster record: the node that
 // creates the cluster supplies them once, and job limits change afterwards
 // only through UpdateJobLimits. Network settings are fixed at creation
-// because every namespace subnet and WireGuard port slot is derived from them.
+// because every namespace subnet and WireGuard port slot is assigned from them.
 type ClusterSettings struct {
 	JobLimits          spec.Limits  `json:"job_limits"`
 	WireGuardPool      netip.Prefix `json:"wireguard_pool"`

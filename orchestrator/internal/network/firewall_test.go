@@ -31,19 +31,19 @@ func (m *iptablesModel) Run(_ context.Context, name string, args ...string) erro
 	flag, chain := args[0], args[1]
 	rules, exists := m.chains[chain]
 	if !exists && flag != "-N" {
-		return errors.New("iptables: No chain/target/match by that name.")
+		return errors.New("iptables: No chain/target/match by that name")
 	}
 	rule := strings.Join(args[2:], " ")
 	switch flag {
 	case "-N":
 		if exists {
-			return errors.New("iptables: Chain already exists.")
+			return errors.New("iptables: chain already exists")
 		}
 		m.chains[chain] = nil
 	case "-L":
 	case "-C":
 		if !slices.Contains(rules, rule) {
-			return errors.New("iptables: Bad rule (does a matching rule exist in that chain?).")
+			return errors.New("iptables: Bad rule (does a matching rule exist in that chain?)")
 		}
 	case "-A":
 		m.chains[chain] = append(rules, rule)
@@ -59,18 +59,18 @@ func (m *iptablesModel) Run(_ context.Context, name string, args ...string) erro
 	case "-D":
 		index := slices.Index(rules, rule)
 		if index < 0 {
-			return errors.New("iptables: Bad rule (does a matching rule exist in that chain?).")
+			return errors.New("iptables: Bad rule (does a matching rule exist in that chain?)")
 		}
 		m.chains[chain] = slices.Delete(rules, index, index+1)
 	case "-F":
 		m.chains[chain] = nil
 	case "-X":
 		if len(rules) != 0 {
-			return errors.New("iptables: Directory not empty.")
+			return errors.New("iptables: directory not empty")
 		}
 		for _, other := range m.chains {
 			if slices.Contains(other, "-j "+chain) {
-				return errors.New("iptables: Too many links.")
+				return errors.New("iptables: too many links")
 			}
 		}
 		delete(m.chains, chain)
