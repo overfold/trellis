@@ -31,5 +31,9 @@ func (s *ServerClient) AllocationTaskLogs(ctx context.Context, allocationID, tas
 	if task != "" {
 		query.Set("task", task)
 	}
-	return s.client.stream(ctx, fmt.Sprintf("%s/v1/allocations/%s/logs?%s", s.address(), url.PathEscape(allocationID), query.Encode()))
+	path, err := s.namespaced("/allocations/%s/logs?%s", url.PathEscape(allocationID), query.Encode())
+	if err != nil {
+		return nil, fmt.Errorf("allocation task logs: %w", err)
+	}
+	return s.client.stream(ctx, path)
 }

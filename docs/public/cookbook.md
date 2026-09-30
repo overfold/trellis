@@ -263,20 +263,20 @@ Namespace scope cannot name or select some other namespace: Trellis creates a be
 
 - `TRELLIS_ADDR` — workload-reachable control-plane address;
 - `TRELLIS_TOKEN` — bearer token restricted to the job namespace;
-- `TRELLIS_NAMESPACE` — that same job namespace, for request scoping;
+- `TRELLIS_NAMESPACE` — that same job namespace, for building `/v1/namespaces/{namespace}/...` request paths;
 - `TRELLIS_CA_CERT` — cluster CA PEM when TLS is configured.
 
-Use a namespace-aware client and verify TLS with the injected CA. Treat an address without an explicit scheme as HTTPS, matching first-party Trellis client behavior. Requests send both Bearer authentication and `X-Trellis-Namespace`; never send the workload credential over plaintext HTTP.
+Use a namespace-aware client and verify TLS with the injected CA. Treat an address without an explicit scheme as HTTPS, matching first-party Trellis client behavior. Requests send Bearer authentication and address `/v1/namespaces/$TRELLIS_NAMESPACE/...`; never send the workload credential over plaintext HTTP.
 
 Every task in the group receives the injected environment, so use only reviewed images in an API-enabled group. Controllers should set request deadlines, retry transient failures with backoff, tolerate resources changing between reads, avoid leaking credentials into logs or metrics, and preserve useful last-known-good state through temporary API outages.
 
-Prefer this mode for proxies, discovery controllers, and automation that does not need cluster administration. Changing `TRELLIS_NAMESPACE` or the request header cannot broaden the token beyond the job namespace.
+Prefer this mode for proxies, discovery controllers, and automation that does not need cluster administration. Changing `TRELLIS_NAMESPACE` or the request path cannot broaden the token beyond the job namespace: requests for any other namespace receive `403`.
 
 ## Give a trusted operator workload cluster API access
 
 **Outcome:** let a workload perform ordinary cluster-wide or cross-namespace operations that a namespace controller cannot perform.
 
-Set `api_access.scope: cluster` with the required `read` or `write` access only on a fully trusted task group. Trellis injects a scoped cluster API token in `TRELLIS_TOKEN`, never the administrator or enrollment credential. It also sets `TRELLIS_NAMESPACE` to the job's namespace as a conservative default for clients that automatically send a namespace header, but that value is **not** an authorization boundary for a cluster-scoped token.
+Set `api_access.scope: cluster` with the required `read` or `write` access only on a fully trusted task group. Trellis injects a scoped cluster API token in `TRELLIS_TOKEN`, never the administrator or enrollment credential. It also sets `TRELLIS_NAMESPACE` to the job's namespace as a conservative default for clients that build namespaced request paths, but that value is **not** an authorization boundary for a cluster-scoped token, which may address any namespace and the cross-namespace `GET /v1/allocations` and `GET /v1/events` endpoints.
 
 Cluster mode is appropriate for an operator workload that genuinely needs ordinary cross-namespace reads or writes. It does not grant credential minting, backup/restore, node enrollment, or Raft administration; those remain administrator, enrollment, or node-identity operations. It is not a shortcut for giving an ordinary application access to another namespace.
 

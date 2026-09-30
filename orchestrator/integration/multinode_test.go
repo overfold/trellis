@@ -289,7 +289,6 @@ func (h *harness) request(i int, method, path string, body any) (*http.Response,
 	req, _ := http.NewRequestWithContext(context.Background(), method, "https://"+addr(h.nodes[i].ports[1])+path, rd)
 	req.Header.Set("Authorization", "Bearer "+h.token)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Trellis-Namespace", "default")
 	return h.client.Do(req)
 }
 func (h *harness) endpoint() int {
@@ -302,7 +301,7 @@ func (h *harness) endpoint() int {
 	return 0
 }
 func (h *harness) submit(v any) {
-	r, e := h.request(h.endpoint(), "POST", "/v1/jobs", v)
+	r, e := h.request(h.endpoint(), "POST", "/v1/namespaces/default/jobs", v)
 	if e != nil {
 		h.t.Fatal(e)
 	}
@@ -370,7 +369,7 @@ func (h *harness) waitJob(name string, revision, desired int) { //nolint:unparam
 		}
 	}()
 	h.eventually(70*time.Second, func() bool {
-		r, e := h.request(h.endpoint(), "GET", "/v1/jobs/"+name, nil)
+		r, e := h.request(h.endpoint(), "GET", "/v1/namespaces/default/jobs/"+name, nil)
 		if e != nil {
 			return false
 		}

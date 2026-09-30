@@ -17,7 +17,7 @@ func TestServerClientExecSessionLifecycle(t *testing.T) {
 	called := make(map[string]bool)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/allocations/alloc-1/exec":
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/namespaces/default/allocations/alloc-1/exec":
 			called["exec"] = true
 			var request api.ExecRequest
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -28,7 +28,7 @@ func TestServerClientExecSessionLifecycle(t *testing.T) {
 			}
 			_ = json.NewEncoder(w).Encode(api.ExecResponse{Stdout: "hello\n", ExitCode: 0})
 
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/allocations/alloc-1/exec/sessions":
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/namespaces/default/allocations/alloc-1/exec/sessions":
 			called["create"] = true
 			var request api.ExecSessionCreateRequest
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -39,7 +39,7 @@ func TestServerClientExecSessionLifecycle(t *testing.T) {
 			}
 			_ = json.NewEncoder(w).Encode(api.ExecSessionResponse{ID: "session-1"})
 
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/allocations/alloc-1/exec/sessions/session-1/input":
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/namespaces/default/allocations/alloc-1/exec/sessions/session-1/input":
 			called["input"] = true
 			var request api.ExecSessionInputRequest
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -50,7 +50,7 @@ func TestServerClientExecSessionLifecycle(t *testing.T) {
 			}
 			w.WriteHeader(http.StatusNoContent)
 
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/allocations/alloc-1/exec/sessions/session-1/output":
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/namespaces/default/allocations/alloc-1/exec/sessions/session-1/output":
 			called["output"] = true
 			if got := r.URL.Query().Get("offset"); got != "7" {
 				t.Fatalf("output offset = %q", got)
@@ -63,7 +63,7 @@ func TestServerClientExecSessionLifecycle(t *testing.T) {
 				ExitCode:   &exitCode,
 			})
 
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/allocations/alloc-1/exec/sessions/session-1/resize":
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/namespaces/default/allocations/alloc-1/exec/sessions/session-1/resize":
 			called["resize"] = true
 			var request api.ExecSessionResizeRequest
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -74,7 +74,7 @@ func TestServerClientExecSessionLifecycle(t *testing.T) {
 			}
 			w.WriteHeader(http.StatusNoContent)
 
-		case r.Method == http.MethodDelete && r.URL.Path == "/v1/allocations/alloc-1/exec/sessions/session-1":
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/namespaces/default/allocations/alloc-1/exec/sessions/session-1":
 			called["close"] = true
 			w.WriteHeader(http.StatusNoContent)
 

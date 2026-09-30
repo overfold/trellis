@@ -10,6 +10,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -207,12 +208,20 @@ func TestManagedEnrollmentCannotRequestExistingIdentityOrReceiveCAKey(t *testing
 	control := &Server{storage: local, state: NewStateController(memoryStore{}, "test"), nodeID: leaderID}
 	e := echo.New()
 	NewHandler(control).Register(e)
-	body := []byte(`{"node_id":"` + leaderID.String() + `","server_advertise":"node-b:8128","agent_advertise":"node-b:8127","raft_advertise":"node-b:8129"}`)
-	req := httptest.NewRequest(http.MethodPost, "/v1/nodes/enroll", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(context.WithValue(req.Context(), EnrollmentContextKey, true))
-	rec := httptest.NewRecorder()
-	e.ServeHTTP(rec, req)
+	enroll := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v1/nodes/enroll", bytes.NewReader([]byte(body)))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(context.WithValue(req.Context(), EnrollmentContextKey, true))
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		return rec
+	}
+	// The enrollment request has no identity field, so asking for one is
+	// rejected rather than ignored.
+	if rec := enroll(`{"node_id":"` + leaderID.String() + `","server_advertise":"node-b:8128","agent_advertise":"node-b:8127","raft_advertise":"node-b:8129"}`); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "node_id") {
+		t.Fatalf("identity request status = %d, want 400 naming node_id; body: %s", rec.Code, rec.Body.String())
+	}
+	rec := enroll(`{"server_advertise":"node-b:8128","agent_advertise":"node-b:8127","raft_advertise":"node-b:8129"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusCreated, rec.Body.String())
 	}
