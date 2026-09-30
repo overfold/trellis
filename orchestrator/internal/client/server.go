@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,16 +22,35 @@ import (
 
 // ServerClient sends authenticated requests to the Trellis server API.
 type ServerClient struct {
-	baseURL string
-	client  *client
-	mu      sync.RWMutex
+	baseURL   string
+	namespace string
+	client    *client
+	mu        sync.RWMutex
 }
+
+// ErrNamespaceRequired reports a namespaced request from a client created
+// without a namespace.
+var ErrNamespaceRequired = errors.New("a namespace is required")
+
+// namespaced returns the URL of path within the client's namespace.
+func (s *ServerClient) namespaced(format string, args ...any) (string, error) {
+	if s.namespace == "" {
+		return "", ErrNamespaceRequired
+	}
+	return s.address() + "/v1/namespaces/" + url.PathEscape(s.namespace) + fmt.Sprintf(format, args...), nil
+}
+
+// Namespace returns the namespace addressed by namespaced requests.
+func (s *ServerClient) Namespace() string { return s.namespace }
 
 // ExecAllocation runs a non-interactive command in an allocation task.
 func (s *ServerClient) ExecAllocation(ctx context.Context, id, task string, command []string) (*api.ExecResponse, error) {
 	request := api.ExecRequest{Task: task, Command: command}
 	var response api.ExecResponse
-	path := fmt.Sprintf("%s/v1/allocations/%s/exec", s.address(), url.PathEscape(id))
+	path, err := s.namespaced("/allocations/%s/exec", url.PathEscape(id))
+	if err != nil {
+		return nil, fmt.Errorf("exec allocation: %w", err)
+	}
 	if err := s.client.request(ctx, http.MethodPost, path, &request, &response); err != nil {
 		return nil, fmt.Errorf("exec allocation: %w", err)
 	}
@@ -40,7 +60,10 @@ func (s *ServerClient) ExecAllocation(ctx context.Context, id, task string, comm
 // CreateExecSession starts an interactive terminal in an allocation task.
 func (s *ServerClient) CreateExecSession(ctx context.Context, id string, request *api.ExecSessionCreateRequest) (*api.ExecSessionResponse, error) {
 	var response api.ExecSessionResponse
-	path := fmt.Sprintf("%s/v1/allocations/%s/exec/sessions", s.address(), url.PathEscape(id))
+	path, err := s.namespaced("/allocations/%s/exec/sessions", url.PathEscape(id))
+	if err != nil {
+		return nil, fmt.Errorf("create exec session: %w", err)
+	}
 	if err := s.client.request(ctx, http.MethodPost, path, request, &response); err != nil {
 		return nil, fmt.Errorf("create exec session: %w", err)
 	}
@@ -49,7 +72,10 @@ func (s *ServerClient) CreateExecSession(ctx context.Context, id string, request
 
 // WriteExecSession appends terminal input to an interactive allocation session.
 func (s *ServerClient) WriteExecSession(ctx context.Context, id, sessionID string, request *api.ExecSessionInputRequest) error {
-	path := fmt.Sprintf("%s/v1/allocations/%s/exec/sessions/%s/input", s.address(), url.PathEscape(id), url.PathEscape(sessionID))
+	path, err := s.namespaced("/allocations/%s/exec/sessions/%s/input", url.PathEscape(id), url.PathEscape(sessionID))
+	if err != nil {
+		return fmt.Errorf("write exec session: %w", err)
+	}
 	if err := s.client.request(ctx, http.MethodPost, path, request, nil); err != nil {
 		return fmt.Errorf("write exec session: %w", err)
 	}
@@ -59,7 +85,10 @@ func (s *ServerClient) WriteExecSession(ctx context.Context, id, sessionID strin
 // ReadExecSession reads terminal output produced since offset.
 func (s *ServerClient) ReadExecSession(ctx context.Context, id, sessionID string, offset int64) (*api.ExecSessionOutputResponse, error) {
 	var response api.ExecSessionOutputResponse
-	path := fmt.Sprintf("%s/v1/allocations/%s/exec/sessions/%s/output?offset=%d", s.address(), url.PathEscape(id), url.PathEscape(sessionID), offset)
+	path, err := s.namespaced("/allocations/%s/exec/sessions/%s/output?offset=%d", url.PathEscape(id), url.PathEscape(sessionID), offset)
+	if err != nil {
+		return nil, fmt.Errorf("read exec session: %w", err)
+	}
 	if err := s.client.request(ctx, http.MethodGet, path, nil, &response); err != nil {
 		return nil, fmt.Errorf("read exec session: %w", err)
 	}
@@ -68,7 +97,10 @@ func (s *ServerClient) ReadExecSession(ctx context.Context, id, sessionID string
 
 // ResizeExecSession changes the dimensions of an interactive allocation terminal.
 func (s *ServerClient) ResizeExecSession(ctx context.Context, id, sessionID string, request *api.ExecSessionResizeRequest) error {
-	path := fmt.Sprintf("%s/v1/allocations/%s/exec/sessions/%s/resize", s.address(), url.PathEscape(id), url.PathEscape(sessionID))
+	path, err := s.namespaced("/allocations/%s/exec/sessions/%s/resize", url.PathEscape(id), url.PathEscape(sessionID))
+	if err != nil {
+		return fmt.Errorf("resize exec session: %w", err)
+	}
 	if err := s.client.request(ctx, http.MethodPost, path, request, nil); err != nil {
 		return fmt.Errorf("resize exec session: %w", err)
 	}
@@ -77,7 +109,10 @@ func (s *ServerClient) ResizeExecSession(ctx context.Context, id, sessionID stri
 
 // CloseExecSession terminates an interactive allocation terminal.
 func (s *ServerClient) CloseExecSession(ctx context.Context, id, sessionID string) error {
-	path := fmt.Sprintf("%s/v1/allocations/%s/exec/sessions/%s", s.address(), url.PathEscape(id), url.PathEscape(sessionID))
+	path, err := s.namespaced("/allocations/%s/exec/sessions/%s", url.PathEscape(id), url.PathEscape(sessionID))
+	if err != nil {
+		return fmt.Errorf("close exec session: %w", err)
+	}
 	if err := s.client.request(ctx, http.MethodDelete, path, nil, nil); err != nil {
 		return fmt.Errorf("close exec session: %w", err)
 	}
@@ -86,13 +121,20 @@ func (s *ServerClient) CloseExecSession(ctx context.Context, id, sessionID strin
 
 // AllocationLogs streams logs for an allocation.
 func (s *ServerClient) AllocationLogs(ctx context.Context, id string, follow bool, tail int) (io.ReadCloser, error) {
-	return s.client.stream(ctx, fmt.Sprintf("%s/v1/allocations/%s/logs?follow=%t&tail=%d", s.address(), url.PathEscape(id), follow, tail))
+	path, err := s.namespaced("/allocations/%s/logs?follow=%t&tail=%d", url.PathEscape(id), follow, tail)
+	if err != nil {
+		return nil, fmt.Errorf("allocation logs: %w", err)
+	}
+	return s.client.stream(ctx, path)
 }
 
 // AllocationEvents returns the lifecycle event history for an allocation.
 func (s *ServerClient) AllocationEvents(ctx context.Context, id string) (*api.AllocationEventListResponse, error) {
 	var response api.AllocationEventListResponse
-	path := fmt.Sprintf("%s/v1/allocations/%s/events", s.address(), url.PathEscape(id))
+	path, err := s.namespaced("/allocations/%s/events", url.PathEscape(id))
+	if err != nil {
+		return nil, fmt.Errorf("list allocation events: %w", err)
+	}
 	if err := s.client.request(ctx, http.MethodGet, path, nil, &response); err != nil {
 		return nil, fmt.Errorf("list allocation events: %w", err)
 	}
@@ -173,23 +215,19 @@ type Heartbeat struct {
 	RaftAppliedIndex  uint64
 }
 
-// NewServerClient creates a client for cluster-scoped server APIs.
+// NewServerClient creates a client for cluster-scoped server APIs. Its
+// namespaced requests fail with ErrNamespaceRequired.
 func NewServerClient(token string, addr string, tlsConfig *tls.Config) *ServerClient {
 	return NewNamespaceServerClient(token, addr, "", tlsConfig)
 }
 
-// NewNamespaceServerClient creates a client for namespace-scoped server APIs.
+// NewNamespaceServerClient creates a client whose namespaced requests address
+// /v1/namespaces/{namespace}/... paths.
 func NewNamespaceServerClient(token string, addr string, namespace string, tlsConfig *tls.Config) *ServerClient {
-	baseURL := normalizeBaseURL(addr)
-	c := &client{
-		token:     token,
-		namespace: namespace,
-		client:    newHTTPClient(tlsConfig),
-	}
-
 	return &ServerClient{
-		baseURL: baseURL,
-		client:  c,
+		baseURL:   normalizeBaseURL(addr),
+		namespace: namespace,
+		client:    &client{token: token, client: newHTTPClient(tlsConfig)},
 	}
 }
 
@@ -283,7 +321,11 @@ func (s *ServerClient) RegisterNode(ctx context.Context, nodeInfo *NodeInfo) (*a
 // GetJob returns a job and its allocations.
 func (s *ServerClient) GetJob(ctx context.Context, name string) (*api.JobStatusResponse, error) {
 	var response api.JobStatusResponse
-	if err := s.client.request(ctx, http.MethodGet, s.address()+"/v1/jobs/"+url.PathEscape(name), nil, &response); err != nil {
+	path, err := s.namespaced("/jobs/%s", url.PathEscape(name))
+	if err != nil {
+		return nil, fmt.Errorf("get job: %w", err)
+	}
+	if err := s.client.request(ctx, http.MethodGet, path, nil, &response); err != nil {
 		return nil, fmt.Errorf("get job: %w", err)
 	}
 	return &response, nil
@@ -292,13 +334,18 @@ func (s *ServerClient) GetJob(ctx context.Context, name string) (*api.JobStatusR
 // ListJobs returns jobs in the configured namespace.
 func (s *ServerClient) ListJobs(ctx context.Context) (*api.JobListResponse, error) {
 	var response api.JobListResponse
-	if err := s.client.request(ctx, http.MethodGet, s.address()+"/v1/jobs", nil, &response); err != nil {
+	path, err := s.namespaced("/jobs")
+	if err != nil {
+		return nil, fmt.Errorf("list jobs: %w", err)
+	}
+	if err := s.client.request(ctx, http.MethodGet, path, nil, &response); err != nil {
 		return nil, fmt.Errorf("list jobs: %w", err)
 	}
 	return &response, nil
 }
 
-// SubmitJob creates or updates a job. A non-nil expectedVersion makes the
+// SubmitJob creates or updates a job in the client's namespace, which must be
+// the spec's namespace. A non-nil expectedVersion makes the
 // apply conditional: 0 requires that the job does not exist and N requires
 // that it is at version N. A failed precondition returns an *HTTPError with
 // status 409 Conflict.
@@ -309,7 +356,11 @@ func (s *ServerClient) SubmitJob(ctx context.Context, spec *spec.JobSpec, expect
 	}
 
 	var response api.JobRegistrationResponse
-	if err := s.client.request(ctx, http.MethodPost, s.address()+"/v1/jobs", requestData, &response); err != nil {
+	path, err := s.namespaced("/jobs")
+	if err != nil {
+		return nil, fmt.Errorf("submit job: %w", err)
+	}
+	if err := s.client.request(ctx, http.MethodPost, path, requestData, &response); err != nil {
 		return nil, fmt.Errorf("submit job: %w", err)
 	}
 	return &response, nil
@@ -317,7 +368,11 @@ func (s *ServerClient) SubmitJob(ctx context.Context, spec *spec.JobSpec, expect
 
 // DeleteJob deletes a job.
 func (s *ServerClient) DeleteJob(ctx context.Context, name string) error {
-	if err := s.client.request(ctx, http.MethodDelete, s.address()+"/v1/jobs/"+url.PathEscape(name), nil, nil); err != nil {
+	path, err := s.namespaced("/jobs/%s", url.PathEscape(name))
+	if err != nil {
+		return fmt.Errorf("delete job: %w", err)
+	}
+	if err := s.client.request(ctx, http.MethodDelete, path, nil, nil); err != nil {
 		return fmt.Errorf("delete job: %w", err)
 	}
 	return nil
@@ -326,15 +381,22 @@ func (s *ServerClient) DeleteJob(ctx context.Context, name string) error {
 // ResetReplacementBackoff clears the replacement backoff of a job task group
 // so its failed allocations are replaced without waiting.
 func (s *ServerClient) ResetReplacementBackoff(ctx context.Context, job, group string) error {
-	path := fmt.Sprintf("%s/v1/jobs/%s/groups/%s/replacement-backoff/reset", s.address(), url.PathEscape(job), url.PathEscape(group))
+	path, err := s.namespaced("/jobs/%s/groups/%s/replacement-backoff/reset", url.PathEscape(job), url.PathEscape(group))
+	if err != nil {
+		return fmt.Errorf("reset replacement backoff: %w", err)
+	}
 	if err := s.client.request(ctx, http.MethodPost, path, nil, nil); err != nil {
 		return fmt.Errorf("reset replacement backoff: %w", err)
 	}
 	return nil
 }
 
-// SetSecret creates or updates a namespace secret.
-func (s *ServerClient) SetSecret(ctx context.Context, namespace, name string, value []byte, expected *uint64) (*api.SecretMetadata, error) {
+// SetSecret creates or updates a secret in the client's namespace.
+func (s *ServerClient) SetSecret(ctx context.Context, name string, value []byte, expected *uint64) (*api.SecretMetadata, error) {
+	path, err := s.namespaced("/secrets/%s", url.PathEscape(name))
+	if err != nil {
+		return nil, fmt.Errorf("set secret: %w", err)
+	}
 	request := make([]byte, 0, base64.StdEncoding.EncodedLen(len(value))+64)
 	request = append(request, '{', '"')
 	request = append(request, "value_base64"...)
@@ -349,17 +411,19 @@ func (s *ServerClient) SetSecret(ctx context.Context, namespace, name string, va
 	}
 	request = append(request, '}')
 	var response api.SecretMetadata
-	path := fmt.Sprintf("%s/v1/namespaces/%s/secrets/%s", s.address(), url.PathEscape(namespace), url.PathEscape(name))
 	if err := s.client.requestBody(ctx, http.MethodPut, path, request, &response); err != nil {
 		return nil, fmt.Errorf("set secret: %w", err)
 	}
 	return &response, nil
 }
 
-// ListSecrets returns secret metadata for a namespace.
-func (s *ServerClient) ListSecrets(ctx context.Context, namespace string) (*api.SecretListResponse, error) {
+// ListSecrets returns secret metadata for the client's namespace.
+func (s *ServerClient) ListSecrets(ctx context.Context) (*api.SecretListResponse, error) {
 	var response api.SecretListResponse
-	path := fmt.Sprintf("%s/v1/namespaces/%s/secrets", s.address(), url.PathEscape(namespace))
+	path, err := s.namespaced("/secrets")
+	if err != nil {
+		return nil, fmt.Errorf("list secrets: %w", err)
+	}
 	if err := s.client.request(ctx, http.MethodGet, path, nil, &response); err != nil {
 		return nil, fmt.Errorf("list secrets: %w", err)
 	}
@@ -367,18 +431,24 @@ func (s *ServerClient) ListSecrets(ctx context.Context, namespace string) (*api.
 }
 
 // GetSecretMetadata returns metadata for a secret.
-func (s *ServerClient) GetSecretMetadata(ctx context.Context, namespace, name string) (*api.SecretMetadata, error) {
+func (s *ServerClient) GetSecretMetadata(ctx context.Context, name string) (*api.SecretMetadata, error) {
 	var response api.SecretMetadata
-	path := fmt.Sprintf("%s/v1/namespaces/%s/secrets/%s", s.address(), url.PathEscape(namespace), url.PathEscape(name))
+	path, err := s.namespaced("/secrets/%s", url.PathEscape(name))
+	if err != nil {
+		return nil, fmt.Errorf("describe secret: %w", err)
+	}
 	if err := s.client.request(ctx, http.MethodGet, path, nil, &response); err != nil {
 		return nil, fmt.Errorf("describe secret: %w", err)
 	}
 	return &response, nil
 }
 
-// DeleteSecret removes a secret.
-func (s *ServerClient) DeleteSecret(ctx context.Context, namespace, name string) error {
-	path := fmt.Sprintf("%s/v1/namespaces/%s/secrets/%s", s.address(), url.PathEscape(namespace), url.PathEscape(name))
+// DeleteSecret removes a secret from the client's namespace.
+func (s *ServerClient) DeleteSecret(ctx context.Context, name string) error {
+	path, err := s.namespaced("/secrets/%s", url.PathEscape(name))
+	if err != nil {
+		return fmt.Errorf("delete secret: %w", err)
+	}
 	if err := s.client.request(ctx, http.MethodDelete, path, nil, nil); err != nil {
 		return fmt.Errorf("delete secret: %w", err)
 	}
@@ -394,12 +464,25 @@ func (s *ServerClient) ListDiscovery(ctx context.Context) (*api.ServiceListRespo
 	return &responseData, nil
 }
 
-// ListAllocations fetches allocations from the public allocations API.
-// label filters to allocations whose task group carries the given label key
-// or key:value pair (e.g. "trellis.expose" or "trellis.expose:true").
-// An empty label string returns all allocations visible to the caller.
+// ListAllocations fetches allocations in the client's namespace. label
+// filters to allocations whose task group carries the given label key or
+// key:value pair (e.g. "trellis.expose" or "trellis.expose:true"); an empty
+// label returns every allocation in the namespace.
 func (s *ServerClient) ListAllocations(ctx context.Context, label string) (*api.AllocationListResponse, error) {
-	u := s.address() + "/v1/allocations"
+	u, err := s.namespaced("/allocations")
+	if err != nil {
+		return nil, fmt.Errorf("list allocations: %w", err)
+	}
+	return s.listAllocations(ctx, u, label)
+}
+
+// ListClusterAllocations fetches allocations across every namespace, which
+// requires a cluster-scoped credential. label filters as in ListAllocations.
+func (s *ServerClient) ListClusterAllocations(ctx context.Context, label string) (*api.AllocationListResponse, error) {
+	return s.listAllocations(ctx, s.address()+"/v1/allocations", label)
+}
+
+func (s *ServerClient) listAllocations(ctx context.Context, u, label string) (*api.AllocationListResponse, error) {
 	if label != "" {
 		u += "?label=" + url.QueryEscape(label)
 	}

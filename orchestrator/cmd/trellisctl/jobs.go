@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -138,11 +139,11 @@ func NewJobsListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List jobs in the selected namespace",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			tlsCfg, err := buildCLITLSConfig()
+			serverClient, err := namespaceClient(cmd.Context())
 			if err != nil {
 				return err
 			}
-			jobs, err := client.NewNamespaceServerClient(config.ClusterToken, config.ServerAddr, config.Namespace, tlsCfg).ListJobs(cmd.Context())
+			jobs, err := serverClient.ListJobs(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -185,11 +186,10 @@ func NewJobsStatusCmd() *cobra.Command {
 			if allocation != "" && !history {
 				return fmt.Errorf("--allocation requires --history")
 			}
-			tlsCfg, err := buildCLITLSConfig()
+			serverClient, err := namespaceClient(cmd.Context())
 			if err != nil {
 				return err
 			}
-			serverClient := client.NewNamespaceServerClient(config.ClusterToken, config.ServerAddr, config.Namespace, tlsCfg)
 			if watch {
 				if config.Output == "json" {
 					return fmt.Errorf("--watch does not support --output json")
@@ -237,11 +237,10 @@ func NewJobsLogsCmd() *cobra.Command {
 		Short: "Show task logs for a job without requiring full allocation IDs",
 		Long:  "Show logs for a job. Non-following output includes every matching task stream. Use --allocation, --group, and --task to narrow the selection; --follow requires exactly one task stream.",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			tlsCfg, err := buildCLITLSConfig()
+			serverClient, err := namespaceClient(cmd.Context())
 			if err != nil {
 				return err
 			}
-			serverClient := client.NewNamespaceServerClient(config.ClusterToken, config.ServerAddr, config.Namespace, tlsCfg)
 			return runJobLogs(cmd.Context(), cmd.OutOrStdout(), serverClient, args[0], allocation, group, task, follow, tail)
 		},
 	}
@@ -261,11 +260,10 @@ func NewJobsResetBackoffCmd() *cobra.Command {
 		Short: "Reset a task group's replacement backoff",
 		Long:  "Reset the replacement backoff of a task group so its failed allocations are replaced without waiting. Use it after fixing the cause of the failures; a group without counted failures is left unchanged.",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			tlsCfg, err := buildCLITLSConfig()
+			serverClient, err := namespaceClient(cmd.Context())
 			if err != nil {
 				return err
 			}
-			serverClient := client.NewNamespaceServerClient(config.ClusterToken, config.ServerAddr, config.Namespace, tlsCfg)
 			if err := serverClient.ResetReplacementBackoff(cmd.Context(), args[0], args[1]); err != nil {
 				return err
 			}
@@ -284,11 +282,10 @@ func NewJobsDeleteCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		Short: "Delete a job and stop its allocations",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			tlsCfg, err := buildCLITLSConfig()
+			serverClient, err := namespaceClient(cmd.Context())
 			if err != nil {
 				return err
 			}
-			serverClient := client.NewNamespaceServerClient(config.ClusterToken, config.ServerAddr, config.Namespace, tlsCfg)
 			if err := serverClient.DeleteJob(cmd.Context(), args[0]); err != nil {
 				return err
 			}
@@ -316,6 +313,27 @@ func ensureActiveNamespace(job *spec.JobSpec) error {
 		source = fmt.Sprintf("context %q", config.Context)
 	}
 	return fmt.Errorf("manifest namespace %q does not match %s namespace %q; change the manifest or select the intended namespace", job.Namespace, source, config.Namespace)
+}
+
+// namespaceClient returns a client for the selected namespace. Without
+// --namespace or a context namespace, a namespace-scoped credential selects
+// its own namespace; a cluster-scoped credential must name one.
+func namespaceClient(ctx context.Context) (*client.ServerClient, error) {
+	if config.Namespace != "" {
+		return jobClient(config.Namespace)
+	}
+	tlsCfg, err := buildCLITLSConfig()
+	if err != nil {
+		return nil, fmt.Errorf("build TLS config: %w", err)
+	}
+	info, err := client.NewServerClient(config.ClusterToken, config.ServerAddr, tlsCfg).CredentialInfo(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("select namespace: %w", err)
+	}
+	if info.Scope != "namespace" || info.Namespace == "" {
+		return nil, fmt.Errorf("--namespace is required with a %s-scoped credential", info.Scope)
+	}
+	return jobClient(info.Namespace)
 }
 
 func jobClient(namespace string) (*client.ServerClient, error) {

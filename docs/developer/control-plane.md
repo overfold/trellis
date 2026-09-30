@@ -72,7 +72,7 @@ Count reconciliation delays replacements for a task group whose allocations keep
 
 The backoff delays only placements that replace counted failed allocations. The record carries `delayed_replacements`, the number of failures counted while the backoff is active. For a group deficit `d` (desired count minus active allocations, after rolling-update limits), the pass withholds `min(d, delayed_replacements)` placements and places the rest immediately, so a deficit from an allocation lost with its node, or from a higher `count`, does not wait. The pass also lowers `delayed_replacements` to the group's missing capacity, so a failure whose capacity was scaled away is not held against a later count increase. The first reconciliation pass at or after `next_replacement_at` places the whole deficit and `delayed_replacements` returns to zero; failures counted in that pass start a new delayed set. The failure count and its reset rules are unchanged. While the backoff is active the pass still trims excess pending allocations. A record whose group is no longer desired has its failures cleared and is deleted together with the group's last allocation record.
 
-An operator can clear a group's backoff with `POST /v1/jobs/{name}/groups/{group}/replacement-backoff/reset` (`trellisctl jobs reset-backoff`). The leader writes the cleared record (zero failures, no `next_replacement_at`, nothing delayed, the seen list kept so retained failures are never counted again) through the state store, publishes `job.replacement_backoff_reset`, and runs a reconciliation pass that places the withheld replacements.
+An operator can clear a group's backoff with `POST /v1/namespaces/{namespace}/jobs/{name}/groups/{group}/replacement-backoff/reset` (`trellisctl jobs reset-backoff`). The leader writes the cleared record (zero failures, no `next_replacement_at`, nothing delayed, the seen list kept so retained failures are never counted again) through the state store, publishes `job.replacement_backoff_reset`, and runs a reconciliation pass that places the withheld replacements.
 
 These are server defaults (`DefaultReplacementPolicy`), not manifest fields.
 
@@ -82,7 +82,7 @@ Allocation records are otherwise never deleted, so each pass also prunes termina
 
 Allocation updates, new allocations, pruned records, and backoff changes from one pass are committed as a single atomic batch. Every value, including timestamps, is chosen by the leader and carried in the Raft entry; the FSM only applies the puts and deletes, so log replay and snapshot restore produce identical state on every node. A new leader reloads the committed backoff records, so failover neither shortens nor resets a backoff.
 
-Operators see the state as `replacement_backoff` in job status (`trellisctl jobs status` prints a **Replacement backoff** table), a `job.replacement_delayed` event on `/v1/events` whenever a failure is counted, and the `trellis_replacement_backoff_failures` and `trellis_replacement_backoff_remaining_seconds` gauges labelled by namespace, job, and group.
+Operators see the state as `replacement_backoff` in job status (`trellisctl jobs status` prints a **Replacement backoff** table), a `job.replacement_delayed` event on the event streams whenever a failure is counted, and the `trellis_replacement_backoff_failures` and `trellis_replacement_backoff_remaining_seconds` gauges labelled by namespace, job, and group.
 
 ### Lost allocations
 

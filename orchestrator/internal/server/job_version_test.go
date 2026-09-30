@@ -205,7 +205,7 @@ func TestRegisterJobHandlerReportsVersionConflict(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	e.ServeHTTP(rec, scopedRequest(t, http.MethodPost, "/v1/jobs", body("app:v1", 0), auth.AccessNamespace, auth.AccessWrite, "default"))
+	e.ServeHTTP(rec, scopedRequest(t, http.MethodPost, "/v1/namespaces/default/jobs", body("app:v1", 0), auth.AccessNamespace, auth.AccessWrite, "default"))
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("create status = %d, body: %s", rec.Code, rec.Body.String())
 	}
@@ -218,7 +218,7 @@ func TestRegisterJobHandlerReportsVersionConflict(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
-	e.ServeHTTP(rec, scopedRequest(t, http.MethodPost, "/v1/jobs", body("app:v2", 0), auth.AccessNamespace, auth.AccessWrite, "default"))
+	e.ServeHTTP(rec, scopedRequest(t, http.MethodPost, "/v1/namespaces/default/jobs", body("app:v2", 0), auth.AccessNamespace, auth.AccessWrite, "default"))
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("conflicting create status = %d, want 409; body: %s", rec.Code, rec.Body.String())
 	}
@@ -230,7 +230,7 @@ func TestRegisterJobHandlerReportsVersionConflict(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
-	e.ServeHTTP(rec, scopedRequest(t, http.MethodPost, "/v1/jobs/plan", body("app:v2", 0), auth.AccessNamespace, auth.AccessWrite, "default"))
+	e.ServeHTTP(rec, scopedRequest(t, http.MethodPost, "/v1/namespaces/default/jobs/plan", body("app:v2", 0), auth.AccessNamespace, auth.AccessWrite, "default"))
 	var planned struct {
 		BaseVersion  int `json:"base_version"`
 		BaseRevision int `json:"base_revision"`

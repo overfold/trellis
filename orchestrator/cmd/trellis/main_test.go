@@ -283,7 +283,7 @@ func TestControlPlaneFollowerProxiesToLeader(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer workload-token" {
 			t.Errorf("authorization header = %q", got)
 		}
-		if r.Method != http.MethodGet || r.URL.Path != "/v1/jobs" {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/namespaces/default/jobs" {
 			t.Errorf("proxied request = %s %s", r.Method, r.URL.Path)
 		}
 		if r.Header.Get(auth.AdministratorChallengeHeader) != "challenge" || r.Header.Get(auth.AdministratorSignatureHeader) != "signature" {
@@ -301,7 +301,7 @@ func TestControlPlaneFollowerProxiesToLeader(t *testing.T) {
 		http.DefaultTransport,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
-	req := httptest.NewRequest(http.MethodGet, "https://follower.example/v1/jobs", nil)
+	req := httptest.NewRequest(http.MethodGet, "https://follower.example/v1/namespaces/default/jobs", nil)
 	req.Header.Set("Authorization", "Bearer workload-token")
 	req.Header.Set(auth.AdministratorChallengeHeader, "challenge")
 	req.Header.Set(auth.AdministratorSignatureHeader, "signature")
@@ -359,7 +359,7 @@ func TestControlPlaneExecutesLocallyOnlyWhenLeaderIsActive(t *testing.T) {
 
 	request := func() *httptest.ResponseRecorder {
 		recorder := httptest.NewRecorder()
-		proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/jobs", strings.NewReader("{}")))
+		proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/namespaces/default/jobs", strings.NewReader("{}")))
 		return recorder
 	}
 	if got := request().Code; got != http.StatusServiceUnavailable {
@@ -383,9 +383,9 @@ func TestEnrollmentCredentialIsNotAdministratorCredential(t *testing.T) {
 	e.Use(leaderAuthMiddleware(auth.NewAdministratorAuthenticator(), func() (ed25519.PublicKey, uint64, bool) {
 		return publicKey, 1, true
 	}, "enroll-secret", nil, nil))
-	e.POST("/v1/jobs", func(c *echo.Context) error { return c.NoContent(http.StatusNoContent) })
+	e.POST("/v1/namespaces/default/jobs", func(c *echo.Context) error { return c.NoContent(http.StatusNoContent) })
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/jobs", nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/namespaces/default/jobs", nil)
 	req.Header.Set("Authorization", "Bearer enroll-secret")
 	rec := httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
@@ -393,7 +393,7 @@ func TestEnrollmentCredentialIsNotAdministratorCredential(t *testing.T) {
 		t.Fatalf("enrollment credential status = %d, want %d", rec.Code, http.StatusUnauthorized)
 	}
 
-	req = httptest.NewRequest(http.MethodPost, "/v1/jobs", nil)
+	req = httptest.NewRequest(http.MethodPost, "/v1/namespaces/default/jobs", nil)
 	req.Header.Set("Authorization", "Bearer former-admin-secret")
 	rec = httptest.NewRecorder()
 	e.ServeHTTP(rec, req)

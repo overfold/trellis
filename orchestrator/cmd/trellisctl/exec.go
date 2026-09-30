@@ -46,11 +46,10 @@ func NewExecCmd() *cobra.Command {
 				return fmt.Errorf("--term requires --tty")
 			}
 
-			tlsCfg, err := buildCLITLSConfig()
+			serverClient, err := namespaceClient(cmd.Context())
 			if err != nil {
 				return err
 			}
-			serverClient := client.NewNamespaceServerClient(config.ClusterToken, config.ServerAddr, config.Namespace, tlsCfg)
 			allocationID := args[0]
 			command := args[1:]
 

@@ -17,7 +17,7 @@ func TestExecCommandWritesStreamsAndPreservesExitStatus(t *testing.T) {
 	t.Cleanup(func() { config = previousConfig })
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/v1/allocations/alloc-1/exec" {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/namespaces/default/allocations/alloc-1/exec" {
 			http.Error(w, "unexpected request", http.StatusNotFound)
 			return
 		}
