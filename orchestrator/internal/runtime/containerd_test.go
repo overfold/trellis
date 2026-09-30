@@ -244,7 +244,11 @@ func TestRemoveAllocationFilesCleansCurrentAndLegacyFiles(t *testing.T) {
 		if err := os.MkdirAll(folder, 0o750); err != nil {
 			t.Fatal(err)
 		}
-		for _, suffix := range []string{".log", "-resolv.conf", "-hosts"} {
+		suffixes := []string{".log", "-resolv.conf", "-hosts"}
+		if folder == r.logDir {
+			suffixes = append(suffixes, ".log.1", ".log.2", ".log.3", ".log.trim")
+		}
+		for _, suffix := range suffixes {
 			path := filepath.Join(folder, "allocation"+suffix)
 			if err := os.WriteFile(path, []byte("data"), 0o600); err != nil {
 				t.Fatal(err)
@@ -267,6 +271,46 @@ func TestRemoveAllocationFilesCleansCurrentAndLegacyFiles(t *testing.T) {
 		if len(entries) != 1 || entries[0].Name() != "other.log" {
 			t.Fatalf("remaining files in %s: %v", folder, entries)
 		}
+	}
+}
+
+func TestContainerdLogFollowerAdmissionAndRelease(t *testing.T) {
+	dir := t.TempDir()
+	r := &ContainerdRuntime{
+		logDir:       filepath.Join(dir, "runtime"),
+		legacyLogDir: filepath.Join(dir, "legacy"),
+	}
+	if err := os.MkdirAll(r.logDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(r.logPath("allocation"), []byte("ready\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	readers := make([]io.ReadCloser, 0, maxLogFollowers)
+	for range maxLogFollowers {
+		reader, err := r.Logs(context.Background(), "allocation", true, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		readers = append(readers, reader)
+	}
+	if reader, err := r.Logs(context.Background(), "allocation", true, 0); !errors.Is(err, ErrTooManyLogFollowers) {
+		if reader != nil {
+			_ = reader.Close()
+		}
+		t.Fatalf("extra follower error = %v", err)
+	}
+	if err := readers[0].Close(); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := r.Logs(context.Background(), "allocation", true, 0)
+	if err != nil {
+		t.Fatalf("follower slot was not released: %v", err)
+	}
+	_ = replacement.Close()
+	for _, reader := range readers[1:] {
+		_ = reader.Close()
 	}
 }
 

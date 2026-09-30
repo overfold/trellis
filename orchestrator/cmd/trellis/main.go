@@ -105,6 +105,14 @@ func main() {
 		Args:  cobra.NoArgs,
 		Run:   func(_ *cobra.Command, _ []string) { fmt.Println(version.Current()) },
 	})
+	root.AddCommand(&cobra.Command{
+		Use:    "log-sink PATH",
+		Hidden: true,
+		Args:   cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return containerruntime.RunLogSink(args[0])
+		},
+	})
 	f := root.Flags()
 	f.StringVar(&cfg.ConfigFile, "config", "", "Path to Trellis node configuration YAML")
 	f.StringVar(&cfg.AgentListen, "agent-listen", ":8127", "Agent API listen address")

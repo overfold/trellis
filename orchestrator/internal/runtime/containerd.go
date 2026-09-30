@@ -43,6 +43,9 @@ type ContainerdRuntime struct {
 	client       *containerd.Client
 	logDir       string
 	legacyLogDir string
+	loggerBinary string
+	followOnce   sync.Once
+	followSlots  chan struct{}
 }
 
 // Port maps a host port to a container port.
@@ -129,11 +132,17 @@ func NewContainerdRuntime(socketPath string) (*ContainerdRuntime, error) {
 	if err != nil {
 		return nil, err
 	}
+	loggerBinary, err := os.Executable()
+	if err != nil {
+		_ = client.Close()
+		return nil, fmt.Errorf("locate log sink executable: %w", err)
+	}
 
 	return &ContainerdRuntime{
 		client:       client,
 		logDir:       "/var/lib/trellis/runtime",
 		legacyLogDir: filepath.Join(os.TempDir(), "trellis-logs"),
+		loggerBinary: loggerBinary,
 	}, nil
 }
 
@@ -366,7 +375,7 @@ func (c *ContainerdRuntime) Start(ctx context.Context, containerID string) error
 	if err := ensureRuntimeDir(c.logDir); err != nil {
 		return fmt.Errorf("create log directory: %w", err)
 	}
-	task, err := container.NewTask(ctx, cio.LogFile(c.logPath(containerID)))
+	task, err := container.NewTask(ctx, rotatingLogCreator(c.loggerBinary, c.logPath(containerID)))
 	if err != nil {
 		return fmt.Errorf("creating task for %s: %w", containerID, err)
 	}
@@ -430,14 +439,65 @@ func checkOwnedDir(path string, info os.FileInfo, uid uint32, private bool) erro
 
 // Logs opens the log stream for a container.
 func (c *ContainerdRuntime) Logs(ctx context.Context, containerID string, follow bool, tail int) (io.ReadCloser, error) {
+	var release func()
+	if follow {
+		var err error
+		release, err = c.acquireLogFollower()
+		if err != nil {
+			return nil, err
+		}
+	}
 	file, err := os.Open(c.logPath(containerID))
 	if os.IsNotExist(err) {
 		file, err = c.openLegacyLog(filepath.Base(containerID) + ".log")
+		if err == nil {
+			reader, readErr := newLogReader(ctx, file, follow, tail)
+			if readErr != nil {
+				if release != nil {
+					release()
+				}
+				return nil, readErr
+			}
+			return &releaseReadCloser{ReadCloser: reader, release: release}, nil
+		}
 	}
 	if err != nil {
+		if release != nil {
+			release()
+		}
 		return nil, fmt.Errorf("open logs for %s: %w", containerID, err)
 	}
-	return newLogReader(ctx, file, follow, tail)
+	_ = file.Close()
+	reader, err := newSegmentedLogReader(ctx, c.logPath(containerID), logSegmentCount, follow, tail, release)
+	if err != nil {
+		return nil, fmt.Errorf("read logs for %s: %w", containerID, err)
+	}
+	return reader, nil
+}
+
+func (c *ContainerdRuntime) acquireLogFollower() (func(), error) {
+	c.followOnce.Do(func() { c.followSlots = make(chan struct{}, maxLogFollowers) })
+	select {
+	case c.followSlots <- struct{}{}:
+		var once sync.Once
+		return func() { once.Do(func() { <-c.followSlots }) }, nil
+	default:
+		return nil, ErrTooManyLogFollowers
+	}
+}
+
+type releaseReadCloser struct {
+	io.ReadCloser
+	release func()
+	once    sync.Once
+}
+
+func (r *releaseReadCloser) Close() error {
+	err := r.ReadCloser.Close()
+	if r.release != nil {
+		r.once.Do(r.release)
+	}
+	return err
 }
 
 func (c *ContainerdRuntime) openLegacyLog(name string) (*os.File, error) {
@@ -585,7 +645,7 @@ func (c *ContainerdRuntime) Remove(ctx context.Context, containerID string) erro
 func (c *ContainerdRuntime) removeAllocationFiles(containerID string) error {
 	name := filepath.Base(containerID)
 	var paths []string
-	for _, suffix := range []string{".log", "-resolv.conf", "-hosts"} {
+	for _, suffix := range []string{".log", ".log.1", ".log.2", ".log.3", ".log.trim", "-resolv.conf", "-hosts"} {
 		paths = append(paths, filepath.Join(c.logDir, name+suffix))
 	}
 	err := removeRuntimeFiles(paths...)
