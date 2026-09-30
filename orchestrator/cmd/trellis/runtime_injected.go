@@ -7,7 +7,7 @@ import (
 	"io"
 	"path/filepath"
 
-	containerruntime "github.com/overfold/trellis/internal/runtime"
+	containerruntime "github.com/overfold/trellis/orchestrator/internal/runtime"
 	"github.com/spf13/pflag"
 )
 

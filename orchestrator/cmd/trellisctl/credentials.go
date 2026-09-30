@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/orchestrator/internal/api"
 	"github.com/spf13/cobra"
 )
 

@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/auth"
+	"github.com/overfold/trellis/orchestrator/internal/api"
+	"github.com/overfold/trellis/orchestrator/internal/auth"
 )
 
 func TestAdministratorClientRetriesWithFreshChallengeAfterLeadershipChange(t *testing.T) {

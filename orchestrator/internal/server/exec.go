@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/execstream"
+	"github.com/overfold/trellis/orchestrator/internal/api"
+	"github.com/overfold/trellis/orchestrator/internal/execstream"
 )
 
 const (

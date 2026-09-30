@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/overfold/trellis/internal/server"
+	"github.com/overfold/trellis/orchestrator/internal/server"
 	"github.com/spf13/pflag"
 )
 

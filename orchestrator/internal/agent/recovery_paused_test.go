@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/runtime"
+	"github.com/overfold/trellis/orchestrator/internal/api"
+	"github.com/overfold/trellis/orchestrator/internal/runtime"
 )
 
 // newPausedInjectedRuntime returns an injected runtime holding one running

@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/overfold/trellis/internal/runtime"
-	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/runtime"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
 // HealthSubscriber receives allocation health changes.

@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/execstream"
+	"github.com/overfold/trellis/orchestrator/internal/api"
+	"github.com/overfold/trellis/orchestrator/internal/execstream"
 )
 
 // ExecError reports a stream that the server ended with an error frame

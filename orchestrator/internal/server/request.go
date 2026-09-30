@@ -10,8 +10,8 @@ import (
 	"reflect"
 
 	"github.com/labstack/echo/v5"
-	"github.com/overfold/trellis/internal/auth"
-	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/auth"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
 // Request body limits. Every JSON request body is bounded; routes whose

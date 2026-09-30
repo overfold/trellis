@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/orchestrator/internal/api"
 )
 
 // ListNamespaces returns the sorted union of namespaces referenced by desired

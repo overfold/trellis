@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/auth"
-	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/api"
+	"github.com/overfold/trellis/orchestrator/internal/auth"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
 // apiAccessToken returns the workload credential for one allocation

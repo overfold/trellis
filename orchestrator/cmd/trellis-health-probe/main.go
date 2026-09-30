@@ -15,7 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/overfold/trellis/internal/probepath"
+	"github.com/overfold/trellis/orchestrator/internal/probepath"
 )
 
 const (

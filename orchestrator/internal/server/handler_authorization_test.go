@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/labstack/echo/v5"
-	"github.com/overfold/trellis/internal/auth"
+	"github.com/overfold/trellis/orchestrator/internal/auth"
 )
 
 func scopedRequest(t *testing.T, method, target, body string, scope auth.AccessScope, access auth.AccessLevel, namespace string) *http.Request {

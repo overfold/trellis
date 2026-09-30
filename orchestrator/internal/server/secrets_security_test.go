@@ -14,12 +14,12 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/auth"
-	"github.com/overfold/trellis/internal/lifecycle"
-	secretstore "github.com/overfold/trellis/internal/secrets"
-	"github.com/overfold/trellis/internal/spec"
-	"github.com/overfold/trellis/internal/state"
+	"github.com/overfold/trellis/orchestrator/internal/api"
+	"github.com/overfold/trellis/orchestrator/internal/auth"
+	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
+	secretstore "github.com/overfold/trellis/orchestrator/internal/secrets"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/state"
 )
 
 func secretHandler(t *testing.T) (*echo.Echo, *secretstore.Store) {

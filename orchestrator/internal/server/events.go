@@ -3,7 +3,7 @@ package server
 import (
 	"sync"
 
-	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/orchestrator/internal/api"
 )
 
 const defaultMaxEventSubscribers = 256

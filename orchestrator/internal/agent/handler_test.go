@@ -11,8 +11,8 @@ import (
 	"testing"
 
 	"github.com/labstack/echo/v5"
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/api"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
 func TestMutationHandlersRequirePositiveFences(t *testing.T) {

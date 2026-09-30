@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/overfold/trellis/internal/state"
+	"github.com/overfold/trellis/orchestrator/internal/state"
 )
 
 func TestStoreIsWriteOnlyAndEncryptedAtRest(t *testing.T) {

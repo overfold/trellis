@@ -11,7 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/hashicorp/raft"
-	"github.com/overfold/trellis/internal/tlsutil"
+	"github.com/overfold/trellis/orchestrator/internal/tlsutil"
 )
 
 var (

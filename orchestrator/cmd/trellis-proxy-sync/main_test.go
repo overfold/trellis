@@ -11,8 +11,8 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/api"
+	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
 	"golang.org/x/sys/unix"
 )
 

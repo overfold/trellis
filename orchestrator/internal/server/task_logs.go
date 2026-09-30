@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
 // ErrTaskSelection indicates that a log request needs a valid task selector.

@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/overfold/trellis/internal/specschema"
+	"github.com/overfold/trellis/orchestrator/internal/specschema"
 )
 
 func main() {

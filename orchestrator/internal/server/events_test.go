@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v5"
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/auth"
+	"github.com/overfold/trellis/orchestrator/internal/api"
+	"github.com/overfold/trellis/orchestrator/internal/auth"
 )
 
 func TestEventBusNamespaceSubscriptionSerializesOnlySelectedNamespace(t *testing.T) {

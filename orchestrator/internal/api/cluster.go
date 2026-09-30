@@ -3,7 +3,7 @@ package api
 import (
 	"time"
 
-	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
 // ClusterSettings are the replicated cluster-wide semantics every leader

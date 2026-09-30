@@ -3,7 +3,7 @@ package agent
 import (
 	"testing"
 
-	"github.com/overfold/trellis/internal/network"
+	"github.com/overfold/trellis/orchestrator/internal/network"
 )
 
 func TestAllocationNetworkAddress(t *testing.T) {

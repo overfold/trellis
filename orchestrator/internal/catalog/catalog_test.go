@@ -3,7 +3,7 @@ package catalog
 import (
 	"testing"
 
-	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/orchestrator/internal/api"
 )
 
 func TestLookupByJob(t *testing.T) {

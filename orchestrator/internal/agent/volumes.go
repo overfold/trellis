@@ -13,8 +13,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/overfold/trellis/internal/runtime"
-	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/runtime"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 	"golang.org/x/sys/unix"
 )
 

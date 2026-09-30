@@ -21,8 +21,8 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/client"
+	"github.com/overfold/trellis/orchestrator/internal/api"
+	"github.com/overfold/trellis/orchestrator/internal/client"
 	"golang.org/x/sys/unix"
 )
 

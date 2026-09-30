@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/overfold/trellis/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
 )
 
 func TestJobsStatusObservationModesRegistered(t *testing.T) {

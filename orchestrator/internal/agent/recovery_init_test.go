@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/overfold/trellis/internal/client"
-	"github.com/overfold/trellis/internal/runtime"
-	"github.com/overfold/trellis/internal/storage"
+	"github.com/overfold/trellis/orchestrator/internal/client"
+	"github.com/overfold/trellis/orchestrator/internal/runtime"
+	"github.com/overfold/trellis/orchestrator/internal/storage"
 )
 
 // lockedListingRuntime lets a test change what the runtime lists while the

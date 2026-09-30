@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/overfold/trellis/internal/probepath"
+	"github.com/overfold/trellis/orchestrator/internal/probepath"
 )
 
 func TestGenerateDeterministic(t *testing.T) {

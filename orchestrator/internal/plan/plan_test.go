@@ -3,7 +3,7 @@ package plan
 import (
 	"testing"
 
-	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
 func task(name string) spec.TaskSpec {

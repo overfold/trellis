@@ -10,9 +10,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/catalog"
-	"github.com/overfold/trellis/internal/client"
+	"github.com/overfold/trellis/orchestrator/internal/api"
+	"github.com/overfold/trellis/orchestrator/internal/catalog"
+	"github.com/overfold/trellis/orchestrator/internal/client"
 )
 
 func newNopStateController() *StateController {

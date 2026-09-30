@@ -3,7 +3,7 @@ package server
 import (
 	"time"
 
-	"github.com/overfold/trellis/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
 	"github.com/prometheus/client_golang/prometheus"
 )
 

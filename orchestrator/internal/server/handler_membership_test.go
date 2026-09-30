@@ -16,10 +16,10 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/state"
-	"github.com/overfold/trellis/internal/storage"
-	"github.com/overfold/trellis/internal/tlsutil"
+	"github.com/overfold/trellis/orchestrator/internal/api"
+	"github.com/overfold/trellis/orchestrator/internal/state"
+	"github.com/overfold/trellis/orchestrator/internal/storage"
+	"github.com/overfold/trellis/orchestrator/internal/tlsutil"
 )
 
 func TestHandleRaftMemberRemove(t *testing.T) {

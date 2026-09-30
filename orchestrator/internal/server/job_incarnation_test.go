@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/overfold/trellis/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
 )
 
 func TestDeleteAndRecreateJobDoesNotAdoptPreviousIncarnation(t *testing.T) {

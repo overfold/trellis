@@ -1,6 +1,6 @@
 package server
 
-import "github.com/overfold/trellis/internal/spec"
+import "github.com/overfold/trellis/orchestrator/internal/spec"
 
 // canonicalTestSpec resolves job defaults in place, as registration does
 // before a job is stored. Validation errors are ignored so tests can store

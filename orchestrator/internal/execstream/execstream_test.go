@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/orchestrator/internal/api"
 )
 
 func TestFramesRoundTripAndSplitData(t *testing.T) {

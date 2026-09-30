@@ -25,7 +25,7 @@ jobs:
           VERSION: ${{ github.ref_name }}
         run: |
           mkdir -p bin
-          LDFLAGS="-X github.com/overfold/trellis/internal/version.version=${VERSION}"
+          LDFLAGS="-X github.com/overfold/trellis/orchestrator/internal/version.version=${VERSION}"
           go build -ldflags "${LDFLAGS}" -o bin/trellis ./cmd/trellis
           go build -ldflags "${LDFLAGS}" -o bin/trellisctl ./cmd/trellisctl
           CGO_ENABLED=0 go build -o bin/trellis-health-probe ./cmd/trellis-health-probe
