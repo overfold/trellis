@@ -33,9 +33,9 @@ type AllocationReconciler struct {
 // AllocationReconcileSubscriber receives reconciliation state changes.
 type AllocationReconcileSubscriber interface {
 	OnReconciledStatus(allocID, status string)
-	// OnRestartState records restart accounting. When exhausted is true the
-	// allocation has failed terminally; an error means the exhaustion was
-	// not recorded and the reconciler will retry on its next pass.
+	// OnRestartState records restart accounting before an allowed restart, or
+	// the terminal failed observation when exhausted is true. An error leaves
+	// the runtime untouched and the reconciler retries on its next pass.
 	OnRestartState(allocID string, attempts int, window time.Time, exhausted bool) error
 }
 
