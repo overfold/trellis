@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 )
 
 const (
@@ -31,7 +31,7 @@ const (
 
 // DiscoveryLookup lists service-discovery records.
 type DiscoveryLookup interface {
-	ListDiscovery(ctx context.Context) (*api.ServiceListResponse, error)
+	ListDiscovery(ctx context.Context) (*nodeapi.ServiceListResponse, error)
 }
 
 // NamespaceLookup identifies the namespace network that owns a workload IP.

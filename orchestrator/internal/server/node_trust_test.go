@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/overfold/trellis/internal/state"
-	"github.com/overfold/trellis/internal/storage"
-	"github.com/overfold/trellis/internal/tlsutil"
+	"github.com/overfold/trellis/orchestrator/internal/state"
+	"github.com/overfold/trellis/orchestrator/internal/storage"
+	"github.com/overfold/trellis/orchestrator/internal/tlsutil"
 )
 
 type nodeTrustFixture struct {

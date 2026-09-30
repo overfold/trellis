@@ -1,4 +1,7 @@
-// Package client provides clients for Trellis server and agent APIs.
+// Package client provides the node-internal clients: the leader's client for
+// agent operations and a node's client for registration, heartbeats, and
+// internal discovery. Operators and integrations use the public package
+// github.com/overfold/trellis/orchestrator/client.
 package client
 
 import (
@@ -14,9 +17,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/execstream"
-	"github.com/overfold/trellis/internal/tlsutil"
+	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/internal/execstream"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
+	"github.com/overfold/trellis/orchestrator/internal/tlsutil"
+	"github.com/overfold/trellis/orchestrator/internal/transport"
 )
 
 // AgentClient sends authenticated requests to a Trellis agent.
@@ -24,15 +29,15 @@ type AgentClient struct {
 	token              string
 	tlsConfig          *tls.Config
 	mu                 sync.Mutex
-	clients            map[uuid.UUID]*client
-	networkPlanClients map[uuid.UUID]*client
+	clients            map[uuid.UUID]*transport.Client
+	networkPlanClients map[uuid.UUID]*transport.Client
 }
 
 const agentOperationTimeout = 30 * time.Second
 
 // AgentOperationError reports a rejected agent operation.
 type AgentOperationError struct {
-	Response api.OperationResponse
+	Response nodeapi.OperationResponse
 }
 
 func (e *AgentOperationError) Error() string {
@@ -40,11 +45,11 @@ func (e *AgentOperationError) Error() string {
 }
 
 func decodeOperationError(err error) error {
-	var httpErr *HTTPError
+	var httpErr *transport.HTTPError
 	if !errors.As(err, &httpErr) {
 		return err
 	}
-	var response api.OperationResponse
+	var response nodeapi.OperationResponse
 	if json.Unmarshal(httpErr.Body, &response) == nil && response.Code != "" {
 		return &AgentOperationError{Response: response}
 	}
@@ -52,7 +57,7 @@ func decodeOperationError(err error) error {
 		Message json.RawMessage `json:"message"`
 	}
 	if json.Unmarshal(httpErr.Body, &wrapped) == nil && len(wrapped.Message) > 0 {
-		var inner api.OperationResponse
+		var inner nodeapi.OperationResponse
 		if json.Unmarshal(wrapped.Message, &inner) == nil && inner.Code != "" {
 			return &AgentOperationError{Response: inner}
 		}
@@ -69,7 +74,7 @@ func decodeOperationError(err error) error {
 // Logs streams logs for an allocation from an agent.
 func (s *AgentClient) Logs(ctx context.Context, nodeID uuid.UUID, address, allocID string, follow bool, tail int) (io.ReadCloser, error) {
 	query := url.Values{"follow": {fmt.Sprint(follow)}, "tail": {fmt.Sprint(tail)}}
-	return s.clientFor(nodeID, 30*time.Second).stream(ctx, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(allocID)+"/logs?"+query.Encode())
+	return s.clientFor(nodeID, 30*time.Second).Stream(ctx, transport.NormalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(allocID)+"/logs?"+query.Encode())
 }
 
 // NewAgentClient creates a client for Trellis agent APIs.
@@ -77,19 +82,19 @@ func NewAgentClient(token string, tlsConfig *tls.Config) *AgentClient {
 	return &AgentClient{
 		token:              token,
 		tlsConfig:          tlsConfig,
-		clients:            make(map[uuid.UUID]*client),
-		networkPlanClients: make(map[uuid.UUID]*client),
+		clients:            make(map[uuid.UUID]*transport.Client),
+		networkPlanClients: make(map[uuid.UUID]*transport.Client),
 	}
 }
 
-func (s *AgentClient) clientFor(expectedNodeID uuid.UUID, responseHeaderTimeout time.Duration) *client {
+func (s *AgentClient) clientFor(expectedNodeID uuid.UUID, responseHeaderTimeout time.Duration) *transport.Client {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.clients == nil {
-		s.clients = make(map[uuid.UUID]*client)
+		s.clients = make(map[uuid.UUID]*transport.Client)
 	}
 	if s.networkPlanClients == nil {
-		s.networkPlanClients = make(map[uuid.UUID]*client)
+		s.networkPlanClients = make(map[uuid.UUID]*transport.Client)
 	}
 	clients := s.clients
 	if responseHeaderTimeout == 0 {
@@ -121,7 +126,7 @@ func (s *AgentClient) clientFor(expectedNodeID uuid.UUID, responseHeaderTimeout 
 		}
 		return nil
 	}
-	created := &client{token: s.token, client: newHTTPClientWithResponseHeaderTimeout(tlsConfig, responseHeaderTimeout)}
+	created := &transport.Client{Token: s.token, HTTP: transport.NewHTTPClient(tlsConfig, responseHeaderTimeout)}
 	clients[expectedNodeID] = created
 	return created
 }
@@ -129,7 +134,7 @@ func (s *AgentClient) clientFor(expectedNodeID uuid.UUID, responseHeaderTimeout 
 func (s *AgentClient) operationRequest(ctx context.Context, nodeID uuid.UUID, method, target string, requestData, responseData any) error {
 	ctx, cancel := context.WithTimeout(ctx, agentOperationTimeout)
 	defer cancel()
-	return s.clientFor(nodeID, 30*time.Second).request(ctx, method, target, requestData, responseData)
+	return s.clientFor(nodeID, 30*time.Second).Request(ctx, method, target, requestData, responseData)
 }
 
 // RetainNodes evicts cached transports for nodes that are no longer registered.
@@ -137,21 +142,21 @@ func (s *AgentClient) operationRequest(ctx context.Context, nodeID uuid.UUID, me
 func (s *AgentClient) RetainNodes(nodes map[uuid.UUID]struct{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, clients := range []map[uuid.UUID]*client{s.clients, s.networkPlanClients} {
+	for _, clients := range []map[uuid.UUID]*transport.Client{s.clients, s.networkPlanClients} {
 		for nodeID, cached := range clients {
 			if _, keep := nodes[nodeID]; keep {
 				continue
 			}
-			cached.client.CloseIdleConnections()
+			cached.HTTP.CloseIdleConnections()
 			delete(clients, nodeID)
 		}
 	}
 }
 
 // RunAllocation asks an agent to start an allocation.
-func (s *AgentClient) RunAllocation(ctx context.Context, nodeID uuid.UUID, address string, allocation *api.AllocationRequest) error {
-	var response api.OperationResponse
-	err := s.operationRequest(ctx, nodeID, http.MethodPost, normalizeBaseURL(address)+"/v1/allocations", allocation, &response)
+func (s *AgentClient) RunAllocation(ctx context.Context, nodeID uuid.UUID, address string, allocation *nodeapi.AllocationRequest) error {
+	var response nodeapi.OperationResponse
+	err := s.operationRequest(ctx, nodeID, http.MethodPost, transport.NormalizeBaseURL(address)+"/v1/allocations", allocation, &response)
 	if err != nil {
 		return fmt.Errorf("run allocation: %w", decodeOperationError(err))
 	}
@@ -159,9 +164,9 @@ func (s *AgentClient) RunAllocation(ctx context.Context, nodeID uuid.UUID, addre
 }
 
 // DrainAllocation suppresses automatic restarts until the allocation is stopped.
-func (s *AgentClient) DrainAllocation(ctx context.Context, nodeID uuid.UUID, address string, request *api.DrainAllocationRequest) error {
-	var response api.OperationResponse
-	err := s.operationRequest(ctx, nodeID, http.MethodPost, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(request.AllocationID)+"/drain", request, &response)
+func (s *AgentClient) DrainAllocation(ctx context.Context, nodeID uuid.UUID, address string, request *nodeapi.DrainAllocationRequest) error {
+	var response nodeapi.OperationResponse
+	err := s.operationRequest(ctx, nodeID, http.MethodPost, transport.NormalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(request.AllocationID)+"/drain", request, &response)
 	if err != nil {
 		return fmt.Errorf("drain allocation: %w", decodeOperationError(err))
 	}
@@ -169,9 +174,9 @@ func (s *AgentClient) DrainAllocation(ctx context.Context, nodeID uuid.UUID, add
 }
 
 // ResumeAllocation restores automatic restarts for a retained allocation.
-func (s *AgentClient) ResumeAllocation(ctx context.Context, nodeID uuid.UUID, address string, request *api.DrainAllocationRequest) error {
-	var response api.OperationResponse
-	err := s.operationRequest(ctx, nodeID, http.MethodDelete, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(request.AllocationID)+"/drain", request, &response)
+func (s *AgentClient) ResumeAllocation(ctx context.Context, nodeID uuid.UUID, address string, request *nodeapi.DrainAllocationRequest) error {
+	var response nodeapi.OperationResponse
+	err := s.operationRequest(ctx, nodeID, http.MethodDelete, transport.NormalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(request.AllocationID)+"/drain", request, &response)
 	if err != nil {
 		return fmt.Errorf("resume allocation: %w", decodeOperationError(err))
 	}
@@ -179,9 +184,9 @@ func (s *AgentClient) ResumeAllocation(ctx context.Context, nodeID uuid.UUID, ad
 }
 
 // StopAllocation asks an agent to stop an allocation.
-func (s *AgentClient) StopAllocation(ctx context.Context, nodeID uuid.UUID, address string, request *api.StopAllocationRequest) error {
-	var response api.OperationResponse
-	err := s.operationRequest(ctx, nodeID, http.MethodDelete, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(request.AllocationID), request, &response)
+func (s *AgentClient) StopAllocation(ctx context.Context, nodeID uuid.UUID, address string, request *nodeapi.StopAllocationRequest) error {
+	var response nodeapi.OperationResponse
+	err := s.operationRequest(ctx, nodeID, http.MethodDelete, transport.NormalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(request.AllocationID), request, &response)
 	if err != nil {
 		return fmt.Errorf("stop allocation: %w", decodeOperationError(err))
 	}
@@ -190,9 +195,9 @@ func (s *AgentClient) StopAllocation(ctx context.Context, nodeID uuid.UUID, addr
 }
 
 // UpdateNetworkPlan reconciles an active namespace network on an agent.
-func (s *AgentClient) UpdateNetworkPlan(ctx context.Context, nodeID uuid.UUID, address string, request *api.NetworkPlanRequest) error {
-	var response api.OperationResponse
-	if err := s.clientFor(nodeID, 0).request(ctx, http.MethodPost, normalizeBaseURL(address)+"/v1/network-plans", request, &response); err != nil {
+func (s *AgentClient) UpdateNetworkPlan(ctx context.Context, nodeID uuid.UUID, address string, request *nodeapi.NetworkPlanRequest) error {
+	var response nodeapi.OperationResponse
+	if err := s.clientFor(nodeID, 0).Request(ctx, http.MethodPost, transport.NormalizeBaseURL(address)+"/v1/network-plans", request, &response); err != nil {
 		return fmt.Errorf("update network plan: %w", decodeOperationError(err))
 	}
 	return nil
@@ -201,15 +206,15 @@ func (s *AgentClient) UpdateNetworkPlan(ctx context.Context, nodeID uuid.UUID, a
 // Exec opens a leader-to-agent exec stream to a new process in an
 // allocation task. The returned connection carries raw exec stream frames
 // and is closed when ctx ends.
-func (s *AgentClient) Exec(ctx context.Context, nodeID uuid.UUID, address, allocID string, request api.AgentExecRequest) (io.ReadWriteCloser, error) {
-	target := normalizeBaseURL(address) + "/v1/allocations/" + url.PathEscape(allocID) + "/exec?" + execstream.EncodeAgentRequest(request).Encode()
-	return s.clientFor(nodeID, 30*time.Second).upgrade(ctx, target)
+func (s *AgentClient) Exec(ctx context.Context, nodeID uuid.UUID, address, allocID string, request nodeapi.AgentExecRequest) (io.ReadWriteCloser, error) {
+	target := transport.NormalizeBaseURL(address) + "/v1/allocations/" + url.PathEscape(allocID) + "/exec?" + execstream.EncodeAgentRequest(request.ExecRequest, request.Epoch).Encode()
+	return s.clientFor(nodeID, 30*time.Second).Upgrade(ctx, target)
 }
 
 // AllocationMetrics fetches resource usage for an allocation's tasks from an agent.
 func (s *AgentClient) AllocationMetrics(ctx context.Context, nodeID uuid.UUID, address, allocID string) (api.AllocationMetricsListResponse, error) {
-	var response []api.AgentTaskMetrics
-	err := s.operationRequest(ctx, nodeID, http.MethodGet, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(allocID)+"/metrics", nil, &response)
+	var response []nodeapi.AgentTaskMetrics
+	err := s.operationRequest(ctx, nodeID, http.MethodGet, transport.NormalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(allocID)+"/metrics", nil, &response)
 	if err != nil {
 		return nil, fmt.Errorf("allocation metrics: %w", err)
 	}

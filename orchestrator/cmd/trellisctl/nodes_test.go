@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
 func TestResolveNodeReference(t *testing.T) {
@@ -67,7 +67,7 @@ func TestPrintNodeStatusShowsPlacementMetadata(t *testing.T) {
 		Arch:          "amd64",
 		Labels:        map[string]string{"zone": "a", "storage": "fast"},
 		Volumes:       []string{"data", "cache"},
-		Capabilities:  []spec.NodeCapability{spec.CapabilityRunsc},
+		Capabilities:  []string{string(spec.CapabilityRunsc)},
 		Version:       "v0.1.0",
 		ControlPlane:  api.ControlPlaneNonvoter,
 	}

@@ -9,9 +9,9 @@ import (
 	"strconv"
 
 	"github.com/labstack/echo/v5"
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/execstream"
-	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/execstream"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
 // Handler exposes agent operations through HTTP.
@@ -41,7 +41,7 @@ func (h *Handler) Register(e *echo.Echo) {
 }
 
 func (h *Handler) handleNetworkPlan(c *echo.Context) error {
-	var request api.NetworkPlanRequest
+	var request nodeapi.NetworkPlanRequest
 	if err := c.Bind(&request); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 	}
@@ -54,11 +54,11 @@ func (h *Handler) handleNetworkPlan(c *echo.Context) error {
 	if err := h.agent.UpdateNetworkPlan(c.Request().Context(), &request); err != nil {
 		return operationError(err)
 	}
-	return c.JSON(http.StatusOK, api.OperationResponse{Code: api.OperationOK, Epoch: request.Epoch})
+	return c.JSON(http.StatusOK, nodeapi.OperationResponse{Code: nodeapi.OperationOK, Epoch: request.Epoch})
 }
 
 func (h *Handler) handleDrain(c *echo.Context) error {
-	request := api.DrainAllocationRequest{AllocationID: c.Param("id")}
+	request := nodeapi.DrainAllocationRequest{AllocationID: c.Param("id")}
 	if err := c.Bind(&request); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 	}
@@ -74,11 +74,11 @@ func (h *Handler) handleDrain(c *echo.Context) error {
 	if err := h.agent.DrainGroup(&request); err != nil {
 		return operationError(err)
 	}
-	return c.JSON(http.StatusOK, api.OperationResponse{Code: api.OperationOK, Generation: request.Generation})
+	return c.JSON(http.StatusOK, nodeapi.OperationResponse{Code: nodeapi.OperationOK, Generation: request.Generation})
 }
 
 func (h *Handler) handleResume(c *echo.Context) error {
-	request := api.DrainAllocationRequest{AllocationID: c.Param("id")}
+	request := nodeapi.DrainAllocationRequest{AllocationID: c.Param("id")}
 	if err := c.Bind(&request); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 	}
@@ -91,7 +91,7 @@ func (h *Handler) handleResume(c *echo.Context) error {
 	if err := h.agent.ResumeGroup(&request); err != nil {
 		return operationError(err)
 	}
-	return c.JSON(http.StatusOK, api.OperationResponse{Code: api.OperationOK, Generation: request.Generation, Epoch: request.Epoch})
+	return c.JSON(http.StatusOK, nodeapi.OperationResponse{Code: nodeapi.OperationOK, Generation: request.Generation, Epoch: request.Epoch})
 }
 
 func (h *Handler) handleLogs(c *echo.Context) error {
@@ -118,6 +118,8 @@ func (h *Handler) handleLogs(c *echo.Context) error {
 	defer func() { _ = logs.Close() }()
 	c.Response().Header().Set("Content-Type", "text/plain; charset=utf-8")
 	c.Response().WriteHeader(http.StatusOK)
+	// Send the headers now: a followed task may not log for a long time.
+	_ = http.NewResponseController(c.Response()).Flush()
 	_, err = io.Copy(c.Response(), logs)
 	return err
 }
@@ -130,7 +132,7 @@ func (h *Handler) handleList(c *echo.Context) error {
 func (h *Handler) handleRun(c *echo.Context) error {
 	ctx := c.Request().Context()
 
-	var request api.AllocationRequest
+	var request nodeapi.AllocationRequest
 	err := c.Bind(&request)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
@@ -169,13 +171,13 @@ func (h *Handler) handleRun(c *echo.Context) error {
 		return operationError(err)
 	}
 
-	return c.JSON(http.StatusOK, api.OperationResponse{Code: api.OperationOK, Generation: request.Generation, Epoch: request.Epoch})
+	return c.JSON(http.StatusOK, nodeapi.OperationResponse{Code: nodeapi.OperationOK, Generation: request.Generation, Epoch: request.Epoch})
 }
 
 func (h *Handler) handleDelete(c *echo.Context) error {
 	ctx := c.Request().Context()
 
-	request := api.StopAllocationRequest{AllocationID: c.Param("id")}
+	request := nodeapi.StopAllocationRequest{AllocationID: c.Param("id")}
 	if err := c.Bind(&request); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 	}
@@ -193,7 +195,7 @@ func (h *Handler) handleDelete(c *echo.Context) error {
 		return operationError(err)
 	}
 
-	return c.JSON(http.StatusOK, api.OperationResponse{Code: api.OperationOK, Generation: request.Generation, Epoch: request.Epoch})
+	return c.JSON(http.StatusOK, nodeapi.OperationResponse{Code: nodeapi.OperationOK, Generation: request.Generation, Epoch: request.Epoch})
 }
 
 // handleExec serves an exec stream. Request errors are ordinary HTTP
@@ -203,10 +205,11 @@ func (h *Handler) handleExec(c *echo.Context) error {
 	if !execstream.IsUpgradeRequest(c.Request()) {
 		return echo.NewHTTPError(http.StatusBadRequest, "exec requires an HTTP/1.1 upgrade to "+execstream.Protocol)
 	}
-	request, err := execstream.DecodeAgentRequest(c.QueryParams())
+	execRequest, epoch, err := execstream.DecodeAgentRequest(c.QueryParams())
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
+	request := nodeapi.AgentExecRequest{ExecRequest: execRequest, Epoch: epoch}
 	reservation, err := h.agent.ReserveExec(c.Request().Context(), c.Param("id"), request)
 	if err != nil {
 		return execError(err)
@@ -251,26 +254,26 @@ func (h *Handler) handleMetrics(c *echo.Context) error {
 }
 
 func operationError(err error) error {
-	status, code := http.StatusInternalServerError, api.OperationFailed
+	status, code := http.StatusInternalServerError, nodeapi.OperationFailed
 	switch {
 	case errors.Is(err, ErrStaleEpoch):
-		status, code = http.StatusConflict, api.OperationStaleEpoch
+		status, code = http.StatusConflict, nodeapi.OperationStaleEpoch
 	case errors.Is(err, ErrStaleGeneration):
-		status, code = http.StatusConflict, api.OperationStaleGeneration
+		status, code = http.StatusConflict, nodeapi.OperationStaleGeneration
 	case errors.Is(err, ErrExecutionConflict), errors.Is(err, ErrAllocationExists):
-		status, code = http.StatusConflict, api.OperationConflict
+		status, code = http.StatusConflict, nodeapi.OperationConflict
 	case errors.Is(err, ErrInvalidEpoch), errors.Is(err, ErrInvalidGeneration):
 		status = http.StatusBadRequest
 	case errors.Is(err, ErrRestartBudgetExhausted):
-		status, code = http.StatusConflict, api.OperationRestartExhausted
+		status, code = http.StatusConflict, nodeapi.OperationRestartExhausted
 	}
-	raw, _ := json.Marshal(api.OperationResponse{Code: code, Message: err.Error()})
+	raw, _ := json.Marshal(nodeapi.OperationResponse{Code: code, Message: err.Error()})
 	return echo.NewHTTPError(status, string(raw))
 }
 
 // validateCanonicalRequest refuses a start whose task group settings were not
 // resolved by job canonicalization. The agent applies no defaults of its own.
-func validateCanonicalRequest(request *api.AllocationRequest) error {
+func validateCanonicalRequest(request *nodeapi.AllocationRequest) error {
 	if !spec.Runtime(request.Runtime).Valid() || request.Runtime == string(spec.RuntimeDefault) {
 		return fmt.Errorf("runtime must be explicit")
 	}

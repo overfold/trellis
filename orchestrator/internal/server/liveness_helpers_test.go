@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 )
 
 // addTestNode places node in s and records a heartbeat from it received at
@@ -38,7 +38,7 @@ func setTestHeartbeat(s *Server, id uuid.UUID, heartbeat time.Time) {
 
 // heartbeatAndApply delivers a heartbeat and applies the report it queued,
 // as the observation applier would.
-func heartbeatAndApply(t testing.TB, s *Server, nodeID uuid.UUID, actual []api.AllocationStatus, version string, resources nodeResourceObservation) error {
+func heartbeatAndApply(t testing.TB, s *Server, nodeID uuid.UUID, actual []nodeapi.AllocationStatus, version string, resources nodeResourceObservation) error {
 	t.Helper()
 	if err := s.Heartbeat(context.Background(), nodeID, actual, version, nil, nil, resources); err != nil {
 		return err

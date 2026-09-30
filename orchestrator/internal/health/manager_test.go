@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
 func TestNewHealthConfigUsesConfiguredValues(t *testing.T) {

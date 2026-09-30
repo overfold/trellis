@@ -9,9 +9,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/catalog"
-	"github.com/overfold/trellis/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/catalog"
+	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 )
 
 func TestInternalDiscoveryReturnsOnlyNamespacesAssignedToNode(t *testing.T) {
@@ -38,7 +38,7 @@ func TestInternalDiscoveryReturnsOnlyNamespacesAssignedToNode(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
-	var entries api.ServiceListResponse
+	var entries nodeapi.ServiceListResponse
 	if err := json.Unmarshal(recorder.Body.Bytes(), &entries); err != nil {
 		t.Fatal(err)
 	}

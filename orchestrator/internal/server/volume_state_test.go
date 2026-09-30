@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
 func TestVolumeRegistrationRoundTripAndPinsScheduler(t *testing.T) {

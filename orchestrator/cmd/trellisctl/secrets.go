@@ -107,7 +107,7 @@ func newSecretsListCmd() *cobra.Command {
 		if _, err := fmt.Fprintln(w, "Name\tVersion\tUpdated\tKey"); err != nil {
 			return err
 		}
-		for _, item := range *items {
+		for _, item := range items {
 			if _, err := fmt.Fprintf(w, "%s\t%d\t%s\t%s\n", item.Name, item.Version, item.UpdatedAt.Format("2006-01-02T15:04:05Z"), item.KeyID); err != nil {
 				return err
 			}

@@ -3,40 +3,13 @@ package auth
 import (
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 )
 
-const (
-	// AdministratorChallengeHeader carries the one-time challenge being signed.
-	AdministratorChallengeHeader = "X-Trellis-Admin-Challenge"
-	// AdministratorSignatureHeader carries the Ed25519 request signature.
-	AdministratorSignatureHeader = "X-Trellis-Admin-Signature"
-	// AdministratorChallengeStatusHeader tells clients to obtain a new challenge.
-	AdministratorChallengeStatusHeader = "X-Trellis-Admin-Challenge-Status"
-	// AdministratorChallengeInvalid is returned when a challenge cannot be used.
-	AdministratorChallengeInvalid = "invalid"
-
-	administratorSigningVersion = "trellis-admin-request-v1"
-	maxAdministratorChallenges  = 4096
-)
-
-// AdministratorSigningPayload returns the canonical bytes signed by administrator clients.
-func AdministratorSigningPayload(challenge, method, requestURI string, body []byte) []byte {
-	digest := sha256.Sum256(body)
-	return []byte(strings.Join([]string{
-		administratorSigningVersion,
-		challenge,
-		strings.ToUpper(method),
-		requestURI,
-		hex.EncodeToString(digest[:]),
-	}, "\n"))
-}
+const maxAdministratorChallenges = 4096
 
 type administratorChallenge struct {
 	expiresAt time.Time

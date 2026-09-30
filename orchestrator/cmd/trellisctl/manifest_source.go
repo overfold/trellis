@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
 const maxRemoteManifestBytes int64 = 1 << 20

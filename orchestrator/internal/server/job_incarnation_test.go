@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/overfold/trellis/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
 )
 
 func TestDeleteAndRecreateJobDoesNotAdoptPreviousIncarnation(t *testing.T) {
@@ -105,7 +105,7 @@ func TestConcurrentDeleteAndRecreateFencesOldAllocations(t *testing.T) {
 	deleted := make(chan error, 1)
 	go func() { deleted <- s.DeleteJob(ctx, "default", "web") }()
 	for {
-		if _, exists := s.GetJob("default", "web"); !exists {
+		if _, err := s.GetJob("default", "web"); err != nil {
 			break
 		}
 		runtime.Gosched()

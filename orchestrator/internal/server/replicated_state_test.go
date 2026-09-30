@@ -13,10 +13,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/lifecycle"
-	"github.com/overfold/trellis/internal/spec"
-	"github.com/overfold/trellis/internal/state"
+	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/state"
 )
 
 type auditStore struct {
@@ -159,7 +160,7 @@ func TestHeartbeatBatchFailureLeavesMemoryAndDurableStateUnchanged(t *testing.T)
 	store.mu.Lock()
 	store.failBatch = true
 	store.mu.Unlock()
-	actual := []api.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
+	actual := []nodeapi.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
 	// The heartbeat is accepted and proves liveness even though persisting
 	// its observations fails; the next heartbeat reports them again.
 	if err := heartbeatAndApply(t, s, node.ID, actual, "new", nodeResourceObservation{}); err != nil {
@@ -186,7 +187,7 @@ func TestUnchangedHeartbeatDoesNotWriteRaft(t *testing.T) {
 	clock := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	s := &Server{now: func() time.Time { return clock }, state: NewStateController(store, "test"), allocations: []*Allocation{allocation}, catalog: newNopCatalog()}
 	addTestNode(s, node, clock)
-	status := []api.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
+	status := []nodeapi.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
 
 	for i := 0; i < 3; i++ {
 		clock = clock.Add(heartbeatInterval)
@@ -214,7 +215,7 @@ func TestHeartbeatPersistsOnlyDurableChanges(t *testing.T) {
 	store := &auditStore{memoryStore: memoryStore{}}
 	s := &Server{now: time.Now, state: NewStateController(store, "test"), allocations: []*Allocation{allocation}, catalog: newNopCatalog()}
 	addTestNode(s, node, time.Time{})
-	status := []api.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
+	status := []nodeapi.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
 
 	// Liveness returning is an observation, not a durable fact.
 	if err := heartbeatAndApply(t, s, node.ID, status, "old", nodeResourceObservation{}); err != nil {

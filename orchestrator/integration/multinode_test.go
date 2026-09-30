@@ -22,9 +22,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/client"
-	"github.com/overfold/trellis/internal/storage"
+	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/client"
+	"github.com/overfold/trellis/orchestrator/internal/storage"
 )
 
 // TestMultiNodeFailureRecovery intentionally uses OS processes, loopback TCP,
@@ -310,10 +310,10 @@ func (h *harness) addNode(joinToken string) int {
 	return i
 }
 
-func (h *harness) administrator() *client.ServerClient {
+func (h *harness) administrator() *client.Client {
 	h.t.Helper()
-	administrator := client.NewServerClient("", addr(h.nodes[h.endpoint()].ports[1]), &tls.Config{InsecureSkipVerify: true})
-	if err := administrator.UseAdministratorKey(h.adminKey); err != nil {
+	administrator, err := client.New(client.Config{Address: addr(h.nodes[h.endpoint()].ports[1]), AdministratorKey: h.adminKey, TLSConfig: &tls.Config{InsecureSkipVerify: true}})
+	if err != nil {
 		h.t.Fatal(err)
 	}
 	return administrator
@@ -396,11 +396,11 @@ func (h *harness) close() {
 func (h *harness) waitHTTP(i int) {
 	h.eventually(35*time.Second, func() bool {
 		if h.token == "" {
-			administrator := client.NewServerClient("", addr(h.nodes[i].ports[1]), &tls.Config{InsecureSkipVerify: true})
-			if err := administrator.UseAdministratorKey(h.adminKey); err != nil {
+			administrator, err := client.New(client.Config{Address: addr(h.nodes[i].ports[1]), AdministratorKey: h.adminKey, TLSConfig: &tls.Config{InsecureSkipVerify: true}})
+			if err != nil {
 				return false
 			}
-			_, err := administrator.ListNodes(context.Background())
+			_, err = administrator.ListNodes(context.Background())
 			return err == nil
 		}
 		r, e := h.request(i, "GET", "/v1/nodes", nil)

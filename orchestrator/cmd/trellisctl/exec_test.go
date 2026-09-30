@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/execstream"
+	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/internal/execstream"
 )
 
 // newExecTestServer accepts one exec stream, checks its request, and hands

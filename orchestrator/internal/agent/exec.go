@@ -15,9 +15,10 @@ import (
 
 	"github.com/containerd/errdefs"
 	"github.com/google/uuid"
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/execstream"
-	"github.com/overfold/trellis/internal/runtime"
+	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/internal/execstream"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
+	"github.com/overfold/trellis/orchestrator/internal/runtime"
 )
 
 // execTiming bounds exec streams. Tests shorten it.
@@ -191,13 +192,13 @@ func (a *Agent) selectRunningExecTarget(ctx context.Context, allocID, task strin
 type ExecReservation struct {
 	allocationID string
 	target       execTarget
-	request      api.AgentExecRequest
+	request      nodeapi.AgentExecRequest
 }
 
 // ReserveExec fences an exec request to its leadership epoch, resolves its
 // running target, and claims an admission slot. The caller must pass the
 // reservation to RunExec or ReleaseExec.
-func (a *Agent) ReserveExec(ctx context.Context, allocID string, request api.AgentExecRequest) (*ExecReservation, error) {
+func (a *Agent) ReserveExec(ctx context.Context, allocID string, request nodeapi.AgentExecRequest) (*ExecReservation, error) {
 	if err := a.AcceptEpoch(request.Epoch); err != nil {
 		return nil, err
 	}
@@ -391,7 +392,7 @@ func (a *Agent) registerExecSession(sessionID string, session *execSession, targ
 // disconnects or sends an invalid frame. Stdin is handed to a writer
 // goroutine through a bounded queue so resizes are not stuck behind input
 // the process has not read yet.
-func (a *Agent) readExecInput(ctx context.Context, cancel context.CancelCauseFunc, conn net.Conn, request api.AgentExecRequest, process runtime.ExecProcess, stdin *io.PipeWriter, activity *execActivity) {
+func (a *Agent) readExecInput(ctx context.Context, cancel context.CancelCauseFunc, conn net.Conn, request nodeapi.AgentExecRequest, process runtime.ExecProcess, stdin *io.PipeWriter, activity *execActivity) {
 	var queue chan []byte
 	if stdin != nil {
 		queue = make(chan []byte, execStdinQueue)
@@ -567,21 +568,21 @@ func (a *Agent) CloseExecSessions(ctx context.Context) {
 
 // AllocationMetrics returns resource usage for the running tasks of an
 // allocation; it is empty while none of the current generation's tasks run.
-func (a *Agent) AllocationMetrics(ctx context.Context, allocID string) ([]api.AgentTaskMetrics, error) {
+func (a *Agent) AllocationMetrics(ctx context.Context, allocID string) ([]nodeapi.AgentTaskMetrics, error) {
 	a.mu.RLock()
 	tasks, known := a.execTargetsLocked(allocID)
 	a.mu.RUnlock()
 	if !known {
 		return nil, fmt.Errorf("%w: %s", ErrAllocationNotFound, allocID)
 	}
-	result := make([]api.AgentTaskMetrics, 0, len(tasks))
+	result := make([]nodeapi.AgentTaskMetrics, 0, len(tasks))
 	for _, task := range tasks {
 		m, err := a.runtime.Metrics(ctx, task.ContainerID)
 		if err != nil {
 			a.log.Warn("metrics unavailable", "container", task.ContainerID, "error", err)
 			continue
 		}
-		result = append(result, api.AgentTaskMetrics{
+		result = append(result, nodeapi.AgentTaskMetrics{
 			Task:                task.TaskName,
 			CPUUsageNanoseconds: m.CPUUsageNanoseconds,
 			MemoryUsageBytes:    m.MemoryUsageBytes,

@@ -18,9 +18,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/state"
-	"github.com/overfold/trellis/internal/tlsutil"
+	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
+	"github.com/overfold/trellis/orchestrator/internal/state"
+	"github.com/overfold/trellis/orchestrator/internal/tlsutil"
 )
 
 const (
@@ -284,7 +285,7 @@ func (s *Server) RevokeJoinToken(ctx context.Context, id string) error {
 // use limit holds however many enrollments race. The CA key is withheld until
 // the identity joins Raft, so a join token alone cannot mint or duplicate an
 // existing identity.
-func (s *Server) EnrollNode(ctx context.Context, joinToken string, advertised ...string) (*api.NodeEnrollmentResponse, error) {
+func (s *Server) EnrollNode(ctx context.Context, joinToken string, advertised ...string) (*nodeapi.NodeEnrollmentResponse, error) {
 	id, ok := parseJoinTokenID(joinToken)
 	if !ok {
 		return nil, ErrInvalidJoinToken
@@ -345,7 +346,7 @@ func (s *Server) EnrollNode(ctx context.Context, joinToken string, advertised ..
 	if err := s.state.batch(ctx, []state.Mutation{useToken, bind}); err != nil {
 		return nil, fmt.Errorf("reserve node identity: %w", err)
 	}
-	return &api.NodeEnrollmentResponse{
+	return &nodeapi.NodeEnrollmentResponse{
 		NodeID: nodeID,
 		CACert: caCert,
 		Cert:   string(cert),

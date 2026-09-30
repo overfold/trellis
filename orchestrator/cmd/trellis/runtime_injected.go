@@ -11,8 +11,8 @@ import (
 	"net/netip"
 	"path/filepath"
 
-	"github.com/overfold/trellis/internal/network"
-	containerruntime "github.com/overfold/trellis/internal/runtime"
+	"github.com/overfold/trellis/orchestrator/internal/network"
+	containerruntime "github.com/overfold/trellis/orchestrator/internal/runtime"
 	"github.com/spf13/pflag"
 )
 

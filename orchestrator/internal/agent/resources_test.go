@@ -3,7 +3,7 @@ package agent
 import (
 	"testing"
 
-	"github.com/overfold/trellis/internal/nodecapacity"
+	"github.com/overfold/trellis/orchestrator/internal/nodecapacity"
 )
 
 func TestSetResourcesOwnsCapacityAndAllocatableValues(t *testing.T) {

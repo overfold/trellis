@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/lifecycle"
-	"github.com/overfold/trellis/internal/runtime"
-	"github.com/overfold/trellis/internal/storage"
+	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
+	"github.com/overfold/trellis/orchestrator/internal/runtime"
+	"github.com/overfold/trellis/orchestrator/internal/storage"
 )
 
 // slowPullRuntime blocks image pulls until released and counts pulls and
@@ -55,7 +55,7 @@ func (r *slowPullRuntime) counts() (int, int) {
 	return r.pulls, r.creates
 }
 
-func singleTaskRequest() *api.AllocationRequest {
+func singleTaskRequest() *nodeapi.AllocationRequest {
 	request := operationTestRequest()
 	request.Tasks = request.Tasks[:1]
 	return request
@@ -86,8 +86,8 @@ func waitStart(t *testing.T, agent *Agent, allocationID string) *groupStart {
 	return start
 }
 
-func statusesFor(agent *Agent, allocationID string) []api.AllocationStatus {
-	var result []api.AllocationStatus
+func statusesFor(agent *Agent, allocationID string) []nodeapi.AllocationStatus {
+	var result []nodeapi.AllocationStatus
 	for _, status := range agent.allocationStatuses() {
 		if status.ID == allocationID {
 			result = append(result, status)
@@ -189,7 +189,7 @@ func TestStopCancelsStartDuringPull(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitPulling(t, rt)
-	stop := &api.StopAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: request.Epoch}
+	stop := &nodeapi.StopAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: request.Epoch}
 	if err := agent.StopGroup(context.Background(), stop); err != nil {
 		t.Fatalf("stop during pull: %v", err)
 	}
@@ -215,10 +215,10 @@ func TestStartFencesAgainstStartInProgress(t *testing.T) {
 	if err := agent.StartGroup(context.Background(), older); !errors.Is(err, ErrStaleGeneration) {
 		t.Fatalf("older start = %v, want stale generation", err)
 	}
-	if err := agent.StopGroup(context.Background(), &api.StopAllocationRequest{AllocationID: request.AllocationID, Generation: older.Generation, Epoch: request.Epoch}); !errors.Is(err, ErrStaleGeneration) {
+	if err := agent.StopGroup(context.Background(), &nodeapi.StopAllocationRequest{AllocationID: request.AllocationID, Generation: older.Generation, Epoch: request.Epoch}); !errors.Is(err, ErrStaleGeneration) {
 		t.Fatalf("older stop = %v, want stale generation", err)
 	}
-	if err := agent.DrainGroup(&api.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: older.Generation, Epoch: request.Epoch, Sequence: 9}); !errors.Is(err, ErrStaleGeneration) {
+	if err := agent.DrainGroup(&nodeapi.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: older.Generation, Epoch: request.Epoch, Sequence: 9}); !errors.Is(err, ErrStaleGeneration) {
 		t.Fatalf("older drain = %v, want stale generation", err)
 	}
 	conflict := singleTaskRequest()
@@ -236,7 +236,7 @@ func TestStartFencesAgainstStartInProgress(t *testing.T) {
 	}
 
 	// A drain delivered during the pull applies when the task is created.
-	if err := agent.DrainGroup(&api.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: 5, Sequence: 3}); err != nil {
+	if err := agent.DrainGroup(&nodeapi.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: 5, Sequence: 3}); err != nil {
 		t.Fatalf("drain during pull: %v", err)
 	}
 	// The leader of the new epoch re-sends the start it still wants.
@@ -332,9 +332,9 @@ func TestAgentRestartDuringPullRecoversOnRetriedStart(t *testing.T) {
 }
 
 func TestTruncateStartFailureKeepsValidUTF8(t *testing.T) {
-	message := string(make([]byte, api.MaxStartFailureMessageBytes-1)) + "é\xff"
+	message := string(make([]byte, nodeapi.MaxStartFailureMessageBytes-1)) + "é\xff"
 	got := truncateStartFailure(message)
-	if len(got) > api.MaxStartFailureMessageBytes {
+	if len(got) > nodeapi.MaxStartFailureMessageBytes {
 		t.Fatalf("length = %d", len(got))
 	}
 	for _, r := range got {
@@ -384,12 +384,12 @@ func TestStartSupersededByNewEpochCreatesNothing(t *testing.T) {
 func TestTerminalStartFailureCarriesCode(t *testing.T) {
 	for _, tc := range []struct {
 		err  error
-		code api.OperationCode
+		code nodeapi.OperationCode
 	}{
-		{ErrRestartBudgetExhausted, api.OperationRestartExhausted},
-		{ErrAllocationExists, api.OperationConflict},
-		{ErrExecutionConflict, api.OperationConflict},
-		{ErrStaleGeneration, api.OperationStaleGeneration},
+		{ErrRestartBudgetExhausted, nodeapi.OperationRestartExhausted},
+		{ErrAllocationExists, nodeapi.OperationConflict},
+		{ErrExecutionConflict, nodeapi.OperationConflict},
+		{ErrStaleGeneration, nodeapi.OperationStaleGeneration},
 		{errors.New("pull failed"), ""},
 	} {
 		if got := terminalStartCode(fmt.Errorf("start: %w", tc.err)); got != tc.code {
@@ -408,7 +408,7 @@ func TestFailedNewerStartDoesNotFenceOlderStop(t *testing.T) {
 	waitPulling(t, rt)
 	rt.release <- errors.New("registry unavailable")
 	waitStart(t, agent, request.AllocationID)
-	older := &api.StopAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation - 1, Epoch: request.Epoch}
+	older := &nodeapi.StopAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation - 1, Epoch: request.Epoch}
 	if err := agent.StopGroup(context.Background(), older); err != nil {
 		t.Fatalf("stop of older generation beside a failed start: %v", err)
 	}

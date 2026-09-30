@@ -6,13 +6,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/orchestrator/api"
 )
 
 func TestWriteClusterSettingsShowsReconciliation(t *testing.T) {
 	settings := &api.ClusterSettings{
-		JobLimits: spec.DefaultLimits(),
+		JobLimits: api.JobLimits{DefaultTaskMemory: 128 << 20, MaxTaskMemory: 1 << 40},
 		Reconciliation: api.ReconciliationSettings{
 			AllocationLossTimeout: 2 * time.Minute, ReplacementBackoffBase: 10 * time.Second, ReplacementBackoffMax: 5 * time.Minute,
 			ReplacementStableAfter: 10 * time.Minute, TerminalAllocationRetention: 7,
@@ -23,7 +22,7 @@ func TestWriteClusterSettingsShowsReconciliation(t *testing.T) {
 	if err := writeClusterSettings(&out, settings); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"Allocation loss timeout", "2m0s", "Replacement backoff max", "5m0s", "Terminal allocation retention", "7"} {
+	for _, want := range []string{"128MiB", "1TiB", "Allocation loss timeout", "2m0s", "Replacement backoff max", "5m0s", "Terminal allocation retention", "7"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("settings output missing %q:\n%s", want, out.String())
 		}

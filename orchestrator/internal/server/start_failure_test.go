@@ -8,9 +8,9 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/lifecycle"
-	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
 func newStartingTestServer(t *testing.T, attempt int) (*Server, *testAgent, *Node, *Allocation) {
@@ -31,8 +31,8 @@ func newStartingTestServer(t *testing.T, attempt int) (*Server, *testAgent, *Nod
 	return s, agent, node, allocation
 }
 
-func startFailure(allocation *Allocation, attempt int) []api.AllocationStatus {
-	return []api.AllocationStatus{{ID: allocation.ID, Generation: allocation.Generation, Task: "app", Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown, StartFailure: &api.StartFailure{Attempt: attempt, Message: "pull image app: registry unavailable"}}}
+func startFailure(allocation *Allocation, attempt int) []nodeapi.AllocationStatus {
+	return []nodeapi.AllocationStatus{{ID: allocation.ID, Generation: allocation.Generation, Task: "app", Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown, StartFailure: &nodeapi.StartFailure{Attempt: attempt, Message: "pull image app: registry unavailable"}}}
 }
 
 func TestExecuteAcceptedStartWaitsForObservedState(t *testing.T) {
@@ -43,10 +43,10 @@ func TestExecuteAcceptedStartWaitsForObservedState(t *testing.T) {
 	if allocation.Phase != lifecycle.PhaseStarting || allocation.Attempt != 2 {
 		t.Fatalf("after accepted start: phase=%s attempt=%d, want starting at attempt 2", allocation.Phase, allocation.Attempt)
 	}
-	var starts []api.AllocationRequest
+	var starts []nodeapi.AllocationRequest
 	for _, call := range agent.recordedCalls() {
 		if call.method == http.MethodPost && call.path == "/v1/allocations" {
-			var request api.AllocationRequest
+			var request nodeapi.AllocationRequest
 			if err := json.Unmarshal(call.body, &request); err != nil {
 				t.Fatal(err)
 			}
@@ -61,7 +61,7 @@ func TestExecuteAcceptedStartWaitsForObservedState(t *testing.T) {
 	if err := s.Execute(context.Background(), &Action{Type: ActionStart, Allocation: allocation}); err != nil {
 		t.Fatal(err)
 	}
-	var retried api.AllocationRequest
+	var retried nodeapi.AllocationRequest
 	calls := agent.recordedCalls()
 	if err := json.Unmarshal(calls[len(calls)-1].body, &retried); err != nil {
 		t.Fatal(err)
@@ -109,7 +109,7 @@ func TestHeartbeatCountsStartFailureOnce(t *testing.T) {
 
 func TestHeartbeatRunningResetsStartAttempts(t *testing.T) {
 	s, _, node, allocation := newStartingTestServer(t, 3)
-	running := []api.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
+	running := []nodeapi.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
 	if err := heartbeatAndApply(t, s, node.ID, running, "test", nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
 	}
@@ -120,11 +120,11 @@ func TestHeartbeatRunningResetsStartAttempts(t *testing.T) {
 
 func TestHeartbeatRejectsInvalidStartFailure(t *testing.T) {
 	s, _, node, allocation := newStartingTestServer(t, 0)
-	for name, status := range map[string]api.AllocationStatus{
-		"running phase": {ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy, StartFailure: &api.StartFailure{}},
-		"long message":  {ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown, StartFailure: &api.StartFailure{Message: strings.Repeat("x", api.MaxStartFailureMessageBytes+1)}},
+	for name, status := range map[string]nodeapi.AllocationStatus{
+		"running phase": {ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy, StartFailure: &nodeapi.StartFailure{}},
+		"long message":  {ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown, StartFailure: &nodeapi.StartFailure{Message: strings.Repeat("x", nodeapi.MaxStartFailureMessageBytes+1)}},
 	} {
-		if err := heartbeatAndApply(t, s, node.ID, []api.AllocationStatus{status}, "test", nodeResourceObservation{}); err == nil {
+		if err := heartbeatAndApply(t, s, node.ID, []nodeapi.AllocationStatus{status}, "test", nodeResourceObservation{}); err == nil {
 			t.Fatalf("%s: heartbeat accepted invalid start failure", name)
 		}
 	}
@@ -133,14 +133,14 @@ func TestHeartbeatRejectsInvalidStartFailure(t *testing.T) {
 func TestHeartbeatTerminalStartFailureFailsAllocation(t *testing.T) {
 	s, _, node, allocation := newStartingTestServer(t, 1)
 	statuses := startFailure(allocation, 1)
-	statuses[0].StartFailure.Code = api.OperationRestartExhausted
+	statuses[0].StartFailure.Code = nodeapi.OperationRestartExhausted
 	if err := heartbeatAndApply(t, s, node.ID, statuses, "test", nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
 	}
-	if allocation.Phase != lifecycle.PhaseFailed || allocation.Reason != string(api.OperationRestartExhausted) || allocation.NextRetryAt != nil {
+	if allocation.Phase != lifecycle.PhaseFailed || allocation.Reason != string(nodeapi.OperationRestartExhausted) || allocation.NextRetryAt != nil {
 		t.Fatalf("after terminal failure: phase=%s reason=%s retry=%v", allocation.Phase, allocation.Reason, allocation.NextRetryAt)
 	}
-	statuses[0].StartFailure.Code = api.OperationFailed
+	statuses[0].StartFailure.Code = nodeapi.OperationFailed
 	if err := heartbeatAndApply(t, s, node.ID, statuses, "test", nodeResourceObservation{}); err == nil {
 		t.Fatal("heartbeat accepted a start failure with a non-terminal code")
 	}

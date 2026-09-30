@@ -6,7 +6,7 @@ import (
 	"net/url"
 	"strconv"
 
-	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/orchestrator/api"
 )
 
 const (
@@ -92,24 +92,25 @@ func DecodeRequest(query url.Values) (api.ExecRequest, error) {
 }
 
 // EncodeAgentRequest returns the query string of a leader-to-agent exec
-// upgrade request.
-func EncodeAgentRequest(request api.AgentExecRequest) url.Values {
-	query := EncodeRequest(request.ExecRequest)
-	query.Set("epoch", strconv.FormatUint(request.Epoch, 10))
+// upgrade request fenced to the leadership epoch.
+func EncodeAgentRequest(request api.ExecRequest, epoch uint64) url.Values {
+	query := EncodeRequest(request)
+	query.Set("epoch", strconv.FormatUint(epoch, 10))
 	return query
 }
 
-// DecodeAgentRequest parses and validates a leader-to-agent exec request.
-func DecodeAgentRequest(query url.Values) (api.AgentExecRequest, error) {
+// DecodeAgentRequest parses and validates a leader-to-agent exec request and
+// its leadership epoch.
+func DecodeAgentRequest(query url.Values) (api.ExecRequest, uint64, error) {
 	request, err := DecodeRequest(query)
 	if err != nil {
-		return api.AgentExecRequest{}, err
+		return api.ExecRequest{}, 0, err
 	}
 	epoch, err := strconv.ParseUint(query.Get("epoch"), 10, 64)
 	if err != nil || epoch == 0 {
-		return api.AgentExecRequest{}, errors.New("epoch must be greater than zero")
+		return api.ExecRequest{}, 0, errors.New("epoch must be greater than zero")
 	}
-	return api.AgentExecRequest{ExecRequest: request, Epoch: epoch}, nil
+	return request, epoch, nil
 }
 
 // ValidateResize checks the dimensions of a resize frame.

@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/overfold/trellis/internal/state"
+	"github.com/overfold/trellis/orchestrator/internal/state"
 )
 
 const (

@@ -11,9 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/lifecycle"
-	"github.com/overfold/trellis/internal/plan"
+	"github.com/overfold/trellis/orchestrator/api"
 )
 
 func TestJobsCommandSurface(t *testing.T) {
@@ -77,12 +75,12 @@ func TestPrintJobPlanFormatsHumanDurations(t *testing.T) {
 	config.Output = "table"
 	defer func() { config.Output = previousOutput }()
 
-	result := &plan.Result{
+	result := &api.JobPlanResponse{
 		Action:       "update",
 		Namespace:    "default",
 		Job:          "web",
 		BaseRevision: 7,
-		Changes: []plan.Change{{
+		Changes: []api.JobPlanChange{{
 			Operation: "change",
 			Path:      "task_groups[frontend].restart.window",
 			Before:    float64(60_000_000_000),
@@ -136,8 +134,8 @@ func TestPrintJobStatusIncludesDiagnostics(t *testing.T) {
 			ID:          "abcdef12-rest",
 			Group:       "web",
 			JobRevision: 2,
-			Phase:       lifecycle.PhaseRunning,
-			Health:      lifecycle.HealthUnhealthy,
+			Phase:       api.PhaseRunning,
+			Health:      api.HealthUnhealthy,
 			Reason:      "health_check_failed",
 			Message:     "connection refused",
 		}},
@@ -176,11 +174,11 @@ func TestResolveAllocationPrefix(t *testing.T) {
 }
 
 func TestJobStateSeparatesConvergingAndDegraded(t *testing.T) {
-	converging := &api.JobStatusResponse{Desired: 2, Running: 1, Healthy: 1, Allocations: []api.AllocationResponse{{Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown}}}
+	converging := &api.JobStatusResponse{Desired: 2, Running: 1, Healthy: 1, Allocations: []api.AllocationResponse{{Phase: api.PhaseStarting, Health: api.HealthUnknown}}}
 	if got := jobState(converging); got != "converging" {
 		t.Fatalf("state = %q", got)
 	}
-	degraded := &api.JobStatusResponse{Desired: 2, Running: 2, Healthy: 1, Allocations: []api.AllocationResponse{{Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthUnhealthy}}}
+	degraded := &api.JobStatusResponse{Desired: 2, Running: 2, Healthy: 1, Allocations: []api.AllocationResponse{{Phase: api.PhaseRunning, Health: api.HealthUnhealthy}}}
 	if got := jobState(degraded); got != "degraded" {
 		t.Fatalf("state = %q", got)
 	}
@@ -194,9 +192,9 @@ func TestJobStateSeparatesConvergingAndDegraded(t *testing.T) {
 		Running:  3,
 		Healthy:  3,
 		Allocations: []api.AllocationResponse{
-			{JobRevision: 1, Draining: true, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy},
-			{JobRevision: 2, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy},
-			{JobRevision: 2, Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown},
+			{JobRevision: 1, Draining: true, Phase: api.PhaseRunning, Health: api.HealthHealthy},
+			{JobRevision: 2, Phase: api.PhaseRunning, Health: api.HealthHealthy},
+			{JobRevision: 2, Phase: api.PhaseStarting, Health: api.HealthUnknown},
 		},
 	}
 	if got := jobState(overlap); got != "converging" {
@@ -250,10 +248,11 @@ func TestJobsApplySendsPlannedVersionAndReportsConflict(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var expected *int
+			var expectedIncarnation string
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/v1/namespaces/default/jobs/plan":
-					_ = json.NewEncoder(w).Encode(plan.Result{Action: "update", Namespace: "default", Job: "web", BaseVersion: 4, BaseRevision: 2, Changes: []plan.Change{{Operation: "change", Path: "task_groups[api].count", Before: 1, After: 3}}})
+					_ = json.NewEncoder(w).Encode(api.JobPlanResponse{Action: "update", Namespace: "default", Job: "web", BaseIncarnation: "inc-1", BaseVersion: 4, BaseRevision: 2, Changes: []api.JobPlanChange{{Operation: "change", Path: "task_groups[api].count", Before: 1, After: 3}}})
 				case "/v1/namespaces/default/jobs":
 					var request api.JobRegistrationRequest
 					decoder := json.NewDecoder(r.Body)
@@ -261,7 +260,7 @@ func TestJobsApplySendsPlannedVersionAndReportsConflict(t *testing.T) {
 					if err := decoder.Decode(&request); err != nil {
 						t.Error(err)
 					}
-					expected = request.ExpectedVersion
+					expected, expectedIncarnation = request.ExpectedVersion, request.ExpectedIncarnation
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(tc.status)
 					_, _ = w.Write([]byte(tc.body))
@@ -278,8 +277,8 @@ func TestJobsApplySendsPlannedVersionAndReportsConflict(t *testing.T) {
 			cmd.SetOut(&stdout)
 			cmd.SetErr(&bytes.Buffer{})
 			err := cmd.Execute()
-			if expected == nil || *expected != 4 {
-				t.Fatalf("submitted expected_version = %v, want 4", expected)
+			if expected == nil || *expected != 4 || expectedIncarnation != "inc-1" {
+				t.Fatalf("submitted expected_version = %v, expected_incarnation = %q, want 4 and inc-1", expected, expectedIncarnation)
 			}
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {

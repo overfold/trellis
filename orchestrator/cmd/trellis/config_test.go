@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/overfold/trellis/internal/nodecapacity"
+	"github.com/overfold/trellis/orchestrator/internal/nodecapacity"
 	"github.com/spf13/pflag"
 )
 

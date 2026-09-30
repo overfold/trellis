@@ -7,44 +7,35 @@ import (
 	"reflect"
 	"sort"
 
-	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
-// Change describes one semantic change to a job specification.
-type Change struct {
-	Operation string `json:"operation"`
-	Path      string `json:"path"`
-	Before    any    `json:"before,omitempty"`
-	After     any    `json:"after,omitempty"`
+// Base identifies the current job a plan is computed against.
+type Base struct {
+	Incarnation string
+	Version     int
+	Revision    int
 }
 
-// Result describes what applying a desired job specification would do.
-type Result struct {
-	Action             string   `json:"action"`
-	Namespace          string   `json:"namespace"`
-	Job                string   `json:"job"`
-	BaseVersion        int      `json:"base_version,omitempty"`
-	BaseRevision       int      `json:"base_revision,omitempty"`
-	DesiredAllocations int      `json:"desired_allocations"`
-	Changes            []Change `json:"changes"`
-}
-
-// Build returns the canonical semantic plan for desired. current may be nil when the job does not exist.
-// currentVersion is the version an apply of this plan should expect.
-func Build(current *spec.JobSpec, currentVersion, currentRevision int, desired *spec.JobSpec) Result {
-	result := Result{
+// Build returns the canonical semantic plan for desired. current is nil when
+// the job does not exist; otherwise base identifies it, and an apply of the
+// plan should expect it.
+func Build(current *spec.JobSpec, base Base, desired *spec.JobSpec) api.JobPlanResponse {
+	result := api.JobPlanResponse{
 		Action:             "create",
 		Namespace:          desired.Namespace,
 		Job:                desired.Name,
 		DesiredAllocations: desiredAllocationCount(desired),
-		Changes:            []Change{},
+		Changes:            []api.JobPlanChange{},
 	}
 	if current == nil {
 		return result
 	}
 
-	result.BaseVersion = currentVersion
-	result.BaseRevision = currentRevision
+	result.BaseIncarnation = base.Incarnation
+	result.BaseVersion = base.Version
+	result.BaseRevision = base.Revision
 	result.Changes = Diff(current, desired)
 	if len(result.Changes) == 0 {
 		result.Action = "none"
@@ -58,14 +49,14 @@ func Build(current *spec.JobSpec, currentVersion, currentRevision int, desired *
 // matched by name because their order does not affect revision semantics. Other
 // slices remain positional because their order participates in task-group
 // content hashing and can therefore cause allocation replacement.
-func Diff(before, after *spec.JobSpec) []Change {
+func Diff(before, after *spec.JobSpec) []api.JobPlanChange {
 	var left any
 	var right any
 	leftRaw, _ := json.Marshal(before)
 	rightRaw, _ := json.Marshal(after)
 	_ = json.Unmarshal(leftRaw, &left)
 	_ = json.Unmarshal(rightRaw, &right)
-	changes := make([]Change, 0)
+	changes := make([]api.JobPlanChange, 0)
 	walk("", left, right, &changes)
 	return changes
 }
@@ -78,7 +69,7 @@ func desiredAllocationCount(job *spec.JobSpec) int {
 	return total
 }
 
-func walk(path string, before, after any, changes *[]Change) {
+func walk(path string, before, after any, changes *[]api.JobPlanChange) {
 	if reflect.DeepEqual(before, after) {
 		return
 	}
@@ -103,9 +94,9 @@ func walk(path string, before, after any, changes *[]Change) {
 			child := joinPath(path, key)
 			switch {
 			case !leftExists:
-				*changes = append(*changes, Change{Operation: "add", Path: child, After: right})
+				*changes = append(*changes, api.JobPlanChange{Operation: "add", Path: child, After: right})
 			case !rightExists:
-				*changes = append(*changes, Change{Operation: "remove", Path: child, Before: left})
+				*changes = append(*changes, api.JobPlanChange{Operation: "remove", Path: child, Before: left})
 			default:
 				walk(child, left, right, changes)
 			}
@@ -137,9 +128,9 @@ func walk(path string, before, after any, changes *[]Change) {
 						child := fmt.Sprintf("%s[%s]", path, name)
 						switch {
 						case !leftExists:
-							*changes = append(*changes, Change{Operation: "add", Path: child, After: right})
+							*changes = append(*changes, api.JobPlanChange{Operation: "add", Path: child, After: right})
 						case !rightExists:
-							*changes = append(*changes, Change{Operation: "remove", Path: child, Before: left})
+							*changes = append(*changes, api.JobPlanChange{Operation: "remove", Path: child, Before: left})
 						default:
 							walk(child, left, right, changes)
 						}
@@ -156,16 +147,16 @@ func walk(path string, before, after any, changes *[]Change) {
 			child := fmt.Sprintf("%s[%d]", path, i)
 			switch {
 			case i >= len(leftSlice):
-				*changes = append(*changes, Change{Operation: "add", Path: child, After: rightSlice[i]})
+				*changes = append(*changes, api.JobPlanChange{Operation: "add", Path: child, After: rightSlice[i]})
 			case i >= len(rightSlice):
-				*changes = append(*changes, Change{Operation: "remove", Path: child, Before: leftSlice[i]})
+				*changes = append(*changes, api.JobPlanChange{Operation: "remove", Path: child, Before: leftSlice[i]})
 			default:
 				walk(child, leftSlice[i], rightSlice[i], changes)
 			}
 		}
 		return
 	}
-	*changes = append(*changes, Change{Operation: "change", Path: path, Before: before, After: after})
+	*changes = append(*changes, api.JobPlanChange{Operation: "change", Path: path, Before: before, After: after})
 }
 
 func namedSlice(values []any) (map[string]any, bool) {

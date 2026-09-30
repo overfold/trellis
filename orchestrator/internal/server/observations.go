@@ -10,9 +10,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/lifecycle"
-	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
 // maxObservationCommitRecords bounds the node and allocation records one
@@ -28,11 +29,11 @@ type allocationObservation struct {
 	Generation    uint64
 	Phase         lifecycle.Phase
 	Health        lifecycle.Health
-	Reason        api.OperationCode
+	Reason        nodeapi.OperationCode
 	Endpoints     []api.AllocationEndpoint
 	Ports         []api.PortMapping
 	ObservedTasks map[string]bool
-	StartFailure  *api.StartFailure
+	StartFailure  *nodeapi.StartFailure
 }
 
 type allocationGeneration struct {
@@ -422,7 +423,7 @@ func (s *Server) discardObservations(reason string, count int) {
 
 // newNodeObservation validates a heartbeat report and aggregates its task
 // reports per allocation generation. It reads no server state.
-func newNodeObservation(nodeID uuid.UUID, at time.Time, actual []api.AllocationStatus, version string, volumes []string, capabilities []spec.NodeCapability, resources nodeResourceObservation) (*nodeObservation, error) {
+func newNodeObservation(nodeID uuid.UUID, at time.Time, actual []nodeapi.AllocationStatus, version string, volumes []string, capabilities []spec.NodeCapability, resources nodeResourceObservation) (*nodeObservation, error) {
 	if len(actual) > maxHeartbeatAllocationStatuses {
 		return nil, fmt.Errorf("heartbeat allocation status count %d exceeds limit %d", len(actual), maxHeartbeatAllocationStatuses)
 	}
@@ -440,10 +441,10 @@ func newNodeObservation(nodeID uuid.UUID, at time.Time, actual []api.AllocationS
 		if !a.Phase.Valid() || !a.Health.Valid() {
 			return nil, fmt.Errorf("invalid allocation state for %s: phase=%q health=%q", a.ID, a.Phase, a.Health)
 		}
-		if a.Reason != "" && (a.Phase != lifecycle.PhaseFailed || a.Reason != api.OperationRestartExhausted) {
+		if a.Reason != "" && (a.Phase != lifecycle.PhaseFailed || a.Reason != nodeapi.OperationRestartExhausted) {
 			return nil, fmt.Errorf("invalid failure reason for %s: phase=%q reason=%q", a.ID, a.Phase, a.Reason)
 		}
-		if a.StartFailure != nil && (a.Phase != lifecycle.PhaseStarting || a.StartFailure.Attempt < 0 || len(a.StartFailure.Message) > api.MaxStartFailureMessageBytes || !terminalStartFailureCode(a.StartFailure.Code)) {
+		if a.StartFailure != nil && (a.Phase != lifecycle.PhaseStarting || a.StartFailure.Attempt < 0 || len(a.StartFailure.Message) > nodeapi.MaxStartFailureMessageBytes || !terminalStartFailureCode(a.StartFailure.Code)) {
 			return nil, fmt.Errorf("invalid start failure for %s: phase=%q attempt=%d message bytes=%d", a.ID, a.Phase, a.StartFailure.Attempt, len(a.StartFailure.Message))
 		}
 		phase, health := a.Phase, a.Health

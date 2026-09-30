@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
 func validSnapshotJob(t *testing.T, namespace, name string, revision int) (string, []byte) {

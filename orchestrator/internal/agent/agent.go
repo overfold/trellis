@@ -20,15 +20,16 @@ import (
 
 	"github.com/containerd/errdefs"
 	"github.com/google/uuid"
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/client"
-	"github.com/overfold/trellis/internal/health"
-	"github.com/overfold/trellis/internal/lifecycle"
-	"github.com/overfold/trellis/internal/network"
-	"github.com/overfold/trellis/internal/nodecapacity"
-	"github.com/overfold/trellis/internal/runtime"
-	"github.com/overfold/trellis/internal/spec"
-	"github.com/overfold/trellis/internal/storage"
+	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/internal/client"
+	"github.com/overfold/trellis/orchestrator/internal/health"
+	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/network"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
+	"github.com/overfold/trellis/orchestrator/internal/nodecapacity"
+	"github.com/overfold/trellis/orchestrator/internal/runtime"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/storage"
 )
 
 // Agent manages allocation lifecycle on a node.
@@ -1124,7 +1125,7 @@ func (a *Agent) GetAllocations() []*Allocation {
 // startDrainState combines the drain state carried by a start request with the
 // newest drain or resume the agent already applied to that generation. The
 // higher sequence wins, so a delayed start cannot roll back a later drain.
-func (a *Agent) startDrainState(request *api.AllocationRequest) (bool, uint64) {
+func (a *Agent) startDrainState(request *nodeapi.AllocationRequest) (bool, uint64) {
 	draining, sequence := request.Draining, request.DrainSequence
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -1142,7 +1143,7 @@ func (a *Agent) startDrainState(request *api.AllocationRequest) (bool, uint64) {
 }
 
 // UpdateNetworkPlan refreshes the network shared by running allocations.
-func (a *Agent) UpdateNetworkPlan(ctx context.Context, request *api.NetworkPlanRequest) error {
+func (a *Agent) UpdateNetworkPlan(ctx context.Context, request *nodeapi.NetworkPlanRequest) error {
 	if err := a.AcceptEpoch(request.Epoch); err != nil {
 		return err
 	}
@@ -1186,7 +1187,7 @@ func (a *Agent) UpdateNetworkPlan(ctx context.Context, request *api.NetworkPlanR
 }
 
 // StopGroup stops all tasks in an allocation group.
-func (a *Agent) StopGroup(ctx context.Context, request *api.StopAllocationRequest) error {
+func (a *Agent) StopGroup(ctx context.Context, request *nodeapi.StopAllocationRequest) error {
 	if request.Generation == 0 {
 		return ErrInvalidGeneration
 	}
@@ -1260,7 +1261,7 @@ func (a *Agent) StopGroup(ctx context.Context, request *api.StopAllocationReques
 
 // listUnrecorded lists containers for stopUnrecorded and rejects a stop for a
 // generation older than a listed unrecorded one.
-func (a *Agent) listUnrecorded(ctx context.Context, request *api.StopAllocationRequest) ([]runtime.ContainerInfo, error) {
+func (a *Agent) listUnrecorded(ctx context.Context, request *nodeapi.StopAllocationRequest) ([]runtime.ContainerInfo, error) {
 	managed, ok := a.runtime.(runtime.ManagedRuntime)
 	if !ok {
 		return nil, nil
@@ -1281,7 +1282,7 @@ func (a *Agent) listUnrecorded(ctx context.Context, request *api.StopAllocationR
 // generation, and of its older generations, while recovery has not completed a
 // listing. handled names the recorded tasks the caller already stopped; the
 // listing predates those stops. The caller holds the allocation operation lock.
-func (a *Agent) stopUnrecorded(ctx context.Context, request *api.StopAllocationRequest, containers []runtime.ContainerInfo, handled []string) error {
+func (a *Agent) stopUnrecorded(ctx context.Context, request *nodeapi.StopAllocationRequest, containers []runtime.ContainerInfo, handled []string) error {
 	skip := make(map[string]bool, len(handled))
 	for _, id := range handled {
 		skip[id] = true
@@ -1323,7 +1324,7 @@ func (a *Agent) stopUnrecorded(ctx context.Context, request *api.StopAllocationR
 
 // DrainGroup suppresses automatic restarts for one allocation generation until
 // the control plane delivers the normal stop operation.
-func (a *Agent) DrainGroup(request *api.DrainAllocationRequest) error {
+func (a *Agent) DrainGroup(request *nodeapi.DrainAllocationRequest) error {
 	unlock := a.lockAllocationOperation(request.AllocationID)
 	defer unlock()
 	if err := a.AcceptEpoch(request.Epoch); err != nil {
@@ -1392,7 +1393,7 @@ func (a *Agent) drainStartLocked(allocationID string, generation uint64, drainin
 }
 
 // ResumeGroup cancels a drain for a retained allocation generation.
-func (a *Agent) ResumeGroup(request *api.DrainAllocationRequest) error {
+func (a *Agent) ResumeGroup(request *nodeapi.DrainAllocationRequest) error {
 	unlock := a.lockAllocationOperation(request.AllocationID)
 	defer unlock()
 	if err := a.AcceptEpoch(request.Epoch); err != nil {
@@ -1475,7 +1476,7 @@ type taskStart struct {
 	Runtime       string
 	NetworkPlan   *network.Plan
 	EnvOverrides  map[string]string
-	Secrets       []api.DeliveredSecret
+	Secrets       []nodeapi.DeliveredSecret
 	Restart       *spec.RestartPolicySpec
 	// Draining and DrainSequence are the generation's drain state; a draining
 	// task starts restart-suppressed.
@@ -1650,7 +1651,7 @@ func (a *Agent) launchTask(ctx context.Context, launch *taskLaunch) error {
 			if !overridden {
 				value := []byte(v)
 				defer clear(value)
-				taskSecrets = append(taskSecrets, api.DeliveredSecret{Task: ts.Name, Name: "api-access-token", Target: spec.SecretTargetEnv, Env: k, Value: value})
+				taskSecrets = append(taskSecrets, nodeapi.DeliveredSecret{Task: ts.Name, Name: "api-access-token", Target: spec.SecretTargetEnv, Env: k, Value: value})
 			}
 			continue
 		}
@@ -2216,20 +2217,20 @@ func (a *Agent) runHeartbeatLoop(ctx context.Context) {
 	}
 }
 
-func (a *Agent) allocationStatuses() []api.AllocationStatus {
+func (a *Agent) allocationStatuses() []nodeapi.AllocationStatus {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	actual := make([]api.AllocationStatus, 0, len(a.allocations))
+	actual := make([]nodeapi.AllocationStatus, 0, len(a.allocations))
 	for _, alloc := range a.allocations {
 		ports := make([]api.PortMapping, 0, len(alloc.Ports))
 		for _, p := range alloc.Ports {
 			ports = append(ports, api.PortMapping{HostPort: p.HostPort, ContainerPort: p.ContainerPort})
 		}
-		var reason api.OperationCode
+		var reason nodeapi.OperationCode
 		if alloc.Status == "failed" && alloc.RestartExhausted {
-			reason = api.OperationRestartExhausted
+			reason = nodeapi.OperationRestartExhausted
 		}
-		actual = append(actual, api.AllocationStatus{ID: alloc.AllocationID, Generation: alloc.Generation, Task: alloc.TaskName, Address: allocationNetworkAddress(alloc), Phase: lifecycle.Phase(alloc.Status), Health: lifecycle.Health(reportedHealth(alloc)), Reason: reason, Ports: ports})
+		actual = append(actual, nodeapi.AllocationStatus{ID: alloc.AllocationID, Generation: alloc.Generation, Task: alloc.TaskName, Address: allocationNetworkAddress(alloc), Phase: lifecycle.Phase(alloc.Status), Health: lifecycle.Health(reportedHealth(alloc)), Reason: reason, Ports: ports})
 	}
 	return append(actual, a.startingStatusesLocked()...)
 }

@@ -51,3 +51,32 @@ type CredentialInfoResponse struct {
 	CreatedAt *time.Time                 `json:"created_at,omitempty"`
 	ExpiresAt *time.Time                 `json:"expires_at,omitempty"`
 }
+
+// JoinTokenCreateRequest asks the administrator to mint a node join token.
+// TTLSeconds defaults to one hour and may not exceed seven days. A positive
+// MaxUses limits how many nodes may enroll with the token; zero or absent
+// allows any number until it expires.
+type JoinTokenCreateRequest struct {
+	TTLSeconds int64 `json:"ttl_seconds,omitempty"`
+	MaxUses    int   `json:"max_uses,omitempty"`
+}
+
+// JoinTokenResponse is the listable metadata of a node join token. It never
+// contains the token itself.
+type JoinTokenResponse struct {
+	ID        string    `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+	MaxUses   int       `json:"max_uses,omitempty"`
+	Uses      int       `json:"uses"`
+}
+
+// JoinTokenCreateResponse returns a newly minted join token exactly once,
+// together with the metadata later listings show for it.
+type JoinTokenCreateResponse struct {
+	Token string `json:"token"`
+	JoinTokenResponse
+}
+
+// JoinTokenListResponse lists unexpired join tokens ordered by creation time.
+type JoinTokenListResponse []JoinTokenResponse

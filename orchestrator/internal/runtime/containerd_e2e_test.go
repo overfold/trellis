@@ -16,10 +16,10 @@ import (
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
-	"github.com/overfold/trellis/internal/agent"
-	"github.com/overfold/trellis/internal/health"
-	"github.com/overfold/trellis/internal/runtime"
-	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/agent"
+	"github.com/overfold/trellis/orchestrator/internal/health"
+	"github.com/overfold/trellis/orchestrator/internal/runtime"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
 // This intentionally stays small: distributed behavior belongs in the

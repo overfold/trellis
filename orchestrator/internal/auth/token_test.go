@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/overfold/trellis/internal/secrets"
-	"github.com/overfold/trellis/internal/state"
+	"github.com/overfold/trellis/orchestrator/internal/secrets"
+	"github.com/overfold/trellis/orchestrator/internal/state"
 )
 
 type memStore struct {

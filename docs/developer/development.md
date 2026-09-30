@@ -2,7 +2,7 @@
 
 ## Toolchains
 
-The orchestrator module targets Go 1.26.4.
+The Go module `github.com/overfold/trellis` is rooted at the repository (`go.mod` in the repository root) and targets Go 1.26.4. All of its code lives under `orchestrator/`, so its packages are `github.com/overfold/trellis/orchestrator/...` and release tags (`vX.Y.Z`) are module versions. Run commands from `orchestrator/`, as CI does; `go test ./...` from the repository root is equivalent. `tutorial/` is a separate module.
 
 ```sh
 cd orchestrator
@@ -44,7 +44,7 @@ The Vagrant environment provisions `control`, `worker-1`, and `worker-2` Debian 
 
 ## Design rules
 
-- Put wire-compatible JSON structures in `internal/api`; keep job YAML/JSON schema in `internal/spec`.
+- Put operator-API wire types in the public `api` package and client methods in the public `client` package; put node-to-node wire types in `internal/nodeapi`. Keep job YAML/JSON schema in `internal/spec`; the public API carries job specifications as canonical JSON.
 - Validate user-controlled identifiers, paths, ports, resources, and enum values before persistence.
 - Treat start/stop as retriable and idempotent; preserve epoch and generation checks.
 - Never log or return secret plaintext. Clear temporary byte slices where feasible.

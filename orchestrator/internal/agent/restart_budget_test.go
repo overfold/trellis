@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/lifecycle"
-	"github.com/overfold/trellis/internal/runtime"
-	"github.com/overfold/trellis/internal/spec"
-	"github.com/overfold/trellis/internal/storage"
+	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
+	"github.com/overfold/trellis/orchestrator/internal/runtime"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/storage"
 )
 
 func TestAllocationStatusReportsRestartExhaustionReason(t *testing.T) {
@@ -21,8 +21,8 @@ func TestAllocationStatusReportsRestartExhaustionReason(t *testing.T) {
 	for _, status := range agent.allocationStatuses() {
 		switch status.ID {
 		case "failed":
-			if status.Phase != lifecycle.PhaseFailed || status.Reason != api.OperationRestartExhausted {
-				t.Fatalf("failed status = %+v, want reason %q", status, api.OperationRestartExhausted)
+			if status.Phase != lifecycle.PhaseFailed || status.Reason != nodeapi.OperationRestartExhausted {
+				t.Fatalf("failed status = %+v, want reason %q", status, nodeapi.OperationRestartExhausted)
 			}
 		case "running":
 			if status.Reason != "" {

@@ -12,7 +12,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
+	"github.com/overfold/trellis/orchestrator/internal/transport"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -71,7 +72,7 @@ func TestAgentOperationDeadlineCoversStalledResponse(t *testing.T) {
 			t.Cleanup(server.Close)
 			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 			defer cancel()
-			err := NewAgentClient("", nil).RunAllocation(ctx, uuid.New(), server.URL, &api.AllocationRequest{})
+			err := NewAgentClient("", nil).RunAllocation(ctx, uuid.New(), server.URL, &nodeapi.AllocationRequest{})
 			close(release)
 			if !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("RunAllocation error = %v, want context deadline exceeded", err)
@@ -102,14 +103,14 @@ func TestAgentOperationAddsDeadlineWithoutBoundingLogStream(t *testing.T) {
 		}, nil
 	})
 	agent := NewAgentClient("", nil)
-	agent.clients[nodeID] = &client{client: &http.Client{Transport: operationTransport}}
-	if err := agent.RunAllocation(context.Background(), nodeID, "agent.invalid", &api.AllocationRequest{}); err != nil {
+	agent.clients[nodeID] = &transport.Client{HTTP: &http.Client{Transport: operationTransport}}
+	if err := agent.RunAllocation(context.Background(), nodeID, "agent.invalid", &nodeapi.AllocationRequest{}); err != nil {
 		t.Fatalf("RunAllocation: %v", err)
 	}
 	if !operationSawDeadline {
 		t.Fatalf("operation request did not receive an approximately %s deadline", agentOperationTimeout)
 	}
-	agent.clients[nodeID] = &client{client: &http.Client{Transport: streamTransport}}
+	agent.clients[nodeID] = &transport.Client{HTTP: &http.Client{Transport: streamTransport}}
 	body, err := agent.TaskLogs(context.Background(), nodeID, "agent.invalid", "alloc", "task", true, 0)
 	if err != nil {
 		t.Fatalf("TaskLogs: %v", err)
@@ -125,10 +126,10 @@ func TestAgentClientRetainNodesEvictsBothTransportCaches(t *testing.T) {
 	agent := NewAgentClient("", nil)
 	regularKeep, regularRemove := &closeTrackingTransport{}, &closeTrackingTransport{}
 	planKeep, planRemove := &closeTrackingTransport{}, &closeTrackingTransport{}
-	agent.clients[keep] = &client{client: &http.Client{Transport: regularKeep}}
-	agent.clients[remove] = &client{client: &http.Client{Transport: regularRemove}}
-	agent.networkPlanClients[keep] = &client{client: &http.Client{Transport: planKeep}}
-	agent.networkPlanClients[remove] = &client{client: &http.Client{Transport: planRemove}}
+	agent.clients[keep] = &transport.Client{HTTP: &http.Client{Transport: regularKeep}}
+	agent.clients[remove] = &transport.Client{HTTP: &http.Client{Transport: regularRemove}}
+	agent.networkPlanClients[keep] = &transport.Client{HTTP: &http.Client{Transport: planKeep}}
+	agent.networkPlanClients[remove] = &transport.Client{HTTP: &http.Client{Transport: planRemove}}
 
 	agent.RetainNodes(map[uuid.UUID]struct{}{keep: {}})
 
@@ -140,5 +141,24 @@ func TestAgentClientRetainNodesEvictsBothTransportCaches(t *testing.T) {
 	}
 	if regularKeep.closes.Load() != 0 || planKeep.closes.Load() != 0 {
 		t.Fatal("retained node transports were closed")
+	}
+}
+func TestAgentClientNetworkPlanTransportUsesContextDeadline(t *testing.T) {
+	client := NewAgentClient("token", nil)
+	regularClient := client.clientFor(uuid.New(), 30*time.Second)
+	regular, ok := regularClient.HTTP.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("regular transport type = %T", regularClient.HTTP.Transport)
+	}
+	networkPlanClient := client.clientFor(uuid.New(), 0)
+	networkPlans, ok := networkPlanClient.HTTP.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("network-plan transport type = %T", networkPlanClient.HTTP.Transport)
+	}
+	if regular.ResponseHeaderTimeout != 30*time.Second {
+		t.Fatalf("regular response header timeout = %s, want 30s", regular.ResponseHeaderTimeout)
+	}
+	if networkPlans.ResponseHeaderTimeout != 0 {
+		t.Fatalf("network-plan response header timeout = %s, want context-governed zero", networkPlans.ResponseHeaderTimeout)
 	}
 }

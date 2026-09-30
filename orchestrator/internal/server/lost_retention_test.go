@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/lifecycle"
-	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
 var (
@@ -68,7 +68,7 @@ func (f *lostReturnFixture) addAllocation(id string, node *Node, phase lifecycle
 // heartbeatA reports the original's container as running on node A.
 func (f *lostReturnFixture) heartbeatA(t *testing.T) {
 	t.Helper()
-	statuses := []api.AllocationStatus{{ID: "original", Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
+	statuses := []nodeapi.AllocationStatus{{ID: "original", Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
 	if err := heartbeatAndApply(t, f.s, f.nodeA.ID, statuses, "test", nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
 	}
@@ -105,13 +105,13 @@ func recordedOperations(t *testing.T, agent *testAgent) []recordedOperation {
 	for _, call := range agent.recordedCalls() {
 		switch {
 		case call.method == http.MethodDelete:
-			var request api.StopAllocationRequest
+			var request nodeapi.StopAllocationRequest
 			if err := json.Unmarshal(call.body, &request); err != nil {
 				t.Fatal(err)
 			}
 			operations = append(operations, recordedOperation{method: call.method, id: request.AllocationID, generation: request.Generation})
 		case call.method == http.MethodPost && call.path == "/v1/allocations":
-			var request api.AllocationRequest
+			var request nodeapi.AllocationRequest
 			if err := json.Unmarshal(call.body, &request); err != nil {
 				t.Fatal(err)
 			}
@@ -189,7 +189,7 @@ func TestReconcileKeepsLostOriginalUntilReplacementRuns(t *testing.T) {
 	})
 	t.Run("original reported starting is not retained", func(t *testing.T) {
 		f := newLostReturnFixture(t, tasks, true)
-		if err := heartbeatAndApply(t, f.s, f.nodeA.ID, []api.AllocationStatus{
+		if err := heartbeatAndApply(t, f.s, f.nodeA.ID, []nodeapi.AllocationStatus{
 			{ID: "original", Generation: 1, Task: "app", Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown},
 		}, "test", nodeResourceObservation{}); err != nil {
 			t.Fatal(err)

@@ -7,9 +7,8 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/client"
-	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 	"github.com/spf13/cobra"
 )
 
@@ -29,11 +28,11 @@ func newClusterSettingsCmd() *cobra.Command {
 		Short: "Show the replicated cluster settings",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			tlsCfg, err := buildCLITLSConfig()
+			serverClient, err := apiClient("")
 			if err != nil {
 				return err
 			}
-			settings, err := client.NewServerClient(config.ClusterToken, config.ServerAddr, tlsCfg).ClusterSettings(cmd.Context())
+			settings, err := serverClient.ClusterSettings(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -83,14 +82,14 @@ func newClusterSetJobLimitsCmd() *cobra.Command {
 					*target = value
 				}
 			}
-			for name, target := range map[string]*spec.ByteSize{"default-task-memory": &limits.DefaultTaskMemory, "max-task-memory": &limits.MaxTaskMemory} {
+			for name, target := range map[string]*int64{"default-task-memory": &limits.DefaultTaskMemory, "max-task-memory": &limits.MaxTaskMemory} {
 				if flags.Changed(name) {
 					raw, _ := flags.GetString(name)
 					value, err := spec.ParseByteSize(raw)
 					if err != nil {
 						return fmt.Errorf("--%s: %w", name, err)
 					}
-					*target = value
+					*target = int64(value)
 				}
 			}
 			settings, err := serverClient.UpdateJobLimits(cmd.Context(), limits)
@@ -178,9 +177,9 @@ func writeClusterSettings(out io.Writer, settings *api.ClusterSettings) error {
 		{"  Max desired allocations", fmt.Sprint(limits.MaxDesiredAllocations)},
 		{"  Max desired allocations per namespace", fmt.Sprint(limits.MaxDesiredAllocationsPerNamespace)},
 		{"  Default task CPU", fmt.Sprintf("%dm", limits.DefaultTaskCPU)},
-		{"  Default task memory", limits.DefaultTaskMemory.String()},
+		{"  Default task memory", spec.ByteSize(limits.DefaultTaskMemory).String()},
 		{"  Max task CPU", fmt.Sprintf("%dm", limits.MaxTaskCPU)},
-		{"  Max task memory", limits.MaxTaskMemory.String()},
+		{"  Max task memory", spec.ByteSize(limits.MaxTaskMemory).String()},
 		{"Reconciliation", ""},
 		{"  Allocation loss timeout", reconciliation.AllocationLossTimeout.String()},
 		{"  Replacement backoff base", reconciliation.ReplacementBackoffBase.String()},

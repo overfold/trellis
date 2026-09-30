@@ -15,10 +15,11 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v5"
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/auth"
-	"github.com/overfold/trellis/internal/client"
-	"github.com/overfold/trellis/internal/execstream"
+	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/client"
+	"github.com/overfold/trellis/orchestrator/internal/auth"
+	"github.com/overfold/trellis/orchestrator/internal/execstream"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 )
 
 // execRelayTest runs a leader whose single allocation is served by a fake
@@ -26,15 +27,16 @@ import (
 type execRelayTest struct {
 	server   *Server
 	leader   *httptest.Server
-	requests chan api.AgentExecRequest
+	requests chan nodeapi.AgentExecRequest
 	cancel   context.CancelFunc
 }
 
 func newExecRelayTest(t *testing.T, serve func(*execstream.Reader, *execstream.Writer)) *execRelayTest {
 	t.Helper()
-	test := &execRelayTest{requests: make(chan api.AgentExecRequest, 1)}
+	test := &execRelayTest{requests: make(chan nodeapi.AgentExecRequest, 1)}
 	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		request, err := execstream.DecodeAgentRequest(r.URL.Query())
+		execRequest, epoch, err := execstream.DecodeAgentRequest(r.URL.Query())
+		request := nodeapi.AgentExecRequest{ExecRequest: execRequest, Epoch: epoch}
 		if r.URL.Path != "/v1/allocations/alloc-1/exec" || !execstream.IsUpgradeRequest(r) || err != nil {
 			http.Error(w, "unexpected request", http.StatusBadRequest)
 			return
@@ -70,7 +72,11 @@ func newExecRelayTest(t *testing.T, serve func(*execstream.Reader, *execstream.W
 
 func (test *execRelayTest) open(t *testing.T, request api.ExecRequest) *client.ExecStream {
 	t.Helper()
-	stream, err := client.NewNamespaceServerClient("", test.leader.URL, "team", nil).Exec(context.Background(), "alloc-1", request)
+	operator, err := client.New(client.Config{Address: test.leader.URL, Namespace: "team"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := operator.Exec(context.Background(), "alloc-1", request)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/orchestrator/api"
 )
 
 func TestCredentialAndJoinTokenRoutes(t *testing.T) {
@@ -33,7 +33,7 @@ func TestCredentialAndJoinTokenRoutes(t *testing.T) {
 	defer server.Close()
 
 	ctx := context.Background()
-	c := NewServerClient("", server.URL, nil)
+	c := mustNew(t, Config{Address: server.URL})
 	if _, err := c.CreateCredential(ctx, &api.CredentialCreateRequest{Scope: "cluster", Access: "read", TTLSeconds: 60}); err != nil {
 		t.Fatal(err)
 	}

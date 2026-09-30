@@ -8,8 +8,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
 // DefaultWireGuardPool is the namespace address pool of a cluster created
@@ -175,12 +175,42 @@ func (c ClusterSettings) Validate() error {
 // API returns the wire representation of the settings.
 func (c ClusterSettings) API() api.ClusterSettings {
 	return api.ClusterSettings{
-		JobLimits:      c.JobLimits,
+		JobLimits:      JobLimitsAPI(c.JobLimits),
 		Reconciliation: c.Reconciliation.API(),
 		Network: api.ClusterNetworkSettings{
 			WireGuardPool:      c.WireGuardPool.String(),
 			WireGuardPortCount: c.WireGuardPortCount,
 		},
+	}
+}
+
+// JobLimitsAPI returns the wire representation of job limits.
+func JobLimitsAPI(limits spec.Limits) api.JobLimits {
+	return api.JobLimits{
+		MaxReplicasPerTaskGroup:           limits.MaxReplicasPerTaskGroup,
+		MaxTaskGroupsPerJob:               limits.MaxTaskGroupsPerJob,
+		MaxTasksPerTaskGroup:              limits.MaxTasksPerTaskGroup,
+		MaxDesiredAllocations:             limits.MaxDesiredAllocations,
+		MaxDesiredAllocationsPerNamespace: limits.MaxDesiredAllocationsPerNamespace,
+		DefaultTaskCPU:                    limits.DefaultTaskCPU,
+		DefaultTaskMemory:                 int64(limits.DefaultTaskMemory),
+		MaxTaskCPU:                        limits.MaxTaskCPU,
+		MaxTaskMemory:                     int64(limits.MaxTaskMemory),
+	}
+}
+
+// JobLimitsFromAPI converts wire job limits.
+func JobLimitsFromAPI(limits api.JobLimits) spec.Limits {
+	return spec.Limits{
+		MaxReplicasPerTaskGroup:           limits.MaxReplicasPerTaskGroup,
+		MaxTaskGroupsPerJob:               limits.MaxTaskGroupsPerJob,
+		MaxTasksPerTaskGroup:              limits.MaxTasksPerTaskGroup,
+		MaxDesiredAllocations:             limits.MaxDesiredAllocations,
+		MaxDesiredAllocationsPerNamespace: limits.MaxDesiredAllocationsPerNamespace,
+		DefaultTaskCPU:                    limits.DefaultTaskCPU,
+		DefaultTaskMemory:                 spec.ByteSize(limits.DefaultTaskMemory),
+		MaxTaskCPU:                        limits.MaxTaskCPU,
+		MaxTaskMemory:                     spec.ByteSize(limits.MaxTaskMemory),
 	}
 }
 
@@ -213,7 +243,7 @@ func ClusterSettingsFromAPI(settings api.ClusterSettings) (ClusterSettings, erro
 		return ClusterSettings{}, fmt.Errorf("WireGuard pool: %w", err)
 	}
 	result := ClusterSettings{
-		JobLimits:          settings.JobLimits,
+		JobLimits:          JobLimitsFromAPI(settings.JobLimits),
 		Reconciliation:     ReconciliationSettingsFromAPI(settings.Reconciliation),
 		WireGuardPool:      pool,
 		WireGuardPortCount: settings.Network.WireGuardPortCount,

@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/overfold/trellis/internal/network"
+	"github.com/overfold/trellis/orchestrator/internal/network"
 )
 
 // detachAllocationNetwork removes an allocation's network attachment. A

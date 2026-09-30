@@ -16,11 +16,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/client"
-	"github.com/overfold/trellis/internal/lifecycle"
-	"github.com/overfold/trellis/internal/network"
-	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/client"
+	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/network"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
 // ActionType identifies a reconciliation operation.
@@ -87,7 +87,7 @@ func retryDelay(id string, attempt int) time.Duration {
 	return base + time.Duration(binary.BigEndian.Uint16(h[:2])%500)*time.Millisecond
 }
 
-func agentOperationCode(err error) api.OperationCode {
+func agentOperationCode(err error) nodeapi.OperationCode {
 	var operation *client.AgentOperationError
 	if errors.As(err, &operation) {
 		return operation.Response.Code
@@ -812,7 +812,7 @@ func (s *Server) runNetworkPlanLoop(ctx context.Context) {
 	}
 }
 
-func (s *Server) dispatchPendingNetworkPlans(ctx context.Context, update func(context.Context, uuid.UUID, string, *api.NetworkPlanRequest) error) {
+func (s *Server) dispatchPendingNetworkPlans(ctx context.Context, update func(context.Context, uuid.UUID, string, *nodeapi.NetworkPlanRequest) error) {
 	if ctx.Err() != nil {
 		return
 	}
@@ -823,13 +823,13 @@ func (s *Server) dispatchPendingNetworkPlans(ctx context.Context, update func(co
 	}
 }
 
-func (s *Server) sendNetworkPlanTarget(ctx context.Context, target networkPlanTarget, update func(context.Context, uuid.UUID, string, *api.NetworkPlanRequest) error) {
+func (s *Server) sendNetworkPlanTarget(ctx context.Context, target networkPlanTarget, update func(context.Context, uuid.UUID, string, *nodeapi.NetworkPlanRequest) error) {
 	defer s.releaseNetworkPlanWorker(target.nodeID, target.epoch)
 	if ctx.Err() != nil || target.epoch != s.currentControlEpoch() {
 		return
 	}
 	planCtx, cancel := context.WithTimeout(ctx, networkPlanOperationTimeout(target.plan, target.attempt))
-	request := &api.NetworkPlanRequest{Epoch: target.epoch, Namespace: target.namespace, Plan: *target.plan}
+	request := &nodeapi.NetworkPlanRequest{Epoch: target.epoch, Namespace: target.namespace, Plan: *target.plan}
 	err := update(planCtx, target.nodeID, target.address, request)
 	cancel()
 	s.finishNetworkPlanAttempt(target, err)
@@ -874,9 +874,9 @@ func recordStartFailure(next *Allocation, now time.Time, message string) error {
 
 // terminalStartFailureCode reports whether code may accompany a reported start
 // failure.
-func terminalStartFailureCode(code api.OperationCode) bool {
+func terminalStartFailureCode(code nodeapi.OperationCode) bool {
 	switch code {
-	case "", api.OperationStaleGeneration, api.OperationConflict, api.OperationRestartExhausted:
+	case "", nodeapi.OperationStaleGeneration, nodeapi.OperationConflict, nodeapi.OperationRestartExhausted:
 		return true
 	}
 	return false
@@ -894,7 +894,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 		if nodeStatus != NodeStatusHealthy && nodeStatus != NodeStatusDraining {
 			return fmt.Errorf("node %s is unavailable for observed allocation stop", node.ID)
 		}
-		return s.client.StopAllocation(ctx, node.ID, address, &api.StopAllocationRequest{AllocationID: action.ID, Generation: action.Generation, Epoch: epoch})
+		return s.client.StopAllocation(ctx, node.ID, address, &nodeapi.StopAllocationRequest{AllocationID: action.ID, Generation: action.Generation, Epoch: epoch})
 	}
 	alloc := action.Allocation
 
@@ -959,7 +959,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 				break
 			}
 		}
-		request := &api.AllocationRequest{AllocationID: alloc.ID, Generation: alloc.Generation, JobRevision: alloc.JobRevision, Epoch: epoch, Namespace: alloc.Namespace, JobName: alloc.JobName, GroupName: alloc.TaskGroupName, Tasks: alloc.Tasks, Runtime: groupRuntime, Restart: groupRestart, Draining: alloc.Draining, DrainSequence: alloc.DrainSequence, Attempt: attempt}
+		request := &nodeapi.AllocationRequest{AllocationID: alloc.ID, Generation: alloc.Generation, JobRevision: alloc.JobRevision, Epoch: epoch, Namespace: alloc.Namespace, JobName: alloc.JobName, GroupName: alloc.TaskGroupName, Tasks: alloc.Tasks, Runtime: groupRuntime, Restart: groupRestart, Draining: alloc.Draining, DrainSequence: alloc.DrainSequence, Attempt: attempt}
 		if groupUsesWireGuard {
 			plan, err := s.networkPlan(alloc.Namespace, alloc.Node)
 			if err != nil {
@@ -981,7 +981,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 				if err != nil {
 					return fmt.Errorf("secret %s is unavailable", ref.Name)
 				}
-				request.Secrets = append(request.Secrets, api.DeliveredSecret{Task: task.Name, Name: ref.Name, Version: version, Target: ref.Target, Env: ref.Env, Path: ref.Path, Mode: ref.Mode, Value: value})
+				request.Secrets = append(request.Secrets, nodeapi.DeliveredSecret{Task: task.Name, Name: ref.Name, Version: version, Target: ref.Target, Env: ref.Env, Path: ref.Path, Mode: ref.Mode, Value: value})
 			}
 		}
 		defer func() {
@@ -1027,7 +1027,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 			// Peer changes can be refreshed independently.
 			hashInput.NetworkPlan = &network.Plan{CIDR: request.NetworkPlan.CIDR, Gateway: request.NetworkPlan.Gateway}
 		}
-		hashInput.Secrets = append([]api.DeliveredSecret(nil), request.Secrets...)
+		hashInput.Secrets = append([]nodeapi.DeliveredSecret(nil), request.Secrets...)
 		for i := range hashInput.Secrets {
 			hashInput.Secrets[i].Value = nil
 		}
@@ -1054,9 +1054,9 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 			return fmt.Errorf("persist allocation: %w", err)
 		}
 		if err := s.client.RunAllocation(ctx, requestNodeID, address, request); err != nil {
-			if code := agentOperationCode(err); code == api.OperationStaleEpoch {
+			if code := agentOperationCode(err); code == nodeapi.OperationStaleEpoch {
 				return err
-			} else if code == api.OperationStaleGeneration || code == api.OperationConflict || code == api.OperationRestartExhausted {
+			} else if code == nodeapi.OperationStaleGeneration || code == nodeapi.OperationConflict || code == nodeapi.OperationRestartExhausted {
 				if persistErr := s.persistAllocationUpdate(context.WithoutCancel(ctx), alloc, func(next *Allocation) error {
 					if next.Phase != lifecycle.PhaseStarting && next.Phase != lifecycle.PhaseRunning {
 						return nil
@@ -1090,7 +1090,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 		if nodeStatus != NodeStatusHealthy && nodeStatus != NodeStatusDraining {
 			return fmt.Errorf("node %s is unavailable for allocation drain", requestNodeID)
 		}
-		return s.client.DrainAllocation(ctx, requestNodeID, address, &api.DrainAllocationRequest{AllocationID: allocationID, Generation: generation, Epoch: epoch, Sequence: drainSequence})
+		return s.client.DrainAllocation(ctx, requestNodeID, address, &nodeapi.DrainAllocationRequest{AllocationID: allocationID, Generation: generation, Epoch: epoch, Sequence: drainSequence})
 	case ActionResume:
 		unlockState()
 		if nodeStatus != NodeStatusHealthy {
@@ -1099,7 +1099,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 		if draining {
 			return nil
 		}
-		request := &api.DrainAllocationRequest{AllocationID: allocationID, Generation: generation, Epoch: epoch, Sequence: drainSequence}
+		request := &nodeapi.DrainAllocationRequest{AllocationID: allocationID, Generation: generation, Epoch: epoch, Sequence: drainSequence}
 		if err := s.client.ResumeAllocation(ctx, requestNodeID, address, request); err != nil {
 			return err
 		}
@@ -1118,8 +1118,8 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 		if nodeStatus != NodeStatusHealthy && nodeStatus != NodeStatusDraining {
 			return fmt.Errorf("node %s is unavailable for allocation stop", requestNodeID)
 		}
-		if err := s.client.StopAllocation(ctx, requestNodeID, address, &api.StopAllocationRequest{AllocationID: allocationID, Generation: generation, Epoch: epoch}); err != nil {
-			if code := agentOperationCode(err); code == api.OperationStaleEpoch || code == api.OperationStaleGeneration {
+		if err := s.client.StopAllocation(ctx, requestNodeID, address, &nodeapi.StopAllocationRequest{AllocationID: allocationID, Generation: generation, Epoch: epoch}); err != nil {
+			if code := agentOperationCode(err); code == nodeapi.OperationStaleEpoch || code == nodeapi.OperationStaleGeneration {
 				return err
 			}
 			if persistErr := s.persistAllocationUpdate(context.WithoutCancel(ctx), alloc, func(next *Allocation) error {

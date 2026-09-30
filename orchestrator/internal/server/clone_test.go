@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/overfold/trellis/internal/deepcopytest"
+	"github.com/overfold/trellis/orchestrator/internal/deepcopytest"
 )
 
 func filledAllocation(t *testing.T) *Allocation {

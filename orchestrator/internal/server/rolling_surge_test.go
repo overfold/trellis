@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/overfold/trellis/internal/lifecycle"
-	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
 func rollingPlanJob(count, parallel int) *Job {

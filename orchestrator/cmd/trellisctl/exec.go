@@ -7,9 +7,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/client"
-	"github.com/overfold/trellis/internal/execstream"
+	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/client"
+	"github.com/overfold/trellis/orchestrator/internal/execstream"
 	"github.com/spf13/cobra"
 )
 
@@ -96,7 +96,7 @@ func newExecTerminal(cmd *cobra.Command) (*execTerminal, error) {
 	return terminal, nil
 }
 
-func runExec(cmd *cobra.Command, serverClient *client.ServerClient, allocationID string, request api.ExecRequest, terminal *execTerminal) error {
+func runExec(cmd *cobra.Command, serverClient *client.Client, allocationID string, request api.ExecRequest, terminal *execTerminal) error {
 	ctx, cancel := context.WithCancel(cmd.Context())
 	defer cancel()
 	stream, err := serverClient.Exec(ctx, allocationID, request)

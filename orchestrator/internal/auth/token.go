@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/overfold/trellis/internal/state"
+	"github.com/overfold/trellis/orchestrator/internal/state"
 )
 
 // AccessScope controls where a generated API credential may operate.

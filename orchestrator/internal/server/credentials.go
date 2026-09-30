@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/overfold/trellis/internal/auth"
+	"github.com/overfold/trellis/orchestrator/internal/auth"
 )
 
 // ErrInvalidCredentialRequest reports an operator credential request that

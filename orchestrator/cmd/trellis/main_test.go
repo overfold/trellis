@@ -19,14 +19,15 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/auth"
-	"github.com/overfold/trellis/internal/client"
-	"github.com/overfold/trellis/internal/election"
-	"github.com/overfold/trellis/internal/execstream"
-	"github.com/overfold/trellis/internal/server"
-	"github.com/overfold/trellis/internal/storage"
-	"github.com/overfold/trellis/internal/tlsutil"
+	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/client"
+	"github.com/overfold/trellis/orchestrator/internal/adminsign"
+	"github.com/overfold/trellis/orchestrator/internal/auth"
+	"github.com/overfold/trellis/orchestrator/internal/election"
+	"github.com/overfold/trellis/orchestrator/internal/execstream"
+	"github.com/overfold/trellis/orchestrator/internal/server"
+	"github.com/overfold/trellis/orchestrator/internal/storage"
+	"github.com/overfold/trellis/orchestrator/internal/tlsutil"
 	"github.com/spf13/pflag"
 )
 
@@ -289,7 +290,7 @@ func TestControlPlaneFollowerProxiesToLeader(t *testing.T) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/namespaces/default/jobs" {
 			t.Errorf("proxied request = %s %s", r.Method, r.URL.Path)
 		}
-		if r.Header.Get(auth.AdministratorChallengeHeader) != "challenge" || r.Header.Get(auth.AdministratorSignatureHeader) != "signature" {
+		if r.Header.Get(adminsign.ChallengeHeader) != "challenge" || r.Header.Get(adminsign.SignatureHeader) != "signature" {
 			t.Error("administrator signing headers were not proxied unchanged")
 		}
 		w.Header().Set("X-Executed-By", "leader")
@@ -306,8 +307,8 @@ func TestControlPlaneFollowerProxiesToLeader(t *testing.T) {
 	)
 	req := httptest.NewRequest(http.MethodGet, "https://follower.example/v1/namespaces/default/jobs", nil)
 	req.Header.Set("Authorization", "Bearer workload-token")
-	req.Header.Set(auth.AdministratorChallengeHeader, "challenge")
-	req.Header.Set(auth.AdministratorSignatureHeader, "signature")
+	req.Header.Set(adminsign.ChallengeHeader, "challenge")
+	req.Header.Set(adminsign.SignatureHeader, "signature")
 	recorder := httptest.NewRecorder()
 	proxy.ServeHTTP(recorder, req)
 
@@ -352,7 +353,11 @@ func TestControlPlaneFollowerProxiesExecStream(t *testing.T) {
 	follower.Start()
 	defer follower.Close()
 
-	stream, err := client.NewNamespaceServerClient("operator-token", follower.URL, "team", nil).Exec(context.Background(), "alloc-1", api.ExecRequest{Command: []string{"cat"}, Stdin: true})
+	operator, err := client.New(client.Config{Address: follower.URL, Token: "operator-token", Namespace: "team"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := operator.Exec(context.Background(), "alloc-1", api.ExecRequest{Command: []string{"cat"}, Stdin: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -511,9 +516,9 @@ func TestAdministratorRequestSignatures(t *testing.T) {
 	}
 	signedRequest := func(actualMethod, actualTarget string, actualBody []byte, signedMethod, signedTarget string, signedBody []byte, key ed25519.PrivateKey, challenge string) *http.Request {
 		req := httptest.NewRequest(actualMethod, actualTarget, strings.NewReader(string(actualBody)))
-		payload := auth.AdministratorSigningPayload(challenge, signedMethod, signedTarget, signedBody)
-		req.Header.Set(auth.AdministratorChallengeHeader, challenge)
-		req.Header.Set(auth.AdministratorSignatureHeader, base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, payload)))
+		payload := adminsign.Payload(challenge, signedMethod, signedTarget, signedBody)
+		req.Header.Set(adminsign.ChallengeHeader, challenge)
+		req.Header.Set(adminsign.SignatureHeader, base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, payload)))
 		return req
 	}
 
@@ -556,23 +561,23 @@ func TestAdministratorRequestSignatures(t *testing.T) {
 	t.Run("incomplete headers consume challenge", func(t *testing.T) {
 		value := challenge()
 		req := httptest.NewRequest(http.MethodPost, "/v1/root", nil)
-		req.Header.Set(auth.AdministratorChallengeHeader, value)
+		req.Header.Set(adminsign.ChallengeHeader, value)
 		assertConsumed(t, value, req, http.StatusUnauthorized)
 	})
 	t.Run("unreadable body consumes challenge", func(t *testing.T) {
 		value := challenge()
 		req := httptest.NewRequest(http.MethodPost, "/v1/root", nil)
 		req.Body = io.NopCloser(failingReader{})
-		req.Header.Set(auth.AdministratorChallengeHeader, value)
-		req.Header.Set(auth.AdministratorSignatureHeader, "invalid")
+		req.Header.Set(adminsign.ChallengeHeader, value)
+		req.Header.Set(adminsign.SignatureHeader, "invalid")
 		assertConsumed(t, value, req, http.StatusBadRequest)
 	})
 	t.Run("oversized body consumes challenge", func(t *testing.T) {
 		value := challenge()
 		req := httptest.NewRequest(http.MethodPost, "/v1/root", nil)
 		req.Body = io.NopCloser(io.LimitReader(endlessReader{}, (64<<20)+1))
-		req.Header.Set(auth.AdministratorChallengeHeader, value)
-		req.Header.Set(auth.AdministratorSignatureHeader, "invalid")
+		req.Header.Set(adminsign.ChallengeHeader, value)
+		req.Header.Set(adminsign.SignatureHeader, "invalid")
 		assertConsumed(t, value, req, http.StatusRequestEntityTooLarge)
 	})
 	t.Run("unavailable verification consumes challenge", func(t *testing.T) {

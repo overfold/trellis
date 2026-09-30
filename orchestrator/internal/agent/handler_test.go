@@ -11,8 +11,8 @@ import (
 	"testing"
 
 	"github.com/labstack/echo/v5"
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
 func TestMutationHandlersRequirePositiveFences(t *testing.T) {
@@ -104,7 +104,7 @@ func TestHandleRunRequiresPositiveJobRevision(t *testing.T) {
 			}}
 			e := echo.New()
 			NewHandler(agent).Register(e)
-			body, err := json.Marshal(api.AllocationRequest{
+			body, err := json.Marshal(nodeapi.AllocationRequest{
 				AllocationID: "allocation", Generation: 1, JobRevision: test.revision, ExecutionHash: "hash",
 				Tasks: []spec.TaskSpec{{Name: "task", Image: "image"}},
 			})
@@ -132,12 +132,12 @@ func TestOperationErrorReportsRestartExhaustion(t *testing.T) {
 	if !errors.As(operationError(fmt.Errorf("%w: allocation x", ErrRestartBudgetExhausted)), &httpErr) {
 		t.Fatal("operation error is not an HTTP error")
 	}
-	var response api.OperationResponse
+	var response nodeapi.OperationResponse
 	if err := json.Unmarshal([]byte(httpErr.Message), &response); err != nil {
 		t.Fatal(err)
 	}
-	if httpErr.Code != http.StatusConflict || response.Code != api.OperationRestartExhausted {
-		t.Fatalf("operation error = %d/%q, want %d/%q", httpErr.Code, response.Code, http.StatusConflict, api.OperationRestartExhausted)
+	if httpErr.Code != http.StatusConflict || response.Code != nodeapi.OperationRestartExhausted {
+		t.Fatalf("operation error = %d/%q, want %d/%q", httpErr.Code, response.Code, http.StatusConflict, nodeapi.OperationRestartExhausted)
 	}
 }
 
@@ -147,24 +147,24 @@ func TestHandleRunRequiresCanonicalTaskGroup(t *testing.T) {
 	}
 	for _, test := range []struct {
 		name   string
-		mutate func(*api.AllocationRequest)
+		mutate func(*nodeapi.AllocationRequest)
 		want   string
 	}{
-		{name: "runtime", mutate: func(r *api.AllocationRequest) { r.Runtime = "" }, want: "runtime must be explicit"},
-		{name: "restart", mutate: func(r *api.AllocationRequest) { r.Restart = nil }, want: "restart policy is required"},
-		{name: "networking", mutate: func(r *api.AllocationRequest) { r.Tasks[0].Networking = nil }, want: "networking.mode"},
-		{name: "resources", mutate: func(r *api.AllocationRequest) { r.Tasks[0].Resources = nil }, want: "resources"},
-		{name: "health interval", mutate: func(r *api.AllocationRequest) {
+		{name: "runtime", mutate: func(r *nodeapi.AllocationRequest) { r.Runtime = "" }, want: "runtime must be explicit"},
+		{name: "restart", mutate: func(r *nodeapi.AllocationRequest) { r.Restart = nil }, want: "restart policy is required"},
+		{name: "networking", mutate: func(r *nodeapi.AllocationRequest) { r.Tasks[0].Networking = nil }, want: "networking.mode"},
+		{name: "resources", mutate: func(r *nodeapi.AllocationRequest) { r.Tasks[0].Resources = nil }, want: "resources"},
+		{name: "health interval", mutate: func(r *nodeapi.AllocationRequest) {
 			r.Tasks[0].HealthCheck = &spec.HealthCheckSpec{Type: spec.HealthCheckTCP, Port: 80, Timeout: 1, Threshold: 1}
 		}, want: "health_check.interval"},
-		{name: "secret mode", mutate: func(r *api.AllocationRequest) {
+		{name: "secret mode", mutate: func(r *nodeapi.AllocationRequest) {
 			r.Tasks[0].Secrets = []spec.SecretRefSpec{{Name: "s", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/s"}}
 		}, want: "secrets[0].mode"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			e := echo.New()
 			NewHandler(&Agent{}).Register(e)
-			allocation := api.AllocationRequest{
+			allocation := nodeapi.AllocationRequest{
 				AllocationID: "allocation", Generation: 1, JobRevision: 1, Epoch: 1, ExecutionHash: "hash",
 				Runtime: string(spec.DefaultRuntime), Restart: testRestartPolicy(), Tasks: []spec.TaskSpec{canonicalTask()},
 			}

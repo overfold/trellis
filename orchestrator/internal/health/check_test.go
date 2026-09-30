@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/overfold/trellis/internal/probepath"
-	"github.com/overfold/trellis/internal/runtime"
+	"github.com/overfold/trellis/orchestrator/internal/probepath"
+	"github.com/overfold/trellis/orchestrator/internal/runtime"
 )
 
 type probeRuntime struct {

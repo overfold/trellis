@@ -13,11 +13,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 )
 
 type mockLookup struct {
-	services *api.ServiceListResponse
+	services *nodeapi.ServiceListResponse
 }
 
 type namespaceLookup map[netip.Prefix]string
@@ -31,12 +31,12 @@ func (n namespaceLookup) NamespaceForIP(address netip.Addr) (string, bool) {
 	return "", false
 }
 
-func (m *mockLookup) ListDiscovery(_ context.Context) (*api.ServiceListResponse, error) {
+func (m *mockLookup) ListDiscovery(_ context.Context) (*nodeapi.ServiceListResponse, error) {
 	return m.services, nil
 }
 
 func TestResolveGroupJobNamespace(t *testing.T) {
-	services := api.ServiceListResponse{
+	services := nodeapi.ServiceListResponse{
 		{Group: "frontend", Job: "web", Namespace: "acme", Address: "10.0.0.1"},
 		{Group: "frontend", Job: "web", Namespace: "acme", Address: "10.0.0.2"},
 		{Group: "primary", Job: "db", Namespace: "acme", Address: "10.0.0.3"},
@@ -71,7 +71,7 @@ func TestResolveGroupJobNamespace(t *testing.T) {
 }
 
 func TestHandleQuery(t *testing.T) {
-	services := api.ServiceListResponse{
+	services := nodeapi.ServiceListResponse{
 		{Group: "frontend", Job: "web", Namespace: "acme", Address: "10.0.0.1"},
 		{Group: "frontend", Job: "web", Namespace: "acme", Address: "10.0.0.2"},
 	}
@@ -97,7 +97,7 @@ func TestHandleQuery(t *testing.T) {
 }
 
 func TestHandleQueryRestrictsDiscoveryToSourceNamespace(t *testing.T) {
-	services := api.ServiceListResponse{
+	services := nodeapi.ServiceListResponse{
 		{Group: "frontend", Job: "web", Namespace: "acme", Address: "10.0.0.1"},
 		{Group: "frontend", Job: "web", Namespace: "other", Address: "10.1.0.1"},
 	}
@@ -141,7 +141,7 @@ func TestBuildResponseCountsOnlyIPv4Answers(t *testing.T) {
 }
 
 func TestHandleQueryNXDomain(t *testing.T) {
-	r := NewResolver(nil, &mockLookup{services: &api.ServiceListResponse{}}, nil, "trellis")
+	r := NewResolver(nil, &mockLookup{services: &nodeapi.ServiceListResponse{}}, nil, "trellis")
 	r.refresh(context.Background())
 
 	query := buildQuery("missing.web.acme.trellis.")
@@ -170,7 +170,7 @@ func TestEncodeDecodeName(t *testing.T) {
 }
 
 func TestResolveIgnoresEmptyAddresses(t *testing.T) {
-	services := api.ServiceListResponse{
+	services := nodeapi.ServiceListResponse{
 		{Group: "frontend", Job: "web", Namespace: "acme", Address: "10.0.0.1"},
 		{Group: "frontend", Job: "web", Namespace: "acme", Address: ""},
 	}
@@ -202,7 +202,7 @@ func buildQuery(name string) []byte {
 }
 
 func TestResolveMultipleNamespaces(t *testing.T) {
-	services := api.ServiceListResponse{
+	services := nodeapi.ServiceListResponse{
 		{Group: "frontend", Job: "web", Namespace: "acme", Address: "10.0.0.1"},
 		{Group: "frontend", Job: "web", Namespace: "staging", Address: "10.0.1.1"},
 	}
@@ -239,7 +239,7 @@ func TestForwardsExternalQueriesToUpstream(t *testing.T) {
 		_, _ = upstream.WriteToUDP(response, remote)
 	}()
 
-	r := NewResolver(nil, &mockLookup{services: &api.ServiceListResponse{}}, nil, "trellis", upstream.LocalAddr().String())
+	r := NewResolver(nil, &mockLookup{services: &nodeapi.ServiceListResponse{}}, nil, "trellis", upstream.LocalAddr().String())
 	resp := r.handleQuery(buildQuery("example.com."))
 	if resp == nil {
 		t.Fatal("expected forwarded response")
@@ -282,7 +282,7 @@ func TestUDPSlowUpstreamIsConcurrentBoundedAndRecovers(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
-	r := NewResolver(nil, &mockLookup{services: &api.ServiceListResponse{}}, nil, "trellis", upstream.LocalAddr().String())
+	r := NewResolver(nil, &mockLookup{services: &nodeapi.ServiceListResponse{}}, nil, "trellis", upstream.LocalAddr().String())
 	r.udpSlots = make(chan struct{}, 2)
 	done := make(chan error, 1)
 	go func() { done <- r.serveUDP(ctx, conn) }()
@@ -374,7 +374,7 @@ func TestUDPCancellationStopsBlockedUpstreamWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
-	r := NewResolver(nil, &mockLookup{services: &api.ServiceListResponse{}}, nil, "trellis", upstream.LocalAddr().String())
+	r := NewResolver(nil, &mockLookup{services: &nodeapi.ServiceListResponse{}}, nil, "trellis", upstream.LocalAddr().String())
 	done := make(chan error, 1)
 	go func() { done <- r.serveUDP(ctx, conn) }()
 
@@ -410,7 +410,7 @@ func TestTCPConnectionBurstIsBoundedAndCancellationClosesConnections(t *testing.
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
-	r := NewResolver(nil, &mockLookup{services: &api.ServiceListResponse{}}, nil, "trellis")
+	r := NewResolver(nil, &mockLookup{services: &nodeapi.ServiceListResponse{}}, nil, "trellis")
 	r.tcpSlots = make(chan struct{}, 2)
 	done := make(chan error, 1)
 	go func() { done <- r.serveTCP(ctx, listener) }()
@@ -494,7 +494,7 @@ func waitForSlots(t *testing.T, slots chan struct{}, want int) {
 }
 
 func TestExternalQueryWithoutUpstreamReturnsServfail(t *testing.T) {
-	r := NewResolver(nil, &mockLookup{services: &api.ServiceListResponse{}}, nil, "trellis")
+	r := NewResolver(nil, &mockLookup{services: &nodeapi.ServiceListResponse{}}, nil, "trellis")
 	resp := r.handleQuery(buildQuery("example.com."))
 	if resp == nil {
 		t.Fatal("expected SERVFAIL response")

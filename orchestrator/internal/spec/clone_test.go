@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/overfold/trellis/internal/deepcopytest"
+	"github.com/overfold/trellis/orchestrator/internal/deepcopytest"
 )
 
 func TestTaskSpecCloneIsDeep(t *testing.T) {

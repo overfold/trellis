@@ -5,7 +5,7 @@ import (
 	"sort"
 
 	"github.com/google/uuid"
-	"github.com/overfold/trellis/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
 )
 
 // retainedOriginal is a lost allocation whose returning node still reports its

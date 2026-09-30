@@ -12,10 +12,10 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/lifecycle"
-	"github.com/overfold/trellis/internal/spec"
-	"github.com/overfold/trellis/internal/state"
+	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/state"
 )
 
 type undrainFailingStore struct{ memoryStore }
@@ -48,13 +48,13 @@ func (s nodeWriteFailingStore) Batch(ctx context.Context, mutations []state.Muta
 	return s.memoryStore.Batch(ctx, mutations)
 }
 
-func resumeCalls(agent *testAgent, id string) []api.DrainAllocationRequest {
-	var requests []api.DrainAllocationRequest
+func resumeCalls(agent *testAgent, id string) []nodeapi.DrainAllocationRequest {
+	var requests []nodeapi.DrainAllocationRequest
 	for _, call := range agent.recordedCalls() {
 		if call.method != http.MethodDelete || call.path != "/v1/allocations/"+id+"/drain" {
 			continue
 		}
-		var request api.DrainAllocationRequest
+		var request nodeapi.DrainAllocationRequest
 		if err := json.Unmarshal(call.body, &request); err == nil {
 			requests = append(requests, request)
 		}
@@ -375,7 +375,7 @@ func TestUndrainNodeRetainsCurrentAllocation(t *testing.T) {
 	resumed := false
 	for _, call := range agent.recordedCalls() {
 		if call.path == "/v1/allocations/original/drain" {
-			var request api.DrainAllocationRequest
+			var request nodeapi.DrainAllocationRequest
 			if err := json.Unmarshal(call.body, &request); err != nil {
 				t.Fatal(err)
 			}
@@ -519,7 +519,7 @@ func TestUndrainNodeSaveFailureSendsNoResume(t *testing.T) {
 			var drained uint64
 			for _, call := range agent.recordedCalls() {
 				if call.method == http.MethodPost && call.path == "/v1/allocations/original/drain" {
-					var request api.DrainAllocationRequest
+					var request nodeapi.DrainAllocationRequest
 					if err := json.Unmarshal(call.body, &request); err != nil {
 						t.Fatal(err)
 					}

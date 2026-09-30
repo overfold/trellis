@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/lifecycle"
-	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
 // livenessClock is a test clock that heartbeating goroutines can read while
@@ -64,7 +64,7 @@ func newLivenessFixture(t *testing.T) *livenessFixture {
 
 // heartbeatPromptly delivers a heartbeat and fails the test unless it
 // returns well within one heartbeat interval.
-func (f *livenessFixture) heartbeatPromptly(t *testing.T, version string, actual []api.AllocationStatus) {
+func (f *livenessFixture) heartbeatPromptly(t *testing.T, version string, actual []nodeapi.AllocationStatus) {
 	t.Helper()
 	done := make(chan error, 1)
 	go func() {
@@ -132,7 +132,7 @@ func TestBlockedReconciliationDoesNotMakeHeartbeatingNodeUnhealthy(t *testing.T)
 	f.s.reconciliation.AllocationLossTimeout = livenessWindow
 	job := canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 2, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}})
 	f.s.jobs[jobKey("default", "web")] = &Job{Spec: job, Revision: 1}
-	report := []api.AllocationStatus{{ID: running.ID, Generation: 1, Task: "server", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
+	report := []nodeapi.AllocationStatus{{ID: running.ID, Generation: 1, Task: "server", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
 
 	f.block()
 	passDone := make(chan struct{})
@@ -170,7 +170,7 @@ func TestBlockedObservationCommitDoesNotMakeHeartbeatingNodeUnhealthy(t *testing
 		Node: f.node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown}
 	f.s.allocations = []*Allocation{starting}
 	f.s.rebuildAllocationNodeIndexLocked()
-	report := []api.AllocationStatus{{ID: starting.ID, Generation: 1, Task: "server", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
+	report := []nodeapi.AllocationStatus{{ID: starting.ID, Generation: 1, Task: "server", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
 
 	f.block()
 	f.heartbeatPromptly(t, "v1", report)
@@ -218,7 +218,7 @@ func TestInvalidHeartbeatDoesNotStampLiveness(t *testing.T) {
 	s := NewServer(slog.Default(), nil, NewStateController(memoryStore{}, "test"), memoryStore{}, "test", "")
 	node := &Node{ID: uuid.New()}
 	addTestNode(s, node, time.Time{})
-	invalid := []api.AllocationStatus{{ID: "web-1", Generation: 1, Task: "app", Phase: "exploded", Health: lifecycle.HealthHealthy}}
+	invalid := []nodeapi.AllocationStatus{{ID: "web-1", Generation: 1, Task: "app", Phase: "exploded", Health: lifecycle.HealthHealthy}}
 	if err := s.Heartbeat(context.Background(), node.ID, invalid, "test", nil, nil, nodeResourceObservation{}); err == nil {
 		t.Fatal("invalid heartbeat accepted")
 	}
@@ -266,9 +266,9 @@ func TestObservationCommitsAreOrderedAndBounded(t *testing.T) {
 	}
 	s.rebuildAllocationNodeIndexLocked()
 	for _, node := range nodes {
-		var report []api.AllocationStatus
+		var report []nodeapi.AllocationStatus
 		for _, allocation := range s.allocationsByNode[node.ID] {
-			report = append(report, api.AllocationStatus{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy})
+			report = append(report, nodeapi.AllocationStatus{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy})
 		}
 		if err := s.Heartbeat(context.Background(), node.ID, report, "new", nil, nil, nodeResourceObservation{}); err != nil {
 			t.Fatal(err)
@@ -395,7 +395,7 @@ func TestObservedTransitionIsStampedWhenApplied(t *testing.T) {
 	starting := &Allocation{ID: "web-1", Tasks: []spec.TaskSpec{{Name: "server"}}, Node: f.node, Generation: 1, Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown,
 		Diagnostic: lifecycle.Diagnostic{CreatedAt: received, TransitionedAt: received}}
 	f.s.allocations = []*Allocation{starting}
-	report := []api.AllocationStatus{{ID: starting.ID, Generation: 1, Task: "server", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
+	report := []nodeapi.AllocationStatus{{ID: starting.ID, Generation: 1, Task: "server", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
 	f.heartbeatPromptly(t, "test", report)
 	f.clock.advance(time.Minute)
 	applyTestObservations(f.s)

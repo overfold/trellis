@@ -5,7 +5,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/orchestrator/api"
 	"github.com/spf13/cobra"
 )
 

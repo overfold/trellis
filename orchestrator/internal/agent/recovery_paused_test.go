@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/runtime"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
+	"github.com/overfold/trellis/orchestrator/internal/runtime"
 )
 
 // newPausedInjectedRuntime returns an injected runtime holding one running
@@ -96,7 +96,7 @@ func TestRecoverPausedContainerIsObservedRunningAndUnhealthy(t *testing.T) {
 	}
 
 	// A control-plane stop still reaches the runtime.
-	if err := agent.StopGroup(context.Background(), &api.StopAllocationRequest{AllocationID: "allocation", Generation: 1, Epoch: 1}); err != nil {
+	if err := agent.StopGroup(context.Background(), &nodeapi.StopAllocationRequest{AllocationID: "allocation", Generation: 1, Epoch: 1}); err != nil {
 		t.Fatalf("stop paused allocation: %v", err)
 	}
 	if agent.allocations["task"] != nil || portClaimed(agent, 18090) {

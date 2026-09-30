@@ -10,9 +10,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/catalog"
-	"github.com/overfold/trellis/internal/client"
+	"github.com/overfold/trellis/orchestrator/internal/catalog"
+	"github.com/overfold/trellis/orchestrator/internal/client"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 )
 
 func newNopStateController() *StateController {
@@ -59,7 +59,7 @@ func newTestAgent() *testAgent {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(api.OperationResponse{Code: "ok"})
+		_ = json.NewEncoder(w).Encode(nodeapi.OperationResponse{Code: "ok"})
 	}))
 	host, portStr, _ := net.SplitHostPort(ts.Listener.Addr().String())
 	port, _ := strconv.Atoi(portStr)

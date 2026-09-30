@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/overfold/trellis/internal/network"
-	"github.com/overfold/trellis/internal/runtime"
-	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/network"
+	"github.com/overfold/trellis/orchestrator/internal/runtime"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
 // recordingAttachManager records the attach requests it receives.

@@ -1,31 +1,12 @@
 package client
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
-
-func TestRequestBodyIsClearedAfterSend(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.Copy(io.Discard, r.Body)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{}`)
-	}))
-	defer server.Close()
-	body := []byte("sensitive request body")
-	c := &client{client: server.Client()}
-	if err := c.requestBody(context.Background(), http.MethodPut, server.URL, body, &struct{}{}); err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(body, make([]byte, len(body))) {
-		t.Fatal("marshalled request body was not cleared")
-	}
-}
 
 func TestSetSecretBuildsValidRequestWithoutImmutableBase64Copy(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -48,7 +29,7 @@ func TestSetSecretBuildsValidRequestWithoutImmutableBase64Copy(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"namespace": "default", "name": "token", "version": 8})
 	}))
 	defer server.Close()
-	c := NewNamespaceServerClient("", server.URL, "default", nil)
+	c := mustNew(t, Config{Address: server.URL, Namespace: "default"})
 	expected := uint64(7)
 	metadata, err := c.SetSecret(context.Background(), "token", []byte("secret"), &expected)
 	if err != nil {

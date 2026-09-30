@@ -9,13 +9,13 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/auth"
-	"github.com/overfold/trellis/internal/lifecycle"
-	secretstore "github.com/overfold/trellis/internal/secrets"
-	"github.com/overfold/trellis/internal/spec"
-	"github.com/overfold/trellis/internal/state"
-	"github.com/overfold/trellis/internal/storage"
+	"github.com/overfold/trellis/orchestrator/internal/auth"
+	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
+	secretstore "github.com/overfold/trellis/orchestrator/internal/secrets"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/state"
+	"github.com/overfold/trellis/orchestrator/internal/storage"
 )
 
 type apiAccessStore map[string][]byte
@@ -59,7 +59,7 @@ func newAPIAccessServer(t *testing.T) (*Server, apiAccessStore) {
 func TestAPIAccessTokenClusterRead(t *testing.T) {
 	s, _ := newAPIAccessServer(t)
 	requested := &spec.APIAccessSpec{Scope: spec.APIAccessCluster, Access: spec.APIAccessRead}
-	request := &api.AllocationRequest{AllocationID: "alloc-1", Generation: 1, Namespace: "default", JobName: "web", GroupName: "app"}
+	request := &nodeapi.AllocationRequest{AllocationID: "alloc-1", Generation: 1, Namespace: "default", JobName: "web", GroupName: "app"}
 	token, err := s.apiAccessToken(context.Background(), requested, request)
 	if err != nil {
 		t.Fatalf("cluster/read api access: %v", err)
@@ -79,7 +79,7 @@ func TestAPIAccessTokenClusterRead(t *testing.T) {
 func TestAPIAccessTokenRequiresSecretsKey(t *testing.T) {
 	s := &Server{tokenManager: auth.NewTokenManager(apiAccessStore{}, "test")}
 	requested := &spec.APIAccessSpec{Scope: spec.APIAccessNamespace, Access: spec.APIAccessRead}
-	request := &api.AllocationRequest{AllocationID: "alloc-1", Generation: 1, Namespace: "default", JobName: "web", GroupName: "app"}
+	request := &nodeapi.AllocationRequest{AllocationID: "alloc-1", Generation: 1, Namespace: "default", JobName: "web", GroupName: "app"}
 	if _, err := s.apiAccessToken(context.Background(), requested, request); err == nil || !strings.Contains(err.Error(), "secrets encryption key") {
 		t.Fatalf("api access without secrets key error = %v", err)
 	}
@@ -112,7 +112,7 @@ func TestStartRetryRedeliversWorkloadTokenWithStableExecutionHash(t *testing.T) 
 	if len(calls) != 3 {
 		t.Fatalf("start calls = %d, want 3", len(calls))
 	}
-	requests := make([]api.AllocationRequest, len(calls))
+	requests := make([]nodeapi.AllocationRequest, len(calls))
 	for i := range calls {
 		if err := json.Unmarshal(calls[i].body, &requests[i]); err != nil {
 			t.Fatal(err)
@@ -146,7 +146,7 @@ func TestRevokeStaleWorkloadCredentials(t *testing.T) {
 	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", APIAccess: access}}})}
 	issue := func(id string) string {
 		t.Helper()
-		token, err := s.apiAccessToken(ctx, access, &api.AllocationRequest{AllocationID: id, Generation: 1, Namespace: "default", JobName: "web", GroupName: "app"})
+		token, err := s.apiAccessToken(ctx, access, &nodeapi.AllocationRequest{AllocationID: id, Generation: 1, Namespace: "default", JobName: "web", GroupName: "app"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -170,7 +170,7 @@ func TestRevokeStaleWorkloadCredentials(t *testing.T) {
 		t.Fatal("widening api_access revoked a running allocation's workload token")
 	}
 
-	writer, err := s.apiAccessToken(ctx, &spec.APIAccessSpec{Scope: spec.APIAccessCluster, Access: spec.APIAccessWrite}, &api.AllocationRequest{AllocationID: "kept", Generation: 2, Namespace: "default", JobName: "web", GroupName: "app"})
+	writer, err := s.apiAccessToken(ctx, &spec.APIAccessSpec{Scope: spec.APIAccessCluster, Access: spec.APIAccessWrite}, &nodeapi.AllocationRequest{AllocationID: "kept", Generation: 2, Namespace: "default", JobName: "web", GroupName: "app"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +206,7 @@ func TestRevokeStaleWorkloadCredentials(t *testing.T) {
 
 func TestAPIAccessTokenNone(t *testing.T) {
 	s := &Server{}
-	token, err := s.apiAccessToken(context.Background(), nil, &api.AllocationRequest{Namespace: "default"})
+	token, err := s.apiAccessToken(context.Background(), nil, &nodeapi.AllocationRequest{Namespace: "default"})
 	if err != nil {
 		t.Fatalf("disabled api access: %v", err)
 	}

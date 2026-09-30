@@ -28,7 +28,7 @@ Trellis is experimental and pre-1.0. Prefer a clean current design over speculat
 
 Respect these boundaries when changing orchestrator code:
 
-- `orchestrator/internal/api`: wire-compatible JSON structures.
+- `orchestrator/api`: public operator-API wire types. `orchestrator/internal/nodeapi`: node-to-node wire types.
 - `orchestrator/internal/spec`: job authoring decode, canonical spec types, validation, defaults, and execution hashing.
 - `orchestrator/internal/server`: domain state, HTTP handlers, scheduling, reconciliation, allocation queries, metrics, and secret delivery.
 - `orchestrator/internal/agent`: node-side execution and local reconciliation.
@@ -39,7 +39,7 @@ Respect these boundaries when changing orchestrator code:
 - `orchestrator/internal/catalog`: healthy service endpoint index.
 - `orchestrator/internal/health` and `orchestrator/internal/lifecycle`: health and allocation lifecycle semantics.
 - `orchestrator/internal/secrets` and `orchestrator/internal/auth`: secret storage/delivery and authorization.
-- `orchestrator/internal/client`: HTTP clients used by first-party consumers.
+- `orchestrator/client`: the public Go client for the operator API, used by `trellisctl`, `trellis-proxy-sync`, and external consumers. `orchestrator/internal/client`: the node-internal agent and node clients. `orchestrator/internal/transport`: their shared HTTP transport.
 
 Do not blur durable desired state with renewable observations. Allocation lifecycle and health are separate concepts.
 
@@ -49,7 +49,7 @@ Raft-backed mutations must be deterministic. Do not make FSM application depend 
 
 ## Go changes
 
-The Go module lives in `orchestrator/` and targets the version declared in `orchestrator/go.mod`.
+The Go module `github.com/overfold/trellis` is rooted at the repository (`go.mod` at the root) and targets the version declared there; its code lives in `orchestrator/`. External modules import the public `orchestrator/api` and `orchestrator/client` packages, so keep them free of internal types in their exported API and do not make them depend on server-side packages.
 
 - Follow idiomatic Go and existing package structure.
 - Run `gofmt` on modified Go files.
@@ -59,7 +59,7 @@ The Go module lives in `orchestrator/` and targets the version declared in `orch
 - Prefer focused tests beside the package being changed.
 - Do not weaken, delete, or broadly skip tests merely to make a change pass.
 
-When changing public wire behavior, update the relevant server handler, `internal/api` types, `internal/client` behavior, tests, and `docs/developer/api.md` together.
+When changing public wire behavior, update the relevant server handler, `api` types, `client` behavior, `trellisctl`, tests, and `docs/developer/api.md` together.
 
 When changing manifest semantics, update `internal/spec`, validation/defaulting, tests, generated schemas, `docs/public/job-specification.md`, and affected examples together.
 

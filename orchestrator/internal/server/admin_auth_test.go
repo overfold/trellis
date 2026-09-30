@@ -9,7 +9,7 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/overfold/trellis/internal/storage"
+	"github.com/overfold/trellis/orchestrator/internal/storage"
 )
 
 func encodedAdministratorPublicKey(t *testing.T) (ed25519.PublicKey, string) {

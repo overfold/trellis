@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -9,10 +10,9 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/client"
-	"github.com/overfold/trellis/internal/lifecycle"
-	"github.com/overfold/trellis/internal/spec"
+	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/client"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 	"github.com/spf13/cobra"
 )
 
@@ -71,11 +71,15 @@ func NewJobsApplyCmd() *cobra.Command {
 			if err := ensureActiveNamespace(job); err != nil {
 				return err
 			}
-			serverClient, err := jobClient(job.Namespace)
+			serverClient, err := apiClient(job.Namespace)
 			if err != nil {
 				return err
 			}
-			jobPlan, err := serverClient.PlanJob(cmd.Context(), job)
+			rawSpec, err := json.Marshal(job)
+			if err != nil {
+				return fmt.Errorf("encode job: %w", err)
+			}
+			jobPlan, err := serverClient.PlanJob(cmd.Context(), rawSpec)
 			if err != nil {
 				return err
 			}
@@ -91,10 +95,15 @@ func NewJobsApplyCmd() *cobra.Command {
 				}
 				return nil
 			}
-			// Apply only if the job is still at the version this plan was
-			// computed against; a concurrent apply makes the server reject it.
+			// Apply only if the job is still the incarnation and version this
+			// plan was computed against; a concurrent apply, or a delete and
+			// recreate, makes the server reject it.
 			expectedVersion := jobPlan.BaseVersion
-			applied, err := serverClient.SubmitJob(cmd.Context(), job, &expectedVersion)
+			applied, err := serverClient.ApplyJob(cmd.Context(), &api.JobRegistrationRequest{
+				Spec:                rawSpec,
+				ExpectedVersion:     &expectedVersion,
+				ExpectedIncarnation: jobPlan.BaseIncarnation,
+			})
 			if err != nil {
 				var httpErr *client.HTTPError
 				if errors.As(err, &httpErr) && httpErr.Status == http.StatusConflict {
@@ -150,7 +159,7 @@ func NewJobsListCmd() *cobra.Command {
 			if config.Output == "json" {
 				return writeJSON(cmd.OutOrStdout(), jobs)
 			}
-			if len(*jobs) == 0 {
+			if len(jobs) == 0 {
 				_, err = fmt.Fprintln(cmd.OutOrStdout(), "No jobs")
 				return err
 			}
@@ -158,7 +167,7 @@ func NewJobsListCmd() *cobra.Command {
 			if _, err := fmt.Fprintln(w, "Name\tState\tDesired\tRunning\tHealthy\tRevision"); err != nil {
 				return err
 			}
-			for _, job := range *jobs {
+			for _, job := range jobs {
 				if _, err := fmt.Fprintf(w, "%s\t%s\t%d\t%d\t%d\t%d\n", job.Name, jobState(&job), job.Desired, job.Running, job.Healthy, job.Revision); err != nil {
 					return err
 				}
@@ -318,34 +327,36 @@ func ensureActiveNamespace(job *spec.JobSpec) error {
 // namespaceClient returns a client for the selected namespace. Without
 // --namespace or a context namespace, a namespace-scoped credential selects
 // its own namespace; a cluster-scoped credential must name one.
-func namespaceClient(ctx context.Context) (*client.ServerClient, error) {
+func namespaceClient(ctx context.Context) (*client.Client, error) {
 	if config.Namespace != "" {
-		return jobClient(config.Namespace)
+		return apiClient(config.Namespace)
 	}
-	tlsCfg, err := buildCLITLSConfig()
+	serverClient, err := apiClient("")
 	if err != nil {
-		return nil, fmt.Errorf("build TLS config: %w", err)
+		return nil, err
 	}
-	info, err := client.NewServerClient(config.ClusterToken, config.ServerAddr, tlsCfg).CredentialInfo(ctx)
+	info, err := serverClient.CredentialInfo(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("select namespace: %w", err)
 	}
 	if info.Scope != "namespace" || info.Namespace == "" {
 		return nil, fmt.Errorf("--namespace is required with a %s-scoped credential", info.Scope)
 	}
-	return jobClient(info.Namespace)
+	return apiClient(info.Namespace)
 }
 
-func jobClient(namespace string) (*client.ServerClient, error) {
+// apiClient returns a client authenticated with the selected credential. The
+// namespace may be empty for cluster-scoped operations.
+func apiClient(namespace string) (*client.Client, error) {
 	tlsCfg, err := buildCLITLSConfig()
 	if err != nil {
 		return nil, fmt.Errorf("build TLS config: %w", err)
 	}
-	return client.NewNamespaceServerClient(config.ClusterToken, config.ServerAddr, namespace, tlsCfg), nil
+	return client.New(client.Config{Address: config.ServerAddr, Namespace: namespace, Token: config.ClusterToken, TLSConfig: tlsCfg})
 }
 
 func printJobStatus(w io.Writer, status *api.JobStatusResponse) error {
-	if _, err := fmt.Fprintf(w, "Job: %s\nVersion: %d\nRevision: %d\nState: %s\nDesired: %d\nRunning: %d\nHealthy: %d\n", status.Name, status.Version, status.Revision, jobState(status), status.Desired, status.Running, status.Healthy); err != nil {
+	if _, err := fmt.Fprintf(w, "Job: %s\nIncarnation: %s\nVersion: %d\nRevision: %d\nState: %s\nDesired: %d\nRunning: %d\nHealthy: %d\n", status.Name, status.Incarnation, status.Version, status.Revision, jobState(status), status.Desired, status.Running, status.Healthy); err != nil {
 		return err
 	}
 	if len(status.Allocations) == 0 {
@@ -507,10 +518,10 @@ func jobReady(status *api.JobStatusResponse) bool {
 		if a.JobRevision != status.Revision || a.Draining {
 			continue
 		}
-		if a.Phase == lifecycle.PhaseRunning {
+		if a.Phase == api.PhaseRunning {
 			currentRunning++
 		}
-		if a.Phase == lifecycle.PhaseRunning && a.Health == lifecycle.HealthHealthy {
+		if a.Phase == api.PhaseRunning && a.Health == api.HealthHealthy {
 			currentHealthy++
 		}
 	}

@@ -14,10 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/auth"
-	"github.com/overfold/trellis/internal/execstream"
+	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/internal/adminsign"
+	"github.com/overfold/trellis/orchestrator/internal/execstream"
 )
 
 // serveExecTestStream answers exec upgrade requests by accepting them and
@@ -44,7 +43,7 @@ func serveExecTestStream(t *testing.T, check func(*http.Request), serve func(*ex
 	return server
 }
 
-func TestServerClientExecStream(t *testing.T) {
+func TestClientExecStream(t *testing.T) {
 	server := serveExecTestStream(t, func(r *http.Request) {
 		request, err := execstream.DecodeRequest(r.URL.Query())
 		if err != nil {
@@ -77,7 +76,7 @@ func TestServerClientExecStream(t *testing.T) {
 		_ = writer.WriteJSON(execstream.FrameExit, api.ExecExit{ExitCode: 5})
 	})
 
-	stream, err := NewNamespaceServerClient("token", server.URL, "default", nil).Exec(context.Background(), "alloc-1", api.ExecRequest{
+	stream, err := mustNew(t, Config{Address: server.URL, Token: "token", Namespace: "default"}).Exec(context.Background(), "alloc-1", api.ExecRequest{
 		Task: "web", Command: []string{"/bin/sh", "-c", "cat"}, TTY: true, Stdin: true, Term: "xterm-256color", Cols: 120, Rows: 32,
 	})
 	if err != nil {
@@ -100,7 +99,7 @@ func TestServerClientExecStream(t *testing.T) {
 	}
 }
 
-func TestServerClientExecStreamEndings(t *testing.T) {
+func TestClientExecStreamEndings(t *testing.T) {
 	tests := []struct {
 		name  string
 		serve func(*execstream.Writer)
@@ -116,7 +115,7 @@ func TestServerClientExecStreamEndings(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			server := serveExecTestStream(t, nil, func(_ *execstream.Reader, writer *execstream.Writer) { tt.serve(writer) })
-			stream, err := NewNamespaceServerClient("token", server.URL, "default", nil).Exec(context.Background(), "alloc-1", api.ExecRequest{Command: []string{"true"}})
+			stream, err := mustNew(t, Config{Address: server.URL, Token: "token", Namespace: "default"}).Exec(context.Background(), "alloc-1", api.ExecRequest{Command: []string{"true"}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -130,7 +129,7 @@ func TestServerClientExecStreamEndings(t *testing.T) {
 	}
 }
 
-func TestServerClientExecStreamClosesWithContext(t *testing.T) {
+func TestClientExecStreamClosesWithContext(t *testing.T) {
 	closed := make(chan struct{})
 	server := serveExecTestStream(t, nil, func(reader *execstream.Reader, _ *execstream.Writer) {
 		if _, err := reader.Next(); err == nil {
@@ -139,7 +138,7 @@ func TestServerClientExecStreamClosesWithContext(t *testing.T) {
 		close(closed)
 	})
 	ctx, cancel := context.WithCancel(context.Background())
-	stream, err := NewNamespaceServerClient("token", server.URL, "default", nil).Exec(ctx, "alloc-1", api.ExecRequest{Command: []string{"sh"}})
+	stream, err := mustNew(t, Config{Address: server.URL, Token: "token", Namespace: "default"}).Exec(ctx, "alloc-1", api.ExecRequest{Command: []string{"sh"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +151,7 @@ func TestServerClientExecStreamClosesWithContext(t *testing.T) {
 	}
 }
 
-func TestServerClientExecSignsAdministratorUpgrade(t *testing.T) {
+func TestClientExecSignsAdministratorUpgrade(t *testing.T) {
 	publicKey, privateKey, err := ed25519.GenerateKey(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -162,9 +161,9 @@ func TestServerClientExecSignsAdministratorUpgrade(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(api.AdministratorChallengeResponse{Challenge: "challenge-1"})
 			return
 		}
-		signature, err := base64.RawURLEncoding.DecodeString(r.Header.Get(auth.AdministratorSignatureHeader))
-		payload := auth.AdministratorSigningPayload("challenge-1", http.MethodGet, r.URL.RequestURI(), nil)
-		if err != nil || r.Header.Get(auth.AdministratorChallengeHeader) != "challenge-1" || !ed25519.Verify(publicKey, payload, signature) {
+		signature, err := base64.RawURLEncoding.DecodeString(r.Header.Get(adminsign.SignatureHeader))
+		payload := adminsign.Payload("challenge-1", http.MethodGet, r.URL.RequestURI(), nil)
+		if err != nil || r.Header.Get(adminsign.ChallengeHeader) != "challenge-1" || !ed25519.Verify(publicKey, payload, signature) {
 			http.Error(w, "bad signature", http.StatusUnauthorized)
 			return
 		}
@@ -177,10 +176,7 @@ func TestServerClientExecSignsAdministratorUpgrade(t *testing.T) {
 	}))
 	defer server.Close()
 
-	serverClient := NewNamespaceServerClient("", server.URL, "default", nil)
-	if err := serverClient.UseAdministratorKey(privateKey); err != nil {
-		t.Fatal(err)
-	}
+	serverClient := mustNew(t, Config{Address: server.URL, Namespace: "default", AdministratorKey: privateKey})
 	stream, err := serverClient.Exec(context.Background(), "alloc-1", api.ExecRequest{Command: []string{"id"}})
 	if err != nil {
 		t.Fatal(err)
@@ -191,7 +187,7 @@ func TestServerClientExecSignsAdministratorUpgrade(t *testing.T) {
 	}
 }
 
-func TestServerClientExecErrorExposesStatusAndMessage(t *testing.T) {
+func TestClientExecErrorExposesStatusAndMessage(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -199,44 +195,12 @@ func TestServerClientExecErrorExposesStatusAndMessage(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := NewNamespaceServerClient("token", server.URL, "default", nil).Exec(context.Background(), "alloc-1", api.ExecRequest{Command: []string{"true"}})
+	_, err := mustNew(t, Config{Address: server.URL, Token: "token", Namespace: "default"}).Exec(context.Background(), "alloc-1", api.ExecRequest{Command: []string{"true"}})
 	var httpErr *HTTPError
 	if !errors.As(err, &httpErr) {
 		t.Fatalf("exec error = %v, want *HTTPError", err)
 	}
 	if httpErr.Status != http.StatusServiceUnavailable || httpErr.Message() != "node agent unavailable: agent is shutting down" {
 		t.Fatalf("status = %d, message = %q", httpErr.Status, httpErr.Message())
-	}
-}
-
-func TestHTTPErrorMessageFallsBackToBody(t *testing.T) {
-	for body, want := range map[string]string{
-		"plain failure\n":      "plain failure",
-		`{"code":"x"}`:         `{"code":"x"}`,
-		`{"message":"reason"}`: "reason",
-	} {
-		if got := (&HTTPError{Status: http.StatusBadGateway, Body: []byte(body)}).Message(); got != want {
-			t.Fatalf("Message() for %q = %q, want %q", body, got, want)
-		}
-	}
-}
-
-func TestAgentClientNetworkPlanTransportUsesContextDeadline(t *testing.T) {
-	client := NewAgentClient("token", nil)
-	regularClient := client.clientFor(uuid.New(), 30*time.Second)
-	regular, ok := regularClient.client.Transport.(*http.Transport)
-	if !ok {
-		t.Fatalf("regular transport type = %T", regularClient.client.Transport)
-	}
-	networkPlanClient := client.clientFor(uuid.New(), 0)
-	networkPlans, ok := networkPlanClient.client.Transport.(*http.Transport)
-	if !ok {
-		t.Fatalf("network-plan transport type = %T", networkPlanClient.client.Transport)
-	}
-	if regular.ResponseHeaderTimeout != 30*time.Second {
-		t.Fatalf("regular response header timeout = %s, want 30s", regular.ResponseHeaderTimeout)
-	}
-	if networkPlans.ResponseHeaderTimeout != 0 {
-		t.Fatalf("network-plan response header timeout = %s, want context-governed zero", networkPlans.ResponseHeaderTimeout)
 	}
 }

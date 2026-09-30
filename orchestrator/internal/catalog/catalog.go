@@ -4,7 +4,8 @@ package catalog
 import (
 	"sync"
 
-	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 )
 
 // ServiceInstance describes one discoverable allocation endpoint.
@@ -102,10 +103,10 @@ type ListFilter struct {
 // List returns internal discovery records. Filtering is intentionally kept
 // independent of any public "service" resource so it can be reused by DNS and
 // other discovery implementations.
-func (c *ServiceCatalog) List(namespace string, filter *ListFilter) []api.ServiceEntry {
+func (c *ServiceCatalog) List(namespace string, filter *ListFilter) []nodeapi.ServiceEntry {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	var result []api.ServiceEntry
+	var result []nodeapi.ServiceEntry
 	for ns, instances := range c.services {
 		if namespace != "" && ns != namespace {
 			continue
@@ -117,7 +118,7 @@ func (c *ServiceCatalog) List(namespace string, filter *ListFilter) []api.Servic
 			if filter != nil && filter.Label != "" && !matchLabel(inst.Labels, filter.Label) {
 				continue
 			}
-			result = append(result, api.ServiceEntry{
+			result = append(result, nodeapi.ServiceEntry{
 				ID:        inst.ID,
 				Job:       inst.Job,
 				Group:     inst.Group,

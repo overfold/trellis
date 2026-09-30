@@ -9,12 +9,12 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/overfold/trellis/internal/api"
-	"github.com/overfold/trellis/internal/client"
-	"github.com/overfold/trellis/internal/network"
-	"github.com/overfold/trellis/internal/runtime"
-	"github.com/overfold/trellis/internal/spec"
-	"github.com/overfold/trellis/internal/storage"
+	"github.com/overfold/trellis/orchestrator/internal/client"
+	"github.com/overfold/trellis/orchestrator/internal/network"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
+	"github.com/overfold/trellis/orchestrator/internal/runtime"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/storage"
 )
 
 // recoveringNetworkManager records attachments by allocation ID the way the
@@ -97,7 +97,7 @@ func (m *recoveringNetworkManager) isAttached(id string) bool {
 	return m.attached[id]
 }
 
-func wireGuardTestRequest() *api.AllocationRequest {
+func wireGuardTestRequest() *nodeapi.AllocationRequest {
 	request := operationTestRequest()
 	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard}}}
 	request.NetworkPlan = &network.Plan{}
