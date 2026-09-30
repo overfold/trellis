@@ -190,6 +190,9 @@ func TestRestoreDesiredKeepsRuntimeStateAndRequiresFreshTarget(t *testing.T) {
 	snapshot := &DesiredSnapshot{
 		Jobs:                     map[string][]byte{jobKey: jobValue},
 		NetworkPortRegistrations: map[string][]byte{"acme": []byte(`{"namespace":"acme","slot":7}`)},
+		NetworkSubnetRegistrations: map[string][]byte{
+			"acme/11111111-1111-1111-1111-111111111111": []byte(`{"namespace":"acme","node_id":"11111111-1111-1111-1111-111111111111","index":3}`),
+		},
 	}
 	if err := store.RestoreDesired("new", snapshot); err != nil {
 		t.Fatal(err)
@@ -198,10 +201,11 @@ func TestRestoreDesiredKeepsRuntimeStateAndRequiresFreshTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 3 ||
+	if len(all) != 4 ||
 		all["trellis/new/nodes/local"] == nil ||
 		all["trellis/new/jobs/"+jobKey] == nil ||
-		all["trellis/new/network-port-registrations/acme"] == nil {
+		all["trellis/new/network-port-registrations/acme"] == nil ||
+		all["trellis/new/network-subnet-registrations/acme/11111111-1111-1111-1111-111111111111"] == nil {
 		t.Fatalf("unexpected restored state: %#v", all)
 	}
 	if err := store.RestoreDesired("new", snapshot); err == nil {
@@ -236,6 +240,26 @@ func TestRestoreDesiredRejectsInvalidSnapshotWithoutWriting(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("invalid restore wrote state: %#v", entries)
+	}
+}
+
+func TestValidateDesiredSnapshotRejectsInvalidNetworkSubnetRegistrations(t *testing.T) {
+	node := "11111111-1111-1111-1111-111111111111"
+	other := "22222222-2222-2222-2222-222222222222"
+	for name, registrations := range map[string]map[string][]byte{
+		"negative index": {"acme/" + node: []byte(`{"namespace":"acme","node_id":"` + node + `","index":-1}`)},
+		"key mismatch":   {"acme/" + other: []byte(`{"namespace":"acme","node_id":"` + node + `","index":0}`)},
+		"missing node":   {"acme/00000000-0000-0000-0000-000000000000": []byte(`{"namespace":"acme","index":0}`)},
+		"shared index": {
+			"acme/" + node:  []byte(`{"namespace":"acme","node_id":"` + node + `","index":2}`),
+			"acme/" + other: []byte(`{"namespace":"acme","node_id":"` + other + `","index":2}`),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidateDesiredSnapshot(&DesiredSnapshot{NetworkSubnetRegistrations: registrations}, nil); err == nil {
+				t.Fatal("expected invalid network subnet registration to be rejected")
+			}
+		})
 	}
 }
 

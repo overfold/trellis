@@ -33,13 +33,15 @@ type RaftStore struct {
 // relative to their state prefixes so a backup can be restored into a freshly
 // bootstrapped cluster with a different name. Volume registrations preserve
 // locality metadata only; volume bytes remain external to the backup. Namespace
-// network port registrations preserve stable WireGuard pathway assignments.
+// network port and subnet registrations preserve stable WireGuard pathway
+// assignments.
 type DesiredSnapshot struct {
-	Jobs                     map[string][]byte `json:"jobs"`
-	JobRevisions             map[string][]byte `json:"job_revisions,omitempty"`
-	Secrets                  map[string][]byte `json:"secrets"`
-	VolumeRegistrations      map[string][]byte `json:"volume_registrations"`
-	NetworkPortRegistrations map[string][]byte `json:"network_port_registrations"`
+	Jobs                       map[string][]byte `json:"jobs"`
+	JobRevisions               map[string][]byte `json:"job_revisions,omitempty"`
+	Secrets                    map[string][]byte `json:"secrets"`
+	VolumeRegistrations        map[string][]byte `json:"volume_registrations"`
+	NetworkPortRegistrations   map[string][]byte `json:"network_port_registrations"`
+	NetworkSubnetRegistrations map[string][]byte `json:"network_subnet_registrations,omitempty"`
 }
 
 // BackupDesired takes a linearizable view of desired state. The barrier makes
