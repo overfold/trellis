@@ -2,6 +2,7 @@ package network
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"slices"
 	"strconv"
@@ -222,7 +223,7 @@ func TestNamespaceNATChainsJumpFirst(t *testing.T) {
 	}
 	for chain, want := range map[string][]string{
 		"nat/PREROUTING":  {"-m addrtype --dst-type LOCAL -j TRELLIS-PORTS", "-m addrtype --dst-type LOCAL -j DOCKER"},
-		"nat/OUTPUT":      {"-m addrtype --dst-type LOCAL ! -d 127.0.0.0/8 -j TRELLIS-PORTS"},
+		"nat/OUTPUT":      {"! -d 127.0.0.0/8 -m addrtype --dst-type LOCAL -j TRELLIS-PORTS"},
 		"nat/POSTROUTING": {"-j TRELLIS-POSTROUTING", "-s 172.17.0.0/16 ! -o docker0 -j MASQUERADE"},
 	} {
 		if !slices.Equal(model.chains[chain], want) {
@@ -372,4 +373,86 @@ func TestAttachRejectsInvalidPortMappings(t *testing.T) {
 	if len(runner.commands) != 0 {
 		t.Fatalf("invalid ports reached the host: %q", runner.commands)
 	}
+}
+
+func TestNamespaceJumpsAlreadyFirstAreNotRepositioned(t *testing.T) {
+	model := newIPTablesModel()
+	manager := NewWireGuardManager(t.TempDir())
+	manager.run = model
+	if err := manager.reconcileFirewall(context.Background(), "tb-acme", "tw-acme", "10.42.1.0/24", "10.42.1.1", 0); err != nil {
+		t.Fatal(err)
+	}
+	model.commands = nil
+	if err := manager.reconcileFirewall(context.Background(), "tb-acme", "tw-acme", "10.42.1.0/24", "10.42.1.1", 0); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range model.commands {
+		if strings.Contains(command, " -D ") || strings.Contains(command, " -I PREROUTING") || strings.Contains(command, " -I OUTPUT") || strings.Contains(command, " -I POSTROUTING") || strings.Contains(command, " -I FORWARD") || strings.Contains(command, " -I INPUT") {
+			t.Fatalf("reconciliation repositioned a jump that was already first: %q", command)
+		}
+	}
+	if model.outputs == 0 {
+		t.Fatal("reconciliation did not inspect jump positions")
+	}
+}
+
+func TestAttachRollbackBeforePublishingPortsConverges(t *testing.T) {
+	model := newIPTablesModel()
+	manager, err := NewAutomatedWireGuardManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.netnsDir = t.TempDir()
+	manager.run = &failingModel{iptablesModel: model, fail: "ip netns add alloc-web"}
+	_, err = manager.Attach(context.Background(), AttachRequest{
+		Namespace: "acme", Network: "acme", AllocationID: "alloc-web",
+		Plan:  Plan{CIDR: "10.42.1.0/24", Gateway: "10.42.1.1", WireGuardAddress: "169.254.0.1/32", ListenPort: 51917},
+		Ports: []PortMapping{{HostPort: 80, ContainerPort: 8080}},
+	})
+	if err == nil || strings.Contains(err.Error(), "roll back") {
+		t.Fatalf("Attach() error = %v, want the injected failure with a clean rollback", err)
+	}
+	assertAttachments(t, manager)
+	for chain := range model.chains {
+		if strings.Contains(chain, "TRELLIS") {
+			t.Fatalf("%s survived the rolled-back attach", chain)
+		}
+	}
+}
+
+func TestUnpublishPortsToleratesMissingChains(t *testing.T) {
+	model := newIPTablesModel()
+	manager := NewWireGuardManager(t.TempDir())
+	manager.run = model
+	// Neither TRELLIS-PORTS nor the allocation chain exists.
+	if err := manager.unpublishPorts(context.Background(), "alloc-web"); err != nil {
+		t.Fatalf("unpublishPorts() without chains = %v", err)
+	}
+	if err := manager.reconcileFirewall(context.Background(), "tb-acme", "tw-acme", "10.42.1.0/24", "10.42.1.1", 0); err != nil {
+		t.Fatal(err)
+	}
+	// TRELLIS-PORTS exists, but the allocation chain was never created.
+	if err := manager.unpublishPorts(context.Background(), "alloc-web"); err != nil {
+		t.Fatalf("unpublishPorts() without the allocation chain = %v", err)
+	}
+	// A retried removal after the nat chains are gone converges.
+	delete(model.chains, "nat/"+portsChain)
+	model.chains["nat/PREROUTING"] = nil
+	model.chains["nat/OUTPUT"] = nil
+	if err := manager.removeChains(context.Background()); err != nil {
+		t.Fatalf("removeChains() after partial removal = %v", err)
+	}
+}
+
+// failingModel fails one exact command and otherwise runs the model.
+type failingModel struct {
+	*iptablesModel
+	fail string
+}
+
+func (m *failingModel) Run(ctx context.Context, name string, args ...string) error {
+	if name+" "+strings.Join(args, " ") == m.fail {
+		return errors.New("injected failure")
+	}
+	return m.iptablesModel.Run(ctx, name, args...)
 }

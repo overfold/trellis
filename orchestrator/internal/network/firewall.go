@@ -40,7 +40,7 @@ var chainJumps = []chainJump{
 	{parent: "FORWARD", chain: forwardChain},
 	{parent: "INPUT", chain: inputChain},
 	{table: "nat", parent: "PREROUTING", chain: portsChain, match: []string{"-m", "addrtype", "--dst-type", "LOCAL"}},
-	{table: "nat", parent: "OUTPUT", chain: portsChain, match: []string{"-m", "addrtype", "--dst-type", "LOCAL", "!", "-d", "127.0.0.0/8"}},
+	{table: "nat", parent: "OUTPUT", chain: portsChain, match: []string{"!", "-d", "127.0.0.0/8", "-m", "addrtype", "--dst-type", "LOCAL"}},
 	{table: "nat", parent: "POSTROUTING", chain: postroutingChain},
 }
 
@@ -161,14 +161,32 @@ func (m *WireGuardManager) ensureChain(ctx context.Context, table, chain string)
 	return nil
 }
 
+// outputRunner is a commandRunner that can also return a command's output.
+type outputRunner interface {
+	Output(context.Context, string, ...string) (string, error)
+}
+
 // ensureJumpChain creates a Trellis-owned chain and makes its jump the first
 // rule of a built-in chain, so host rules that accept traffic earlier cannot
-// bypass Trellis isolation.
+// bypass Trellis isolation. A jump that is already first is left in place:
+// repositioning deletes it briefly, and while a nat jump is missing new
+// connections to published ports are not forwarded.
 func (m *WireGuardManager) ensureJumpChain(ctx context.Context, jump chainJump) error {
 	if err := m.ensureChain(ctx, jump.table, jump.chain); err != nil {
 		return err
 	}
 	rule := append(append([]string{jump.parent}, jump.match...), "-j", jump.chain)
+	if runner, ok := m.run.(outputRunner); ok {
+		args := []string{"-S", jump.parent, "1"}
+		if jump.table != "" {
+			args = append([]string{"-t", jump.table}, args...)
+		}
+		// iptables prints the rule in its canonical option order; a
+		// differently printed jump is simply repositioned below.
+		if first, err := runner.Output(ctx, "iptables", args...); err == nil && strings.TrimSpace(first) == "-A "+strings.Join(rule, " ") {
+			return nil
+		}
+	}
 	if m.iptables(ctx, jump.table, append([]string{"-C"}, rule...)...) == nil {
 		if err := m.iptables(ctx, jump.table, append([]string{"-D"}, rule...)...); err != nil {
 			return fmt.Errorf("reposition Trellis %s chain: %w", jump.parent, err)
@@ -206,21 +224,23 @@ func (m *WireGuardManager) removeChains(ctx context.Context) error {
 	return nil
 }
 
-const noChain = "No chain/target/match by that name"
+// missingChain lists messages iptables reports for a chain, or a jump
+// target, that does not exist.
+var missingChain = []string{"No chain/target/match by that name", "Couldn't load target", "does not exist"}
 
 // removeChain flushes and deletes a Trellis-owned chain that nothing jumps to
 // any longer, tolerating a chain that is already gone.
 func (m *WireGuardManager) removeChain(ctx context.Context, table, chain string) error {
 	if err := m.iptables(ctx, table, "-F", chain); err != nil {
 		inspectErr := m.iptables(ctx, table, "-L", chain, "-n")
-		absent := explicitAbsence(err, noChain) || explicitAbsence(inspectErr, noChain)
+		absent := explicitAbsence(err, missingChain...) || explicitAbsence(inspectErr, missingChain...)
 		if ctx.Err() != nil || !absent {
 			return fmt.Errorf("flush Trellis chain %s: %w", chain, err)
 		}
 	}
 	if err := m.iptables(ctx, table, "-X", chain); err != nil {
 		inspectErr := m.iptables(ctx, table, "-L", chain, "-n")
-		absent := explicitAbsence(err, noChain) || explicitAbsence(inspectErr, noChain)
+		absent := explicitAbsence(err, missingChain...) || explicitAbsence(inspectErr, missingChain...)
 		if ctx.Err() != nil || !absent {
 			if inspectErr != nil {
 				return fmt.Errorf("delete Trellis chain %s: %w (verify absence: %v)", chain, err, inspectErr)
@@ -231,13 +251,15 @@ func (m *WireGuardManager) removeChain(ctx context.Context, table, chain string)
 	return nil
 }
 
-// deleteRule deletes a rule, tolerating a rule or chain that is already gone.
+// deleteRule deletes a rule, tolerating a rule, its chain, or the chain it
+// jumps to already being gone; a jump cannot exist without its target.
 func (m *WireGuardManager) deleteRule(ctx context.Context, table string, args ...string) error {
 	if err := m.iptables(ctx, table, append([]string{"-D"}, args...)...); err != nil {
 		inspectErr := m.iptables(ctx, table, append([]string{"-C"}, args...)...)
 		var exitErr *exec.ExitError
-		absent := explicitAbsence(err, "Bad rule", "does a matching rule exist", noChain) ||
-			explicitAbsence(inspectErr, "Bad rule", "does a matching rule exist", noChain) ||
+		absentMessages := append([]string{"Bad rule", "does a matching rule exist"}, missingChain...)
+		absent := explicitAbsence(err, absentMessages...) ||
+			explicitAbsence(inspectErr, absentMessages...) ||
 			errors.As(inspectErr, &exitErr) && exitErr.ExitCode() == 1
 		if ctx.Err() == nil && absent {
 			return nil

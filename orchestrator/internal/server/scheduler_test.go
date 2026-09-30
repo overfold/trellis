@@ -421,6 +421,28 @@ func TestScheduleEnforcesNodePortsAcrossNetworkModes(t *testing.T) {
 	}
 }
 
+func TestScheduleKeepsWireGuardPortRangeFree(t *testing.T) {
+	a := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000001"), Status: NodeStatusHealthy, WireGuardPortBase: 51820, WireGuardPortCount: 8}
+	b := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000002"), Status: NodeStatusHealthy, WireGuardPortBase: 52820, WireGuardPortCount: 8}
+	for _, tasks := range [][]spec.TaskSpec{
+		{{Name: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard, Ports: []spec.PortSpec{{Port: 8080, HostPort: 51827}}}}},
+		{{Name: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkHost, Ports: []spec.PortSpec{{Port: 51820}}}}},
+	} {
+		placements, diagnostic := schedule(&PlacementIntent{Count: 2, Nodes: []*Node{a, b}, Tasks: tasks})
+		if len(placements) != 1 || placements[0].NodeID != b.ID {
+			t.Fatalf("placements = %#v, want only the node whose WireGuard range excludes the port", placements)
+		}
+		if diagnostic == nil || diagnostic.Reason != "host_port_conflict" {
+			t.Fatalf("diagnostic = %#v, want host_port_conflict", diagnostic)
+		}
+	}
+	// The port just past the range is free.
+	tasks := []spec.TaskSpec{{Name: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkHost, Ports: []spec.PortSpec{{Port: 51828}}}}}
+	if placements := Schedule(&PlacementIntent{Count: 1, Nodes: []*Node{a}, Tasks: tasks}); len(placements) != 1 {
+		t.Fatalf("placements = %#v, want the port after the WireGuard range", placements)
+	}
+}
+
 func TestScheduleStacksReplicasWhenOnlyOneNodeFits(t *testing.T) {
 	a := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000001"), Status: NodeStatusHealthy, CPUAllocatable: 1000}
 	b := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000002"), Status: NodeStatusHealthy, CPUAllocatable: 50}

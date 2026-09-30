@@ -309,8 +309,8 @@ func NewAgent(log *slog.Logger, runtime runtime.ContainerRuntime, health *health
 	return agent
 }
 
-// SetNetworkManager configures allocation networking. It is required before
-// the agent starts tasks that use namespace networking.
+// SetNetworkManager configures allocation networking. Every node has one; it
+// must be set before the agent starts or stops allocations.
 func (a *Agent) SetNetworkManager(manager network.Manager) {
 	a.network = manager
 }
@@ -1596,6 +1596,9 @@ func (a *Agent) launchTask(ctx context.Context, launch *taskLaunch) error {
 		taskPorts = ts.Networking.Ports
 	}
 	for _, p := range taskPorts {
+		if base, count := a.nodeInfo.WireGuardPortBase, a.nodeInfo.WireGuardPortCount; count > 0 && p.NodePort() >= base && p.NodePort() < base+count {
+			return fmt.Errorf("claim node port %d: reserved for namespace WireGuard networks (%d-%d)", p.NodePort(), base, base+count-1)
+		}
 		port, err := a.ports.Claim(p)
 		if err != nil {
 			return fmt.Errorf("claim node port %d: %w", p.NodePort(), err)

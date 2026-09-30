@@ -202,7 +202,7 @@ Each namespace-mode `ports` entry publishes node port `host_port` to `port`, the
 
 **`none`** gives the task only loopback. Use it for batch work that needs no network. API access and published ports require another mode.
 
-`port` and `host_port` must be 1–65535. `port` must be unique within a task. The node port of every entry — `host_port` in namespace mode, `port` in host mode — must be unique across all tasks in the task group, and the scheduler places an allocation only on a node where none of its node ports is held by another allocation, in either mode. Replicas publishing or reserving the same node port therefore need distinct nodes, and a rolling replacement needs another node with the port free while old and new allocations overlap.
+`port` and `host_port` must be 1–65535. `port` must be unique within a task. The node port of every entry — `host_port` in namespace mode, `port` in host mode — must be unique across all tasks in the task group, and the scheduler places an allocation only on a node where none of its node ports is held by another allocation, in either mode. Node ports in a node's namespace WireGuard UDP range (`wireguard_port` onward, `51820`–`52075` by default) are reserved for Trellis and never offered to tasks. Replicas publishing or reserving the same node port therefore need distinct nodes, and a rolling replacement needs another node with the port free while old and new allocations overlap.
 
 ### Resources
 

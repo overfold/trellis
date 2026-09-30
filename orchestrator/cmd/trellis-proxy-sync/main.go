@@ -348,10 +348,7 @@ func selectPort(ports []api.PortMapping, containerPort int) (int, bool) {
 		return containerPort, containerPort > 0
 	}
 	if containerPort == 0 {
-		if len(ports) == 0 || ports[0].ContainerPort <= 0 {
-			return 0, false
-		}
-		return ports[0].ContainerPort, true
+		return ports[0].ContainerPort, ports[0].ContainerPort > 0
 	}
 	for _, port := range ports {
 		if port.ContainerPort == containerPort {

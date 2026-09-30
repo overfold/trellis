@@ -50,6 +50,14 @@ func (execRunner) Run(ctx context.Context, name string, args ...string) error {
 	return nil
 }
 
+func (execRunner) Output(ctx context.Context, name string, args ...string) (string, error) {
+	out, err := exec.CommandContext(ctx, name, args...).Output()
+	if err != nil {
+		return "", fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
+	}
+	return string(out), nil
+}
+
 // WorkloadDNSAddress is the reserved node-local resolver address injected into workloads.
 const WorkloadDNSAddress = "198.18.0.53"
 

@@ -68,6 +68,18 @@ func (p *PortManager) check(hostPort int) (bool, error) {
 	}
 	_ = listener.Close()
 
+	// Published ports forward UDP too, so a UDP listener also holds the port.
+	conn, err := net.ListenPacket("udp", addr)
+	if err != nil {
+		var errno syscall.Errno
+		if errors.As(err, &errno) && errno == syscall.EADDRINUSE {
+			return true, nil
+		}
+
+		return true, err
+	}
+	_ = conn.Close()
+
 	return false, nil
 }
 

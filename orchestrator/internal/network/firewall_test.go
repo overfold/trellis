@@ -15,14 +15,39 @@ import (
 // assert chain placement and rule order rather than only the issued commands.
 // Filter chains are keyed by name and nat chains by "nat/" and their name.
 type iptablesModel struct {
-	chains map[string][]string
+	chains   map[string][]string
+	commands []string
+	outputs  int
 }
 
 func newIPTablesModel() *iptablesModel {
 	return &iptablesModel{chains: map[string][]string{"INPUT": nil, "FORWARD": nil, "nat/PREROUTING": nil, "nat/OUTPUT": nil, "nat/POSTROUTING": nil}}
 }
 
+// Output supports "iptables [-t TABLE] -S CHAIN N", printing the rule the way
+// iptables does.
+func (m *iptablesModel) Output(_ context.Context, name string, args ...string) (string, error) {
+	m.outputs++
+	table := ""
+	if len(args) >= 2 && args[0] == "-t" {
+		table, args = args[1]+"/", args[2:]
+	}
+	if name != "iptables" || len(args) != 3 || args[0] != "-S" {
+		return "", fmt.Errorf("unsupported output command %s %v", name, args)
+	}
+	rules, exists := m.chains[table+args[1]]
+	if !exists {
+		return "", errors.New("iptables: No chain/target/match by that name")
+	}
+	index, err := strconv.Atoi(args[2])
+	if err != nil || index < 1 || index > len(rules) {
+		return "", errors.New("iptables: Index of deletion too big")
+	}
+	return "-A " + args[1] + " " + rules[index-1] + "\n", nil
+}
+
 func (m *iptablesModel) Run(_ context.Context, name string, args ...string) error {
+	m.commands = append(m.commands, name+" "+strings.Join(args, " "))
 	if name != "iptables" {
 		return nil
 	}
@@ -39,6 +64,14 @@ func (m *iptablesModel) Run(_ context.Context, name string, args ...string) erro
 		return errors.New("iptables: No chain/target/match by that name")
 	}
 	rule := strings.Join(args[2:], " ")
+	// Like iptables, refuse a rule that jumps to a Trellis chain that does
+	// not exist, even when only checking or deleting it.
+	if _, target, ok := strings.Cut(" "+rule, " -j "); ok && strings.HasPrefix(target, "TRELLIS") {
+		name, _, _ := strings.Cut(target, " ")
+		if _, targetExists := m.chains[table+name]; !targetExists {
+			return fmt.Errorf("iptables v1.8.9 (nf_tables): Couldn't load target `%s':No such file or directory", name)
+		}
+	}
 	switch flag {
 	case "-N":
 		if exists {
