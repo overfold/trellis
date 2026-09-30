@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -10,6 +9,7 @@ import (
 
 	"github.com/labstack/echo/v5"
 	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/execstream"
 )
 
 // Handler exposes agent operations through HTTP.
@@ -34,12 +34,7 @@ func (h *Handler) Register(e *echo.Echo) {
 	v1.POST("/network-plans", h.handleNetworkPlan)
 	v1.DELETE("/allocations/:id", h.handleDelete)
 	v1.GET("/allocations/:id/logs", h.handleLogs)
-	v1.POST("/allocations/:id/exec", h.handleExec)
-	v1.POST("/allocations/:id/exec/sessions", h.handleCreateExecSession)
-	v1.POST("/allocations/:id/exec/sessions/:session/input", h.handleExecSessionInput)
-	v1.GET("/allocations/:id/exec/sessions/:session/output", h.handleExecSessionOutput)
-	v1.POST("/allocations/:id/exec/sessions/:session/resize", h.handleExecSessionResize)
-	v1.DELETE("/allocations/:id/exec/sessions/:session", h.handleExecSessionClose)
+	v1.GET("/allocations/:id/exec", h.handleExec)
 	v1.GET("/allocations/:id/metrics", h.handleMetrics)
 }
 
@@ -196,53 +191,39 @@ func (h *Handler) handleDelete(c *echo.Context) error {
 	return c.JSON(http.StatusOK, api.OperationResponse{Code: api.OperationOK, Generation: request.Generation, Epoch: request.Epoch})
 }
 
+// handleExec serves an exec stream. Request errors are ordinary HTTP
+// responses; once the connection is upgraded, the stream reports the
+// process's end with an exit or error frame.
 func (h *Handler) handleExec(c *echo.Context) error {
-	var request api.AgentExecRequest
-	if err := c.Bind(&request); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	if !execstream.IsUpgradeRequest(c.Request()) {
+		return echo.NewHTTPError(http.StatusBadRequest, "exec requires an HTTP/1.1 upgrade to "+execstream.Protocol)
 	}
-	if len(request.Command) == 0 {
-		return echo.NewHTTPError(http.StatusBadRequest, "command is required")
+	request, err := execstream.DecodeAgentRequest(c.QueryParams())
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
-	result, err := h.agent.ExecAllocation(c.Request().Context(), c.Param("id"), request.Task, request.Command)
+	reservation, err := h.agent.ReserveExec(c.Request().Context(), c.Param("id"), request)
 	if err != nil {
 		return execError(err)
 	}
-	return c.JSON(http.StatusOK, result)
-}
-
-func (h *Handler) handleCreateExecSession(c *echo.Context) error {
-	var request api.ExecSessionCreateRequest
-	if err := c.Bind(&request); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
-	}
-	if len(request.Command) == 0 {
-		return echo.NewHTTPError(http.StatusBadRequest, "command is required")
-	}
-	if request.Cols == 0 {
-		request.Cols = 80
-	}
-	if request.Rows == 0 {
-		request.Rows = 24
-	}
-	if request.Cols > 1000 || request.Rows > 1000 {
-		return echo.NewHTTPError(http.StatusBadRequest, "terminal dimensions are too large")
-	}
-	result, err := h.agent.CreateExecSession(c.Request().Context(), c.Param("id"), request.Task, request.Command, request.Term, request.Cols, request.Rows)
+	conn, err := execstream.Accept(c.Response())
 	if err != nil {
-		return execError(err)
+		h.agent.ReleaseExec(reservation)
+		h.agent.log.Warn("accept exec stream", "allocation", c.Param("id"), "error", err)
+		return nil
 	}
-	return c.JSON(http.StatusCreated, result)
+	h.agent.RunExec(conn, reservation)
+	return nil
 }
 
-// execError maps an exec or session-creation failure to its HTTP status.
+// execError maps a rejected exec request to its HTTP status.
 func execError(err error) error {
 	switch {
 	case errors.Is(err, ErrAllocationNotFound):
 		return echo.NewHTTPError(http.StatusNotFound, err.Error())
-	case errors.Is(err, ErrExecTaskRequired):
+	case errors.Is(err, ErrExecTaskRequired), errors.Is(err, ErrInvalidEpoch):
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-	case errors.Is(err, ErrExecutionConflict):
+	case errors.Is(err, ErrExecutionConflict), errors.Is(err, ErrStaleEpoch):
 		return echo.NewHTTPError(http.StatusConflict, err.Error())
 	case errors.Is(err, ErrExecSessionLimit):
 		return echo.NewHTTPError(http.StatusTooManyRequests, err.Error())
@@ -251,72 +232,6 @@ func execError(err error) error {
 	default:
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
-}
-
-func (h *Handler) handleExecSessionInput(c *echo.Context) error {
-	var request api.ExecSessionInputRequest
-	if err := c.Bind(&request); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
-	}
-	data, err := base64.StdEncoding.DecodeString(request.DataBase64)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "data_base64 must contain valid base64")
-	}
-	if len(data) > 64*1024 {
-		return echo.NewHTTPError(http.StatusRequestEntityTooLarge, "terminal input chunk is too large")
-	}
-	if err := h.agent.WriteExecSession(c.Param("id"), c.Param("session"), data); err != nil {
-		if errors.Is(err, ErrExecSessionNotFound) {
-			return echo.NewHTTPError(http.StatusNotFound, err.Error())
-		}
-		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
-	}
-	return c.NoContent(http.StatusNoContent)
-}
-
-func (h *Handler) handleExecSessionOutput(c *echo.Context) error {
-	offset, err := strconv.ParseInt(c.QueryParam("offset"), 10, 64)
-	if c.QueryParam("offset") == "" {
-		offset, err = 0, nil
-	}
-	if err != nil || offset < 0 {
-		return echo.NewHTTPError(http.StatusBadRequest, "offset must be a non-negative integer")
-	}
-	result, err := h.agent.ReadExecSession(c.Param("id"), c.Param("session"), offset)
-	if err != nil {
-		if errors.Is(err, ErrExecSessionNotFound) {
-			return echo.NewHTTPError(http.StatusNotFound, err.Error())
-		}
-		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
-	}
-	return c.JSON(http.StatusOK, result)
-}
-
-func (h *Handler) handleExecSessionResize(c *echo.Context) error {
-	var request api.ExecSessionResizeRequest
-	if err := c.Bind(&request); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
-	}
-	if request.Cols == 0 || request.Rows == 0 || request.Cols > 1000 || request.Rows > 1000 {
-		return echo.NewHTTPError(http.StatusBadRequest, "terminal dimensions must be between 1 and 1000")
-	}
-	if err := h.agent.ResizeExecSession(c.Request().Context(), c.Param("id"), c.Param("session"), request.Cols, request.Rows); err != nil {
-		if errors.Is(err, ErrExecSessionNotFound) {
-			return echo.NewHTTPError(http.StatusNotFound, err.Error())
-		}
-		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
-	}
-	return c.NoContent(http.StatusNoContent)
-}
-
-func (h *Handler) handleExecSessionClose(c *echo.Context) error {
-	if err := h.agent.CloseExecSession(c.Request().Context(), c.Param("id"), c.Param("session")); err != nil {
-		if errors.Is(err, ErrExecSessionNotFound) {
-			return echo.NewHTTPError(http.StatusNotFound, err.Error())
-		}
-		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
-	}
-	return c.NoContent(http.StatusNoContent)
 }
 
 func (h *Handler) handleMetrics(c *echo.Context) error {

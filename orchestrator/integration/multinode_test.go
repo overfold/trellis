@@ -325,7 +325,7 @@ func (h *harness) waitNodes(want int) {
 
 // waitVoters waits until members nodes belong to Raft and voters of them vote.
 // It returns each listed node's control-plane role keyed by node ID.
-func (h *harness) waitVoters(members, voters int) map[string]api.ControlPlaneMembership {
+func (h *harness) waitVoters(members, voters int) map[string]api.ControlPlaneMembership { //nolint:unparam // Both counts keep call sites readable; the suite currently expects three voters.
 	var last map[string]api.ControlPlaneMembership
 	h.eventually(90*time.Second, func() bool {
 		r, e := h.request(h.endpoint(), "GET", "/v1/nodes", nil)
@@ -360,7 +360,7 @@ func (h *harness) isLeader(id string) bool {
 	leader := h.leader()
 	return h.nodeID(leader) == id
 }
-func (h *harness) waitJob(name string, revision, desired int) { //nolint:unparam // The name keeps call sites readable; the suite currently uses one job.
+func (h *harness) waitJob(name string, revision, desired int) {
 	var last []byte
 	converged := false
 	defer func() {

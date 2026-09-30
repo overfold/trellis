@@ -136,7 +136,6 @@ func TestFirstPartyRequestsDecodeStrictly(t *testing.T) {
 		{name: "raft join", body: api.RaftJoinRequest{ServerAddress: "a:8128", RaftAddress: "a:8129"}, dst: &api.RaftJoinRequest{}},
 		{name: "credential", body: api.CredentialCreateRequest{Scope: "namespace", Access: "read", Namespace: "team"}, dst: &api.CredentialCreateRequest{}},
 		{name: "job limits", body: spec.DefaultLimits(), dst: &spec.Limits{}},
-		{name: "exec session", body: api.ExecSessionCreateRequest{Task: "web", Command: []string{"sh"}, Term: "xterm", Cols: 80, Rows: 24}, dst: &api.ExecSessionCreateRequest{}},
 		{name: "backup", body: api.BackupSnapshot{}, dst: &api.BackupSnapshot{}},
 	}
 

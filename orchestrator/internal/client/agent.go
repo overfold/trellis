@@ -10,12 +10,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/execstream"
 	"github.com/overfold/trellis/internal/tlsutil"
 )
 
@@ -198,66 +198,12 @@ func (s *AgentClient) UpdateNetworkPlan(ctx context.Context, nodeID uuid.UUID, a
 	return nil
 }
 
-// ExecAllocation runs a command in an allocation task container via an agent.
-func (s *AgentClient) ExecAllocation(ctx context.Context, nodeID uuid.UUID, address, allocID, task string, command []string) (*api.ExecResponse, error) {
-	request := api.AgentExecRequest{Task: task, Command: command}
-	var response api.AgentExecResponse
-	err := s.operationRequest(ctx, nodeID, http.MethodPost, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(allocID)+"/exec", &request, &response)
-	if err != nil {
-		return nil, fmt.Errorf("exec allocation: %w", err)
-	}
-	return &api.ExecResponse{
-		Stdout:   response.Stdout,
-		Stderr:   response.Stderr,
-		ExitCode: response.ExitCode,
-	}, nil
-}
-
-// CreateExecSession starts an interactive terminal in an allocation task via an agent.
-func (s *AgentClient) CreateExecSession(ctx context.Context, nodeID uuid.UUID, address, allocID string, request *api.ExecSessionCreateRequest) (*api.ExecSessionResponse, error) {
-	var response api.ExecSessionResponse
-	err := s.operationRequest(ctx, nodeID, http.MethodPost, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(allocID)+"/exec/sessions", request, &response)
-	if err != nil {
-		return nil, fmt.Errorf("create exec session: %w", err)
-	}
-	return &response, nil
-}
-
-// WriteExecSession sends terminal input to an allocation task via an agent.
-func (s *AgentClient) WriteExecSession(ctx context.Context, nodeID uuid.UUID, address, allocID, sessionID string, request *api.ExecSessionInputRequest) error {
-	err := s.operationRequest(ctx, nodeID, http.MethodPost, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(allocID)+"/exec/sessions/"+url.PathEscape(sessionID)+"/input", request, nil)
-	if err != nil {
-		return fmt.Errorf("write exec session: %w", err)
-	}
-	return nil
-}
-
-// ReadExecSession reads terminal output from an allocation task via an agent.
-func (s *AgentClient) ReadExecSession(ctx context.Context, nodeID uuid.UUID, address, allocID, sessionID string, offset int64) (*api.ExecSessionOutputResponse, error) {
-	var response api.ExecSessionOutputResponse
-	path := normalizeBaseURL(address) + "/v1/allocations/" + url.PathEscape(allocID) + "/exec/sessions/" + url.PathEscape(sessionID) + "/output?offset=" + strconv.FormatInt(offset, 10)
-	if err := s.operationRequest(ctx, nodeID, http.MethodGet, path, nil, &response); err != nil {
-		return nil, fmt.Errorf("read exec session: %w", err)
-	}
-	return &response, nil
-}
-
-// ResizeExecSession changes terminal dimensions via an agent.
-func (s *AgentClient) ResizeExecSession(ctx context.Context, nodeID uuid.UUID, address, allocID, sessionID string, request *api.ExecSessionResizeRequest) error {
-	err := s.operationRequest(ctx, nodeID, http.MethodPost, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(allocID)+"/exec/sessions/"+url.PathEscape(sessionID)+"/resize", request, nil)
-	if err != nil {
-		return fmt.Errorf("resize exec session: %w", err)
-	}
-	return nil
-}
-
-// CloseExecSession terminates an interactive terminal via an agent.
-func (s *AgentClient) CloseExecSession(ctx context.Context, nodeID uuid.UUID, address, allocID, sessionID string) error {
-	err := s.operationRequest(ctx, nodeID, http.MethodDelete, normalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(allocID)+"/exec/sessions/"+url.PathEscape(sessionID), nil, nil)
-	if err != nil {
-		return fmt.Errorf("close exec session: %w", err)
-	}
-	return nil
+// Exec opens a leader-to-agent exec stream to a new process in an
+// allocation task. The returned connection carries raw exec stream frames
+// and is closed when ctx ends.
+func (s *AgentClient) Exec(ctx context.Context, nodeID uuid.UUID, address, allocID string, request api.AgentExecRequest) (io.ReadWriteCloser, error) {
+	target := normalizeBaseURL(address) + "/v1/allocations/" + url.PathEscape(allocID) + "/exec?" + execstream.EncodeAgentRequest(request).Encode()
+	return s.clientFor(nodeID, 30*time.Second).upgrade(ctx, target)
 }
 
 // AllocationMetrics fetches resource usage for an allocation's tasks from an agent.

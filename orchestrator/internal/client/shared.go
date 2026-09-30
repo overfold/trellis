@@ -12,10 +12,12 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/overfold/trellis/internal/api"
 	"github.com/overfold/trellis/internal/auth"
+	"github.com/overfold/trellis/internal/execstream"
 )
 
 const maxResponseBody = 64 << 20
@@ -84,17 +86,8 @@ func (c *client) requestBody(ctx context.Context, method string, url string, req
 			return fmt.Errorf("constructing request %s: %w", url, err)
 		}
 		request.Header.Set("Content-Type", "application/json")
-		if c.token != "" {
-			request.Header.Set("Authorization", "Bearer "+c.token)
-		}
-		if c.administratorKey != nil {
-			challenge, err := c.administratorChallenge(ctx, url)
-			if err != nil {
-				return err
-			}
-			payload := auth.AdministratorSigningPayload(challenge, method, request.URL.RequestURI(), requestBodyBytes)
-			request.Header.Set(auth.AdministratorChallengeHeader, challenge)
-			request.Header.Set(auth.AdministratorSignatureHeader, base64.RawURLEncoding.EncodeToString(ed25519.Sign(c.administratorKey, payload)))
+		if err := c.authenticate(ctx, request, requestBodyBytes); err != nil {
+			return err
 		}
 
 		response, err := c.client.Do(request)
@@ -123,6 +116,92 @@ func (c *client) requestBody(ctx context.Context, method string, url string, req
 		return nil
 	}
 	return fmt.Errorf("administrator challenge was rejected after retry")
+}
+
+// authenticate adds the client's credentials to request, signing it with a
+// fresh administrator challenge when the client holds the administrator key.
+func (c *client) authenticate(ctx context.Context, request *http.Request, body []byte) error {
+	if c.token != "" {
+		request.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	if c.administratorKey != nil {
+		challenge, err := c.administratorChallenge(ctx, request.URL.String())
+		if err != nil {
+			return err
+		}
+		payload := auth.AdministratorSigningPayload(challenge, request.Method, request.URL.RequestURI(), body)
+		request.Header.Set(auth.AdministratorChallengeHeader, challenge)
+		request.Header.Set(auth.AdministratorSignatureHeader, base64.RawURLEncoding.EncodeToString(ed25519.Sign(c.administratorKey, payload)))
+	}
+	return nil
+}
+
+// upgrade sends a GET request that the server switches to the exec stream
+// protocol and returns the stream. The stream is closed when ctx ends.
+func (c *client) upgrade(ctx context.Context, target string) (io.ReadWriteCloser, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, http.NoBody)
+		if err != nil {
+			return nil, fmt.Errorf("constructing request %s: %w", target, err)
+		}
+		if err := c.authenticate(ctx, request, nil); err != nil {
+			return nil, err
+		}
+		execstream.SetUpgradeHeaders(request)
+		response, err := c.client.Do(request)
+		if err != nil {
+			return nil, fmt.Errorf("executing request %s: %w", target, err)
+		}
+		if response.StatusCode == http.StatusSwitchingProtocols {
+			stream, err := execstream.Upgraded(response)
+			if err != nil {
+				_ = response.Body.Close()
+				return nil, err
+			}
+			return closeWithContext(ctx, stream), nil
+		}
+		body, readErr := io.ReadAll(io.LimitReader(response.Body, maxResponseBody))
+		_ = response.Body.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("read response body: %w", readErr)
+		}
+		if c.administratorKey != nil && attempt == 0 && response.Header.Get(auth.AdministratorChallengeStatusHeader) == auth.AdministratorChallengeInvalid {
+			continue
+		}
+		if !checkStatusCode(response.StatusCode) {
+			return nil, fmt.Errorf("server did not switch to %s (status %d)", execstream.Protocol, response.StatusCode)
+		}
+		return nil, &HTTPError{Status: response.StatusCode, Body: body}
+	}
+	return nil, fmt.Errorf("administrator challenge was rejected after retry")
+}
+
+// contextStream closes its stream when the context it was opened with ends.
+type contextStream struct {
+	io.ReadWriteCloser
+	once   sync.Once
+	closed chan struct{}
+	err    error
+}
+
+func closeWithContext(ctx context.Context, stream io.ReadWriteCloser) io.ReadWriteCloser {
+	wrapped := &contextStream{ReadWriteCloser: stream, closed: make(chan struct{})}
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = wrapped.Close()
+		case <-wrapped.closed:
+		}
+	}()
+	return wrapped
+}
+
+func (s *contextStream) Close() error {
+	s.once.Do(func() {
+		s.err = s.ReadWriteCloser.Close()
+		close(s.closed)
+	})
+	return s.err
 }
 
 func (c *client) administratorChallenge(ctx context.Context, target string) (string, error) {

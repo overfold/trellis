@@ -3,10 +3,13 @@
 package runtime_test
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -372,7 +375,7 @@ func TestContainerdListsPausedContainer(t *testing.T) {
 	// graceful-stop assertion below measures the entrypoint, not Stop.
 	deadline := time.Now().Add(15 * time.Second)
 	for {
-		comm, _, code, execErr := r.ExecOutput(ctx, id, []string{"cat", "/proc/1/comm"})
+		comm, _, code, execErr := execOutput(ctx, r, id, runtime.ExecOptions{Command: []string{"cat", "/proc/1/comm"}})
 		if execErr == nil && code == 0 && strings.TrimSpace(string(comm)) == "nginx" {
 			break
 		}
@@ -451,5 +454,89 @@ func TestContainerdListsContainerWithDeletedTask(t *testing.T) {
 	}
 	if listed := listedContainer(ctx, t, r, cluster, id); listed.Status != runtime.StatusRunning {
 		t.Fatalf("listed container status after restart = %q, want %q", listed.Status, runtime.StatusRunning)
+	}
+}
+
+// lockedWriter lets a test read output while containerd's copy goroutine
+// may still be writing it.
+type lockedWriter struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (w *lockedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+func (w *lockedWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
+
+// execOutput runs a streamed exec process to completion and returns its
+// captured stdout and stderr.
+func execOutput(ctx context.Context, r *runtime.ContainerdRuntime, id string, options runtime.ExecOptions) (string, string, int, error) {
+	var stdout, stderr lockedWriter
+	options.Stdout, options.Stderr = &stdout, &stderr
+	process, err := r.StartExec(ctx, id, options)
+	if err != nil {
+		return "", "", 0, err
+	}
+	select {
+	case <-process.Done():
+	case <-ctx.Done():
+		_ = process.Kill(context.Background())
+		return stdout.String(), stderr.String(), 0, ctx.Err()
+	}
+	code, err := process.ExitCode()
+	return stdout.String(), stderr.String(), code, err
+}
+
+// A streamed exec delivers stdin until its end, separates stdout from
+// stderr, reports the exit status, and runs a TTY process with the requested
+// TERM; Kill ends a process that would otherwise run forever.
+func TestContainerdExecStream(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	r, _, id := newListingE2E(ctx, t, "trellis-e2e-exec-stream", "containerd-e2e-exec-stream")
+
+	stdout, stderr, code, err := execOutput(ctx, r, id, runtime.ExecOptions{
+		Command: []string{"sh", "-c", "cat; echo problem >&2; exit 7"},
+		Stdin:   strings.NewReader("hello from stdin\n"),
+	})
+	if err != nil || code != 7 || stdout != "hello from stdin\n" || stderr != "problem\n" {
+		t.Fatalf("exec = stdout %q, stderr %q, code %d, err %v", stdout, stderr, code, err)
+	}
+
+	stdout, _, code, err = execOutput(ctx, r, id, runtime.ExecOptions{
+		Command: []string{"sh", "-c", "echo $TERM; stty size"},
+		TTY:     true,
+		Term:    "screen",
+		Cols:    91,
+		Rows:    17,
+	})
+	if err != nil || code != 0 || !strings.Contains(stdout, "screen") || !strings.Contains(stdout, "17 91") {
+		t.Fatalf("tty exec = stdout %q, code %d, err %v", stdout, code, err)
+	}
+
+	stdinReader, stdinWriter := io.Pipe()
+	defer func() { _ = stdinWriter.Close() }()
+	process, err := r.StartExec(ctx, id, runtime.ExecOptions{Command: []string{"sleep", "600"}, Stdin: stdinReader})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := process.Kill(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-process.Done():
+	case <-ctx.Done():
+		t.Fatal("killed exec process did not exit")
+	}
+	if code, err := process.ExitCode(); err != nil || code != 137 {
+		t.Fatalf("killed exec exit = %d, %v; want 137", code, err)
 	}
 }

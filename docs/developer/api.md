@@ -42,9 +42,7 @@ The API uses the same resource vocabulary as the [Trellis user model](../public/
 | `DELETE` | `/v1/namespaces/{ns}/allocations/{id}` | Stop one allocation; requires write access. |
 | `GET` | `/v1/namespaces/{ns}/allocations/{id}/events` | Lifecycle event array. |
 | `GET` | `/v1/namespaces/{ns}/allocations/{id}/logs?task=NAME&tail=100&follow=true` | Plain-text logs for one task in an allocation. |
-| `POST` | `/v1/namespaces/{ns}/allocations/{id}/exec` | Run one non-interactive command and capture stdout/stderr; requires write access. |
-| `POST` | `/v1/namespaces/{ns}/allocations/{id}/exec/sessions` | Start an ephemeral interactive TTY session; requires write access. |
-| `POST` / `GET` / `DELETE` | `/v1/namespaces/{ns}/allocations/{id}/exec/sessions/{session}/...` | Write input, read output, resize, or close an interactive TTY session; requires write access. |
+| `GET` | `/v1/namespaces/{ns}/allocations/{id}/exec?command=...` | Upgrade to a bidirectional exec stream (`Upgrade: trellis-exec.v1`) that runs one command; requires write access. See [Exec streams](#exec-streams). |
 | `GET` | `/v1/namespaces/{ns}/allocations/{id}/metrics` | Current per-task CPU and memory usage. |
 | `GET` | `/v1/namespaces/{ns}/events` | Server-sent event stream for one namespace. |
 | `PUT` | `/v1/namespaces/{ns}/secrets/{name}` | Set a secret; requires write access. |
@@ -85,21 +83,52 @@ The job submitted to `POST /v1/namespaces/{ns}/jobs` or `.../jobs/plan` must nam
 
 For allocation logs, `task` selects the task name from the allocation's task group. It may be omitted when the allocation has exactly one task; a multi-task allocation returns `400` until the caller selects one. The allocation ID is the Trellis allocation identity, not an agent/container runtime ID.
 
-Both non-interactive exec and interactive exec sessions create the command with the selected task container's OCI process context: environment variables, user, and working directory are inherited from the task. The command argv is supplied by the caller; Trellis does not invoke a shell implicitly. A one-shot exec captures at most 4 MiB of each of stdout and stderr; further output is discarded. If a background process keeps the command's output open, the result is returned shortly after the command exits with the output captured so far. TTY sessions may additionally set or replace `TERM` from the session request.
+### Exec streams
 
-Interactive exec sessions use the same task-selection rule. Create a session with `POST /v1/namespaces/{ns}/allocations/{id}/exec/sessions` and a body such as `{"task":"web","command":["/bin/sh"],"term":"xterm-256color","cols":120,"rows":32}`. `command` is required; Trellis does not choose a shell for the client. `term` is optional and, when present, is carried into the OCI process as `TERM`; Trellis does not assume a terminal type. The response is `{"id":"..."}`. Terminal bytes are transported as base64: send `{"data_base64":"..."}` to `.../{session}/input`, poll `.../{session}/output?offset=N` for `data_base64`, `next_offset`, `exited`, and optional `exit_code`, send `{"cols":120,"rows":32}` to `.../{session}/resize`, and `DELETE` the session when finished. Sessions are node-local, ephemeral diagnostics state: they are not persisted in Raft and end when the process, the task, or explicit session closes. Each node agent admits at most 64 sessions in total and 8 for one allocation, including sessions whose cleanup is being retried. A session lasts at most eight hours; an exited session's output remains readable for about two minutes, and a session with no input, output reads, or resizes for 30 minutes is closed. Each session retains at most 2 MiB of its newest terminal output. Exec, sessions, and allocation metrics address only the current generation's running tasks.
+`GET /v1/namespaces/{ns}/allocations/{id}/exec` runs one command in an allocation task over a single long-lived, bidirectional stream. The request is an HTTP/1.1 upgrade: it carries `Connection: Upgrade` and `Upgrade: trellis-exec.v1` along with the usual credentials, and the server answers `101 Switching Protocols` once the command is admitted. HTTP/2 cannot upgrade connections, so clients must use HTTP/1.1 for this request. Followers proxy the upgrade to the leader like any other request.
 
-Exec, exec-session, and allocation-metrics errors return a JSON `{"message":"..."}` body with these statuses:
+The query string describes the process:
+
+| Parameter | Meaning |
+|---|---|
+| `command` | Required and repeated: the argv, in order, such as `command=/bin/sh&command=-c&command=ls`. Trellis never adds a shell. |
+| `task` | The task to run in. It may be omitted when the allocation has exactly one task. |
+| `stdin=true` | Attach the stream's input frames to the process. Without it the process has no standard input. |
+| `tty=true` | Allocate a terminal. Terminal output arrives as stdout frames; there is no separate stderr. |
+| `term` | `TERM` for a TTY process: at most 64 characters of letters, digits, `.`, `_`, `+`, and `-`. |
+| `cols`, `rows` | Initial TTY size, 1–1000 each; default 80×24. |
+
+`term`, `cols`, and `rows` require `tty=true`. The command runs with the selected task container's OCI process context: environment variables, user, working directory, and security confinement are inherited from the task. `TERM` is the only override. Exec addresses only the current generation's running tasks, as do allocation metrics.
+
+After the upgrade, both directions carry frames: a one-byte type, a four-byte big-endian payload length, and a payload of at most 32 KiB. Data frames carry raw bytes; control frames carry JSON.
+
+| Type | Name | Direction | Payload |
+|---|---|---|---|
+| 1 | stdin | client → server | Input bytes. Requires `stdin=true`. |
+| 2 | stdin-close | client → server | Empty. Ends the process's input, as end of file. |
+| 3 | resize | client → server | `{"cols":120,"rows":32}`, 1–1000 each. Requires `tty=true`. |
+| 4 | stdout | server → client | Output bytes; with a TTY, all terminal output. |
+| 5 | stderr | server → client | Standard error bytes of a non-TTY process. |
+| 6 | exit | server → client | `{"exit_code":0}`. The process exited; the server then closes the connection. |
+| 7 | error | server → client | `{"message":"..."}`. The stream ended without an exit status; the server then closes the connection. |
+
+Every stream ends with exactly one exit or error frame, unless the client disconnects first. Closing the connection kills the process, so a client that is interrupted never leaves a command running. A frame of an unknown or wrong-direction type, a malformed resize, or input without `stdin=true` ends the stream with an error frame. An error frame is sent when the process could not be started (for example, the executable does not exist), when its task stops, when the stream is idle or reaches its lifetime, when the node agent shuts down, when the node agent connection is lost, and when control-plane leadership changes.
+
+The leader authorizes the request exactly as other namespaced writes, then relays the stream to the node agent that owns the allocation over the node-certificate mTLS agent API; clients never connect to agents. The relay carries the leader's control epoch. The agent rejects a stream from an older epoch and ends open streams as soon as a newer leader has fenced it, and a leader ends every stream it relays with an error frame when its term ends, so a failover never leaves a stream open to a deposed leader. Exec streams are node-local, ephemeral diagnostics state: they are not persisted in Raft, and processes left behind by an agent crash keep running in their containers until they exit or the container stops.
+
+Buffering is bounded end to end. The leader holds one frame per direction of each stream, and the agent holds at most four input frames ahead of the process. Output is not buffered: a client that stops reading stalls the process's output instead of growing memory, and a single frame that the peer does not accept within 30 minutes ends the stream. A stream with no input, output, or resize for 30 minutes is closed, and a stream lasts at most eight hours even while active. Each node agent admits at most 64 streams in total and 8 for one allocation; a slot is held until the process has exited, including while a failed kill is being retried. Each leader relays at most 256 streams.
+
+Exec and allocation-metrics requests that fail before the upgrade return a JSON `{"message":"..."}` body with these statuses:
 
 | Status | Meaning |
 |---|---|
-| `400` | The request is invalid, or it must name one task: the allocation has several tasks, or the named task is not in its task group. |
-| `404` | The allocation is not placed in the path namespace, or the exec session is unknown or has already been closed. |
-| `409` | The allocation exists but its node has no running target for the request, such as a task that has not started or has exited. It also covers conflicting execution records for the task on the node. Retry after the allocation is running again. |
-| `413` | Terminal input chunk exceeds 64 KiB. |
-| `429` | The node or allocation interactive-session limit has been reached. Close a session or retry after one expires. |
+| `400` | The request is invalid, is not an upgrade to `trellis-exec.v1`, or must name one task: the allocation has several tasks, or the named task is not in its task group. |
+| `403` | The credential is scoped to another namespace, or lacks write access (exec only). |
+| `404` | The allocation is not placed in the path namespace. |
+| `409` | The allocation exists but its node has no running target for the request, such as a task that has not started or has exited. It also covers conflicting execution records for the task on the node, and an agent already fenced by a newer leader. Retry after the allocation is running again. |
+| `429` | The node or allocation exec stream limit, or the leader's relay limit, has been reached. Close a stream or retry later. |
 | `502` | The node agent failed while it was handling the request. Details are logged by the control plane, not returned. |
-| `503` | The node agent is unreachable or shutting down. Retry later or target a replacement allocation. |
+| `503` | The node agent is unreachable or shutting down, or the control-plane leader is not active. Retry later or target a replacement allocation. |
 
 
 Secret write body: `{"value_base64":"...","expected_version":1}`; omit `expected_version` for unconditional update. Decoded values may contain at most 65,536 bytes; an oversized request returns `413` before base64 decoding. Lists are JSON arrays. Non-2xx responses are errors; clients must tolerate reconciliation-driven changes between reads.

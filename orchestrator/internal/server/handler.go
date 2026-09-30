@@ -18,6 +18,7 @@ import (
 	"github.com/overfold/trellis/internal/auth"
 	"github.com/overfold/trellis/internal/catalog"
 	"github.com/overfold/trellis/internal/client"
+	"github.com/overfold/trellis/internal/execstream"
 	"github.com/overfold/trellis/internal/plan"
 	secretstore "github.com/overfold/trellis/internal/secrets"
 	"github.com/overfold/trellis/internal/spec"
@@ -169,12 +170,7 @@ func (h *Handler) Register(e *echo.Echo) {
 	ns.DELETE("/allocations/:id", h.handleStopAllocation)
 	ns.GET("/allocations/:id/events", h.handleAllocationEvents)
 	ns.GET("/allocations/:id/logs", h.handleAllocationLogs)
-	ns.POST("/allocations/:id/exec", h.handleExecAllocation)
-	ns.POST("/allocations/:id/exec/sessions", h.handleCreateExecSession)
-	ns.POST("/allocations/:id/exec/sessions/:session/input", h.handleExecSessionInput)
-	ns.GET("/allocations/:id/exec/sessions/:session/output", h.handleExecSessionOutput)
-	ns.POST("/allocations/:id/exec/sessions/:session/resize", h.handleExecSessionResize)
-	ns.DELETE("/allocations/:id/exec/sessions/:session", h.handleExecSessionClose)
+	ns.GET("/allocations/:id/exec", h.handleExec)
 	ns.GET("/allocations/:id/metrics", h.handleAllocationMetrics)
 	ns.GET("/events", h.handleEvents)
 	ns.PUT("/secrets/:name", h.handleSetSecret)
@@ -838,114 +834,39 @@ func (h *Handler) handleStopAllocation(c *echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
-func (h *Handler) handleExecAllocation(c *echo.Context) error {
+// handleExec opens an exec stream. Request, authorization, lookup, and
+// admission errors are ordinary HTTP responses; once the connection is
+// upgraded the leader relays frames between the client and the agent.
+func (h *Handler) handleExec(c *echo.Context) error {
 	ns, err := namespaceWrite(c, "exec requires write authorization")
 	if err != nil {
 		return err
 	}
-	var request api.ExecRequest
-	if err := decodeJSON(c, &request, maxDefaultRequestBytes); err != nil {
-		return err
+	if !execstream.IsUpgradeRequest(c.Request()) {
+		return echo.NewHTTPError(http.StatusBadRequest, "exec requires an HTTP/1.1 upgrade to "+execstream.Protocol)
 	}
-	if len(request.Command) == 0 {
-		return echo.NewHTTPError(http.StatusBadRequest, "command is required")
-	}
-	result, err := h.server.ExecAllocation(c.Request().Context(), ns, c.Param("id"), request.Task, request.Command)
+	request, err := execstream.DecodeRequest(c.QueryParams())
 	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+	stream, err := h.server.OpenExec(c.Request().Context(), ns, c.Param("id"), request)
+	if err != nil {
+		switch {
+		case errors.Is(err, errExecRelayLimit):
+			return echo.NewHTTPError(http.StatusTooManyRequests, err.Error())
+		case errors.Is(err, errExecNoTerm):
+			return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error())
+		}
 		return h.agentRequestError(err, noRunningTaskMessage(c.Param("id"), request.Task))
 	}
-	return c.JSON(http.StatusOK, result)
-}
-
-func (h *Handler) handleCreateExecSession(c *echo.Context) error {
-	ns, err := namespaceWrite(c, "interactive exec requires write authorization")
+	defer stream.Close()
+	conn, err := execstream.Accept(c.Response())
 	if err != nil {
-		return err
+		h.server.log.Warn("accept exec stream", "allocation", c.Param("id"), "error", err)
+		return nil
 	}
-	var request api.ExecSessionCreateRequest
-	if err := decodeJSON(c, &request, maxDefaultRequestBytes); err != nil {
-		return err
-	}
-	if len(request.Command) == 0 {
-		return echo.NewHTTPError(http.StatusBadRequest, "command is required")
-	}
-	if request.Cols == 0 {
-		request.Cols = 80
-	}
-	if request.Rows == 0 {
-		request.Rows = 24
-	}
-	if request.Cols > 1000 || request.Rows > 1000 {
-		return echo.NewHTTPError(http.StatusBadRequest, "terminal dimensions are too large")
-	}
-	result, err := h.server.CreateExecSession(c.Request().Context(), ns, c.Param("id"), &request)
-	if err != nil {
-		return h.agentRequestError(err, noRunningTaskMessage(c.Param("id"), request.Task))
-	}
-	return c.JSON(http.StatusCreated, result)
-}
-
-func (h *Handler) handleExecSessionInput(c *echo.Context) error {
-	ns, err := namespaceWrite(c, "interactive exec requires write authorization")
-	if err != nil {
-		return err
-	}
-	var request api.ExecSessionInputRequest
-	if err := decodeJSON(c, &request, maxExecInputRequestSize); err != nil {
-		return err
-	}
-	if err := h.server.WriteExecSession(c.Request().Context(), ns, c.Param("id"), c.Param("session"), &request); err != nil {
-		return h.agentRequestError(err, "")
-	}
-	return c.NoContent(http.StatusNoContent)
-}
-
-func (h *Handler) handleExecSessionOutput(c *echo.Context) error {
-	ns, err := namespaceWrite(c, "interactive exec requires write authorization")
-	if err != nil {
-		return err
-	}
-	offset, err := strconv.ParseInt(c.QueryParam("offset"), 10, 64)
-	if c.QueryParam("offset") == "" {
-		offset, err = 0, nil
-	}
-	if err != nil || offset < 0 {
-		return echo.NewHTTPError(http.StatusBadRequest, "offset must be a non-negative integer")
-	}
-	result, err := h.server.ReadExecSession(c.Request().Context(), ns, c.Param("id"), c.Param("session"), offset)
-	if err != nil {
-		return h.agentRequestError(err, "")
-	}
-	return c.JSON(http.StatusOK, result)
-}
-
-func (h *Handler) handleExecSessionResize(c *echo.Context) error {
-	ns, err := namespaceWrite(c, "interactive exec requires write authorization")
-	if err != nil {
-		return err
-	}
-	var request api.ExecSessionResizeRequest
-	if err := decodeJSON(c, &request, maxSmallRequestBytes); err != nil {
-		return err
-	}
-	if request.Cols == 0 || request.Rows == 0 || request.Cols > 1000 || request.Rows > 1000 {
-		return echo.NewHTTPError(http.StatusBadRequest, "terminal dimensions must be between 1 and 1000")
-	}
-	if err := h.server.ResizeExecSession(c.Request().Context(), ns, c.Param("id"), c.Param("session"), &request); err != nil {
-		return h.agentRequestError(err, "")
-	}
-	return c.NoContent(http.StatusNoContent)
-}
-
-func (h *Handler) handleExecSessionClose(c *echo.Context) error {
-	ns, err := namespaceWrite(c, "interactive exec requires write authorization")
-	if err != nil {
-		return err
-	}
-	if err := h.server.CloseExecSession(c.Request().Context(), ns, c.Param("id"), c.Param("session")); err != nil {
-		return h.agentRequestError(err, "")
-	}
-	return c.NoContent(http.StatusNoContent)
+	stream.Relay(conn)
+	return nil
 }
 
 func (h *Handler) handleAllocationMetrics(c *echo.Context) error {
@@ -960,13 +881,12 @@ func (h *Handler) handleAllocationMetrics(c *echo.Context) error {
 	return c.JSON(http.StatusOK, metrics)
 }
 
-// agentRequestError maps a failed exec, exec session, or allocation metrics
-// request to its public status. Control-plane lookup failures keep their
-// meaning, and the agent's rejections of the request itself pass through.
-// When notRunning is set, an agent 404 means the control plane knows the
-// allocation but its node has no running target, so it becomes a 409 with
-// that message; otherwise an agent 404 (an unknown exec session) passes
-// through. Transport failures and other agent failures are logged and
+// agentRequestError maps a failed exec or allocation metrics request to its
+// public status. Control-plane lookup failures keep their meaning, and the
+// agent's rejections of the request itself pass through. When notRunning is
+// set, an agent 404 means the control plane knows the allocation but its
+// node has no running target, so it becomes a 409 with that message;
+// otherwise an agent 404 passes through. Transport failures and other agent failures are logged and
 // reported without their details.
 func (h *Handler) agentRequestError(err error, notRunning string) error {
 	var agentErr *client.HTTPError

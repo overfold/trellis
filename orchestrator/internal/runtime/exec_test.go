@@ -206,30 +206,3 @@ func TestKillExecProcessRetriesFailedKill(t *testing.T) {
 		t.Fatalf("kill attempts = %d, want 2", len(signals))
 	}
 }
-
-func TestLockedBufferDiscardsWritesAfterSnapshot(t *testing.T) {
-	var buffer lockedBuffer
-	_, _ = buffer.Write([]byte("before"))
-	if got := string(buffer.take()); got != "before" {
-		t.Fatalf("snapshot = %q", got)
-	}
-	if n, err := buffer.Write([]byte("after")); n != 5 || err != nil {
-		t.Fatalf("detached write = %d, %v", n, err)
-	}
-	if got := len(buffer.take()); got != 0 {
-		t.Fatalf("detached buffer kept %d bytes", got)
-	}
-}
-
-func TestLockedBufferCapsOutput(t *testing.T) {
-	var buffer lockedBuffer
-	chunk := make([]byte, execOutputLimit/2+1)
-	for i := 0; i < 3; i++ {
-		if n, err := buffer.Write(chunk); n != len(chunk) || err != nil {
-			t.Fatalf("write = %d, %v", n, err)
-		}
-	}
-	if got := len(buffer.take()); got != execOutputLimit {
-		t.Fatalf("captured %d bytes, want %d", got, execOutputLimit)
-	}
-}

@@ -37,11 +37,8 @@ func (r *reconcilerRuntime) Remove(context.Context, string) error { return nil }
 func (r *reconcilerRuntime) Exec(context.Context, string, []string) (int, error) {
 	return 0, nil
 }
-func (r *reconcilerRuntime) ExecOutput(context.Context, string, []string) ([]byte, []byte, int, error) {
-	return nil, nil, 0, nil
-}
-func (r *reconcilerRuntime) StartTerminal(context.Context, string, []string, string, uint32, uint32) (runtime.TerminalSession, error) {
-	return nil, nil
+func (r *reconcilerRuntime) StartExec(context.Context, string, runtime.ExecOptions) (runtime.ExecProcess, error) {
+	return nil, errors.New("exec is not supported")
 }
 func (r *reconcilerRuntime) Metrics(context.Context, string) (*runtime.ContainerMetrics, error) {
 	return &runtime.ContainerMetrics{}, nil

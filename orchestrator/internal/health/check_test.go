@@ -2,6 +2,7 @@ package health
 
 import (
 	"context"
+	"errors"
 	"io"
 	"reflect"
 	"strings"
@@ -31,11 +32,8 @@ func (r *probeRuntime) Exec(_ context.Context, containerID string, command []str
 	r.command = append([]string(nil), command...)
 	return r.exitCode, nil
 }
-func (*probeRuntime) ExecOutput(context.Context, string, []string) ([]byte, []byte, int, error) {
-	return nil, nil, 0, nil
-}
-func (*probeRuntime) StartTerminal(context.Context, string, []string, string, uint32, uint32) (runtime.TerminalSession, error) {
-	return nil, nil
+func (*probeRuntime) StartExec(context.Context, string, runtime.ExecOptions) (runtime.ExecProcess, error) {
+	return nil, errors.New("exec is not supported")
 }
 func (*probeRuntime) Metrics(context.Context, string) (*runtime.ContainerMetrics, error) {
 	return &runtime.ContainerMetrics{}, nil

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net"
@@ -13,12 +14,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"github.com/overfold/trellis/internal/auth"
+	"github.com/overfold/trellis/internal/execstream"
 	"github.com/overfold/trellis/internal/spec"
 )
 
 // newExecTestHandler places one allocation on a node whose agent answers
 // every request with status and an Echo-style error body.
-func newExecTestHandler(t *testing.T, status int, message string) *echo.Echo {
+func newExecTestHandler(t *testing.T, status int, message string) (*echo.Echo, *Server) {
 	t.Helper()
 	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -29,7 +31,7 @@ func newExecTestHandler(t *testing.T, status int, message string) *echo.Echo {
 	return newExecTestHandlerAt(t, agent.Listener.Addr().String())
 }
 
-func newExecTestHandlerAt(t *testing.T, address string) *echo.Echo {
+func newExecTestHandlerAt(t *testing.T, address string) (*echo.Echo, *Server) {
 	t.Helper()
 	host, portText, err := net.SplitHostPort(address)
 	if err != nil {
@@ -39,7 +41,7 @@ func newExecTestHandlerAt(t *testing.T, address string) *echo.Echo {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &Server{log: slog.New(slog.DiscardHandler), client: newTestAgentClient()}
+	s := newExecTestServer(t)
 	s.allocations = []*Allocation{{
 		Namespace: "team",
 		ID:        "alloc-1",
@@ -48,7 +50,17 @@ func newExecTestHandlerAt(t *testing.T, address string) *echo.Echo {
 	}}
 	e := echo.New()
 	NewHandler(s).Register(e)
-	return e
+	return e, s
+}
+
+// newExecTestServer returns a server leading term 1 until the test ends.
+func newExecTestServer(t *testing.T) *Server {
+	t.Helper()
+	s := &Server{log: slog.New(slog.DiscardHandler), client: newTestAgentClient(), controlEpoch: 1}
+	term, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	s.exec.startTerm(term)
+	return s
 }
 
 type execErrorRoute struct {
@@ -61,19 +73,16 @@ type execErrorRoute struct {
 }
 
 var execErrorRoutes = []execErrorRoute{
-	{name: "exec", method: http.MethodPost, path: "/v1/namespaces/team/allocations/alloc-1/exec", body: `{"command":["true"]}`, agentNotFound: http.StatusConflict},
-	{name: "create session", method: http.MethodPost, path: "/v1/namespaces/team/allocations/alloc-1/exec/sessions", body: `{"command":["/bin/sh"]}`, agentNotFound: http.StatusConflict},
-	{name: "session input", method: http.MethodPost, path: "/v1/namespaces/team/allocations/alloc-1/exec/sessions/s-1/input", body: `{"data_base64":"aGk="}`, agentNotFound: http.StatusNotFound},
-	{name: "session output", method: http.MethodGet, path: "/v1/namespaces/team/allocations/alloc-1/exec/sessions/s-1/output", agentNotFound: http.StatusNotFound},
-	{name: "session resize", method: http.MethodPost, path: "/v1/namespaces/team/allocations/alloc-1/exec/sessions/s-1/resize", body: `{"cols":80,"rows":24}`, agentNotFound: http.StatusNotFound},
-	{name: "session close", method: http.MethodDelete, path: "/v1/namespaces/team/allocations/alloc-1/exec/sessions/s-1", agentNotFound: http.StatusNotFound},
+	{name: "exec", method: http.MethodGet, path: "/v1/namespaces/team/allocations/alloc-1/exec?command=true", agentNotFound: http.StatusConflict},
 	{name: "metrics", method: http.MethodGet, path: "/v1/namespaces/team/allocations/alloc-1/metrics", agentNotFound: http.StatusConflict},
 }
 
 func serveExecRequest(t *testing.T, e *echo.Echo, route execErrorRoute, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	e.ServeHTTP(rec, scopedRequest(t, route.method, path, route.body, auth.AccessNamespace, auth.AccessWrite, "team"))
+	request := scopedRequest(t, route.method, path, route.body, auth.AccessNamespace, auth.AccessWrite, "team")
+	execstream.SetUpgradeHeaders(request)
+	e.ServeHTTP(rec, request)
 	return rec
 }
 
@@ -101,14 +110,15 @@ func TestAgentExecErrorsMapToPublicStatus(t *testing.T) {
 		{name: "execution conflict", agentStatus: http.StatusConflict, agentBody: "allocation execution metadata conflict", want: http.StatusConflict, wantMessage: "allocation execution metadata conflict"},
 		{name: "session limit", agentStatus: http.StatusTooManyRequests, agentBody: "exec session limit reached: node has 64 interactive sessions (maximum 64)", want: http.StatusTooManyRequests, wantMessage: "exec session limit reached: node has 64 interactive sessions (maximum 64)"},
 		{name: "agent shutting down", agentStatus: http.StatusServiceUnavailable, agentBody: "agent is shutting down", want: http.StatusServiceUnavailable, wantMessage: "node agent unavailable: agent is shutting down"},
-		{name: "agent not found", agentStatus: http.StatusNotFound, agentBody: "exec session not found: s-1"},
+		{name: "stale epoch", agentStatus: http.StatusConflict, agentBody: "stale control-plane epoch: received 1, highest accepted 2", want: http.StatusConflict, wantMessage: "stale control-plane epoch"},
+		{name: "agent not found", agentStatus: http.StatusNotFound, agentBody: "allocation not found"},
 		{name: "agent internal failure", agentStatus: http.StatusInternalServerError, agentBody: "exec in container c-1: runtime detail", want: http.StatusBadGateway, wantMessage: "node agent failed to handle the request"},
 		{name: "agent rejects server credentials", agentStatus: http.StatusForbidden, agentBody: "caller is not the leader", want: http.StatusBadGateway, wantMessage: "node agent failed to handle the request"},
 	}
 	for _, tt := range tests {
 		for _, route := range execErrorRoutes {
 			t.Run(tt.name+"/"+route.name, func(t *testing.T) {
-				e := newExecTestHandler(t, tt.agentStatus, tt.agentBody)
+				e, _ := newExecTestHandler(t, tt.agentStatus, tt.agentBody)
 				rec := serveExecRequest(t, e, route, route.path)
 				want, wantMessage := tt.want, tt.wantMessage
 				if want == 0 {
@@ -130,13 +140,13 @@ func TestAgentExecErrorsMapToPublicStatus(t *testing.T) {
 }
 
 func TestAgentExecNoRunningTargetNamesAllocationAndTask(t *testing.T) {
-	e := newExecTestHandler(t, http.StatusNotFound, "allocation not found: allocation alloc-1 has no running task \"web\"")
-	rec := serveExecRequest(t, e, execErrorRoutes[0], "/v1/namespaces/team/allocations/alloc-1/exec")
+	e, _ := newExecTestHandler(t, http.StatusNotFound, "allocation not found: allocation alloc-1 has no running task \"web\"")
+	rec := serveExecRequest(t, e, execErrorRoutes[0], execErrorRoutes[0].path)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body: %s", rec.Code, rec.Body.String())
 	}
-	route := execErrorRoute{method: http.MethodPost, body: `{"task":"web","command":["true"]}`}
-	rec = serveExecRequest(t, e, route, "/v1/namespaces/team/allocations/alloc-1/exec")
+	route := execErrorRoute{method: http.MethodGet}
+	rec = serveExecRequest(t, e, route, "/v1/namespaces/team/allocations/alloc-1/exec?task=web&command=true")
 	if got, want := errorMessage(t, rec), `allocation alloc-1 task "web" is not running`; rec.Code != http.StatusConflict || got != want {
 		t.Fatalf("status = %d, message = %q; want 409 %q", rec.Code, got, want)
 	}
@@ -149,7 +159,7 @@ func TestAgentExecUnreachableAgentIsUnavailable(t *testing.T) {
 	}
 	address := listener.Addr().String()
 	_ = listener.Close()
-	e := newExecTestHandlerAt(t, address)
+	e, _ := newExecTestHandlerAt(t, address)
 	for _, route := range execErrorRoutes {
 		t.Run(route.name, func(t *testing.T) {
 			rec := serveExecRequest(t, e, route, route.path)
@@ -164,7 +174,7 @@ func TestAgentExecUnreachableAgentIsUnavailable(t *testing.T) {
 }
 
 func TestExecControlPlaneLookupErrors(t *testing.T) {
-	e := newExecTestHandler(t, http.StatusOK, "")
+	e, _ := newExecTestHandler(t, http.StatusOK, "")
 	for _, route := range execErrorRoutes {
 		t.Run(route.name+"/unknown allocation", func(t *testing.T) {
 			rec := serveExecRequest(t, e, route, strings.Replace(route.path, "alloc-1", "alloc-2", 1))
@@ -173,13 +183,10 @@ func TestExecControlPlaneLookupErrors(t *testing.T) {
 			}
 		})
 	}
-	for _, route := range execErrorRoutes[:2] {
-		t.Run(route.name+"/unknown task", func(t *testing.T) {
-			route.body = strings.Replace(route.body, "{", `{"task":"db",`, 1)
-			rec := serveExecRequest(t, e, route, route.path)
-			if rec.Code != http.StatusBadRequest {
-				t.Fatalf("status = %d, want 400; body: %s", rec.Code, rec.Body.String())
-			}
-		})
-	}
+	t.Run("exec/unknown task", func(t *testing.T) {
+		rec := serveExecRequest(t, e, execErrorRoutes[0], "/v1/namespaces/team/allocations/alloc-1/exec?task=db&command=true")
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400; body: %s", rec.Code, rec.Body.String())
+		}
+	})
 }

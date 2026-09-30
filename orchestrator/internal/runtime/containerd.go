@@ -2,7 +2,6 @@
 package runtime
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -954,51 +953,6 @@ func writeRuntimeFile(path, content string) error {
 	return closeErr
 }
 
-// ExecOutput runs a command in a container and returns its captured output.
-func (c *ContainerdRuntime) ExecOutput(ctx context.Context, containerID string, command []string) ([]byte, []byte, int, error) {
-	ctx = c.withNamespace(ctx)
-
-	container, err := c.client.LoadContainer(ctx, containerID)
-	if err != nil {
-		return nil, nil, 1, fmt.Errorf("loading container %s: %w", containerID, err)
-	}
-
-	task, err := container.Task(ctx, nil)
-	if err != nil {
-		return nil, nil, 1, fmt.Errorf("getting task for %s: %w", containerID, err)
-	}
-
-	execID := fmt.Sprintf("exec-%d", time.Now().UnixNano())
-	process, err := containerExecProcess(ctx, container, command, false)
-	if err != nil {
-		return nil, nil, 1, err
-	}
-
-	var outBuf, errBuf lockedBuffer
-	// Output a background child writes after this returns is not collected.
-	defer outBuf.take()
-	defer errBuf.take()
-	creator := cio.NewCreator(cio.WithStreams(nil, &outBuf, &errBuf))
-	taskExec, err := task.Exec(ctx, execID, process, creator)
-	if err != nil {
-		return nil, nil, 1, fmt.Errorf("constructing exec for %s: %w", containerID, err)
-	}
-	status, err := runExecProcess(ctx, taskExec)
-	if err != nil {
-		return nil, nil, 1, fmt.Errorf("exec in %s: %w", containerID, err)
-	}
-	// Deleting the process waits for its output copy to finish. The wait is
-	// bounded because a background child can hold the output open after the
-	// command exits; the output collected by then is returned.
-	_ = deleteExecProcess(ctx, taskExec)
-	code, _, err := status.Result()
-	if err != nil {
-		return nil, nil, 1, fmt.Errorf("extracting exec status for %s: %w", containerID, err)
-	}
-
-	return outBuf.take(), errBuf.take(), int(code), nil
-}
-
 const execCleanupTimeout = 5 * time.Second
 
 // execKillRetryInterval is a variable so tests can shorten it.
@@ -1098,146 +1052,76 @@ func deleteWithin(ctx context.Context, process execProcess) error {
 	}
 }
 
-// execOutputLimit bounds the stdout and stderr each one-shot exec captures.
-// Worst-case JSON escaping (6 bytes per byte) of both streams stays within
-// the 64 MiB response limit of the agent and server clients.
-const execOutputLimit = 4 * 1024 * 1024
-
-// lockedBuffer collects exec output written by containerd's IO copy
-// goroutines, keeping at most execOutputLimit bytes. Taking its contents
-// detaches it: a background child can keep writing after the result is
-// returned, and that output is discarded. Discarded writes still succeed so
-// the command is never blocked or signalled by a full buffer.
-type lockedBuffer struct {
-	mu       sync.Mutex
-	buf      bytes.Buffer
-	detached bool
-}
-
-func (b *lockedBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.detached {
-		return len(p), nil
-	}
-	if room := execOutputLimit - b.buf.Len(); len(p) > room {
-		b.buf.Write(p[:room])
-		return len(p), nil
-	}
-	return b.buf.Write(p)
-}
-
-// take returns the collected output and discards later writes.
-func (b *lockedBuffer) take() []byte {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.detached = true
-	data := b.buf.Bytes()
-	b.buf = bytes.Buffer{}
-	return data
-}
-
-const terminalOutputLimit = 2 * 1024 * 1024
-
-type terminalOutputBuffer struct {
-	mu   sync.Mutex
-	base int64
-	data []byte
-}
-
-func (b *terminalOutputBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.data = append(b.data, p...)
-	if len(b.data) > terminalOutputLimit {
-		drop := len(b.data) - terminalOutputLimit
-		b.data = append([]byte(nil), b.data[drop:]...)
-		b.base += int64(drop)
-	}
-	return len(p), nil
-}
-
-func (b *terminalOutputBuffer) read(offset int64) ([]byte, int64) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if offset < b.base {
-		offset = b.base
-	}
-	end := b.base + int64(len(b.data))
-	if offset > end {
-		offset = end
-	}
-	start := int(offset - b.base)
-	return append([]byte(nil), b.data[start:]...), end
-}
-
-type containerdTerminalSession struct {
-	stdin   *io.PipeWriter
-	output  *terminalOutputBuffer
+// containerdExecProcess is a streamed exec process.
+type containerdExecProcess struct {
 	process containerd.Process
-
-	mu       sync.RWMutex
-	exited   bool
-	exitCode *int
+	// namespaced scopes a caller's context to the Trellis namespace, which
+	// containerd requires on every process call.
+	namespaced func(context.Context) context.Context
+	done       chan struct{}
+	code       int
+	err        error
 }
 
-func (s *containerdTerminalSession) Write(p []byte) (int, error) {
-	s.mu.RLock()
-	exited := s.exited
-	s.mu.RUnlock()
-	if exited {
-		return 0, io.ErrClosedPipe
-	}
-	return s.stdin.Write(p)
+func (p *containerdExecProcess) Done() <-chan struct{} { return p.done }
+
+func (p *containerdExecProcess) ExitCode() (int, error) {
+	<-p.done
+	return p.code, p.err
 }
 
-func (s *containerdTerminalSession) Read(offset int64) ([]byte, int64, bool, *int, error) {
-	data, next := s.output.read(offset)
-	s.mu.RLock()
-	exited := s.exited
-	var code *int
-	if s.exitCode != nil {
-		copyCode := *s.exitCode
-		code = &copyCode
-	}
-	s.mu.RUnlock()
-	return data, next, exited, code, nil
-}
-
-func (s *containerdTerminalSession) Resize(ctx context.Context, cols, rows uint32) error {
+func (p *containerdExecProcess) Resize(ctx context.Context, cols, rows uint32) error {
 	if cols == 0 || rows == 0 {
 		return fmt.Errorf("terminal dimensions must be greater than zero")
 	}
-	s.mu.RLock()
-	exited := s.exited
-	s.mu.RUnlock()
-	if exited {
+	select {
+	case <-p.done:
 		return nil
+	default:
 	}
-	return s.process.Resize(ctx, cols, rows)
+	return p.process.Resize(p.namespaced(ctx), cols, rows)
 }
 
-func (s *containerdTerminalSession) Close(ctx context.Context) error {
-	_ = s.stdin.Close()
-	s.mu.RLock()
-	exited := s.exited
-	s.mu.RUnlock()
-	if exited {
+func (p *containerdExecProcess) Kill(ctx context.Context) error {
+	select {
+	case <-p.done:
 		return nil
+	default:
 	}
-	if err := s.process.Kill(ctx, syscall.SIGKILL); err != nil && !errdefs.IsNotFound(err) {
+	if err := p.process.Kill(p.namespaced(ctx), syscall.SIGKILL); err != nil && !errdefs.IsNotFound(err) {
 		return err
 	}
 	return nil
 }
 
-// StartTerminal starts an interactive TTY-backed process in a container.
-func (c *ContainerdRuntime) StartTerminal(ctx context.Context, containerID string, command []string, term string, cols, rows uint32) (TerminalSession, error) {
-	if len(command) == 0 {
-		return nil, fmt.Errorf("terminal command is required")
-	}
-	ctx = context.WithoutCancel(c.withNamespace(ctx))
+// execStdin closes the process's input once its reader reports io.EOF.
+// containerd does not propagate the end of a stdin stream by itself.
+type execStdin struct {
+	reader io.Reader
+	ready  <-chan struct{}
+	close  func()
+	once   sync.Once
+}
 
+func (s *execStdin) Read(p []byte) (int, error) {
+	n, err := s.reader.Read(p)
+	if err == io.EOF {
+		s.once.Do(func() {
+			<-s.ready
+			s.close()
+		})
+	}
+	return n, err
+}
+
+// StartExec starts a streamed exec process in a container. Output is copied
+// to the option writers as the process produces it, so a blocked writer
+// stalls the process instead of growing a buffer.
+func (c *ContainerdRuntime) StartExec(ctx context.Context, containerID string, options ExecOptions) (ExecProcess, error) {
+	if len(options.Command) == 0 {
+		return nil, fmt.Errorf("exec command is required")
+	}
+	ctx = c.withNamespace(ctx)
 	container, err := c.client.LoadContainer(ctx, containerID)
 	if err != nil {
 		return nil, fmt.Errorf("loading container %s: %w", containerID, err)
@@ -1246,76 +1130,78 @@ func (c *ContainerdRuntime) StartTerminal(ctx context.Context, containerID strin
 	if err != nil {
 		return nil, fmt.Errorf("getting task for %s: %w", containerID, err)
 	}
-
-	processSpec, err := containerExecProcess(ctx, container, command, true)
+	processSpec, err := containerExecProcess(ctx, container, options.Command, options.TTY)
 	if err != nil {
 		return nil, err
 	}
-	if term != "" {
+	if options.TTY && options.Term != "" {
 		env := make([]string, 0, len(processSpec.Env)+1)
 		for _, value := range processSpec.Env {
-			if len(value) >= 5 && value[:5] == "TERM=" {
-				continue
+			if !strings.HasPrefix(value, "TERM=") {
+				env = append(env, value)
 			}
-			env = append(env, value)
 		}
-		processSpec.Env = append(env, "TERM="+term)
+		processSpec.Env = append(env, "TERM="+options.Term)
+	}
+	if options.TTY && options.Cols > 0 && options.Rows > 0 {
+		// The console is created at this size. Resizing after Start would
+		// race a short-lived process's exit.
+		processSpec.ConsoleSize = &specs.Box{Width: uint(options.Cols), Height: uint(options.Rows)}
 	}
 
-	stdinReader, stdinWriter := io.Pipe()
-	output := &terminalOutputBuffer{}
-	creator := cio.NewCreator(cio.WithStreams(stdinReader, output, nil), cio.WithTerminal)
-	execID := fmt.Sprintf("terminal-%d", time.Now().UnixNano())
-	process, err := task.Exec(ctx, execID, processSpec, creator)
-	if err != nil {
-		_ = stdinReader.Close()
-		_ = stdinWriter.Close()
-		return nil, fmt.Errorf("constructing terminal exec for %s: %w", containerID, err)
+	// The process outlives the request that started it.
+	lifetimeCtx := context.WithoutCancel(ctx)
+	var process containerd.Process
+	ready := make(chan struct{})
+	var stdin io.Reader
+	if options.Stdin != nil {
+		stdin = &execStdin{reader: options.Stdin, ready: ready, close: func() {
+			if process != nil {
+				_ = process.CloseIO(lifetimeCtx, containerd.WithStdinCloser)
+			}
+		}}
 	}
-	exitCh, err := process.Wait(ctx)
+	stdout := options.Stdout
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	stderr := options.Stderr
+	if options.TTY {
+		stderr = nil
+	} else if stderr == nil {
+		stderr = io.Discard
+	}
+	creatorOptions := []cio.Opt{cio.WithStreams(stdin, stdout, stderr)}
+	if options.TTY {
+		creatorOptions = append(creatorOptions, cio.WithTerminal)
+	}
+	execID := fmt.Sprintf("exec-%d", time.Now().UnixNano())
+	process, err = task.Exec(ctx, execID, processSpec, cio.NewCreator(creatorOptions...))
+	close(ready)
 	if err != nil {
-		_ = stdinReader.Close()
-		_ = stdinWriter.Close()
+		return nil, fmt.Errorf("constructing exec for %s: %w", containerID, err)
+	}
+	exitCh, err := process.Wait(lifetimeCtx)
+	if err != nil {
 		_ = deleteExecProcess(ctx, process)
-		return nil, fmt.Errorf("waiting on terminal exec for %s: %w", containerID, err)
+		return nil, fmt.Errorf("waiting on exec for %s: %w", containerID, err)
 	}
 	if err := process.Start(ctx); err != nil {
-		_ = stdinReader.Close()
-		_ = stdinWriter.Close()
 		killExecProcess(ctx, process, exitCh)
-		return nil, fmt.Errorf("starting terminal exec for %s: %w", containerID, err)
-	}
-	if cols > 0 && rows > 0 {
-		if err := process.Resize(ctx, cols, rows); err != nil {
-			_ = stdinReader.Close()
-			_ = stdinWriter.Close()
-			killExecProcess(ctx, process, exitCh)
-			return nil, fmt.Errorf("resize terminal exec for %s: %w", containerID, err)
-		}
+		return nil, fmt.Errorf("starting exec for %s: %w", containerID, err)
 	}
 
-	session := &containerdTerminalSession{
-		stdin: stdinWriter, output: output, process: process,
-	}
+	result := &containerdExecProcess{process: process, namespaced: c.withNamespace, done: make(chan struct{})}
 	go func() {
 		status := <-exitCh
-		code, _, resultErr := status.Result()
-		// Input can no longer be delivered, so writes fail instead of blocking.
-		_ = stdinWriter.Close()
-		_ = stdinReader.Close()
-		// Deleting waits (boundedly) for the output copy, so readers do not
-		// see the exit before the final output.
-		_ = deleteExecProcess(ctx, process)
-		session.mu.Lock()
-		session.exited = true
-		if resultErr == nil {
-			value := int(code)
-			session.exitCode = &value
-		}
-		session.mu.Unlock()
+		// Deleting waits, boundedly, for the output copy, so Done follows
+		// the final output.
+		_ = deleteExecProcess(lifetimeCtx, process)
+		code, _, err := status.Result()
+		result.code, result.err = int(code), err
+		close(result.done)
 	}()
-
-	return session, nil
+	return result, nil
 }
 
 // Metrics returns a point-in-time resource usage snapshot for a container.

@@ -147,6 +147,9 @@ type Server struct {
 	raftProgress map[uuid.UUID]raftProgress
 	// membershipWake asks the membership loop for an immediate pass.
 	membershipWake chan struct{}
+
+	// exec tracks the exec streams this leader relays.
+	exec execRelays
 }
 
 // SetSecretStore configures encrypted secret storage.
@@ -929,6 +932,7 @@ func (s *Server) EnrollNode(ctx context.Context, advertised ...string) (*api.Nod
 
 // Run starts background reconciliation until the context ends.
 func (s *Server) Run(ctx context.Context) {
+	s.exec.startTerm(ctx)
 	go s.runReconcileLoop(ctx)
 	go s.runNetworkPlanLoop(ctx)
 	go s.runMembershipLoop(ctx)
@@ -1931,68 +1935,6 @@ func resolveExecTask(id, task string, tasks []spec.TaskSpec) (string, error) {
 		return "", fmt.Errorf("%w: allocation %s has no task %q", ErrTaskSelection, id, task)
 	}
 	return task, nil
-}
-
-// ExecAllocation runs a command in an allocation task container.
-func (s *Server) ExecAllocation(ctx context.Context, namespace, id, task string, command []string) (*api.ExecResponse, error) {
-	nodeID, address, tasks, err := s.allocationAgentAddress(namespace, id)
-	if err != nil {
-		return nil, err
-	}
-	task, err = resolveExecTask(id, task, tasks)
-	if err != nil {
-		return nil, err
-	}
-	return s.client.ExecAllocation(ctx, nodeID, address, id, task, command)
-}
-
-// CreateExecSession starts a persistent interactive terminal in an allocation task.
-func (s *Server) CreateExecSession(ctx context.Context, namespace, id string, request *api.ExecSessionCreateRequest) (*api.ExecSessionResponse, error) {
-	nodeID, address, tasks, err := s.allocationAgentAddress(namespace, id)
-	if err != nil {
-		return nil, err
-	}
-	request.Task, err = resolveExecTask(id, request.Task, tasks)
-	if err != nil {
-		return nil, err
-	}
-	return s.client.CreateExecSession(ctx, nodeID, address, id, request)
-}
-
-// WriteExecSession sends input to an interactive allocation terminal.
-func (s *Server) WriteExecSession(ctx context.Context, namespace, id, sessionID string, request *api.ExecSessionInputRequest) error {
-	nodeID, address, _, err := s.allocationAgentAddress(namespace, id)
-	if err != nil {
-		return err
-	}
-	return s.client.WriteExecSession(ctx, nodeID, address, id, sessionID, request)
-}
-
-// ReadExecSession reads output from an interactive allocation terminal.
-func (s *Server) ReadExecSession(ctx context.Context, namespace, id, sessionID string, offset int64) (*api.ExecSessionOutputResponse, error) {
-	nodeID, address, _, err := s.allocationAgentAddress(namespace, id)
-	if err != nil {
-		return nil, err
-	}
-	return s.client.ReadExecSession(ctx, nodeID, address, id, sessionID, offset)
-}
-
-// ResizeExecSession changes an interactive allocation terminal's dimensions.
-func (s *Server) ResizeExecSession(ctx context.Context, namespace, id, sessionID string, request *api.ExecSessionResizeRequest) error {
-	nodeID, address, _, err := s.allocationAgentAddress(namespace, id)
-	if err != nil {
-		return err
-	}
-	return s.client.ResizeExecSession(ctx, nodeID, address, id, sessionID, request)
-}
-
-// CloseExecSession terminates an interactive allocation terminal.
-func (s *Server) CloseExecSession(ctx context.Context, namespace, id, sessionID string) error {
-	nodeID, address, _, err := s.allocationAgentAddress(namespace, id)
-	if err != nil {
-		return err
-	}
-	return s.client.CloseExecSession(ctx, nodeID, address, id, sessionID)
 }
 
 // AllocationMetrics returns resource usage for all tasks in an allocation.
