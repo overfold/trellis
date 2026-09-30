@@ -38,7 +38,11 @@ For each task-group deficit, `Schedule`:
 2. excludes non-healthy nodes and constraint/host-volume mismatches;
 3. sums all colocated task CPU/memory requirements and existing usage;
 4. excludes nodes whose declared capacity would be exceeded;
-5. selects the highest post-placement normalized CPU/memory utilization (best fit), using the number of same-group replicas as an anti-affinity tie-breaker.
+5. selects the node with the fewest replicas of the same task group, counting placed, non-draining allocations of the group and the placements already made in this pass;
+6. among those, selects the highest post-placement normalized CPU/memory utilization (best fit);
+7. breaks any remaining tie by the lowest node UUID.
+
+Spreading is therefore the primary criterion and a soft one: filtering happens first, so constraints, volume locality, host ports, or capacity can leave replicas co-located on the only eligible nodes.
 
 The result may contain fewer placements than requested. Reconciliation will try later as cluster conditions change. No preemption occurs.
 
