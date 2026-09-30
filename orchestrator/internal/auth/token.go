@@ -8,9 +8,11 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -64,6 +66,9 @@ type Principal struct {
 	Namespace string             `json:"namespace,omitempty"`
 	Subject   *CredentialSubject `json:"subject,omitempty"`
 	CreatedAt time.Time          `json:"created_at,omitempty"`
+	// ExpiresAt is when an operator credential stops authenticating. The zero
+	// time means the credential does not expire.
+	ExpiresAt time.Time `json:"expires_at,omitzero"`
 }
 
 // AdministratorPrincipal returns the effective principal for the administrator credential.
@@ -87,6 +92,9 @@ func (p Principal) Validate() error {
 	}
 	if p.Scope == AccessCluster && p.Namespace != "" {
 		return fmt.Errorf("cluster credential must not include a namespace")
+	}
+	if p.Kind == CredentialWorkload && !p.ExpiresAt.IsZero() {
+		return fmt.Errorf("workload credential must not include an expiry")
 	}
 	if p.Kind == CredentialOperator && p.Subject != nil {
 		return fmt.Errorf("operator credential must not include a workload subject")
@@ -112,12 +120,130 @@ func (p Principal) Validate() error {
 type TokenManager struct {
 	store            state.Store
 	cluster          string
+	now              func() time.Time
 	workloadTokensMu sync.Mutex
 }
 
 // NewTokenManager creates a token manager backed by state storage.
 func NewTokenManager(store state.Store, cluster string) *TokenManager {
-	return &TokenManager{store: store, cluster: cluster}
+	return &TokenManager{store: store, cluster: cluster, now: time.Now}
+}
+
+// SetClock replaces the clock used for credential creation and expiry.
+func (m *TokenManager) SetClock(now func() time.Time) { m.now = now }
+
+// ErrCredentialNotFound reports that no operator credential has the given ID.
+var ErrCredentialNotFound = errors.New("credential not found")
+
+// credentialIDLength is the number of token-hash hex digits that identify an
+// operator credential in listings. The hash of a 256-bit random token reveals
+// nothing about the token, and 64 bits make collisions negligible.
+const credentialIDLength = 16
+
+// CredentialID returns the public identifier of the credential whose token
+// hash is hashHex.
+func CredentialID(hashHex string) string {
+	if len(hashHex) < credentialIDLength {
+		return hashHex
+	}
+	return hashHex[:credentialIDLength]
+}
+
+// ValidCredentialID reports whether id has the form returned by CredentialID.
+func ValidCredentialID(id string) bool {
+	if len(id) != credentialIDLength {
+		return false
+	}
+	for _, c := range id {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// OperatorCredential is the listable metadata of one operator credential. It
+// never contains the bearer token.
+type OperatorCredential struct {
+	ID        string
+	Principal Principal
+}
+
+// CreateOperatorToken mints an operator credential and returns the bearer
+// token together with its listable metadata.
+func (m *TokenManager) CreateOperatorToken(ctx context.Context, principal Principal) (string, OperatorCredential, error) {
+	principal.Kind = CredentialOperator
+	token, key, data, err := m.prepareToken(principal)
+	if err != nil {
+		return "", OperatorCredential{}, err
+	}
+	var stored Principal
+	if err := json.Unmarshal(data, &stored); err != nil {
+		return "", OperatorCredential{}, fmt.Errorf("decode operator principal: %w", err)
+	}
+	if err := m.store.Put(ctx, key, data); err != nil {
+		return "", OperatorCredential{}, fmt.Errorf("store token: %w", err)
+	}
+	return token, OperatorCredential{ID: CredentialID(strings.TrimPrefix(key, m.tokenKey(""))), Principal: stored}, nil
+}
+
+// ListOperatorCredentials returns the metadata of every stored operator
+// credential, including expired ones, ordered by creation time and ID.
+// Workload credentials are managed with their allocations and are omitted.
+func (m *TokenManager) ListOperatorCredentials(ctx context.Context) ([]OperatorCredential, error) {
+	prefix := m.tokenKey("")
+	values, err := m.store.List(ctx, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("list credentials: %w", err)
+	}
+	result := make([]OperatorCredential, 0, len(values))
+	for key, data := range values {
+		var principal Principal
+		if err := json.Unmarshal(data, &principal); err != nil {
+			return nil, fmt.Errorf("unmarshal principal: %w", err)
+		}
+		if principal.Kind != CredentialOperator {
+			continue
+		}
+		result = append(result, OperatorCredential{ID: CredentialID(strings.TrimPrefix(key, prefix)), Principal: principal})
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if !result[i].Principal.CreatedAt.Equal(result[j].Principal.CreatedAt) {
+			return result[i].Principal.CreatedAt.Before(result[j].Principal.CreatedAt)
+		}
+		return result[i].ID < result[j].ID
+	})
+	return result, nil
+}
+
+// RevokeOperatorCredential deletes the operator credential identified by id.
+// Workload credentials cannot be revoked this way.
+func (m *TokenManager) RevokeOperatorCredential(ctx context.Context, id string) error {
+	if !ValidCredentialID(id) {
+		return ErrCredentialNotFound
+	}
+	values, err := m.store.List(ctx, m.tokenKey(id))
+	if err != nil {
+		return fmt.Errorf("list credentials: %w", err)
+	}
+	var match string
+	for key, data := range values {
+		var principal Principal
+		if err := json.Unmarshal(data, &principal); err != nil || principal.Kind != CredentialOperator {
+			continue
+		}
+		if match != "" {
+			return fmt.Errorf("credential ID %s is ambiguous", id)
+		}
+		match = key
+	}
+	if match == "" {
+		return ErrCredentialNotFound
+	}
+	if err := m.store.Delete(ctx, match); err != nil {
+		return fmt.Errorf("revoke credential: %w", err)
+	}
+	return nil
 }
 
 // CreateToken creates and persists a token for principal.
@@ -137,7 +263,7 @@ func (m *TokenManager) prepareToken(principal Principal) (string, string, []byte
 		principal.Namespace = ""
 	}
 	if principal.CreatedAt.IsZero() {
-		principal.CreatedAt = time.Now().UTC()
+		principal.CreatedAt = m.now().UTC()
 	}
 	if err := principal.Validate(); err != nil {
 		return "", "", nil, err
@@ -176,6 +302,9 @@ func (m *TokenManager) ValidateToken(ctx context.Context, rawToken string) (*Pri
 	}
 	if err := principal.Validate(); err != nil {
 		return nil, fmt.Errorf("stored token has invalid principal: %w", err)
+	}
+	if !principal.ExpiresAt.IsZero() && !m.now().Before(principal.ExpiresAt) {
+		return nil, nil
 	}
 	return &principal, nil
 }

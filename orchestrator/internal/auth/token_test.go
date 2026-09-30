@@ -3,10 +3,13 @@ package auth
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/overfold/trellis/internal/secrets"
 	"github.com/overfold/trellis/internal/state"
@@ -396,5 +399,101 @@ func TestPrincipalValidation(t *testing.T) {
 		if err := principal.Validate(); err == nil {
 			t.Fatalf("expected principal to be invalid: %#v", principal)
 		}
+	}
+}
+
+func TestOperatorCredentialExpires(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	mgr := NewTokenManager(newMemStore(), "test")
+	mgr.SetClock(func() time.Time { return now })
+	token, credential, err := mgr.CreateOperatorToken(ctx, Principal{Scope: AccessCluster, Access: AccessRead, ExpiresAt: now.Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !credential.Principal.CreatedAt.Equal(now) || !credential.Principal.ExpiresAt.Equal(now.Add(time.Hour)) || !ValidCredentialID(credential.ID) {
+		t.Fatalf("credential metadata = %+v", credential)
+	}
+	if principal, err := mgr.ValidateToken(ctx, token); err != nil || principal == nil {
+		t.Fatalf("unexpired credential rejected: %v", err)
+	}
+	now = now.Add(time.Hour)
+	if principal, err := mgr.ValidateToken(ctx, token); err != nil || principal != nil {
+		t.Fatalf("expired credential = %+v, %v; want rejected", principal, err)
+	}
+}
+
+func TestWorkloadCredentialCannotExpire(t *testing.T) {
+	principal := workloadPrincipal(AccessNamespace, AccessRead)
+	principal.ExpiresAt = time.Now()
+	if err := principal.Validate(); err == nil {
+		t.Fatal("workload credential with an expiry validated")
+	}
+}
+
+func TestListAndRevokeOperatorCredentials(t *testing.T) {
+	ctx := context.Background()
+	store := newMemStore()
+	mgr := NewTokenManager(store, "test")
+	first, firstCredential, err := mgr.CreateOperatorToken(ctx, Principal{Scope: AccessCluster, Access: AccessWrite})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, secondCredential, err := mgr.CreateOperatorToken(ctx, Principal{Scope: AccessNamespace, Access: AccessRead, Namespace: "acme"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.WorkloadToken(ctx, testSealer(t, store), "alloc-1", 1, workloadPrincipal(AccessNamespace, AccessRead)); err != nil {
+		t.Fatal(err)
+	}
+
+	listed, err := mgr.ListOperatorCredentials(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 2 {
+		t.Fatalf("listed %d credentials, want the two operator credentials only: %+v", len(listed), listed)
+	}
+	ids := map[string]bool{listed[0].ID: true, listed[1].ID: true}
+	if !ids[firstCredential.ID] || !ids[secondCredential.ID] {
+		t.Fatalf("listed IDs = %v, want %s and %s", ids, firstCredential.ID, secondCredential.ID)
+	}
+	for _, credential := range listed {
+		if strings.Contains(credential.ID, first) || strings.Contains(credential.ID, second) {
+			t.Fatal("listing exposed a bearer token")
+		}
+	}
+
+	if err := mgr.RevokeOperatorCredential(ctx, firstCredential.ID); err != nil {
+		t.Fatal(err)
+	}
+	if principal, _ := mgr.ValidateToken(ctx, first); principal != nil {
+		t.Fatal("revoked credential still authenticates")
+	}
+	if principal, _ := mgr.ValidateToken(ctx, second); principal == nil {
+		t.Fatal("revoking one credential revoked another")
+	}
+	if err := mgr.RevokeOperatorCredential(ctx, firstCredential.ID); !errors.Is(err, ErrCredentialNotFound) {
+		t.Fatalf("second revoke error = %v, want ErrCredentialNotFound", err)
+	}
+	if err := mgr.RevokeOperatorCredential(ctx, "not-an-id"); !errors.Is(err, ErrCredentialNotFound) {
+		t.Fatalf("malformed ID error = %v, want ErrCredentialNotFound", err)
+	}
+}
+
+func TestRevokeOperatorCredentialIgnoresWorkloadCredentials(t *testing.T) {
+	ctx := context.Background()
+	store := newMemStore()
+	mgr := NewTokenManager(store, "test")
+	token, err := mgr.WorkloadToken(ctx, testSealer(t, store), "alloc-1", 1, workloadPrincipal(AccessNamespace, AccessRead))
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256([]byte(token))
+	if err := mgr.RevokeOperatorCredential(ctx, CredentialID(hex.EncodeToString(digest[:]))); !errors.Is(err, ErrCredentialNotFound) {
+		t.Fatalf("revoke workload credential error = %v, want ErrCredentialNotFound", err)
+	}
+	if principal, _ := mgr.ValidateToken(ctx, token); principal == nil {
+		t.Fatal("operator revocation removed a workload credential")
 	}
 }

@@ -25,6 +25,7 @@ func NewNodesCmd() *cobra.Command {
 	cmd.AddCommand(NewNodesDrainCmd())
 	cmd.AddCommand(NewNodesUndrainCmd())
 	cmd.AddCommand(NewNodesRemoveCmd())
+	cmd.AddCommand(NewNodesJoinTokenCmd())
 	cmd.AddCommand(NewNodesLeadershipTransferCmd())
 	return cmd
 }
@@ -67,6 +68,7 @@ func NewNodesRemoveCmd() *cobra.Command {
 		Use:   "remove NODE",
 		Args:  cobra.ExactArgs(1),
 		Short: "Permanently remove a node from the cluster",
+		Long:  "Permanently remove a node from the cluster. The node's identity is revoked: its certificate is rejected by every node-authenticated API and Raft stream, and it cannot rejoin. To return the machine to the cluster, wipe its data directory and enroll it again with a new join token.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			serverClient, err := administratorServerClient()
 			if err != nil {
