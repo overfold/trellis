@@ -917,7 +917,7 @@ func joinClusterRaft(ctx context.Context, log *slog.Logger, joinAddr, serverAddr
 				return &joinResponse, nil
 			}
 			if resp.StatusCode == http.StatusForbidden {
-				return nil, fmt.Errorf("raft join rejected with status %d: %s; a removed node must rejoin with a fresh data directory and a new join token", resp.StatusCode, strings.TrimSpace(string(respBody)))
+				return nil, fmt.Errorf("raft join rejected with status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 			}
 			err = fmt.Errorf("join returned status %d", resp.StatusCode)
 		}

@@ -497,3 +497,20 @@ func TestRevokeOperatorCredentialIgnoresWorkloadCredentials(t *testing.T) {
 		t.Fatal("operator revocation removed a workload credential")
 	}
 }
+
+func TestCredentialNamespacesIgnoreExpiredCredentials(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	mgr := NewTokenManager(newMemStore(), "test")
+	mgr.SetClock(func() time.Time { return now })
+	if _, _, err := mgr.CreateOperatorToken(ctx, Principal{Scope: AccessNamespace, Access: AccessRead, Namespace: "tmp", ExpiresAt: now.Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := mgr.CredentialNamespaces(ctx); len(got) != 1 || got[0] != "tmp" {
+		t.Fatalf("namespaces = %v, want [tmp]", got)
+	}
+	now = now.Add(time.Hour)
+	if got, _ := mgr.CredentialNamespaces(ctx); len(got) != 0 {
+		t.Fatalf("namespaces after expiry = %v, want none", got)
+	}
+}

@@ -82,7 +82,7 @@ trellisctl --administrator-key ./trellis-administrator.pem \
   nodes join-token create --ttl 30m --max-uses 1 > trellis-join-token
 ```
 
-The token is printed once; the cluster stores only its hash. `trellisctl nodes join-token list` shows unexpired tokens with their use counts, and `trellisctl nodes join-token revoke ID` withdraws one before it expires. Revoking a token does not affect nodes that already enrolled with it.
+The token is printed once; the cluster stores only its hash. `trellisctl nodes join-token list` shows unexpired tokens with their use counts, and `trellisctl nodes join-token revoke ID` withdraws one before it expires. Revoking a token does not affect nodes that already enrolled with it. Each enrollment attempt that the leader accepts uses the token once, even if its response is lost before the node stores its identity; if a node then reports that its token is exhausted, mint another.
 
 On an existing node, make temporary root-readable copies of the CA certificate and secrets key for secure transfer:
 
@@ -116,7 +116,7 @@ trellisctl nodes list
 
 A join token is accepted only by the managed enrollment endpoint and is never administrator API authority. Enrollment sends it only over TLS authenticated by the pinned CA, and each enrollment consumes one use in the same replicated transaction that records the new identity, so a use limit holds even when enrollments race. The leader assigns the new UUID rather than accepting a caller-selected identity and initially returns only that node's certificate and private key. The managed CA signing key is delivered only after the node proves that certificate and is admitted under the assigned UUID as a Raft member. After enrollment, node registration, heartbeats, Raft joins, Raft replication, and node-to-agent traffic use the node's unique certificate-bound UUID instead of a shared bearer token. Administrator requests are checked by the current leader against the replicated public key, so followers do not need or retain the administrator private key.
 
-**In managed mode every node holds the cluster CA private key.** Each admitted member receives it so that any node can lead enrollment after failover. Anyone who controls any node can therefore issue certificates, so treat compromise of any admitted node in managed mode as compromise of the cluster. Trellis still limits what a stolen CA key alone achieves: a certificate for a new UUID is not a Raft member and is rejected by the Raft transport, a certificate for an existing UUID does not match that UUID's durably bound certificate, and a removed UUID is refused everywhere. When no node should hold the CA private key, use `node_signing_mode: external`.
+**In managed mode every node holds the cluster CA private key.** Each admitted member receives it so that any node can lead enrollment after failover. Anyone who controls any node can therefore issue certificates, so treat compromise of any admitted node in managed mode as compromise of the cluster. Trellis still limits what a stolen CA key alone achieves: a certificate for a new UUID was never enrolled with a join token, so Raft join and the Raft transport refuse it, a certificate for an existing UUID does not match that UUID's durably bound certificate, and a removed UUID is refused everywhere. When no node should hold the CA private key, use `node_signing_mode: external`.
 
 To grow a single node into a fault-tolerant cluster, repeat this for two more machines.
 

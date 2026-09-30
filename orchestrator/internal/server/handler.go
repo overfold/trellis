@@ -811,6 +811,15 @@ func (h *Handler) handleRaftJoin(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusForbidden, "Raft join identity does not match certificate")
 	}
 	nodeID = certificateNodeID
+	// In managed signing mode every member holds the CA key and could mint a
+	// certificate for a new UUID. Only identities bound by join-token
+	// enrollment (or the bootstrap node) may join; external mode lets the
+	// operator's CA decide and binds on first join.
+	if _, caKey, err := h.server.ClusterCA(); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "load managed signing material")
+	} else if caKey != "" && !h.server.AuthorizeNodeCertificate(c.Request().Context(), nodeID, certificate) {
+		return echo.NewHTTPError(http.StatusForbidden, "Raft join requires an identity enrolled with a join token")
+	}
 	if err := h.server.BindNodeCertificate(c.Request().Context(), nodeID, certificate); err != nil {
 		return echo.NewHTTPError(http.StatusForbidden, err.Error())
 	}

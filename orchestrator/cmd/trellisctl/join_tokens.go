@@ -103,7 +103,7 @@ func newJoinTokenRevokeCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "revoke ID",
 		Short: "Revoke a node join token",
-		Long:  "Revoke a join token by the ID shown by 'trellisctl nodes join-token list'. Nodes that already enrolled with it are not affected; remove them with 'trellisctl nodes remove'.",
+		Long:  "Revoke a join token by the ID shown by 'trellisctl nodes join-token list'. Nodes that already enrolled with it are not affected; remove them with 'trellisctl nodes remove UUID', which also accepts identities that never registered.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			serverClient, err := administratorServerClient()

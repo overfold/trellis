@@ -309,8 +309,8 @@ func (m *TokenManager) ValidateToken(ctx context.Context, rawToken string) (*Pri
 	return &principal, nil
 }
 
-// CredentialNamespaces returns the sorted unique namespaces named by stored
-// namespace-scoped credentials.
+// CredentialNamespaces returns the sorted unique namespaces named by stored,
+// unexpired namespace-scoped credentials.
 func (m *TokenManager) CredentialNamespaces(ctx context.Context) ([]string, error) {
 	values, err := m.store.List(ctx, m.tokenKey(""))
 	if err != nil {
@@ -322,7 +322,8 @@ func (m *TokenManager) CredentialNamespaces(ctx context.Context) ([]string, erro
 		if err := json.Unmarshal(data, &principal); err != nil {
 			return nil, fmt.Errorf("unmarshal principal: %w", err)
 		}
-		if principal.Scope == AccessNamespace && principal.Namespace != "" {
+		expired := !principal.ExpiresAt.IsZero() && !m.now().Before(principal.ExpiresAt)
+		if principal.Scope == AccessNamespace && principal.Namespace != "" && !expired {
 			seen[principal.Namespace] = struct{}{}
 		}
 	}

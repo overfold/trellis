@@ -160,13 +160,28 @@ func TestHandleRaftJoinBindsMembershipToCertificateIdentity(t *testing.T) {
 	control := &Server{storage: local, joiner: joiner, state: NewStateController(store, "test")}
 	e := echo.New()
 	NewHandler(control).Register(e)
-	body, _ := json.Marshal(api.RaftJoinRequest{RaftAddress: "node-b:8129", ServerAddress: "node-b:8128"})
-	req := httptest.NewRequest(http.MethodPost, "/v1/raft/join", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{certificate}}
-	req = req.WithContext(context.WithValue(req.Context(), NodeContextKey, nodeID))
-	rec := httptest.NewRecorder()
-	e.ServeHTTP(rec, req)
+	join := func() *httptest.ResponseRecorder {
+		body, _ := json.Marshal(api.RaftJoinRequest{RaftAddress: "node-b:8129", ServerAddress: "node-b:8128"})
+		req := httptest.NewRequest(http.MethodPost, "/v1/raft/join", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{certificate}}
+		req = req.WithContext(context.WithValue(req.Context(), NodeContextKey, nodeID))
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		return rec
+	}
+	// In managed mode a CA-signed certificate for an identity that never
+	// enrolled with a join token cannot join.
+	if rec := join(); rec.Code != http.StatusForbidden {
+		t.Fatalf("unenrolled join status = %d, want 403; body: %s", rec.Code, rec.Body.String())
+	}
+	if got := joiner.operations(); len(got) != 0 {
+		t.Fatalf("unenrolled join changed membership: %v", got)
+	}
+	if err := control.BindNodeCertificate(context.Background(), nodeID, certificate); err != nil {
+		t.Fatal(err)
+	}
+	rec := join()
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}

@@ -289,6 +289,23 @@ func (s *Server) EnrollNode(ctx context.Context, joinToken string, advertised ..
 	if !ok {
 		return nil, ErrInvalidJoinToken
 	}
+	hash := joinTokenHash(joinToken)
+	checkToken := func() (*JoinToken, error) {
+		record, found, err := s.state.GetJoinToken(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if !found || subtle.ConstantTimeCompare([]byte(record.Hash), []byte(hash)) != 1 || !record.usable(s.now()) {
+			return nil, ErrInvalidJoinToken
+		}
+		return record, nil
+	}
+	// Reject invalid tokens before taking mutationMu, which every durable
+	// mutation shares, so unauthenticated callers cannot contend it. The
+	// check is repeated under the lock, where the use is consumed.
+	if _, err := checkToken(); err != nil {
+		return nil, err
+	}
 	caCert, caKey, err := s.ClusterCA()
 	if err != nil || caKey == "" {
 		return nil, fmt.Errorf("managed node signer is unavailable")
@@ -296,12 +313,9 @@ func (s *Server) EnrollNode(ctx context.Context, joinToken string, advertised ..
 
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
-	record, found, err := s.state.GetJoinToken(ctx, id)
+	record, err := checkToken()
 	if err != nil {
 		return nil, err
-	}
-	if !found || subtle.ConstantTimeCompare([]byte(record.Hash), []byte(joinTokenHash(joinToken))) != 1 || !record.usable(s.now()) {
-		return nil, ErrInvalidJoinToken
 	}
 	nodeID := uuid.New()
 	cert, key, err := tlsutil.GenerateNodeCert([]byte(caCert), []byte(caKey), nodeID, advertised...)
