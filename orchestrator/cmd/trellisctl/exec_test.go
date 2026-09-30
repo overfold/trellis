@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -10,31 +9,48 @@ import (
 	"testing"
 
 	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/execstream"
 )
 
-func TestExecCommandWritesStreamsAndPreservesExitStatus(t *testing.T) {
-	previousConfig := config
-	t.Cleanup(func() { config = previousConfig })
-
+// newExecTestServer accepts one exec stream, checks its request, and hands
+// the stream to serve.
+func newExecTestServer(t *testing.T, check func(api.ExecRequest), serve func(*execstream.Reader, *execstream.Writer)) *httptest.Server {
+	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/v1/allocations/alloc-1/exec" {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/allocations/alloc-1/exec" || !execstream.IsUpgradeRequest(r) {
 			http.Error(w, "unexpected request", http.StatusNotFound)
 			return
 		}
-		var request api.ExecRequest
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			t.Fatalf("decode request: %v", err)
+		request, err := execstream.DecodeRequest(r.URL.Query())
+		if err != nil {
+			t.Errorf("decode request: %v", err)
 		}
-		if request.Task != "web" || len(request.Command) != 2 || request.Command[0] != "sh" || request.Command[1] != "-c" {
-			t.Fatalf("unexpected request: %#v", request)
+		check(request)
+		conn, err := execstream.Accept(w)
+		if err != nil {
+			t.Errorf("accept: %v", err)
+			return
 		}
-		_ = json.NewEncoder(w).Encode(api.ExecResponse{
-			Stdout:   "stdout",
-			Stderr:   "stderr",
-			ExitCode: 7,
-		})
+		defer func() { _ = conn.Close() }()
+		serve(execstream.NewReader(conn), execstream.NewWriter(conn, 0))
 	}))
-	defer server.Close()
+	t.Cleanup(server.Close)
+	return server
+}
+
+func TestExecCommandStreamsOutputAndPreservesExitStatus(t *testing.T) {
+	previousConfig := config
+	t.Cleanup(func() { config = previousConfig })
+
+	server := newExecTestServer(t, func(request api.ExecRequest) {
+		if request.Task != "web" || strings.Join(request.Command, " ") != "sh -c" || request.TTY || request.Stdin {
+			t.Errorf("unexpected request: %#v", request)
+		}
+	}, func(_ *execstream.Reader, writer *execstream.Writer) {
+		_ = writer.WriteData(execstream.FrameStdout, []byte("stdout"))
+		_ = writer.WriteData(execstream.FrameStderr, []byte("stderr"))
+		_ = writer.WriteJSON(execstream.FrameExit, api.ExecExit{ExitCode: 7})
+	})
 
 	config = CLIConfig{ServerAddr: server.URL, Namespace: "default"}
 	cmd := NewExecCmd()
@@ -59,11 +75,72 @@ func TestExecCommandWritesStreamsAndPreservesExitStatus(t *testing.T) {
 	}
 }
 
-func TestExecStdinRequiresTTY(t *testing.T) {
+func TestExecForwardsStdinAndClosesIt(t *testing.T) {
+	previousConfig := config
+	t.Cleanup(func() { config = previousConfig })
+
+	server := newExecTestServer(t, func(request api.ExecRequest) {
+		if !request.Stdin || request.TTY {
+			t.Errorf("unexpected request: %#v", request)
+		}
+	}, func(reader *execstream.Reader, writer *execstream.Writer) {
+		for {
+			frame, err := reader.Next()
+			if err != nil {
+				t.Errorf("read: %v", err)
+				return
+			}
+			switch frame.Type {
+			case execstream.FrameStdin:
+				_ = writer.WriteData(execstream.FrameStdout, frame.Payload)
+			case execstream.FrameStdinClose:
+				_ = writer.WriteJSON(execstream.FrameExit, api.ExecExit{})
+				return
+			default:
+				t.Errorf("unexpected frame %d", frame.Type)
+				return
+			}
+		}
+	})
+
+	config = CLIConfig{ServerAddr: server.URL, Namespace: "default"}
 	cmd := NewExecCmd()
-	cmd.SetArgs([]string{"--stdin", "alloc-1", "--", "/bin/sh"})
+	cmd.SetArgs([]string{"-i", "alloc-1", "--", "cat"})
+	cmd.SetIn(strings.NewReader("piped input"))
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if stdout.String() != "piped input" {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestExecReportsStreamError(t *testing.T) {
+	previousConfig := config
+	t.Cleanup(func() { config = previousConfig })
+
+	server := newExecTestServer(t, func(api.ExecRequest) {}, func(_ *execstream.Reader, writer *execstream.Writer) {
+		_ = writer.WriteJSON(execstream.FrameError, api.ExecStreamError{Message: "exec session ended because control-plane leadership changed"})
+	})
+	config = CLIConfig{ServerAddr: server.URL, Namespace: "default"}
+	cmd := NewExecCmd()
+	cmd.SetArgs([]string{"alloc-1", "--", "true"})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
 	err := cmd.Execute()
-	if err == nil || !strings.Contains(err.Error(), "--stdin requires --tty") {
+	var exitErr *execExitError
+	if err == nil || errors.As(err, &exitErr) || !strings.Contains(err.Error(), "leadership changed") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestExecTermRequiresTTY(t *testing.T) {
+	cmd := NewExecCmd()
+	cmd.SetArgs([]string{"--term", "xterm", "alloc-1", "--", "/bin/sh"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "--term requires --tty") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

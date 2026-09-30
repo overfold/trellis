@@ -15,12 +15,15 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"github.com/overfold/trellis/internal/api"
 	"github.com/overfold/trellis/internal/auth"
+	"github.com/overfold/trellis/internal/client"
 	"github.com/overfold/trellis/internal/election"
+	"github.com/overfold/trellis/internal/execstream"
 	"github.com/overfold/trellis/internal/server"
 	"github.com/overfold/trellis/internal/storage"
 	"github.com/overfold/trellis/internal/tlsutil"
@@ -310,6 +313,57 @@ func TestControlPlaneFollowerProxiesToLeader(t *testing.T) {
 
 	if recorder.Code != http.StatusOK || recorder.Header().Get("X-Executed-By") != "leader" {
 		t.Fatalf("response = %d, headers %v", recorder.Code, recorder.Header())
+	}
+}
+
+// A follower forwards an exec upgrade to the leader and then carries the
+// switched stream in both directions.
+func TestControlPlaneFollowerProxiesExecStream(t *testing.T) {
+	leader := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !execstream.IsUpgradeRequest(r) || r.Header.Get("Authorization") != "Bearer operator-token" {
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		conn, err := execstream.Accept(w)
+		if err != nil {
+			t.Errorf("accept: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		frame, err := execstream.NewReader(conn).Next()
+		if err != nil {
+			t.Errorf("read: %v", err)
+			return
+		}
+		writer := execstream.NewWriter(conn, 0)
+		_ = writer.WriteData(execstream.FrameStdout, frame.Payload)
+		_ = writer.WriteJSON(execstream.FrameExit, api.ExecExit{ExitCode: 2})
+	}))
+	defer leader.Close()
+	follower := httptest.NewUnstartedServer(newControlPlaneProxy(
+		fixedElector{leader: &election.Leader{Address: leader.URL}},
+		"https://follower.example:8128",
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("follower executed request locally") }),
+		http.DefaultTransport,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	))
+	// The API server's read timeout must not end a stream that outlives it.
+	follower.Config.ReadTimeout = 200 * time.Millisecond
+	follower.Start()
+	defer follower.Close()
+
+	stream, err := client.NewServerClient("operator-token", follower.URL, nil).Exec(context.Background(), "alloc-1", api.ExecRequest{Command: []string{"cat"}, Stdin: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stream.Close() }()
+	time.Sleep(3 * follower.Config.ReadTimeout)
+	if _, err := stream.Write([]byte("through the follower")); err != nil {
+		t.Fatal(err)
+	}
+	var stdout strings.Builder
+	if code, err := stream.Wait(&stdout, io.Discard); err != nil || code != 2 || stdout.String() != "through the follower" {
+		t.Fatalf("wait = %d, %v; stdout %q", code, err, stdout.String())
 	}
 }
 

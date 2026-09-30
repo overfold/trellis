@@ -62,14 +62,38 @@ type ContainerMetrics struct {
 	MemoryUsageBytes int64
 }
 
-// TerminalSession is a live TTY-backed process running inside a container.
-// Implementations must support concurrent output reads and input writes.
-type TerminalSession interface {
-	Write([]byte) (int, error)
-	// Read returns output produced since offset; offsets past the end return no data.
-	Read(offset int64) (data []byte, nextOffset int64, exited bool, exitCode *int, err error)
+// ExecOptions configures a streamed exec process.
+type ExecOptions struct {
+	Command []string
+	// TTY allocates a terminal; its output is written to Stdout.
+	TTY bool
+	// Term, when set, replaces TERM in a TTY process's environment.
+	Term string
+	// Cols and Rows are the initial size of a TTY. Zero keeps the default.
+	Cols uint32
+	Rows uint32
+	// Stdin supplies process input until it returns io.EOF, which closes the
+	// process's input. A nil Stdin gives the process no input.
+	Stdin io.Reader
+	// Stdout and Stderr receive process output. A write that blocks stalls
+	// the process's output rather than buffering it. Stderr is unused with
+	// TTY; a nil writer discards its stream.
+	Stdout io.Writer
+	Stderr io.Writer
+}
+
+// ExecProcess is a running process started by StartExec.
+type ExecProcess interface {
+	// Resize changes the terminal size of a TTY process.
 	Resize(ctx context.Context, cols, rows uint32) error
-	Close(ctx context.Context) error
+	// Done is closed once the process has exited and its output has been
+	// delivered, or its delivery abandoned after a bounded wait.
+	Done() <-chan struct{}
+	// ExitCode returns the process's exit status after Done is closed.
+	ExitCode() (int, error)
+	// Kill terminates the process. It is safe to call after the process
+	// exited and more than once.
+	Kill(ctx context.Context) error
 }
 
 // ContainerRuntime defines the operations required by an allocation runtime.
@@ -81,11 +105,9 @@ type ContainerRuntime interface {
 	Stop(ctx context.Context, containerID string) error
 	Remove(ctx context.Context, containerID string) error
 	Exec(ctx context.Context, containerID string, command []string) (int, error)
-	// ExecOutput runs a command in a container and returns its stdout, stderr,
-	// and exit code. The command must not require a terminal.
-	ExecOutput(ctx context.Context, containerID string, command []string) (stdout []byte, stderr []byte, exitCode int, err error)
-	// StartTerminal starts an interactive TTY-backed process inside a container.
-	StartTerminal(ctx context.Context, containerID string, command []string, term string, cols, rows uint32) (TerminalSession, error)
+	// StartExec starts a process in a running container with the task's OCI
+	// process context. The process outlives ctx; the caller ends it with Kill.
+	StartExec(ctx context.Context, containerID string, options ExecOptions) (ExecProcess, error)
 	// Metrics returns a point-in-time resource usage snapshot for a container.
 	Metrics(ctx context.Context, containerID string) (*ContainerMetrics, error)
 	Inspect(ctx context.Context, containerID string) (*ContainerInfo, error)

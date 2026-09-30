@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/execstream"
 	"github.com/overfold/trellis/internal/spec"
 )
 
@@ -26,62 +27,15 @@ type ServerClient struct {
 	mu      sync.RWMutex
 }
 
-// ExecAllocation runs a non-interactive command in an allocation task.
-func (s *ServerClient) ExecAllocation(ctx context.Context, id, task string, command []string) (*api.ExecResponse, error) {
-	request := api.ExecRequest{Task: task, Command: command}
-	var response api.ExecResponse
-	path := fmt.Sprintf("%s/v1/allocations/%s/exec", s.address(), url.PathEscape(id))
-	if err := s.client.request(ctx, http.MethodPost, path, &request, &response); err != nil {
+// Exec opens an exec stream to a new process in an allocation task. The
+// stream is closed when ctx ends.
+func (s *ServerClient) Exec(ctx context.Context, id string, request api.ExecRequest) (*ExecStream, error) {
+	target := fmt.Sprintf("%s/v1/allocations/%s/exec?%s", s.address(), url.PathEscape(id), execstream.EncodeRequest(request).Encode())
+	conn, err := s.client.upgrade(ctx, target)
+	if err != nil {
 		return nil, fmt.Errorf("exec allocation: %w", err)
 	}
-	return &response, nil
-}
-
-// CreateExecSession starts an interactive terminal in an allocation task.
-func (s *ServerClient) CreateExecSession(ctx context.Context, id string, request *api.ExecSessionCreateRequest) (*api.ExecSessionResponse, error) {
-	var response api.ExecSessionResponse
-	path := fmt.Sprintf("%s/v1/allocations/%s/exec/sessions", s.address(), url.PathEscape(id))
-	if err := s.client.request(ctx, http.MethodPost, path, request, &response); err != nil {
-		return nil, fmt.Errorf("create exec session: %w", err)
-	}
-	return &response, nil
-}
-
-// WriteExecSession appends terminal input to an interactive allocation session.
-func (s *ServerClient) WriteExecSession(ctx context.Context, id, sessionID string, request *api.ExecSessionInputRequest) error {
-	path := fmt.Sprintf("%s/v1/allocations/%s/exec/sessions/%s/input", s.address(), url.PathEscape(id), url.PathEscape(sessionID))
-	if err := s.client.request(ctx, http.MethodPost, path, request, nil); err != nil {
-		return fmt.Errorf("write exec session: %w", err)
-	}
-	return nil
-}
-
-// ReadExecSession reads terminal output produced since offset.
-func (s *ServerClient) ReadExecSession(ctx context.Context, id, sessionID string, offset int64) (*api.ExecSessionOutputResponse, error) {
-	var response api.ExecSessionOutputResponse
-	path := fmt.Sprintf("%s/v1/allocations/%s/exec/sessions/%s/output?offset=%d", s.address(), url.PathEscape(id), url.PathEscape(sessionID), offset)
-	if err := s.client.request(ctx, http.MethodGet, path, nil, &response); err != nil {
-		return nil, fmt.Errorf("read exec session: %w", err)
-	}
-	return &response, nil
-}
-
-// ResizeExecSession changes the dimensions of an interactive allocation terminal.
-func (s *ServerClient) ResizeExecSession(ctx context.Context, id, sessionID string, request *api.ExecSessionResizeRequest) error {
-	path := fmt.Sprintf("%s/v1/allocations/%s/exec/sessions/%s/resize", s.address(), url.PathEscape(id), url.PathEscape(sessionID))
-	if err := s.client.request(ctx, http.MethodPost, path, request, nil); err != nil {
-		return fmt.Errorf("resize exec session: %w", err)
-	}
-	return nil
-}
-
-// CloseExecSession terminates an interactive allocation terminal.
-func (s *ServerClient) CloseExecSession(ctx context.Context, id, sessionID string) error {
-	path := fmt.Sprintf("%s/v1/allocations/%s/exec/sessions/%s", s.address(), url.PathEscape(id), url.PathEscape(sessionID))
-	if err := s.client.request(ctx, http.MethodDelete, path, nil, nil); err != nil {
-		return fmt.Errorf("close exec session: %w", err)
-	}
-	return nil
+	return newExecStream(conn), nil
 }
 
 // AllocationLogs streams logs for an allocation.

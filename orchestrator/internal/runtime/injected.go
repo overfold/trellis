@@ -13,6 +13,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/containerd/errdefs"
@@ -122,68 +124,100 @@ func (r *InjectedRuntime) setStatus(op, id string, status ContainerStatus) error
 // Exec simulates a successful container command.
 func (r *InjectedRuntime) Exec(context.Context, string, []string) (int, error) { return 0, nil }
 
-// ExecOutput simulates a successful command and returns empty output.
-func (r *InjectedRuntime) ExecOutput(context.Context, string, []string) ([]byte, []byte, int, error) {
-	return nil, nil, 0, nil
+// injectedExecProcess is an in-memory exec process. Its command selects a
+// small scripted behaviour so streams can be tested without containerd:
+//
+//   - echo ARGS... writes ARGS and a newline to stdout and exits 0.
+//   - stderr ARGS... writes ARGS and a newline to stderr (stdout with a TTY)
+//     and exits 0.
+//   - exit CODE exits with CODE.
+//   - anything else copies stdin to stdout until stdin ends, then exits 0.
+//
+// With a TTY, each resize is reported on stdout as "[resize COLSxROWS]".
+type injectedExecProcess struct {
+	options ExecOptions
+	done    chan struct{}
+	once    sync.Once
+	code    int
 }
 
-type injectedTerminalSession struct {
-	mu       sync.Mutex
-	data     []byte
-	exited   bool
-	exitCode *int
+func (p *injectedExecProcess) Done() <-chan struct{} { return p.done }
+
+func (p *injectedExecProcess) ExitCode() (int, error) {
+	<-p.done
+	return p.code, nil
 }
 
-func (s *injectedTerminalSession) Write(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.exited {
-		return 0, io.ErrClosedPipe
-	}
-	s.data = append(s.data, p...)
-	return len(p), nil
+func (p *injectedExecProcess) exit(code int) {
+	p.once.Do(func() {
+		p.code = code
+		close(p.done)
+	})
 }
 
-func (s *injectedTerminalSession) Read(offset int64) ([]byte, int64, bool, *int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if offset < 0 {
-		offset = 0
+func (p *injectedExecProcess) Resize(_ context.Context, cols, rows uint32) error {
+	if cols == 0 || rows == 0 {
+		return fmt.Errorf("terminal dimensions must be greater than zero")
 	}
-	if offset > int64(len(s.data)) {
-		offset = int64(len(s.data))
-	}
-	data := append([]byte(nil), s.data[int(offset):]...)
-	var code *int
-	if s.exitCode != nil {
-		value := *s.exitCode
-		code = &value
-	}
-	return data, int64(len(s.data)), s.exited, code, nil
-}
-
-func (s *injectedTerminalSession) Resize(context.Context, uint32, uint32) error { return nil }
-
-func (s *injectedTerminalSession) Close(context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.exited {
-		value := 0
-		s.exitCode = &value
-		s.exited = true
+	if p.options.TTY {
+		_, _ = fmt.Fprintf(p.options.Stdout, "[resize %dx%d]", cols, rows)
 	}
 	return nil
 }
 
-// StartTerminal creates an in-memory interactive session for integration tests.
-func (r *InjectedRuntime) StartTerminal(_ context.Context, id string, _ []string, _ string, _, _ uint32) (TerminalSession, error) {
+func (p *injectedExecProcess) Kill(context.Context) error {
+	p.exit(137)
+	return nil
+}
+
+func (p *injectedExecProcess) run() {
+	command := p.options.Command
+	args := strings.Join(command[1:], " ")
+	switch command[0] {
+	case "echo":
+		_, _ = io.WriteString(p.options.Stdout, args+"\n")
+		p.exit(0)
+	case "stderr":
+		target := p.options.Stderr
+		if p.options.TTY {
+			target = p.options.Stdout
+		}
+		_, _ = io.WriteString(target, args+"\n")
+		p.exit(0)
+	case "exit":
+		code, err := strconv.Atoi(args)
+		if err != nil {
+			code = 2
+		}
+		p.exit(code)
+	default:
+		if p.options.Stdin != nil {
+			_, _ = io.Copy(p.options.Stdout, p.options.Stdin)
+		}
+		p.exit(0)
+	}
+}
+
+// StartExec starts an in-memory scripted process for integration tests.
+func (r *InjectedRuntime) StartExec(_ context.Context, id string, options ExecOptions) (ExecProcess, error) {
+	if len(options.Command) == 0 {
+		return nil, fmt.Errorf("exec command is required")
+	}
 	r.mu.Lock()
 	_, ok := r.state.Containers[id]
 	r.mu.Unlock()
 	if !ok {
 		return nil, fmt.Errorf("container %s not found", id)
 	}
-	return &injectedTerminalSession{}, nil
+	if options.Stdout == nil {
+		options.Stdout = io.Discard
+	}
+	if options.Stderr == nil {
+		options.Stderr = io.Discard
+	}
+	process := &injectedExecProcess{options: options, done: make(chan struct{})}
+	go process.run()
+	return process, nil
 }
 
 // Metrics returns zero metrics for an injected container.
