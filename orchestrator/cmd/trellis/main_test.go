@@ -428,23 +428,41 @@ func TestControlPlaneExecutesLocallyOnlyWhenLeaderIsActive(t *testing.T) {
 	}
 }
 
-func TestEnrollmentCredentialIsNotAdministratorCredential(t *testing.T) {
+func TestJoinTokenIsOnlyAnEnrollmentCredential(t *testing.T) {
 	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
+	const joinToken = "trls_join_0123456789abcdef.secret"
 	e := echo.New()
 	e.Use(leaderAuthMiddleware(auth.NewAdministratorAuthenticator(), func() (ed25519.PublicKey, uint64, bool) {
 		return publicKey, 1, true
-	}, "enroll-secret", nil, nil))
+	}, nil, nil))
 	e.POST("/v1/namespaces/default/jobs", func(c *echo.Context) error { return c.NoContent(http.StatusNoContent) })
+	e.POST("/v1/nodes/enroll", func(c *echo.Context) error {
+		if admin, _ := c.Request().Context().Value(server.AdminContextKey).(bool); admin {
+			t.Fatal("enrollment request carried administrator authority")
+		}
+		if got, _ := c.Request().Context().Value(server.JoinTokenContextKey).(string); got != joinToken {
+			t.Fatalf("enrollment join token = %q, want the presented bearer", got)
+		}
+		return c.NoContent(http.StatusCreated)
+	})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/namespaces/default/jobs", nil)
-	req.Header.Set("Authorization", "Bearer enroll-secret")
+	req.Header.Set("Authorization", "Bearer "+joinToken)
 	rec := httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("enrollment credential status = %d, want %d", rec.Code, http.StatusUnauthorized)
+		t.Fatalf("join token status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/nodes/enroll", nil)
+	req.Header.Set("Authorization", "Bearer "+joinToken)
+	rec = httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("enrollment status = %d, want the join token passed to enrollment", rec.Code)
 	}
 
 	req = httptest.NewRequest(http.MethodPost, "/v1/namespaces/default/jobs", nil)
@@ -470,7 +488,7 @@ func TestAdministratorRequestSignatures(t *testing.T) {
 	e := echo.New()
 	e.Use(leaderAuthMiddleware(auth.NewAdministratorAuthenticator(), func() (ed25519.PublicKey, uint64, bool) {
 		return publicKey, epoch, verificationAvailable
-	}, "", nil, nil))
+	}, nil, nil))
 	e.POST("/v1/root", func(c *echo.Context) error {
 		if admin, _ := c.Request().Context().Value(server.AdminContextKey).(bool); !admin {
 			t.Fatal("valid signature did not grant administrator context")

@@ -11,7 +11,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -735,6 +734,7 @@ func NewServer(log *slog.Logger, storage *storage.LocalStorage, state *StateCont
 	}
 	s.backupStore, _ = store.(desiredStore)
 	s.events = newEventBus()
+	s.tokenManager.SetClock(func() time.Time { return s.now() })
 	return s
 }
 
@@ -870,6 +870,11 @@ func (s *Server) BindNodeCertificate(ctx context.Context, id uuid.UUID, certific
 	}
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
+	if removed, err := s.state.NodeRemoved(ctx, id.String()); err != nil {
+		return err
+	} else if removed {
+		return fmt.Errorf("node %s: %w", id, ErrNodeRemoved)
+	}
 	fingerprint := nodeCertificateFingerprint(certificate)
 	existing, found, err := s.state.GetNodeCertificateFingerprint(ctx, id.String())
 	if err != nil {
@@ -884,9 +889,13 @@ func (s *Server) BindNodeCertificate(ctx context.Context, id uuid.UUID, certific
 	return s.state.PutNodeCertificateFingerprint(ctx, id.String(), fingerprint)
 }
 
-// AuthorizeNodeCertificate checks the durable UUID-to-certificate binding.
+// AuthorizeNodeCertificate checks the durable UUID-to-certificate binding and
+// rejects removed node identities.
 func (s *Server) AuthorizeNodeCertificate(ctx context.Context, id uuid.UUID, certificate *x509.Certificate) bool {
 	if id == uuid.Nil || certificate == nil {
+		return false
+	}
+	if removed, err := s.state.NodeRemoved(ctx, id.String()); err != nil || removed {
 		return false
 	}
 	existing, found, err := s.state.GetNodeCertificateFingerprint(ctx, id.String())
@@ -910,38 +919,6 @@ func (s *Server) ClusterCA() (certPEM, keyPEM string, err error) {
 		return "", "", fmt.Errorf("load CA key: %w", err)
 	}
 	return certPEM, keyPEM, nil
-}
-
-// EnrollNode issues a server-assigned node identity and certificate in managed
-// signing mode. The CA key is withheld until the identity joins Raft, so an
-// enrollment credential alone cannot mint or duplicate an existing identity.
-func (s *Server) EnrollNode(ctx context.Context, advertised ...string) (*api.NodeEnrollmentResponse, error) {
-	caCert, caKey, err := s.ClusterCA()
-	if err != nil || caKey == "" {
-		return nil, fmt.Errorf("managed node signer is unavailable")
-	}
-	nodeID := uuid.New()
-	cert, key, err := tlsutil.GenerateNodeCert([]byte(caCert), []byte(caKey), nodeID, advertised...)
-	if err != nil {
-		return nil, fmt.Errorf("sign node certificate: %w", err)
-	}
-	block, _ := pem.Decode(cert)
-	if block == nil {
-		return nil, fmt.Errorf("decode signed node certificate")
-	}
-	certificate, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("parse signed node certificate: %w", err)
-	}
-	if err := s.BindNodeCertificate(ctx, nodeID, certificate); err != nil {
-		return nil, fmt.Errorf("reserve node identity: %w", err)
-	}
-	return &api.NodeEnrollmentResponse{
-		NodeID: nodeID,
-		CACert: caCert,
-		Cert:   string(cert),
-		Key:    string(key),
-	}, nil
 }
 
 // Run starts background reconciliation until the context ends.

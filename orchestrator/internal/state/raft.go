@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -108,6 +109,12 @@ type RaftConfig struct {
 	ServerID  string
 	Bootstrap bool
 	TLS       *tls.Config
+	// AuthorizePeer decides whether a peer whose certificate chains to the
+	// cluster CA may open an inbound Raft stream. The CA proves only that a
+	// certificate was issued for some node; this check decides whether that
+	// node is currently entitled to replicate or vote with this member. It is
+	// required with TLS and runs during every inbound TLS handshake.
+	AuthorizePeer func(certificate *x509.Certificate) error
 	// Logger receives Raft, transport, and snapshot-store diagnostics at Warn
 	// and above, rate limited. Nil uses slog.Default.
 	Logger *slog.Logger
@@ -161,6 +168,30 @@ func (t *tlsStreamLayer) Dial(address raft.ServerAddress, timeout time.Duration)
 	return tlsConn, nil
 }
 
+// inboundPeerTLS returns the listener configuration for inbound Raft streams:
+// the peer configuration with authorize applied to the verified client
+// certificate of every handshake. A rejected handshake closes the stream
+// before any Raft RPC is read from it.
+func inboundPeerTLS(peer *tls.Config, authorize func(*x509.Certificate) error) (*tls.Config, error) {
+	if authorize == nil {
+		return nil, fmt.Errorf("raft TLS requires a peer authorizer")
+	}
+	if peer.ClientAuth != tls.RequireAndVerifyClientCert {
+		return nil, fmt.Errorf("raft TLS must require and verify client certificates")
+	}
+	listenTLS := peer.Clone()
+	listenTLS.VerifyConnection = func(state tls.ConnectionState) error {
+		if len(state.VerifiedChains) == 0 || len(state.VerifiedChains[0]) == 0 {
+			return fmt.Errorf("raft peer presented no verified certificate")
+		}
+		if err := authorize(state.VerifiedChains[0][0]); err != nil {
+			return fmt.Errorf("raft peer rejected: %w", err)
+		}
+		return nil
+	}
+	return listenTLS, nil
+}
+
 // NewRaftStore creates a Raft-backed state store.
 func NewRaftStore(cfg RaftConfig) (*RaftStore, error) {
 	raftDir := filepath.Join(cfg.DataDir, "raft")
@@ -202,7 +233,11 @@ func NewRaftStore(cfg RaftConfig) (*RaftStore, error) {
 
 	var transport raft.Transport
 	if cfg.TLS != nil {
-		ln, err := tls.Listen("tcp", cfg.BindAddr, cfg.TLS)
+		listenTLS, err := inboundPeerTLS(cfg.TLS, cfg.AuthorizePeer)
+		if err != nil {
+			return nil, err
+		}
+		ln, err := tls.Listen("tcp", cfg.BindAddr, listenTLS)
 		if err != nil {
 			return nil, fmt.Errorf("create TLS listener: %w", err)
 		}

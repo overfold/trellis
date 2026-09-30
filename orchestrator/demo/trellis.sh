@@ -6,20 +6,16 @@ DATA_DIR="/var/lib/trellis/data"
 CONFIG_FILE="/etc/trellis/trellis.yaml"
 ADMIN_KEY_FILE="${SHARE_DIR}/administrator-key.pem"
 ADMIN_PUBLIC_KEY_FILE="${SHARE_DIR}/administrator-public-key"
-ENROLLMENT_TOKEN_FILE="${SHARE_DIR}/enrollment-token"
+JOIN_TOKEN_FILE="${SHARE_DIR}/join-token"
 CA_CERT_FILE="${SHARE_DIR}/node-ca.crt"
 
-# Generate separate administrator signing and enrollment credentials.
+# Generate the administrator signing key. The control node later uses it to
+# mint the short-lived join token the workers enroll with.
 mkdir -p "${SHARE_DIR}"
 if [ ! -s "${ADMIN_KEY_FILE}" ] || [ ! -s "${ADMIN_PUBLIC_KEY_FILE}" ]; then
     umask 077
     openssl genpkey -algorithm ED25519 -out "${ADMIN_KEY_FILE}"
     openssl pkey -in "${ADMIN_KEY_FILE}" -pubout -outform DER | base64 | tr -d '=\n' >"${ADMIN_PUBLIC_KEY_FILE}"
-fi
-if [ ! -s "${ENROLLMENT_TOKEN_FILE}" ]; then
-    umask 077
-    printf 'trls_enroll_' > "${ENROLLMENT_TOKEN_FILE}"
-    head -c 32 /dev/urandom | base64 | tr -d '=\n' >> "${ENROLLMENT_TOKEN_FILE}"
 fi
 
 # Install binaries from the shared folder.
@@ -34,7 +30,6 @@ HOSTNAME=$(hostname -s)
 ADVERTISE_HOST="${HOSTNAME}.local"
 cat > "$CONFIG_FILE" <<EOF
 cluster: default
-enrollment_token: $(cat "${ENROLLMENT_TOKEN_FILE}")
 node_signing_mode: managed
 data_dir: ${DATA_DIR}
 agent_advertise: ${ADVERTISE_HOST}:8127
@@ -43,11 +38,14 @@ raft_advertise: ${ADVERTISE_HOST}:8129
 EOF
 if [ "${HOSTNAME}" = "control" ]; then
     printf 'administrator_public_key: %s\n' "$(cat "${ADMIN_PUBLIC_KEY_FILE}")" >> "$CONFIG_FILE"
+    rm -f "${CA_CERT_FILE}" "${JOIN_TOKEN_FILE}"
 else
-    for _ in $(seq 1 60); do [ -s "${CA_CERT_FILE}" ] && break; sleep 1; done
+    for _ in $(seq 1 60); do [ -s "${CA_CERT_FILE}" ] && [ -s "${JOIN_TOKEN_FILE}" ] && break; sleep 1; done
     [ -s "${CA_CERT_FILE}" ] || { echo "cluster CA certificate unavailable" >&2; exit 1; }
+    [ -s "${JOIN_TOKEN_FILE}" ] || { echo "cluster join token unavailable" >&2; exit 1; }
     install -m 0644 "${CA_CERT_FILE}" /etc/trellis/node-ca.crt
     printf 'join: control.local:8128\n' >> "$CONFIG_FILE"
+    printf 'join_token: %s\n' "$(cat "${JOIN_TOKEN_FILE}")" >> "$CONFIG_FILE"
     printf 'ca_cert: /etc/trellis/node-ca.crt\n' >> "$CONFIG_FILE"
 fi
 chmod 600 "$CONFIG_FILE"
@@ -72,5 +70,15 @@ systemctl enable trellis
 systemctl start trellis
 if [ "${HOSTNAME}" = "control" ]; then
     for _ in $(seq 1 60); do [ -s "${DATA_DIR}/node-ca.crt" ] && break; sleep 1; done
+    # Mint one join token for the two demo workers. It expires within the
+    # hour whether or not it is used.
+    umask 077
+    for _ in $(seq 1 60); do
+        trellisctl --server-addr localhost:8128 --ca-cert "${DATA_DIR}/node-ca.crt" --administrator-key "${ADMIN_KEY_FILE}" \
+            nodes join-token create --ttl 1h --max-uses 2 >"${JOIN_TOKEN_FILE}.tmp" 2>/dev/null && break
+        sleep 1
+    done
+    [ -s "${JOIN_TOKEN_FILE}.tmp" ] || { echo "could not mint a join token" >&2; exit 1; }
+    mv "${JOIN_TOKEN_FILE}.tmp" "${JOIN_TOKEN_FILE}"
     install -m 0644 "${DATA_DIR}/node-ca.crt" "${CA_CERT_FILE}"
 fi

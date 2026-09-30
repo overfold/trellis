@@ -282,9 +282,9 @@ Prefer this mode for proxies, discovery controllers, and automation that does no
 
 **Outcome:** let a workload perform ordinary cluster-wide or cross-namespace operations that a namespace controller cannot perform.
 
-Set `api_access.scope: cluster` with the required `read` or `write` access only on a fully trusted task group. Trellis injects a scoped cluster API token in `TRELLIS_TOKEN`, never the administrator or enrollment credential. It also sets `TRELLIS_NAMESPACE` to the job's namespace as a conservative default for clients that build namespaced request paths, but that value is **not** an authorization boundary for a cluster-scoped token, which may address any namespace and the cross-namespace `GET /v1/allocations` and `GET /v1/events` endpoints.
+Set `api_access.scope: cluster` with the required `read` or `write` access only on a fully trusted task group. Trellis injects a scoped cluster API token in `TRELLIS_TOKEN`, never the administrator credential or a join token. It also sets `TRELLIS_NAMESPACE` to the job's namespace as a conservative default for clients that build namespaced request paths, but that value is **not** an authorization boundary for a cluster-scoped token, which may address any namespace and the cross-namespace `GET /v1/allocations` and `GET /v1/events` endpoints.
 
-Cluster mode is appropriate for an operator workload that genuinely needs ordinary cross-namespace reads or writes. It does not grant credential minting, backup/restore, node enrollment, or Raft administration; those remain administrator, enrollment, or node-identity operations. It is not a shortcut for giving an ordinary application access to another namespace.
+Cluster mode is appropriate for an operator workload that genuinely needs ordinary cross-namespace reads or writes. It does not grant credential minting, backup/restore, node enrollment, or Raft administration; those remain administrator, join-token, or node-identity operations. It is not a shortcut for giving an ordinary application access to another namespace.
 
 Treat compromise of any task in the group as compromise of the cluster credential. Pin and review images, avoid unrelated sidecars, keep the token out of logs/metrics/browser code, and prefer `namespace` whenever it can express the controller's job.
 

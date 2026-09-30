@@ -247,13 +247,14 @@ func TestRaftTransportErrorsAreLoggedAndBounded(t *testing.T) {
 	out, buf := newBufferLogger()
 	bind := fmt.Sprintf("127.0.0.1:%d", freePort(t))
 	store, err := NewRaftStore(RaftConfig{
-		DataDir:   t.TempDir(),
-		BindAddr:  bind,
-		Advertise: bind,
-		ServerID:  bind,
-		Bootstrap: true,
-		TLS:       testTLSConfig(t),
-		Logger:    out,
+		DataDir:       t.TempDir(),
+		BindAddr:      bind,
+		Advertise:     bind,
+		ServerID:      bind,
+		Bootstrap:     true,
+		TLS:           testTLSConfig(t),
+		AuthorizePeer: allowAnyRaftPeer,
+		Logger:        out,
 	})
 	if err != nil {
 		t.Fatal(err)

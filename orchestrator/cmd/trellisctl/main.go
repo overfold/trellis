@@ -103,6 +103,9 @@ var structuredOutputCommands = [][]string{
 	{"secrets", "list"},
 	{"secrets", "describe"},
 	{"credentials", "create"},
+	{"credentials", "list"},
+	{"nodes", "join-token", "create"},
+	{"nodes", "join-token", "list"},
 }
 
 // addStructuredOutputFlags keeps --output local to commands that deliberately

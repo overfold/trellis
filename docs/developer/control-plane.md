@@ -30,6 +30,14 @@ Removal (`DELETE /v1/raft/members/{id}`) of a voter promotes an eligible non-vot
 
 Heartbeat progress is a leader-local renewable observation; nothing about eligibility is persisted. Configuration changes are ordinary Raft configuration entries, so every member applies the same membership.
 
+Removal writes a node tombstone (`trellis/<cluster>/node-tombstones/<uuid>`, carrying the leader's removal time as data) before changing the configuration, still under `membershipMu`. Raft join checks the tombstone under the same lock before `AddNonvoter`, so a join cannot interleave with a removal and readmit the node. A removal refused for quorum, or of the current leader, records no tombstone. Tombstones are never deleted: a removed machine rejoins only as a new UUID.
+
+### Raft transport authorization
+
+The Raft listener requires a client certificate that chains to the cluster CA and then, during the TLS handshake, asks `RaftPeerAuthorizer` whether that peer may open a stream. The CA proves only that a certificate was issued for some UUID; in managed mode every member holds the CA key and could mint one. The authorizer reads the receiving node's local replicated state and Raft configuration and admits a peer only when its UUID has no tombstone, its certificate fingerprint matches the UUID's durable binding, and the UUID is in the current configuration. Every member's binding commits before its `AddNonvoter` entry, so a configured member's binding is known wherever its configuration entry is.
+
+A newly admitted node has neither state nor configuration until the leader first replicates to it. It therefore also trusts the member IDs returned by its Raft join response (the configuration at admission), still subject to the tombstone and binding checks once those replicate. Until the join response arrives it rejects every inbound stream, and the leader's replication retries. A member that was offline while every node it knows left the voter set cannot authenticate the new leaders and must be removed and replaced with a fresh identity.
+
 ## Scheduling algorithm
 
 For each task-group deficit, `Schedule`:

@@ -14,7 +14,7 @@ The default plan is the feature-complete beginner path: create a new single-node
 
 For automation, the same choices are available as flags. `--without-gvisor` opts out of gVisor.
 
-The installer keeps the administrator key and node-enrollment credential separate, then uses the key transiently to mint a normal `cluster/write` operator credential and saves a `local` context for the user who invoked `sudo`. It displays the base64 PKCS#8 Ed25519 private key once so you can move it to an operator password manager; the daemon receives and replicates only the public key. Routine `trellisctl` commands therefore do **not** need `sudo` and do not receive either privileged secret.
+The installer uses the administrator key transiently to mint a normal `cluster/write` operator credential and saves a `local` context for the user who invoked `sudo`. It displays the base64 PKCS#8 Ed25519 private key once so you can move it to an operator password manager; the daemon receives and replicates only the public key. Routine `trellisctl` commands therefore do **not** need `sudo` and do not receive the administrator key.
 
 Verify the service and saved context:
 
@@ -24,7 +24,7 @@ trellisctl context current
 trellisctl nodes list
 ```
 
-`trellis`, `trellisctl`, and the internal `trellis-health-probe` helper are installed in `/usr/local/bin`. The daemon mounts the helper read-only into managed tasks for HTTP and TCP health checks; it is not an operator CLI. The daemon keeps the managed enrollment credential root-readable under `/etc/trellis`, but never the administrator private key; your user context contains the scoped operator token plus the cluster CA.
+`trellis`, `trellisctl`, and the internal `trellis-health-probe` helper are installed in `/usr/local/bin`. The daemon mounts the helper read-only into managed tasks for HTTP and TCP health checks; it is not an operator CLI. The daemon keeps its configuration and secrets key root-readable under `/etc/trellis`, but never the administrator private key; your user context contains the scoped operator token plus the cluster CA. Adding nodes later uses short-lived join tokens that the administrator mints on demand; see [Multi-node clusters](multi-node.md#add-a-node).
 
 ## 2. Create the first manifest
 
