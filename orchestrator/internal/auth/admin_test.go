@@ -12,9 +12,14 @@ func TestAdministratorChallengeIssuanceRemainsAvailableAtCapacity(t *testing.T) 
 	authenticator := NewAdministratorAuthenticator()
 	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 	authenticator.now = func() time.Time { return now }
+	oldest := ""
 	for i := 0; i < maxAdministratorChallenges; i++ {
-		if _, _, err := authenticator.Issue(7); err != nil {
+		challenge, _, err := authenticator.Issue(7)
+		if err != nil {
 			t.Fatalf("fill challenge %d: %v", i, err)
+		}
+		if i == 0 {
+			oldest = challenge
 		}
 	}
 
@@ -28,6 +33,11 @@ func TestAdministratorChallengeIssuanceRemainsAvailableAtCapacity(t *testing.T) 
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
+	}
+	oldestPayload := AdministratorSigningPayload(oldest, "POST", "/v1/credentials", nil)
+	oldestSignature := base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, oldestPayload))
+	if authenticator.Verify(publicKey, 7, oldest, oldestSignature, oldestPayload) {
+		t.Fatal("oldest challenge remained usable after capacity eviction")
 	}
 	payload := AdministratorSigningPayload(challenge, "POST", "/v1/credentials", nil)
 	signature := base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, payload))

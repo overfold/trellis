@@ -41,6 +41,7 @@ func AdministratorSigningPayload(challenge, method, requestURI string, body []by
 type administratorChallenge struct {
 	expiresAt time.Time
 	epoch     uint64
+	order     uint64
 }
 
 // AdministratorAuthenticator issues and consumes leader-local administrator challenges.
@@ -49,6 +50,7 @@ type AdministratorAuthenticator struct {
 	challenges map[string]administratorChallenge
 	now        func() time.Time
 	ttl        time.Duration
+	nextOrder  uint64
 }
 
 // NewAdministratorAuthenticator creates an administrator request authenticator.
@@ -71,20 +73,21 @@ func (a *AdministratorAuthenticator) Issue(epoch uint64) (string, time.Time, err
 	challenge := base64.RawURLEncoding.EncodeToString(raw)
 	a.mu.Lock()
 	oldest := ""
-	var oldestExpiry time.Time
+	var oldestOrder uint64
 	for value, existing := range a.challenges {
 		if !existing.expiresAt.After(now) || existing.epoch != epoch {
 			delete(a.challenges, value)
 			continue
 		}
-		if oldest == "" || existing.expiresAt.Before(oldestExpiry) {
-			oldest, oldestExpiry = value, existing.expiresAt
+		if oldest == "" || existing.order < oldestOrder {
+			oldest, oldestOrder = value, existing.order
 		}
 	}
 	if len(a.challenges) >= maxAdministratorChallenges {
 		delete(a.challenges, oldest)
 	}
-	a.challenges[challenge] = administratorChallenge{expiresAt: expiresAt, epoch: epoch}
+	a.nextOrder++
+	a.challenges[challenge] = administratorChallenge{expiresAt: expiresAt, epoch: epoch, order: a.nextOrder}
 	a.mu.Unlock()
 	return challenge, expiresAt, nil
 }
