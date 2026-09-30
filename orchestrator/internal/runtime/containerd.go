@@ -1055,9 +1055,12 @@ func deleteWithin(ctx context.Context, process execProcess) error {
 // containerdExecProcess is a streamed exec process.
 type containerdExecProcess struct {
 	process containerd.Process
-	done    chan struct{}
-	code    int
-	err     error
+	// namespaced scopes a caller's context to the Trellis namespace, which
+	// containerd requires on every process call.
+	namespaced func(context.Context) context.Context
+	done       chan struct{}
+	code       int
+	err        error
 }
 
 func (p *containerdExecProcess) Done() <-chan struct{} { return p.done }
@@ -1076,7 +1079,7 @@ func (p *containerdExecProcess) Resize(ctx context.Context, cols, rows uint32) e
 		return nil
 	default:
 	}
-	return p.process.Resize(ctx, cols, rows)
+	return p.process.Resize(p.namespaced(ctx), cols, rows)
 }
 
 func (p *containerdExecProcess) Kill(ctx context.Context) error {
@@ -1085,7 +1088,7 @@ func (p *containerdExecProcess) Kill(ctx context.Context) error {
 		return nil
 	default:
 	}
-	if err := p.process.Kill(ctx, syscall.SIGKILL); err != nil && !errdefs.IsNotFound(err) {
+	if err := p.process.Kill(p.namespaced(ctx), syscall.SIGKILL); err != nil && !errdefs.IsNotFound(err) {
 		return err
 	}
 	return nil
@@ -1188,7 +1191,7 @@ func (c *ContainerdRuntime) StartExec(ctx context.Context, containerID string, o
 		return nil, fmt.Errorf("starting exec for %s: %w", containerID, err)
 	}
 
-	result := &containerdExecProcess{process: process, done: make(chan struct{})}
+	result := &containerdExecProcess{process: process, namespaced: c.withNamespace, done: make(chan struct{})}
 	go func() {
 		status := <-exitCh
 		// Deleting waits, boundedly, for the output copy, so Done follows
