@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/overfold/trellis/orchestrator/internal/api"
 	"github.com/overfold/trellis/orchestrator/internal/network"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 )
 
 type blockingPlanManager struct {
@@ -37,13 +37,13 @@ func TestUpdateNetworkPlanSerializesEpochAndApplication(t *testing.T) {
 
 	firstDone := make(chan error, 1)
 	go func() {
-		firstDone <- agent.UpdateNetworkPlan(context.Background(), &api.NetworkPlanRequest{Epoch: 1, Namespace: "default"})
+		firstDone <- agent.UpdateNetworkPlan(context.Background(), &nodeapi.NetworkPlanRequest{Epoch: 1, Namespace: "default"})
 	}()
 	<-manager.entered
 
 	secondDone := make(chan error, 1)
 	go func() {
-		secondDone <- agent.UpdateNetworkPlan(context.Background(), &api.NetworkPlanRequest{Epoch: 2, Namespace: "default"})
+		secondDone <- agent.UpdateNetworkPlan(context.Background(), &nodeapi.NetworkPlanRequest{Epoch: 2, Namespace: "default"})
 	}()
 	select {
 	case <-manager.entered:
@@ -60,7 +60,7 @@ func TestUpdateNetworkPlanSerializesEpochAndApplication(t *testing.T) {
 	if err := <-secondDone; err != nil {
 		t.Fatal(err)
 	}
-	if err := agent.UpdateNetworkPlan(context.Background(), &api.NetworkPlanRequest{Epoch: 1, Namespace: "default"}); !errors.Is(err, ErrStaleEpoch) {
+	if err := agent.UpdateNetworkPlan(context.Background(), &nodeapi.NetworkPlanRequest{Epoch: 1, Namespace: "default"}); !errors.Is(err, ErrStaleEpoch) {
 		t.Fatalf("stale plan error = %v, want %v", err, ErrStaleEpoch)
 	}
 }
@@ -74,7 +74,7 @@ func TestUpdateNetworkPlanRejectsActiveSubnetChange(t *testing.T) {
 			Gateway: "10.42.1.1",
 		},
 	}
-	err := agent.UpdateNetworkPlan(context.Background(), &api.NetworkPlanRequest{
+	err := agent.UpdateNetworkPlan(context.Background(), &nodeapi.NetworkPlanRequest{
 		Epoch:     1,
 		Namespace: "default",
 		Plan: network.Plan{

@@ -13,8 +13,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/overfold/trellis/orchestrator/internal/api"
+	"github.com/overfold/trellis/orchestrator/api"
 	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 	"github.com/overfold/trellis/orchestrator/internal/state"
 )
@@ -152,7 +153,7 @@ func TestHeartbeatBatchFailureLeavesMemoryAndDurableStateUnchanged(t *testing.T)
 	store.mu.Lock()
 	store.failBatch = true
 	store.mu.Unlock()
-	actual := []api.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
+	actual := []nodeapi.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
 	if err := s.Heartbeat(context.Background(), node.ID, actual, "new", nil, nil, nodeResourceObservation{}); err == nil {
 		t.Fatal("heartbeat succeeded despite failed atomic write")
 	}
@@ -173,7 +174,7 @@ func TestUnchangedHeartbeatDoesNotWriteRaft(t *testing.T) {
 	store := &auditStore{memoryStore: memoryStore{}}
 	clock := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	s := &Server{now: func() time.Time { return clock }, state: NewStateController(store, "test"), nodes: map[uuid.UUID]*Node{node.ID: node}, allocations: []*Allocation{allocation}, catalog: newNopCatalog()}
-	status := []api.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
+	status := []nodeapi.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
 
 	for i := 0; i < 3; i++ {
 		clock = clock.Add(heartbeatInterval)
@@ -200,7 +201,7 @@ func TestHeartbeatPersistsOnlyDurableChanges(t *testing.T) {
 		Endpoints: []api.AllocationEndpoint{{Task: "app"}}}
 	store := &auditStore{memoryStore: memoryStore{}}
 	s := &Server{now: time.Now, state: NewStateController(store, "test"), nodes: map[uuid.UUID]*Node{node.ID: node}, allocations: []*Allocation{allocation}, catalog: newNopCatalog()}
-	status := []api.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
+	status := []nodeapi.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
 
 	// Liveness returning is an observation, not a durable fact.
 	if err := s.Heartbeat(context.Background(), node.ID, status, "old", nil, nil, nodeResourceObservation{}); err != nil {

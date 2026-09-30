@@ -22,8 +22,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/overfold/trellis/orchestrator/internal/api"
-	"github.com/overfold/trellis/orchestrator/internal/client"
+	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/client"
 )
 
 // TestMultiNodeFailureRecovery intentionally uses OS processes, loopback TCP,
@@ -114,8 +114,8 @@ func TestMultiNodeVoterMembership(t *testing.T) {
 	if nonvoter == "" || removed == "" {
 		t.Fatalf("membership = %v, want a non-voter and a non-leader voter", membership)
 	}
-	administrator := client.NewServerClient("", addr(h.nodes[h.endpoint()].ports[1]), &tls.Config{InsecureSkipVerify: true})
-	if err := administrator.UseAdministratorKey(h.adminKey); err != nil {
+	administrator, err := client.New(client.Config{Address: addr(h.nodes[h.endpoint()].ports[1]), AdministratorKey: h.adminKey, TLSConfig: &tls.Config{InsecureSkipVerify: true}})
+	if err != nil {
 		t.Fatal(err)
 	}
 	if err := administrator.RemoveRaftMember(t.Context(), removed); err != nil {
@@ -195,8 +195,8 @@ func newHarness(t *testing.T, count int) *harness {
 		h.start(i)
 		h.waitHTTP(i)
 		if i == 0 {
-			administrator := client.NewServerClient("", addr(n.ports[1]), &tls.Config{InsecureSkipVerify: true})
-			if err := administrator.UseAdministratorKey(h.adminKey); err != nil {
+			administrator, err := client.New(client.Config{Address: addr(n.ports[1]), AdministratorKey: h.adminKey, TLSConfig: &tls.Config{InsecureSkipVerify: true}})
+			if err != nil {
 				t.Fatal(err)
 			}
 			credential, err := administrator.CreateCredential(t.Context(), &api.CredentialCreateRequest{Scope: "cluster", Access: "write"})
@@ -266,11 +266,11 @@ func (h *harness) close() {
 func (h *harness) waitHTTP(i int) {
 	h.eventually(35*time.Second, func() bool {
 		if h.token == "" {
-			administrator := client.NewServerClient("", addr(h.nodes[i].ports[1]), &tls.Config{InsecureSkipVerify: true})
-			if err := administrator.UseAdministratorKey(h.adminKey); err != nil {
+			administrator, err := client.New(client.Config{Address: addr(h.nodes[i].ports[1]), AdministratorKey: h.adminKey, TLSConfig: &tls.Config{InsecureSkipVerify: true}})
+			if err != nil {
 				return false
 			}
-			_, err := administrator.ListNodes(context.Background())
+			_, err = administrator.ListNodes(context.Background())
 			return err == nil
 		}
 		r, e := h.request(i, "GET", "/v1/nodes", nil)

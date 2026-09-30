@@ -298,7 +298,26 @@ Allocation secret files are held on a verified tmpfs rather than a durable node 
 
 ## Observability
 
-The control plane exposes Prometheus metrics at `/metrics`. `GET /v1/auth/whoami` reports the kind, scope, and access of the bearer credential making the request. Job status and allocation events explain lifecycle transitions; logs proxy per-task allocation logs. Monitor leader availability, unhealthy/draining nodes, desired-versus-running/healthy counts, reconciliation latency, retries, task groups in replacement backoff (`trellis_replacement_backoff_failures`), and disk capacity for Raft, containerd, and volumes.
+The control plane exposes Prometheus metrics at `/metrics` on its API port. Metrics name namespaces and jobs across the cluster, so a scrape needs a cluster-scoped credential; `read` access is enough. Mint one for Prometheus and scrape any control-plane node, which forwards the request to the leader:
+
+```sh
+trellisctl credentials create --scope cluster --access read
+```
+
+```yaml
+scrape_configs:
+  - job_name: trellis
+    scheme: https
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/trellis-token
+    tls_config:
+      ca_file: /etc/prometheus/trellis-ca.pem
+    static_configs:
+      - targets: ["control.example:8128"]
+```
+
+A scrape without a credential receives `401`, and one with a namespace-scoped credential receives `403`. `GET /v1/auth/whoami` reports the kind, scope, and access of the bearer credential making the request. Job status and allocation events explain lifecycle transitions; logs proxy per-task allocation logs. Monitor leader availability, unhealthy/draining nodes, desired-versus-running/healthy counts, reconciliation latency, retries, task groups in replacement backoff (`trellis_replacement_backoff_failures`), and disk capacity for Raft, containerd, and volumes.
 
 For normal workload diagnosis, start and usually finish with `jobs status`. `ready`, `converging`, and `degraded` summarize desired-versus-observed state without collapsing allocation lifecycle and health, and non-ready status output includes the allocations that need attention with reason/message, retry timing, and attempt count. Use `jobs status NAME --history` when you need the recorded lifecycle transitions, and `jobs logs NAME` for task output.
 

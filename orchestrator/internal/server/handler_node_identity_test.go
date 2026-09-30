@@ -11,14 +11,14 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
-	"github.com/overfold/trellis/orchestrator/internal/api"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 )
 
 func TestNodeRegistrationRejectsZeroID(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()
 	authenticatedID := uuid.New()
-	body, err := json.Marshal(api.NodeRegistrationRequest{Host: "node-a", Port: 8127})
+	body, err := json.Marshal(nodeapi.NodeRegistrationRequest{Host: "node-a", Port: 8127})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestHeartbeatRejectsZeroPathID(t *testing.T) {
 	initialHeartbeat := time.Date(2026, 9, 30, 11, 0, 0, 0, time.UTC)
 	zeroNode := &Node{ID: uuid.Nil, LastHeartbeat: initialHeartbeat, Version: "before"}
 	s.nodes[uuid.Nil] = zeroNode
-	body, err := json.Marshal(api.HeartbeatRequest{Version: "after"})
+	body, err := json.Marshal(nodeapi.HeartbeatRequest{Version: "after"})
 	if err != nil {
 		t.Fatal(err)
 	}

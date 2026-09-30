@@ -8,7 +8,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/overfold/trellis/orchestrator/internal/api"
+	"github.com/overfold/trellis/orchestrator/api"
 	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 )

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"mime"
 	"net/http"
 	"reflect"
+	"strings"
 
 	"github.com/labstack/echo/v5"
 	"github.com/overfold/trellis/orchestrator/internal/auth"
@@ -45,6 +47,23 @@ func decodeJSON(c *echo.Context, dst any, limit int64) error {
 			return decodeError(err, limit)
 		}
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body: unexpected data after the JSON value")
+	}
+	return nil
+}
+
+// decodeJobSpec strictly decodes the spec of a job request.
+func decodeJobSpec(raw json.RawMessage, jobSpec *spec.JobSpec) error {
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body: spec is required")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(jobSpec); err != nil {
+		var mismatch *json.UnmarshalTypeError
+		if errors.As(err, &mismatch) {
+			mismatch.Field = strings.TrimSuffix("spec."+mismatch.Field, ".")
+		}
+		return decodeError(err, maxJobRequestBytes)
 	}
 	return nil
 }

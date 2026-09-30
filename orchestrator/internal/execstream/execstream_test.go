@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/overfold/trellis/orchestrator/internal/api"
+	"github.com/overfold/trellis/orchestrator/api"
 )
 
 func TestFramesRoundTripAndSplitData(t *testing.T) {
@@ -102,9 +102,9 @@ func TestRequestRoundTripAndDefaults(t *testing.T) {
 	if err != nil || decoded.Cols != DefaultCols || decoded.Rows != DefaultRows {
 		t.Fatalf("defaulted = %#v, %v", decoded, err)
 	}
-	agent, err := DecodeAgentRequest(EncodeAgentRequest(api.AgentExecRequest{ExecRequest: request, Epoch: 9}))
-	if err != nil || agent.Epoch != 9 || !reflect.DeepEqual(agent.ExecRequest, request) {
-		t.Fatalf("agent request = %#v, %v", agent, err)
+	agent, epoch, err := DecodeAgentRequest(EncodeAgentRequest(request, 9))
+	if err != nil || epoch != 9 || !reflect.DeepEqual(agent, request) {
+		t.Fatalf("agent request = %#v at epoch %d, %v", agent, epoch, err)
 	}
 }
 
@@ -132,7 +132,7 @@ func TestDecodeRequestRejectsInvalidValues(t *testing.T) {
 	}
 	for _, query := range []string{"command=sh", "command=sh&epoch=0", "command=sh&epoch=x"} {
 		values, _ := url.ParseQuery(query)
-		if _, err := DecodeAgentRequest(values); err == nil {
+		if _, _, err := DecodeAgentRequest(values); err == nil {
 			t.Fatalf("agent query %q was accepted", query)
 		}
 	}

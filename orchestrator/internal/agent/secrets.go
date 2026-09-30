@@ -9,7 +9,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/overfold/trellis/orchestrator/internal/api"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/runtime"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
@@ -28,7 +28,7 @@ const tmpfsMagic = 0x01021994
 // recorded path is untrusted until checked again.
 const secretRootKey = "agent/secret-root"
 
-func taskHasSecrets(taskName string, delivered []api.DeliveredSecret) bool {
+func taskHasSecrets(taskName string, delivered []nodeapi.DeliveredSecret) bool {
 	for _, secret := range delivered {
 		if secret.Task == taskName {
 			return true
@@ -222,8 +222,8 @@ func createSecretDir(dir string) error {
 // must already have created. Environment values remain files and are loaded by
 // the runtime wrapper immediately before the image process is executed.
 // The caller removes dir if this fails.
-func materializeSecrets(dir, taskName string, delivered []api.DeliveredSecret) ([]*runtime.Mount, error) {
-	var taskSecrets []api.DeliveredSecret
+func materializeSecrets(dir, taskName string, delivered []nodeapi.DeliveredSecret) ([]*runtime.Mount, error) {
+	var taskSecrets []nodeapi.DeliveredSecret
 	for _, secret := range delivered {
 		if secret.Task == taskName {
 			taskSecrets = append(taskSecrets, secret)

@@ -16,7 +16,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
-	"github.com/overfold/trellis/orchestrator/internal/api"
+	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/state"
 	"github.com/overfold/trellis/orchestrator/internal/storage"
 	"github.com/overfold/trellis/orchestrator/internal/tlsutil"
@@ -133,7 +134,7 @@ func TestHandleRaftJoinBindsMembershipToCertificateIdentity(t *testing.T) {
 	control := &Server{storage: local, joiner: joiner, state: NewStateController(store, "test")}
 	e := echo.New()
 	NewHandler(control).Register(e)
-	body, _ := json.Marshal(api.RaftJoinRequest{RaftAddress: "node-b:8129", ServerAddress: "node-b:8128"})
+	body, _ := json.Marshal(nodeapi.RaftJoinRequest{RaftAddress: "node-b:8129", ServerAddress: "node-b:8128"})
 	req := httptest.NewRequest(http.MethodPost, "/v1/raft/join", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{certificate}}
@@ -143,7 +144,7 @@ func TestHandleRaftJoinBindsMembershipToCertificateIdentity(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	var joinResponse api.RaftJoinResponse
+	var joinResponse nodeapi.RaftJoinResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &joinResponse); err != nil || joinResponse.CAKey != string(caKey) {
 		t.Fatalf("join response did not return managed CA key after admission: %v", err)
 	}
@@ -232,7 +233,7 @@ func TestManagedEnrollmentCannotRequestExistingIdentityOrReceiveCAKey(t *testing
 	if _, ok := raw["ca_key"]; ok {
 		t.Fatal("enrollment returned the managed CA key before Raft admission")
 	}
-	var response api.NodeEnrollmentResponse
+	var response nodeapi.NodeEnrollmentResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}

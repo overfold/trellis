@@ -232,11 +232,13 @@ local_ctl() {
 }
 
 wait_for_service() {
-    local temp_root="$1" attempt
+    local temp_root="$1" attempt status
     for attempt in $(seq 1 30); do
-        if systemctl is-active --quiet trellis &&
-            curl --noproxy '*' -fsS --cacert "${DATA_DIR}/node-ca.crt" \
-                --resolve trellis:8128:127.0.0.1 https://trellis:8128/metrics >/dev/null 2>&1; then
+        # Only a serving leader authenticates requests; it rejects this
+        # credential-less one with 401, while an unavailable leader yields 503.
+        status="$(curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' --cacert "${DATA_DIR}/node-ca.crt" \
+            --resolve trellis:8128:127.0.0.1 https://trellis:8128/v1/auth/whoami 2>/dev/null || true)"
+        if systemctl is-active --quiet trellis && [ "$status" = 401 ]; then
             return 0
         fi
         sleep 1

@@ -6,6 +6,8 @@ import (
 	"encoding/base64"
 	"testing"
 	"time"
+
+	"github.com/overfold/trellis/orchestrator/internal/adminsign"
 )
 
 func TestAdministratorChallengeIssuanceRemainsAvailableAtCapacity(t *testing.T) {
@@ -34,12 +36,12 @@ func TestAdministratorChallengeIssuanceRemainsAvailableAtCapacity(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldestPayload := AdministratorSigningPayload(oldest, "POST", "/v1/credentials", nil)
+	oldestPayload := adminsign.Payload(oldest, "POST", "/v1/credentials", nil)
 	oldestSignature := base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, oldestPayload))
 	if authenticator.Verify(publicKey, 7, oldest, oldestSignature, oldestPayload) {
 		t.Fatal("oldest challenge remained usable after capacity eviction")
 	}
-	payload := AdministratorSigningPayload(challenge, "POST", "/v1/credentials", nil)
+	payload := adminsign.Payload(challenge, "POST", "/v1/credentials", nil)
 	signature := base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, payload))
 	if !authenticator.Verify(publicKey, 7, challenge, signature, payload) {
 		t.Fatal("challenge issued at capacity did not verify")
@@ -58,7 +60,7 @@ func TestAdministratorChallengeEpochAndExpiryRemainEnforced(t *testing.T) {
 		t.Fatal(err)
 	}
 	verify := func(challenge string, epoch uint64) bool {
-		payload := AdministratorSigningPayload(challenge, "DELETE", "/v1/raft/members/node-2", nil)
+		payload := adminsign.Payload(challenge, "DELETE", "/v1/raft/members/node-2", nil)
 		signature := base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, payload))
 		return authenticator.Verify(publicKey, epoch, challenge, signature, payload)
 	}

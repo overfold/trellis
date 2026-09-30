@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/overfold/trellis/orchestrator/internal/api"
-	"github.com/overfold/trellis/orchestrator/internal/client"
+	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/client"
 	"github.com/spf13/cobra"
 )
 
@@ -109,11 +109,10 @@ func NewNodesListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List nodes in the cluster",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			tlsCfg, err := buildCLITLSConfig()
+			serverClient, err := apiClient("")
 			if err != nil {
 				return err
 			}
-			serverClient := client.NewServerClient(config.ClusterToken, config.ServerAddr, tlsCfg)
 			nodes, err := serverClient.ListNodes(cmd.Context())
 			if err != nil {
 				return fmt.Errorf("list nodes: %w", err)
@@ -121,7 +120,7 @@ func NewNodesListCmd() *cobra.Command {
 			if config.Output == "json" {
 				return writeJSON(cmd.OutOrStdout(), nodes)
 			}
-			if len(*nodes) == 0 {
+			if len(nodes) == 0 {
 				_, err = fmt.Fprintln(cmd.OutOrStdout(), "No nodes")
 				return err
 			}
@@ -130,7 +129,7 @@ func NewNodesListCmd() *cobra.Command {
 			if _, err := fmt.Fprintln(w, "Node\tID\tStatus\tControl plane\tVersion\tCPU\tMemory\tHeartbeat"); err != nil {
 				return err
 			}
-			for _, node := range *nodes {
+			for _, node := range nodes {
 				heartbeat := formatHeartbeat(node.LastHeartbeat)
 				version := node.Version
 				if version == "" {
@@ -266,12 +265,11 @@ func formatByteCount(bytes int64) string {
 	return fmt.Sprintf("%.1f %s", value, unit)
 }
 
-func resolveNodeClient(cmd *cobra.Command, ref string) (*client.ServerClient, api.NodeResponse, error) {
-	tlsCfg, err := buildCLITLSConfig()
+func resolveNodeClient(cmd *cobra.Command, ref string) (*client.Client, api.NodeResponse, error) {
+	serverClient, err := apiClient("")
 	if err != nil {
 		return nil, api.NodeResponse{}, err
 	}
-	serverClient := client.NewServerClient(config.ClusterToken, config.ServerAddr, tlsCfg)
 	node, err := resolveNodeWithClient(cmd, serverClient, ref)
 	if err != nil {
 		return nil, api.NodeResponse{}, err
@@ -279,12 +277,12 @@ func resolveNodeClient(cmd *cobra.Command, ref string) (*client.ServerClient, ap
 	return serverClient, node, nil
 }
 
-func resolveNodeWithClient(cmd *cobra.Command, serverClient *client.ServerClient, ref string) (api.NodeResponse, error) {
+func resolveNodeWithClient(cmd *cobra.Command, serverClient *client.Client, ref string) (api.NodeResponse, error) {
 	nodes, err := serverClient.ListNodes(cmd.Context())
 	if err != nil {
 		return api.NodeResponse{}, err
 	}
-	return resolveNodeReference(*nodes, ref)
+	return resolveNodeReference(nodes, ref)
 }
 
 func resolveNodeReference(nodes api.NodeListResponse, ref string) (api.NodeResponse, error) {

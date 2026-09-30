@@ -14,8 +14,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
-	"github.com/overfold/trellis/orchestrator/internal/api"
+	"github.com/overfold/trellis/orchestrator/api"
 	"github.com/overfold/trellis/orchestrator/internal/auth"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
@@ -130,12 +131,12 @@ func TestFirstPartyRequestsDecodeStrictly(t *testing.T) {
 		body any
 		dst  any
 	}{
-		{name: "heartbeat", body: api.HeartbeatRequest{NodeID: uuid.New(), Timestamp: now, CPUUsage: &cpu, MemoryUsed: &memory, MetricsAt: &now, Allocations: []api.AllocationStatus{{ID: "a", Generation: 1, Task: "web"}}}, dst: &api.HeartbeatRequest{}},
-		{name: "registration", body: api.NodeRegistrationRequest{ID: uuid.New(), Host: "node", Port: 8127, Labels: map[string]string{"zone": "a"}, Capabilities: []spec.NodeCapability{spec.CapabilityNamespaceNetworking}}, dst: &api.NodeRegistrationRequest{}},
-		{name: "enrollment", body: api.NodeEnrollmentRequest{ServerAdvertise: "a:8128", AgentAdvertise: "a:8127", RaftAdvertise: "a:8129"}, dst: &api.NodeEnrollmentRequest{}},
-		{name: "raft join", body: api.RaftJoinRequest{ServerAddress: "a:8128", RaftAddress: "a:8129"}, dst: &api.RaftJoinRequest{}},
+		{name: "heartbeat", body: nodeapi.HeartbeatRequest{NodeID: uuid.New(), Timestamp: now, CPUUsage: &cpu, MemoryUsed: &memory, MetricsAt: &now, Allocations: []nodeapi.AllocationStatus{{ID: "a", Generation: 1, Task: "web"}}}, dst: &nodeapi.HeartbeatRequest{}},
+		{name: "registration", body: nodeapi.NodeRegistrationRequest{ID: uuid.New(), Host: "node", Port: 8127, Labels: map[string]string{"zone": "a"}, Capabilities: []spec.NodeCapability{spec.CapabilityNamespaceNetworking}}, dst: &nodeapi.NodeRegistrationRequest{}},
+		{name: "enrollment", body: nodeapi.NodeEnrollmentRequest{ServerAdvertise: "a:8128", AgentAdvertise: "a:8127", RaftAdvertise: "a:8129"}, dst: &nodeapi.NodeEnrollmentRequest{}},
+		{name: "raft join", body: nodeapi.RaftJoinRequest{ServerAddress: "a:8128", RaftAddress: "a:8129"}, dst: &nodeapi.RaftJoinRequest{}},
 		{name: "credential", body: api.CredentialCreateRequest{Scope: "namespace", Access: "read", Namespace: "team"}, dst: &api.CredentialCreateRequest{}},
-		{name: "job limits", body: spec.DefaultLimits(), dst: &spec.Limits{}},
+		{name: "job limits", body: JobLimitsAPI(spec.DefaultLimits()), dst: &api.JobLimits{}},
 		{name: "backup", body: api.BackupSnapshot{}, dst: &api.BackupSnapshot{}},
 	}
 
@@ -155,11 +156,19 @@ func TestFirstPartyRequestsDecodeStrictly(t *testing.T) {
 		if err := spec.Canonicalize(job, spec.DefaultLimits()); err != nil {
 			return err
 		}
+		rawSpec, err := json.Marshal(job)
+		if err != nil {
+			return err
+		}
 		requests = append(requests, struct {
 			name string
 			body any
 			dst  any
-		}{name: path, body: api.JobRegistrationRequest{Spec: *job, ExpectedVersion: &expected}, dst: &api.JobRegistrationRequest{}})
+		}{name: path, body: api.JobRegistrationRequest{Spec: rawSpec, ExpectedVersion: &expected, ExpectedIncarnation: "incarnation"}, dst: &api.JobRegistrationRequest{}}, struct {
+			name string
+			body any
+			dst  any
+		}{name: path + " spec", body: job, dst: &spec.JobSpec{}})
 		return nil
 	}); err != nil {
 		t.Fatal(err)

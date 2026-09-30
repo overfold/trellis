@@ -1,6 +1,10 @@
 package lifecycle
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/overfold/trellis/orchestrator/api"
+)
 
 func TestTransitions(t *testing.T) {
 	phases := []Phase{PhasePending, PhasePlaced, PhaseStarting, PhaseRunning, PhaseStopping, PhaseStopped, PhaseFailed, PhaseLost}
@@ -51,6 +55,29 @@ func TestCanObserveKeepsTerminalPhasesAndStopsAuthoritative(t *testing.T) {
 	} {
 		if got := CanObserve(tc.from, tc.to); got != tc.want {
 			t.Errorf("CanObserve(%s, %s) = %v, want %v", tc.from, tc.to, got, tc.want)
+		}
+	}
+}
+
+// TestStatesMatchPublicAPI keeps the public API's phase and health values
+// in step with the lifecycle the control plane reports.
+func TestStatesMatchPublicAPI(t *testing.T) {
+	phases := map[Phase]api.AllocationPhase{
+		PhasePending: api.PhasePending, PhasePlaced: api.PhasePlaced, PhaseStarting: api.PhaseStarting,
+		PhaseRunning: api.PhaseRunning, PhaseStopping: api.PhaseStopping, PhaseStopped: api.PhaseStopped,
+		PhaseFailed: api.PhaseFailed, PhaseLost: api.PhaseLost,
+	}
+	if len(phases) != len(transitions) {
+		t.Fatalf("public API maps %d phases, lifecycle defines %d", len(phases), len(transitions))
+	}
+	for phase, public := range phases {
+		if !phase.Valid() || string(phase) != string(public) {
+			t.Errorf("phase %q is published as %q", phase, public)
+		}
+	}
+	for health, public := range map[Health]api.AllocationHealth{HealthUnknown: api.HealthUnknown, HealthHealthy: api.HealthHealthy, HealthUnhealthy: api.HealthUnhealthy} {
+		if !health.Valid() || string(health) != string(public) {
+			t.Errorf("health %q is published as %q", health, public)
 		}
 	}
 }

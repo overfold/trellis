@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/overfold/trellis/orchestrator/internal/api"
 	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
@@ -71,12 +71,12 @@ func taskRecordID(allocationID string, generation uint64, task string) string {
 // returns once the start is accepted. A retry for the generation and execution
 // already starting, running, or awaiting the control plane's view of its
 // failure is accepted without starting again.
-func (a *Agent) StartGroup(ctx context.Context, request *api.AllocationRequest) error {
+func (a *Agent) StartGroup(ctx context.Context, request *nodeapi.AllocationRequest) error {
 	_, err := a.acceptStart(ctx, request)
 	return err
 }
 
-func (a *Agent) acceptStart(ctx context.Context, request *api.AllocationRequest) (*groupStart, error) {
+func (a *Agent) acceptStart(ctx context.Context, request *nodeapi.AllocationRequest) (*groupStart, error) {
 	// A retry of a running start is accepted without the operation lock,
 	// which the start holds while it creates tasks.
 	if start, err := a.acceptRunningStart(request); start != nil || err != nil {
@@ -101,7 +101,7 @@ func (a *Agent) acceptStart(ctx context.Context, request *api.AllocationRequest)
 
 // acceptRunningStart accepts a retry of the running start of the same
 // generation and execution. It returns nil when there is none.
-func (a *Agent) acceptRunningStart(request *api.AllocationRequest) (*groupStart, error) {
+func (a *Agent) acceptRunningStart(request *nodeapi.AllocationRequest) (*groupStart, error) {
 	if err := a.AcceptEpoch(request.Epoch); err != nil {
 		return nil, err
 	}
@@ -118,7 +118,7 @@ func (a *Agent) acceptRunningStart(request *api.AllocationRequest) (*groupStart,
 // mergeRetry records a retry of a running start: its failure is reported
 // against the newest attempt, and the newest epoch owns it. The caller holds
 // Agent.mu.
-func (s *groupStart) mergeRetry(request *api.AllocationRequest) {
+func (s *groupStart) mergeRetry(request *nodeapi.AllocationRequest) {
 	s.attempt = max(s.attempt, request.Attempt)
 	s.epoch = max(s.epoch, request.Epoch)
 	s.mergeDrain(request.Draining, request.DrainSequence)
@@ -127,7 +127,7 @@ func (s *groupStart) mergeRetry(request *api.AllocationRequest) {
 // acceptStartLocked registers a start, or returns the channel of an older
 // generation's start that must finish first. The caller holds the allocation
 // operation lock.
-func (a *Agent) acceptStartLocked(request *api.AllocationRequest) (*groupStart, <-chan struct{}, error) {
+func (a *Agent) acceptStartLocked(request *nodeapi.AllocationRequest) (*groupStart, <-chan struct{}, error) {
 	if err := a.AcceptEpoch(request.Epoch); err != nil {
 		return nil, nil, err
 	}
@@ -193,11 +193,11 @@ func (a *Agent) lifetimeContext() context.Context {
 
 // cloneStartRequest copies a start request for its background start. The
 // handler clears the delivered secret values when it returns.
-func cloneStartRequest(request *api.AllocationRequest) *api.AllocationRequest {
+func cloneStartRequest(request *nodeapi.AllocationRequest) *nodeapi.AllocationRequest {
 	clone := *request
 	clone.Tasks = append([]spec.TaskSpec(nil), request.Tasks...)
 	clone.EnvOverrides = maps.Clone(request.EnvOverrides)
-	clone.Secrets = append([]api.DeliveredSecret(nil), request.Secrets...)
+	clone.Secrets = append([]nodeapi.DeliveredSecret(nil), request.Secrets...)
 	for i := range clone.Secrets {
 		clone.Secrets[i].Value = bytes.Clone(request.Secrets[i].Value)
 	}
@@ -208,7 +208,7 @@ func cloneStartRequest(request *api.AllocationRequest) *api.AllocationRequest {
 // operation lock, so a slow pull delays neither stops, drains, and retries of
 // the allocation nor any other allocation. It then creates and starts the
 // tasks under the lock.
-func (a *Agent) runStart(ctx context.Context, start *groupStart, request *api.AllocationRequest) {
+func (a *Agent) runStart(ctx context.Context, start *groupStart, request *nodeapi.AllocationRequest) {
 	defer func() {
 		for i := range request.Secrets {
 			clear(request.Secrets[i].Value)
@@ -246,7 +246,7 @@ func (a *Agent) finishStart(ctx context.Context, allocationID string, start *gro
 
 // pullImages pulls each image of the tasks that are not already running for
 // this generation.
-func (a *Agent) pullImages(ctx context.Context, request *api.AllocationRequest) error {
+func (a *Agent) pullImages(ctx context.Context, request *nodeapi.AllocationRequest) error {
 	pulled := make(map[string]bool, len(request.Tasks))
 	for i := range request.Tasks {
 		task := &request.Tasks[i]
@@ -271,7 +271,7 @@ func (a *Agent) pullImages(ctx context.Context, request *api.AllocationRequest) 
 // fenceStart rejects a start for a generation older than a recorded one, a
 // different execution of a recorded generation, and a generation whose restart
 // budget is exhausted. The caller holds the allocation operation lock.
-func (a *Agent) fenceStart(request *api.AllocationRequest) error {
+func (a *Agent) fenceStart(request *nodeapi.AllocationRequest) error {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	var exhaustedTask string
@@ -327,7 +327,7 @@ func (a *Agent) cancelStartLocked(allocationID string, generation uint64) (<-cha
 
 // runGroupTasks replaces older generations and starts every task of the
 // allocation. The caller holds the allocation operation lock.
-func (a *Agent) runGroupTasks(ctx context.Context, start *groupStart, request *api.AllocationRequest) error {
+func (a *Agent) runGroupTasks(ctx context.Context, start *groupStart, request *nodeapi.AllocationRequest) error {
 	// The lock was released while images were pulled; fence again. A start
 	// that no leader of the current epoch has requested does not create tasks.
 	if err := a.fenceStart(request); err != nil {
@@ -395,18 +395,18 @@ func (a *Agent) runGroupTasks(ctx context.Context, start *groupStart, request *a
 // startingStatusesLocked reports the tasks of accepted starts that have no
 // record, as starting. A failed start's tasks carry its failure; a task it
 // left behind reports its own record instead. The caller holds a.mu.
-func (a *Agent) startingStatusesLocked() []api.AllocationStatus {
-	var statuses []api.AllocationStatus
+func (a *Agent) startingStatusesLocked() []nodeapi.AllocationStatus {
+	var statuses []nodeapi.AllocationStatus
 	for allocationID, start := range a.starts {
-		var failure *api.StartFailure
+		var failure *nodeapi.StartFailure
 		if start.failed {
-			failure = &api.StartFailure{Attempt: start.attempt, Code: terminalStartCode(start.err), Message: truncateStartFailure(start.err.Error())}
+			failure = &nodeapi.StartFailure{Attempt: start.attempt, Code: terminalStartCode(start.err), Message: truncateStartFailure(start.err.Error())}
 		}
 		for _, task := range start.tasks {
 			if a.allocations[taskRecordID(allocationID, start.generation, task)] != nil {
 				continue
 			}
-			statuses = append(statuses, api.AllocationStatus{ID: allocationID, Generation: start.generation, Task: task, Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown, StartFailure: failure})
+			statuses = append(statuses, nodeapi.AllocationStatus{ID: allocationID, Generation: start.generation, Task: task, Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown, StartFailure: failure})
 		}
 	}
 	return statuses
@@ -414,14 +414,14 @@ func (a *Agent) startingStatusesLocked() []api.AllocationStatus {
 
 // terminalStartCode identifies a start failure that retrying the same
 // generation cannot fix.
-func terminalStartCode(err error) api.OperationCode {
+func terminalStartCode(err error) nodeapi.OperationCode {
 	switch {
 	case errors.Is(err, ErrStaleGeneration):
-		return api.OperationStaleGeneration
+		return nodeapi.OperationStaleGeneration
 	case errors.Is(err, ErrExecutionConflict), errors.Is(err, ErrAllocationExists):
-		return api.OperationConflict
+		return nodeapi.OperationConflict
 	case errors.Is(err, ErrRestartBudgetExhausted):
-		return api.OperationRestartExhausted
+		return nodeapi.OperationRestartExhausted
 	}
 	return ""
 }
@@ -430,8 +430,8 @@ func terminalStartCode(err error) api.OperationCode {
 // heartbeat limit after JSON encoding.
 func truncateStartFailure(message string) string {
 	message = strings.ToValidUTF8(message, "")
-	if len(message) > api.MaxStartFailureMessageBytes {
-		message = strings.ToValidUTF8(message[:api.MaxStartFailureMessageBytes], "")
+	if len(message) > nodeapi.MaxStartFailureMessageBytes {
+		message = strings.ToValidUTF8(message[:nodeapi.MaxStartFailureMessageBytes], "")
 	}
 	return message
 }

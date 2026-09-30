@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/overfold/trellis/orchestrator/internal/api"
-	"github.com/overfold/trellis/orchestrator/internal/auth"
+	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/internal/adminsign"
 )
 
 func TestAdministratorClientRetriesWithFreshChallengeAfterLeadershipChange(t *testing.T) {
@@ -30,14 +30,14 @@ func TestAdministratorClientRetriesWithFreshChallengeAfterLeadershipChange(t *te
 		}
 		requests++
 		if requests == 1 {
-			w.Header().Set(auth.AdministratorChallengeStatusHeader, auth.AdministratorChallengeInvalid)
+			w.Header().Set(adminsign.ChallengeStatusHeader, adminsign.ChallengeInvalid)
 			http.Error(w, "leadership changed", http.StatusUnauthorized)
 			return
 		}
 		body, _ := io.ReadAll(r.Body)
-		challenge := r.Header.Get(auth.AdministratorChallengeHeader)
-		signature, err := base64.RawURLEncoding.DecodeString(r.Header.Get(auth.AdministratorSignatureHeader))
-		payload := auth.AdministratorSigningPayload(challenge, r.Method, r.URL.RequestURI(), body)
+		challenge := r.Header.Get(adminsign.ChallengeHeader)
+		signature, err := base64.RawURLEncoding.DecodeString(r.Header.Get(adminsign.SignatureHeader))
+		payload := adminsign.Payload(challenge, r.Method, r.URL.RequestURI(), body)
 		if err != nil || challenge != "term-2" || !ed25519.Verify(publicKey, payload, signature) {
 			http.Error(w, "invalid signature", http.StatusUnauthorized)
 			return
@@ -47,8 +47,8 @@ func TestAdministratorClientRetriesWithFreshChallengeAfterLeadershipChange(t *te
 	}))
 	defer server.Close()
 
-	serverClient := NewServerClient("", server.URL, nil)
-	if err := serverClient.UseAdministratorKey(privateKey); err != nil {
+	serverClient, err := New(Config{Address: server.URL, AdministratorKey: privateKey})
+	if err != nil {
 		t.Fatal(err)
 	}
 	response, err := serverClient.CreateCredential(t.Context(), &api.CredentialCreateRequest{Scope: "cluster", Access: "write"})

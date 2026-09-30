@@ -21,8 +21,8 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/overfold/trellis/orchestrator/internal/api"
-	"github.com/overfold/trellis/orchestrator/internal/client"
+	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/client"
 	"golang.org/x/sys/unix"
 )
 
@@ -90,7 +90,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	c := client.NewNamespaceServerClient(token, addr, namespace, tlsConfig)
+	c, err := client.New(client.Config{Address: addr, Namespace: namespace, Token: token, TLSConfig: tlsConfig})
+	if err != nil {
+		log.Error("create Trellis client", "error", err)
+		os.Exit(1)
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
@@ -100,13 +104,13 @@ func main() {
 	defer ticker.Stop()
 
 	sync := func() {
-		allocs, err := c.ListAllocations(ctx, labelFilter)
+		allocs, err := c.ListAllocations(ctx, client.AllocationFilter{Label: labelFilter})
 		if err != nil {
 			log.Error("poll allocations", "error", err)
 			return
 		}
 
-		upstreams := selectUpstreams(*allocs, containerPort)
+		upstreams := selectUpstreams(allocs, containerPort)
 
 		var buf bytes.Buffer
 		if err := tmpl.Execute(&buf, templateData{Upstreams: upstreams}); err != nil {
@@ -315,7 +319,7 @@ func listXattrNames(list func([]byte) (int, error)) (map[string]struct{}, error)
 func selectUpstreams(allocs []api.AllocationResponse, containerPort int) []upstream {
 	var upstreams []upstream
 	for _, alloc := range allocs {
-		if alloc.Phase != "running" || alloc.Health != "healthy" || alloc.Address == "" || len(alloc.Ports) == 0 {
+		if alloc.Phase != api.PhaseRunning || alloc.Health != api.HealthHealthy || alloc.Address == "" || len(alloc.Ports) == 0 {
 			continue
 		}
 		port, ok := selectHostPort(alloc.Ports, containerPort)

@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/overfold/trellis/orchestrator/internal/api"
+	"github.com/overfold/trellis/orchestrator/api"
 	secretstore "github.com/overfold/trellis/orchestrator/internal/secrets"
 )
 

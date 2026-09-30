@@ -15,10 +15,12 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
-	"github.com/overfold/trellis/orchestrator/internal/api"
+	"github.com/overfold/trellis/orchestrator/api"
 	"github.com/overfold/trellis/orchestrator/internal/client"
 	"github.com/overfold/trellis/orchestrator/internal/execstream"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/runtime"
+	"github.com/overfold/trellis/orchestrator/internal/transport"
 )
 
 // execTestProcess copies stdin to stdout and exits with exitCode when stdin
@@ -172,8 +174,8 @@ func addExecTestAllocation(agent *Agent, allocID string) {
 	agent.allocations[id] = &Allocation{ID: id, ContainerID: id, AllocationID: allocID, Generation: 1, TaskName: "web", Status: "running"}
 }
 
-func execTestRequest(task string, command ...string) api.AgentExecRequest {
-	return api.AgentExecRequest{ExecRequest: api.ExecRequest{Task: task, Command: command}, Epoch: 1}
+func execTestRequest(task string, command ...string) nodeapi.AgentExecRequest {
+	return nodeapi.AgentExecRequest{ExecRequest: api.ExecRequest{Task: task, Command: command}, Epoch: 1}
 }
 
 // shortenExecTiming makes an agent's stream checks fast. It must be called
@@ -201,7 +203,7 @@ func serveExecTestAgent(t *testing.T, agent *Agent) string {
 	return server.URL
 }
 
-func openExecTestStream(t *testing.T, address, allocID string, request api.AgentExecRequest) *execTestStream {
+func openExecTestStream(t *testing.T, address, allocID string, request nodeapi.AgentExecRequest) *execTestStream {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -334,7 +336,7 @@ func TestExecRequiresTaskWhenSeveralTasksRun(t *testing.T) {
 	}
 
 	_, err = client.NewAgentClient("", nil).Exec(context.Background(), uuid.Nil, serveExecTestAgent(t, agent), "allocation", execTestRequest("", "true"))
-	var httpErr *client.HTTPError
+	var httpErr *transport.HTTPError
 	if !errors.As(err, &httpErr) || httpErr.Status != http.StatusBadRequest {
 		t.Fatalf("exec error = %v, want 400", err)
 	}
@@ -573,7 +575,7 @@ func TestExecSessionPerAllocationLimitReturnsTooManyRequests(t *testing.T) {
 	}
 
 	_, err := client.NewAgentClient("", nil).Exec(context.Background(), uuid.Nil, serveExecTestAgent(t, agent), "allocation", execTestRequest("web", "sh"))
-	var httpErr *client.HTTPError
+	var httpErr *transport.HTTPError
 	if !errors.As(err, &httpErr) || httpErr.Status != http.StatusTooManyRequests {
 		t.Fatalf("exec error = %v, want 429", err)
 	}
@@ -636,7 +638,7 @@ func TestExecSessionGlobalLimitIsAtomicAndFailedKillsRetainCapacity(t *testing.T
 
 	// A process that survives its kill keeps its slot until it exits.
 	address := serveExecTestAgent(t, agent)
-	stream := openExecTestStream(t, address, "allocation-0", api.AgentExecRequest{ExecRequest: api.ExecRequest{Command: []string{"sh"}}, Epoch: 1})
+	stream := openExecTestStream(t, address, "allocation-0", nodeapi.AgentExecRequest{ExecRequest: api.ExecRequest{Command: []string{"sh"}}, Epoch: 1})
 	process := rt.process(t, "allocation-0-web")
 	process.setKillErr(errors.New("persistent kill failure"))
 	waitForExec(t, "session registration", func() bool { return agent.execSessionTotal() == 1 })

@@ -9,8 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/overfold/trellis/orchestrator/internal/api"
+	"github.com/overfold/trellis/orchestrator/api"
 	"github.com/overfold/trellis/orchestrator/internal/execstream"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 )
 
 const (
@@ -94,7 +95,7 @@ func (s *Server) OpenExec(ctx context.Context, namespace, id string, request api
 	if err != nil {
 		return nil, err
 	}
-	agent, err := s.client.Exec(ctx, nodeID, address, id, api.AgentExecRequest{ExecRequest: request, Epoch: epoch})
+	agent, err := s.client.Exec(ctx, nodeID, address, id, nodeapi.AgentExecRequest{ExecRequest: request, Epoch: epoch})
 	if err != nil {
 		s.exec.release()
 		return nil, err

@@ -14,15 +14,15 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
-	"github.com/overfold/trellis/orchestrator/internal/api"
+	"github.com/overfold/trellis/orchestrator/api"
 	"github.com/overfold/trellis/orchestrator/internal/auth"
 	"github.com/overfold/trellis/orchestrator/internal/catalog"
-	"github.com/overfold/trellis/orchestrator/internal/client"
 	"github.com/overfold/trellis/orchestrator/internal/execstream"
-	"github.com/overfold/trellis/orchestrator/internal/plan"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	secretstore "github.com/overfold/trellis/orchestrator/internal/secrets"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 	"github.com/overfold/trellis/orchestrator/internal/tlsutil"
+	"github.com/overfold/trellis/orchestrator/internal/transport"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -230,11 +230,11 @@ func (h *Handler) handleUpdateJobLimits(c *echo.Context) error {
 	if err := requireRoot(c, "changing cluster settings requires the administrator credential"); err != nil {
 		return err
 	}
-	var limits spec.Limits
+	var limits api.JobLimits
 	if err := decodeJSON(c, &limits, maxSmallRequestBytes); err != nil {
 		return err
 	}
-	settings, err := h.server.UpdateJobLimits(c.Request().Context(), limits)
+	settings, err := h.server.UpdateJobLimits(c.Request().Context(), JobLimitsFromAPI(limits))
 	return clusterSettingsResponse(c, settings, err)
 }
 
@@ -468,7 +468,7 @@ func (h *Handler) handleListNodes(c *echo.Context) error {
 }
 
 func (h *Handler) handleRegisterNode(c *echo.Context) error {
-	var request api.NodeRegistrationRequest
+	var request nodeapi.NodeRegistrationRequest
 	if err := decodeJSON(c, &request, maxDefaultRequestBytes); err != nil {
 		return err
 	}
@@ -499,7 +499,7 @@ func (h *Handler) handleRegisterNode(c *echo.Context) error {
 	}); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "unable to register node")
 	}
-	return c.JSON(http.StatusCreated, api.NodeRegistrationResponse{ID: request.ID})
+	return c.JSON(http.StatusCreated, nodeapi.NodeRegistrationResponse{ID: request.ID})
 }
 
 func (h *Handler) handleHeartbeat(c *echo.Context) error {
@@ -510,7 +510,7 @@ func (h *Handler) handleHeartbeat(c *echo.Context) error {
 	if err := requireExactNode(c, id, "heartbeat identity does not match certificate"); err != nil {
 		return err
 	}
-	var request api.HeartbeatRequest
+	var request nodeapi.HeartbeatRequest
 	if err := decodeJSON(c, &request, maxHeartbeatBodyBytes); err != nil {
 		return err
 	}
@@ -569,12 +569,22 @@ func validationResponse(c *echo.Context, err error) error {
 	return echo.NewHTTPError(http.StatusUnprocessableEntity, err.Error())
 }
 
+// jobRequest is a decoded job apply or plan request.
+type jobRequest struct {
+	Spec          spec.JobSpec
+	Preconditions JobPreconditions
+}
+
 // decodeJobRequest decodes and canonicalizes a job submission addressed to
 // the {namespace} path parameter, whose spec must name the same namespace. A
 // nil request with a nil error means the validation response was written.
-func (h *Handler) decodeJobRequest(c *echo.Context, ns string) (*api.JobRegistrationRequest, error) {
-	var request api.JobRegistrationRequest
-	if err := decodeJSON(c, &request, maxJobRequestBytes); err != nil {
+func (h *Handler) decodeJobRequest(c *echo.Context, ns string) (*jobRequest, error) {
+	var body api.JobRegistrationRequest
+	if err := decodeJSON(c, &body, maxJobRequestBytes); err != nil {
+		return nil, err
+	}
+	request := &jobRequest{Preconditions: JobPreconditions{Version: body.ExpectedVersion, Incarnation: body.ExpectedIncarnation}}
+	if err := decodeJobSpec(body.Spec, &request.Spec); err != nil {
 		return nil, err
 	}
 	if err := h.server.CanonicalizeJob(&request.Spec); err != nil {
@@ -583,7 +593,7 @@ func (h *Handler) decodeJobRequest(c *echo.Context, ns string) (*api.JobRegistra
 	if request.Spec.Namespace != ns {
 		return nil, echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("spec.namespace %q does not match request namespace %q", request.Spec.Namespace, ns))
 	}
-	return &request, nil
+	return request, nil
 }
 
 func (h *Handler) handlePlanJob(c *echo.Context) error {
@@ -601,12 +611,7 @@ func (h *Handler) handlePlanJob(c *echo.Context) error {
 	if err := requireAPIAccessDelegation(c, &request.Spec); err != nil {
 		return err
 	}
-	var currentSpec *spec.JobSpec
-	var version, revision int
-	if current, ok := h.server.GetJob(request.Spec.Namespace, request.Spec.Name); ok {
-		currentSpec, version, revision = current.Spec, current.Version, current.Revision
-	}
-	return c.JSON(http.StatusOK, plan.Build(currentSpec, version, revision, &request.Spec))
+	return c.JSON(http.StatusOK, h.server.PlanJob(&request.Spec))
 }
 
 func (h *Handler) handleRegisterJob(c *echo.Context) error {
@@ -621,9 +626,12 @@ func (h *Handler) handleRegisterJob(c *echo.Context) error {
 	if err := requireAPIAccessDelegation(c, &request.Spec); err != nil {
 		return err
 	}
-	result, err := h.server.RegisterJob(c.Request().Context(), ns, &request.Spec, request.ExpectedVersion)
-	if errors.Is(err, ErrJobVersionConflict) {
+	result, err := h.server.RegisterJob(c.Request().Context(), ns, &request.Spec, &request.Preconditions)
+	switch {
+	case errors.Is(err, ErrJobVersionConflict):
 		return echo.NewHTTPError(http.StatusConflict, err.Error())
+	case errors.Is(err, ErrInvalidJobPreconditions):
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
 	if err != nil {
 		return validationResponse(c, err)
@@ -673,13 +681,13 @@ func (h *Handler) handleListDiscovery(c *echo.Context) error {
 	}
 	entries := h.server.ListServicesForNode(nodeID, filter)
 	if entries == nil {
-		entries = api.ServiceListResponse{}
+		entries = nodeapi.ServiceListResponse{}
 	}
 	return c.JSON(http.StatusOK, entries)
 }
 
 func (h *Handler) handleRaftJoin(c *echo.Context) error {
-	var request api.RaftJoinRequest
+	var request nodeapi.RaftJoinRequest
 	if err := decodeJSON(c, &request, maxSmallRequestBytes); err != nil {
 		return err
 	}
@@ -725,14 +733,14 @@ func (h *Handler) handleRaftJoin(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "load managed signing material")
 	}
 	c.Response().Header().Set("Cache-Control", "no-store")
-	return c.JSON(http.StatusOK, api.RaftJoinResponse{CAKey: caKey})
+	return c.JSON(http.StatusOK, nodeapi.RaftJoinResponse{CAKey: caKey})
 }
 
 func (h *Handler) handleEnrollNode(c *echo.Context) error {
 	if enrolled, _ := c.Request().Context().Value(EnrollmentContextKey).(bool); !enrolled {
 		return echo.NewHTTPError(http.StatusForbidden, "node enrollment requires the enrollment credential")
 	}
-	var request api.NodeEnrollmentRequest
+	var request nodeapi.NodeEnrollmentRequest
 	if err := decodeJSON(c, &request, maxSmallRequestBytes); err != nil {
 		return err
 	}
@@ -777,7 +785,13 @@ func (h *Handler) handleRaftLeadershipTransfer(c *echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
+// handleMetrics serves the leader's Prometheus metrics. They name namespaces
+// and jobs across the cluster, so scraping requires a cluster-scoped
+// credential.
 func (h *Handler) handleMetrics(c *echo.Context) error {
+	if err := requireClusterRead(c, "metrics require a cluster-scoped credential"); err != nil {
+		return err
+	}
 	promhttp.Handler().ServeHTTP(c.Response(), c.Request())
 	return nil
 }
@@ -788,6 +802,10 @@ func (h *Handler) convertNode(node *Node) *api.NodeResponse {
 		heartbeat := node.LastHeartbeat
 		lastHeartbeat = &heartbeat
 	}
+	var capabilities []string
+	for _, capability := range node.Capabilities {
+		capabilities = append(capabilities, string(capability))
+	}
 	return &api.NodeResponse{
 		ID: node.ID, Host: node.Host, Port: node.Port, Status: api.NodeStatusResponse(node.Status),
 		LastHeartbeat: lastHeartbeat, CPU: node.CPUAllocatable, Memory: node.MemoryAllocatable,
@@ -795,7 +813,7 @@ func (h *Handler) convertNode(node *Node) *api.NodeResponse {
 		CPUAllocatable: node.CPUAllocatable, MemoryAllocatable: node.MemoryAllocatable,
 		CPUUsage: node.CPUUsage, MemoryUsed: node.MemoryUsed, MemoryAvailable: node.MemoryAvailable, MetricsAt: node.MetricsAt,
 		OS: node.OS, Arch: node.Arch, Labels: node.Labels,
-		Volumes: node.Volumes, Capabilities: node.Capabilities, Version: node.Version,
+		Volumes: node.Volumes, Capabilities: capabilities, Version: node.Version,
 	}
 }
 
@@ -906,7 +924,7 @@ func (h *Handler) handleAllocationMetrics(c *echo.Context) error {
 // otherwise an agent 404 passes through. Transport failures and other agent failures are logged and
 // reported without their details.
 func (h *Handler) agentRequestError(err error, notRunning string) error {
-	var agentErr *client.HTTPError
+	var agentErr *transport.HTTPError
 	switch {
 	case errors.Is(err, ErrAllocationNotFound):
 		return echo.NewHTTPError(http.StatusNotFound, err.Error())

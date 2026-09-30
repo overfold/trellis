@@ -15,10 +15,10 @@ import (
 
 	"github.com/containerd/errdefs"
 	"github.com/google/uuid"
-	"github.com/overfold/trellis/orchestrator/internal/api"
 	"github.com/overfold/trellis/orchestrator/internal/health"
 	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
 	"github.com/overfold/trellis/orchestrator/internal/network"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/runtime"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 	"github.com/overfold/trellis/orchestrator/internal/storage"
@@ -359,8 +359,8 @@ func testRestartPolicy() *spec.RestartPolicySpec {
 	return &spec.RestartPolicySpec{MaxRestarts: spec.DefaultMaxRestarts, Window: spec.DefaultRestartWindow}
 }
 
-func operationTestRequest() *api.AllocationRequest {
-	return &api.AllocationRequest{
+func operationTestRequest() *nodeapi.AllocationRequest {
+	return &nodeapi.AllocationRequest{
 		AllocationID: "allocation", Generation: 2, JobRevision: 7, Epoch: 1, ExecutionHash: "execution-hash",
 		Namespace: "default", JobName: "job", GroupName: "group", Runtime: string(spec.DefaultRuntime),
 		Tasks:   []spec.TaskSpec{{Name: "first", Image: "image"}, {Name: "second", Image: "image"}},
@@ -678,7 +678,7 @@ func TestStopGroupWaitsForInProgressRun(t *testing.T) {
 	go func() { runDone <- runGroup(context.Background(), agent, request) }()
 	<-rt.started
 	go func() {
-		stopDone <- agent.StopGroup(context.Background(), &api.StopAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: request.Epoch})
+		stopDone <- agent.StopGroup(context.Background(), &nodeapi.StopAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: request.Epoch})
 	}()
 	select {
 	case err := <-stopDone:
@@ -827,7 +827,7 @@ func TestFailedRunStopPreservesStartedAllocationResources(t *testing.T) {
 	agent.ConfigureDurability(local, "test")
 	request := operationTestRequest()
 	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image", Networking: &spec.TaskNetworkingSpec{Ports: []spec.PortSpec{{}}}}}
-	request.Secrets = []api.DeliveredSecret{{Task: "first", Name: "key", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Mode: 0o400, Value: []byte("secret")}}
+	request.Secrets = []nodeapi.DeliveredSecret{{Task: "first", Name: "key", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Mode: 0o400, Value: []byte("secret")}}
 	id := "allocation-g2-first"
 	recordDir := filepath.Join(root, "agent", "allocations")
 	rt.onStart = func() error {
@@ -1013,7 +1013,7 @@ func TestFailedCreateMissingContainerCanBeCleanedUpOnRetry(t *testing.T) {
 					if err := agent.recover(context.Background()); err != nil {
 						t.Fatalf("retry recovery: %v", err)
 					}
-				} else if err := agent.StopGroup(context.Background(), &api.StopAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: request.Epoch}); err != nil {
+				} else if err := agent.StopGroup(context.Background(), &nodeapi.StopAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: request.Epoch}); err != nil {
 					t.Fatalf("retry stop: %v", err)
 				}
 				if agent.allocations[id] != nil {
@@ -1241,7 +1241,7 @@ func TestAmbiguousStartStopsBeforeReleasingResources(t *testing.T) {
 	agent.SetNetworkManager(manager)
 	request := operationTestRequest()
 	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image", Networking: &spec.TaskNetworkingSpec{Ports: []spec.PortSpec{{}}}}}
-	request.Secrets = []api.DeliveredSecret{{Task: "first", Name: "key", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Mode: 0o400, Value: []byte("secret")}}
+	request.Secrets = []nodeapi.DeliveredSecret{{Task: "first", Name: "key", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Mode: 0o400, Value: []byte("secret")}}
 	id := "allocation-g2-first"
 	rt.onStop = func() {
 		alloc := agent.allocations[id]
@@ -1407,7 +1407,7 @@ func TestRecoverRetainsFailedStartRecordUntilNetworkDetachSucceeds(t *testing.T)
 	}
 
 	manager.detachErr = nil
-	if err := second.StopGroup(context.Background(), &api.StopAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: request.Epoch}); err != nil {
+	if err := second.StopGroup(context.Background(), &nodeapi.StopAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: request.Epoch}); err != nil {
 		t.Fatalf("retry stop after recovery: %v", err)
 	}
 	if err := local.Get(allocationRecordKey(id), &recorded); !errors.Is(err, os.ErrNotExist) {
@@ -1538,7 +1538,7 @@ func TestRecoverCreatedAllocationCanBeRetriedByControlPlane(t *testing.T) {
 	if state := second.reconciler.states[id]; state == nil || !state.stopping {
 		t.Fatal("recovered draining allocation is not restart-suppressed")
 	}
-	drain := &api.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: request.Epoch}
+	drain := &nodeapi.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: request.Epoch}
 	if err := second.ResumeGroup(drain); err != nil {
 		t.Fatalf("undrain recovered allocation: %v", err)
 	}
@@ -1568,7 +1568,7 @@ func TestRecoverCreatedAllocationCanBeRetriedByControlPlane(t *testing.T) {
 
 // recoverCreatedAllocationForRetry persists one non-running allocation record,
 // restarts the agent over it, and returns the recovered agent.
-func recoverCreatedAllocationForRetry(t *testing.T, rt *createdRecoveryRuntime, local *storage.LocalStorage, request *api.AllocationRequest, drainSequence uint64) *Agent {
+func recoverCreatedAllocationForRetry(t *testing.T, rt *createdRecoveryRuntime, local *storage.LocalStorage, request *nodeapi.AllocationRequest, drainSequence uint64) *Agent {
 	t.Helper()
 	id := rt.managedID
 	first := newOperationTestAgent(t, rt)
@@ -1580,7 +1580,7 @@ func recoverCreatedAllocationForRetry(t *testing.T, rt *createdRecoveryRuntime, 
 	})
 	rt.labels = recoveryTestLabels(first.allocations[id])
 	if drainSequence != 0 {
-		drain := &api.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: request.Epoch, Sequence: drainSequence}
+		drain := &nodeapi.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: request.Epoch, Sequence: drainSequence}
 		if err := first.DrainGroup(drain); err != nil {
 			t.Fatalf("drain before agent restart: %v", err)
 		}
@@ -1668,7 +1668,7 @@ func TestStaleResumeAfterStartRetryKeepsDrain(t *testing.T) {
 	if state := agent.reconciler.states[rt.managedID]; state != nil {
 		t.Fatal("recovered non-running allocation was tracked before start retry")
 	}
-	drain := &api.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: request.Epoch, Sequence: 5}
+	drain := &nodeapi.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: request.Epoch, Sequence: 5}
 	if err := agent.DrainGroup(drain); err != nil {
 		t.Fatalf("drain recovered allocation: %v", err)
 	}
@@ -1677,14 +1677,14 @@ func TestStaleResumeAfterStartRetryKeepsDrain(t *testing.T) {
 	if err := runGroup(context.Background(), agent, request); err != nil {
 		t.Fatalf("control-plane start retry: %v", err)
 	}
-	stale := &api.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: request.Epoch, Sequence: 3}
+	stale := &nodeapi.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: request.Epoch, Sequence: 3}
 	if err := agent.ResumeGroup(stale); err != nil {
 		t.Fatalf("stale resume: %v", err)
 	}
 	assertDrainingAfterStartRetry(t, agent, rt, local, 5)
 
 	// The control plane resumes with the next drain sequence.
-	resume := &api.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: request.Epoch, Sequence: 6}
+	resume := &nodeapi.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: request.Epoch, Sequence: 6}
 	if err := agent.ResumeGroup(resume); err != nil {
 		t.Fatalf("current resume: %v", err)
 	}
@@ -1709,7 +1709,7 @@ func TestStartHonorsControlPlaneDrainWithoutLocalRecord(t *testing.T) {
 	if err := runGroup(context.Background(), agent, request); err != nil {
 		t.Fatalf("start draining allocation: %v", err)
 	}
-	stale := &api.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: request.Epoch, Sequence: 3}
+	stale := &nodeapi.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: request.Epoch, Sequence: 3}
 	if err := agent.ResumeGroup(stale); err != nil {
 		t.Fatalf("stale resume: %v", err)
 	}
@@ -1831,7 +1831,7 @@ func TestStartResumeReachesRunningTasksDespiteLaterFailure(t *testing.T) {
 	if err := runGroup(context.Background(), agent, request); err == nil {
 		t.Fatal("start succeeded despite failed create")
 	}
-	drain := &api.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: request.Epoch, Sequence: 3}
+	drain := &nodeapi.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: request.Epoch, Sequence: 3}
 	if err := agent.DrainGroup(drain); err != nil {
 		t.Fatalf("drain partially started allocation: %v", err)
 	}
@@ -1877,7 +1877,7 @@ func TestStartDrainStatePrefersHigherSequenceThenDraining(t *testing.T) {
 		{name: "newer request", draining: false, sequence: 7, wantDraining: false, wantSequence: 7},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			request := &api.AllocationRequest{AllocationID: "allocation", Generation: 2, Draining: test.draining, DrainSequence: test.sequence}
+			request := &nodeapi.AllocationRequest{AllocationID: "allocation", Generation: 2, Draining: test.draining, DrainSequence: test.sequence}
 			for range 20 {
 				draining, sequence := agent.startDrainState(request)
 				if draining != test.wantDraining || sequence != test.wantSequence {
@@ -1929,7 +1929,7 @@ func TestRecoverNonRunningAllocationDefersRestartToServer(t *testing.T) {
 			if _, ok := second.reconciler.states["task"]; ok {
 				t.Fatal("non-running recovered allocation entered local restart reconciliation")
 			}
-			request := &api.DrainAllocationRequest{AllocationID: "allocation", Generation: 1, Epoch: 1}
+			request := &nodeapi.DrainAllocationRequest{AllocationID: "allocation", Generation: 1, Epoch: 1}
 			if err := second.DrainGroup(request); err != nil {
 				t.Fatalf("drain recovered allocation: %v", err)
 			}
@@ -2282,7 +2282,7 @@ func TestRestartExhaustionReportsFailedAndSurvivesAgentRestart(t *testing.T) {
 		t.Fatalf("exhausted allocation resurrected: start=%d restart=%d", rt.startCount, rt.restartCount)
 	}
 	// Cancelling a drain must tolerate a task that failed terminally.
-	request := &api.DrainAllocationRequest{AllocationID: "allocation", Generation: 1, Epoch: 1}
+	request := &nodeapi.DrainAllocationRequest{AllocationID: "allocation", Generation: 1, Epoch: 1}
 	if err := second.DrainGroup(request); err != nil {
 		t.Fatalf("drain: %v", err)
 	}
@@ -2361,7 +2361,7 @@ func TestRecoverDrainingExhaustedAllocationKeepsBudgetOnResume(t *testing.T) {
 	if err := second.recover(context.Background()); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
-	if err := second.ResumeGroup(&api.DrainAllocationRequest{AllocationID: "allocation", Generation: 1, Epoch: 1, Sequence: 2}); err != nil {
+	if err := second.ResumeGroup(&nodeapi.DrainAllocationRequest{AllocationID: "allocation", Generation: 1, Epoch: 1, Sequence: 2}); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
 	rt.status = runtime.StatusStopped
@@ -2417,7 +2417,7 @@ func TestFailedAllocationIgnoresLateHealthObservations(t *testing.T) {
 // runGroup starts an allocation and waits for its background start, which the
 // control plane observes through heartbeats. Like the control plane, it counts
 // a failed start, so a retry with the same request starts the generation again.
-func runGroup(ctx context.Context, a *Agent, request *api.AllocationRequest) error {
+func runGroup(ctx context.Context, a *Agent, request *nodeapi.AllocationRequest) error {
 	start, err := a.acceptStart(ctx, request)
 	if err != nil {
 		return err

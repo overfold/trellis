@@ -2,7 +2,7 @@
 package server
 
 import (
-	"github.com/overfold/trellis/orchestrator/internal/api"
+	"github.com/overfold/trellis/orchestrator/api"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
@@ -120,8 +120,8 @@ func (s *Server) allocationResponseLocked(allocation *Allocation) api.Allocation
 		Namespace:        allocation.Namespace,
 		Address:          allocationEndpointAddress(allocation),
 		Endpoints:        allocationTaskEndpoints(allocation),
-		Phase:            allocation.Phase,
-		Health:           allocation.Health,
+		Phase:            api.AllocationPhase(allocation.Phase),
+		Health:           api.AllocationHealth(allocation.Health),
 		Draining:         allocation.Draining,
 		Generation:       allocation.Generation,
 		JobRevision:      allocation.JobRevision,
@@ -164,7 +164,7 @@ func (s *Server) AllocationEvents(namespace, id string) (api.AllocationEventList
 		entries := a.Events.Entries()
 		result := make(api.AllocationEventListResponse, len(entries))
 		for i, e := range entries {
-			result[i] = api.AllocationEventResponse{Phase: e.Phase, Reason: e.Reason, Message: e.Message, At: e.At}
+			result[i] = api.AllocationEventResponse{Phase: api.AllocationPhase(e.Phase), Reason: e.Reason, Message: e.Message, At: e.At}
 		}
 		a.mu.Unlock()
 		return result, true

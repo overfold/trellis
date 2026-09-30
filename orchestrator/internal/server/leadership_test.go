@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/overfold/trellis/orchestrator/internal/api"
 	"github.com/overfold/trellis/orchestrator/internal/network"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 	"github.com/overfold/trellis/orchestrator/internal/state"
 )
@@ -161,8 +161,8 @@ func TestAcquireLeadershipInvalidatesAndFencesCachedNetworkPlans(t *testing.T) {
 	// Even if an old-term target races back into the cache, it must not be sent
 	// using the new term's epoch.
 	s.setDesiredNetworkPlans([]networkPlanTarget{stale})
-	emitted := make(chan *api.NetworkPlanRequest, 1)
-	s.dispatchPendingNetworkPlans(ctx, func(_ context.Context, _ uuid.UUID, _ string, request *api.NetworkPlanRequest) error {
+	emitted := make(chan *nodeapi.NetworkPlanRequest, 1)
+	s.dispatchPendingNetworkPlans(ctx, func(_ context.Context, _ uuid.UUID, _ string, request *nodeapi.NetworkPlanRequest) error {
 		emitted <- request
 		return nil
 	})
@@ -176,7 +176,7 @@ func TestAcquireLeadershipInvalidatesAndFencesCachedNetworkPlans(t *testing.T) {
 	fresh.epoch = 4
 	fresh.plan = &network.Plan{ListenPort: 51820, Peers: []network.PeerPlan{{PublicKey: "new-peer"}}}
 	s.setDesiredNetworkPlans([]networkPlanTarget{fresh})
-	s.dispatchPendingNetworkPlans(ctx, func(_ context.Context, _ uuid.UUID, _ string, request *api.NetworkPlanRequest) error {
+	s.dispatchPendingNetworkPlans(ctx, func(_ context.Context, _ uuid.UUID, _ string, request *nodeapi.NetworkPlanRequest) error {
 		emitted <- request
 		return nil
 	})

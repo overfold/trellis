@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/api"
 )
 
 func TestJobsStatusObservationModesRegistered(t *testing.T) {
@@ -28,13 +28,13 @@ func TestPrintJobEvents(t *testing.T) {
 		{
 			Allocation: "abcdef12-rest",
 			Group:      "web",
-			Phase:      lifecycle.PhaseRunning,
+			Phase:      api.PhaseRunning,
 			At:         time.Date(2026, 9, 3, 12, 0, 2, 0, time.UTC),
 		},
 		{
 			Allocation: "abcdef12-rest",
 			Group:      "web",
-			Phase:      lifecycle.PhaseFailed,
+			Phase:      api.PhaseFailed,
 			Reason:     "image_pull_failed",
 			Message:    "first line\nsecond line",
 			At:         time.Date(2026, 9, 3, 12, 0, 1, 0, time.UTC),

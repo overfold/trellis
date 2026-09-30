@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/overfold/trellis/orchestrator/internal/plan"
+	"github.com/overfold/trellis/orchestrator/api"
 )
 
-func printJobPlan(w io.Writer, result *plan.Result) error {
+func printJobPlan(w io.Writer, result *api.JobPlanResponse) error {
 	if config.Output == "json" {
 		return writeJSON(w, result)
 	}

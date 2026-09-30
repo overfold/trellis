@@ -11,9 +11,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
-	"github.com/overfold/trellis/orchestrator/internal/api"
 	"github.com/overfold/trellis/orchestrator/internal/catalog"
 	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
@@ -33,9 +33,9 @@ func heartbeatReasonTestServer(phase lifecycle.Phase) (*Server, *Node, *Allocati
 	return s, node, allocation
 }
 
-func postHeartbeat(t *testing.T, s *Server, nodeID uuid.UUID, allocations []api.AllocationStatus) int {
+func postHeartbeat(t *testing.T, s *Server, nodeID uuid.UUID, allocations []nodeapi.AllocationStatus) int {
 	t.Helper()
-	body, err := json.Marshal(api.HeartbeatRequest{NodeID: nodeID, Version: "test", Allocations: allocations})
+	body, err := json.Marshal(nodeapi.HeartbeatRequest{NodeID: nodeID, Version: "test", Allocations: allocations})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,21 +50,21 @@ func postHeartbeat(t *testing.T, s *Server, nodeID uuid.UUID, allocations []api.
 }
 
 func TestHeartbeatRecordsReportedFailureReason(t *testing.T) {
-	failed := api.AllocationStatus{ID: "demo-web-1", Generation: 1, Task: "app", Phase: lifecycle.PhaseFailed, Health: lifecycle.HealthUnhealthy, Reason: api.OperationRestartExhausted}
-	running := api.AllocationStatus{ID: "demo-web-1", Generation: 1, Task: "sidecar", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
-	for _, actual := range [][]api.AllocationStatus{{failed, running}, {running, failed}} {
+	failed := nodeapi.AllocationStatus{ID: "demo-web-1", Generation: 1, Task: "app", Phase: lifecycle.PhaseFailed, Health: lifecycle.HealthUnhealthy, Reason: nodeapi.OperationRestartExhausted}
+	running := nodeapi.AllocationStatus{ID: "demo-web-1", Generation: 1, Task: "sidecar", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
+	for _, actual := range [][]nodeapi.AllocationStatus{{failed, running}, {running, failed}} {
 		s, node, allocation := heartbeatReasonTestServer(lifecycle.PhaseRunning)
 		if code := postHeartbeat(t, s, node.ID, actual); code != http.StatusNoContent {
 			t.Fatalf("heartbeat status = %d, want 204", code)
 		}
-		if allocation.Phase != lifecycle.PhaseFailed || allocation.Reason != string(api.OperationRestartExhausted) {
-			t.Fatalf("allocation = %s reason %q, want failed with %q", allocation.Phase, allocation.Reason, api.OperationRestartExhausted)
+		if allocation.Phase != lifecycle.PhaseFailed || allocation.Reason != string(nodeapi.OperationRestartExhausted) {
+			t.Fatalf("allocation = %s reason %q, want failed with %q", allocation.Phase, allocation.Reason, nodeapi.OperationRestartExhausted)
 		}
 		events := allocation.Events.Entries()
-		if len(events) == 0 || events[len(events)-1].Phase != lifecycle.PhaseFailed || events[len(events)-1].Reason != string(api.OperationRestartExhausted) {
+		if len(events) == 0 || events[len(events)-1].Phase != lifecycle.PhaseFailed || events[len(events)-1].Reason != string(nodeapi.OperationRestartExhausted) {
 			t.Fatalf("events = %+v, want a failed event with the reported reason", events)
 		}
-		if response := s.allocationResponseLocked(allocation); response.Reason != string(api.OperationRestartExhausted) {
+		if response := s.allocationResponseLocked(allocation); response.Reason != string(nodeapi.OperationRestartExhausted) {
 			t.Fatalf("allocation response reason = %q", response.Reason)
 		}
 	}
@@ -73,7 +73,7 @@ func TestHeartbeatRecordsReportedFailureReason(t *testing.T) {
 func TestHeartbeatKeepsExistingFailureReason(t *testing.T) {
 	s, node, allocation := heartbeatReasonTestServer(lifecycle.PhaseFailed)
 	allocation.Reason, allocation.Message = "retry_limit", "agent unavailable"
-	actual := []api.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseFailed, Health: lifecycle.HealthUnhealthy, Reason: api.OperationRestartExhausted}}
+	actual := []nodeapi.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseFailed, Health: lifecycle.HealthUnhealthy, Reason: nodeapi.OperationRestartExhausted}}
 	if code := postHeartbeat(t, s, node.ID, actual); code != http.StatusNoContent {
 		t.Fatalf("heartbeat status = %d, want 204", code)
 	}
@@ -83,13 +83,13 @@ func TestHeartbeatKeepsExistingFailureReason(t *testing.T) {
 }
 
 func TestHeartbeatRejectsInvalidFailureReason(t *testing.T) {
-	for _, status := range []api.AllocationStatus{
+	for _, status := range []nodeapi.AllocationStatus{
 		{Phase: lifecycle.PhaseFailed, Reason: "unknown"},
-		{Phase: lifecycle.PhaseRunning, Reason: api.OperationRestartExhausted},
+		{Phase: lifecycle.PhaseRunning, Reason: nodeapi.OperationRestartExhausted},
 	} {
 		s, node, allocation := heartbeatReasonTestServer(lifecycle.PhaseRunning)
 		status.ID, status.Generation, status.Task, status.Health = allocation.ID, 1, "app", lifecycle.HealthUnhealthy
-		if code := postHeartbeat(t, s, node.ID, []api.AllocationStatus{status}); code != http.StatusInternalServerError {
+		if code := postHeartbeat(t, s, node.ID, []nodeapi.AllocationStatus{status}); code != http.StatusInternalServerError {
 			t.Fatalf("heartbeat with %s/%q status = %d, want rejection", status.Phase, status.Reason, code)
 		}
 		if allocation.Phase != lifecycle.PhaseRunning || allocation.Reason != "" {
@@ -100,7 +100,7 @@ func TestHeartbeatRejectsInvalidFailureReason(t *testing.T) {
 
 func TestHeartbeatRejectsExcessAllocationReports(t *testing.T) {
 	s, node, _ := heartbeatReasonTestServer(lifecycle.PhaseRunning)
-	reports := make([]api.AllocationStatus, maxHeartbeatAllocationStatuses+1)
+	reports := make([]nodeapi.AllocationStatus, maxHeartbeatAllocationStatuses+1)
 	if err := s.Heartbeat(context.Background(), node.ID, reports, "test", nil, nil, nodeResourceObservation{}); err == nil {
 		t.Fatal("oversized heartbeat succeeded")
 	}

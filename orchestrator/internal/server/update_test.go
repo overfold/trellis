@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/overfold/trellis/orchestrator/internal/api"
 	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
@@ -34,13 +34,13 @@ func newTestServerWithAgent() (*Server, *testAgent) {
 // its background starts complete.
 func observeStarted(t *testing.T, s *Server, nodeID uuid.UUID) {
 	t.Helper()
-	var statuses []api.AllocationStatus
+	var statuses []nodeapi.AllocationStatus
 	s.mu.RLock()
 	for _, allocation := range s.allocations {
 		allocation.mu.Lock()
 		if allocation.Node != nil && allocation.Node.ID == nodeID && (allocation.Phase == lifecycle.PhaseStarting || allocation.Phase == lifecycle.PhaseRunning) {
 			for _, task := range allocation.Tasks {
-				statuses = append(statuses, api.AllocationStatus{ID: allocation.ID, Generation: allocation.Generation, Task: task.Name, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy})
+				statuses = append(statuses, nodeapi.AllocationStatus{ID: allocation.ID, Generation: allocation.Generation, Task: task.Name, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy})
 			}
 		}
 		allocation.mu.Unlock()

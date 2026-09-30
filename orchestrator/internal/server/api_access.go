@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/overfold/trellis/orchestrator/internal/api"
 	"github.com/overfold/trellis/orchestrator/internal/auth"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
@@ -13,7 +13,7 @@ import (
 // generation. The token is bound to the allocation's job and task group and is
 // persisted only as a hash plus a copy sealed with the secrets key, so start
 // retries and leader changes re-deliver the same token.
-func (s *Server) apiAccessToken(ctx context.Context, access *spec.APIAccessSpec, request *api.AllocationRequest) (string, error) {
+func (s *Server) apiAccessToken(ctx context.Context, access *spec.APIAccessSpec, request *nodeapi.AllocationRequest) (string, error) {
 	if access == nil {
 		return "", nil
 	}

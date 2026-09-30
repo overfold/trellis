@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/overfold/trellis/orchestrator/internal/api"
+	"github.com/overfold/trellis/orchestrator/api"
 	"github.com/overfold/trellis/orchestrator/internal/execstream"
 )
 

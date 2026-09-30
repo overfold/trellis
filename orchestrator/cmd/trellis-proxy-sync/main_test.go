@@ -11,8 +11,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/overfold/trellis/orchestrator/internal/api"
-	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/api"
 	"golang.org/x/sys/unix"
 )
 
@@ -386,14 +385,14 @@ func TestWriteConfigFollowsDanglingSymlink(t *testing.T) {
 func TestSelectUpstreamsExcludesStoppedHealthyAllocation(t *testing.T) {
 	allocs := []api.AllocationResponse{
 		{
-			Phase:   lifecycle.PhaseStopped,
-			Health:  lifecycle.HealthHealthy,
+			Phase:   api.PhaseStopped,
+			Health:  api.HealthHealthy,
 			Address: "10.0.0.1",
 			Ports:   []api.PortMapping{{HostPort: 31000, ContainerPort: 8080}},
 		},
 		{
-			Phase:   lifecycle.PhaseRunning,
-			Health:  lifecycle.HealthHealthy,
+			Phase:   api.PhaseRunning,
+			Health:  api.HealthHealthy,
 			Address: "10.0.0.2",
 			Ports:   []api.PortMapping{{HostPort: 32000, ContainerPort: 8080}},
 		},

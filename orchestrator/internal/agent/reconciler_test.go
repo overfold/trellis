@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/overfold/trellis/orchestrator/internal/api"
 	"github.com/overfold/trellis/orchestrator/internal/health"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/runtime"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
@@ -183,7 +183,7 @@ func TestDrainGroupSuppressesAutomaticRestart(t *testing.T) {
 		reconciler: r,
 		operations: make(map[string]*allocationOperation),
 	}
-	if err := agent.DrainGroup(&api.DrainAllocationRequest{AllocationID: "alloc", Generation: 2, Epoch: 1}); err != nil {
+	if err := agent.DrainGroup(&nodeapi.DrainAllocationRequest{AllocationID: "alloc", Generation: 2, Epoch: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.Reconcile(context.Background(), "task"); err != nil {
@@ -206,10 +206,10 @@ func TestResumeGroupRestoresAutomaticRestart(t *testing.T) {
 		reconciler:  r,
 		operations:  make(map[string]*allocationOperation),
 	}
-	if err := agent.DrainGroup(&api.DrainAllocationRequest{AllocationID: "alloc", Generation: 2, Epoch: 1}); err != nil {
+	if err := agent.DrainGroup(&nodeapi.DrainAllocationRequest{AllocationID: "alloc", Generation: 2, Epoch: 1}); err != nil {
 		t.Fatal(err)
 	}
-	if err := agent.ResumeGroup(&api.DrainAllocationRequest{AllocationID: "alloc", Generation: 2, Epoch: 1}); err != nil {
+	if err := agent.ResumeGroup(&nodeapi.DrainAllocationRequest{AllocationID: "alloc", Generation: 2, Epoch: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if agent.allocations["task"].Draining {
@@ -231,8 +231,8 @@ func TestLateDrainDoesNotSuppressRestartsAfterResume(t *testing.T) {
 		allocations: map[string]*Allocation{"task": {ID: "task", AllocationID: "alloc", Generation: 2, Status: "running", Spec: &spec.TaskSpec{}}},
 		reconciler:  r,
 	}
-	drain := &api.DrainAllocationRequest{AllocationID: "alloc", Generation: 2, Epoch: 4, Sequence: 1}
-	resume := &api.DrainAllocationRequest{AllocationID: "alloc", Generation: 2, Epoch: 4, Sequence: 2}
+	drain := &nodeapi.DrainAllocationRequest{AllocationID: "alloc", Generation: 2, Epoch: 4, Sequence: 1}
+	resume := &nodeapi.DrainAllocationRequest{AllocationID: "alloc", Generation: 2, Epoch: 4, Sequence: 2}
 	if err := agent.ResumeGroup(resume); err != nil {
 		t.Fatal(err)
 	}

@@ -8,8 +8,8 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/overfold/trellis/orchestrator/internal/api"
 	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 )
 
 func TestSendHeartbeatCarriesFailureReason(t *testing.T) {
@@ -24,8 +24,8 @@ func TestSendHeartbeatCarriesFailureReason(t *testing.T) {
 
 	nodeID := uuid.New()
 	client := NewServerClient("token", server.URL, nil)
-	err := client.SendHeartbeat(context.Background(), nodeID, &Heartbeat{NodeID: nodeID, Allocations: []api.AllocationStatus{
-		{ID: "failed", Generation: 1, Phase: lifecycle.PhaseFailed, Health: lifecycle.HealthUnhealthy, Reason: api.OperationRestartExhausted},
+	err := client.SendHeartbeat(context.Background(), nodeID, &Heartbeat{NodeID: nodeID, Allocations: []nodeapi.AllocationStatus{
+		{ID: "failed", Generation: 1, Phase: lifecycle.PhaseFailed, Health: lifecycle.HealthUnhealthy, Reason: nodeapi.OperationRestartExhausted},
 		{ID: "running", Generation: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy},
 	}})
 	if err != nil {

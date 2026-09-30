@@ -1,4 +1,6 @@
-package client
+// Package transport sends authenticated HTTP requests to Trellis APIs. It is
+// shared by the public client package and the node-internal clients.
+package transport
 
 import (
 	"bytes"
@@ -12,21 +14,22 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/overfold/trellis/orchestrator/internal/api"
-	"github.com/overfold/trellis/orchestrator/internal/auth"
+	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/internal/adminsign"
 	"github.com/overfold/trellis/orchestrator/internal/execstream"
 )
 
-const maxResponseBody = 64 << 20
+// MaxResponseBody bounds a buffered response body.
+const MaxResponseBody = 64 << 20
 
-func newHTTPClient(tlsConfig *tls.Config) *http.Client {
-	return newHTTPClientWithResponseHeaderTimeout(tlsConfig, 30*time.Second)
-}
-
-func newHTTPClientWithResponseHeaderTimeout(tlsConfig *tls.Config, responseHeaderTimeout time.Duration) *http.Client {
+// NewHTTPClient returns an HTTP client for Trellis APIs. A zero
+// responseHeaderTimeout leaves waiting for response headers to the request
+// context.
+func NewHTTPClient(tlsConfig *tls.Config, responseHeaderTimeout time.Duration) *http.Client {
 	return &http.Client{Transport: &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
@@ -38,10 +41,25 @@ func newHTTPClientWithResponseHeaderTimeout(tlsConfig *tls.Config, responseHeade
 	}}
 }
 
-type client struct {
-	token            string
-	administratorKey ed25519.PrivateKey
-	client           *http.Client
+// NormalizeBaseURL returns addr as a base URL without a trailing slash. An
+// address without a scheme uses HTTPS.
+func NormalizeBaseURL(addr string) string {
+	addr = strings.TrimRight(strings.TrimSpace(addr), "/")
+	if addr == "" {
+		return ""
+	}
+	if !strings.HasPrefix(addr, "http://") && !strings.HasPrefix(addr, "https://") {
+		addr = "https://" + addr
+	}
+	return addr
+}
+
+// Client authenticates requests with a bearer token or, when
+// AdministratorKey is set, with administrator request signatures.
+type Client struct {
+	Token            string
+	AdministratorKey ed25519.PrivateKey
+	HTTP             *http.Client
 }
 
 // HTTPError contains a non-successful HTTP response.
@@ -66,7 +84,9 @@ func (e *HTTPError) Message() string {
 	return string(bytes.TrimSpace(e.Body))
 }
 
-func (c *client) request(ctx context.Context, method string, url string, requestData any, responseData any) error {
+// Request sends requestData as a JSON body and decodes a JSON response into
+// responseData. Either may be nil.
+func (c *Client) Request(ctx context.Context, method string, url string, requestData any, responseData any) error {
 	var requestBodyBytes []byte
 	if requestData != nil {
 		var err error
@@ -75,10 +95,13 @@ func (c *client) request(ctx context.Context, method string, url string, request
 			return fmt.Errorf("marshal json: %w", err)
 		}
 	}
-	return c.requestBody(ctx, method, url, requestBodyBytes, responseData)
+	return c.RequestBody(ctx, method, url, requestBodyBytes, responseData)
 }
 
-func (c *client) requestBody(ctx context.Context, method string, url string, requestBodyBytes []byte, responseData any) error {
+// RequestBody sends an encoded JSON body and decodes a JSON response into
+// responseData, which may be nil. It clears requestBodyBytes before
+// returning.
+func (c *Client) RequestBody(ctx context.Context, method string, url string, requestBodyBytes []byte, responseData any) error {
 	defer clear(requestBodyBytes)
 	for attempt := 0; attempt < 2; attempt++ {
 		request, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(requestBodyBytes))
@@ -90,19 +113,19 @@ func (c *client) requestBody(ctx context.Context, method string, url string, req
 			return err
 		}
 
-		response, err := c.client.Do(request)
+		response, err := c.HTTP.Do(request)
 		if err != nil {
 			return fmt.Errorf("executing request %s: %w", url, err)
 		}
-		responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, maxResponseBody+1))
+		responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, MaxResponseBody+1))
 		_ = response.Body.Close()
 		if readErr != nil {
 			return fmt.Errorf("read response body: %w", readErr)
 		}
-		if len(responseBody) > maxResponseBody {
-			return fmt.Errorf("response body exceeds %d bytes", maxResponseBody)
+		if len(responseBody) > MaxResponseBody {
+			return fmt.Errorf("response body exceeds %d bytes", MaxResponseBody)
 		}
-		if c.administratorKey != nil && attempt == 0 && response.Header.Get(auth.AdministratorChallengeStatusHeader) == auth.AdministratorChallengeInvalid {
+		if c.AdministratorKey != nil && attempt == 0 && response.Header.Get(adminsign.ChallengeStatusHeader) == adminsign.ChallengeInvalid {
 			continue
 		}
 		if checkStatusCode(response.StatusCode) {
@@ -120,25 +143,25 @@ func (c *client) requestBody(ctx context.Context, method string, url string, req
 
 // authenticate adds the client's credentials to request, signing it with a
 // fresh administrator challenge when the client holds the administrator key.
-func (c *client) authenticate(ctx context.Context, request *http.Request, body []byte) error {
-	if c.token != "" {
-		request.Header.Set("Authorization", "Bearer "+c.token)
+func (c *Client) authenticate(ctx context.Context, request *http.Request, body []byte) error {
+	if c.Token != "" {
+		request.Header.Set("Authorization", "Bearer "+c.Token)
 	}
-	if c.administratorKey != nil {
+	if c.AdministratorKey != nil {
 		challenge, err := c.administratorChallenge(ctx, request.URL.String())
 		if err != nil {
 			return err
 		}
-		payload := auth.AdministratorSigningPayload(challenge, request.Method, request.URL.RequestURI(), body)
-		request.Header.Set(auth.AdministratorChallengeHeader, challenge)
-		request.Header.Set(auth.AdministratorSignatureHeader, base64.RawURLEncoding.EncodeToString(ed25519.Sign(c.administratorKey, payload)))
+		payload := adminsign.Payload(challenge, request.Method, request.URL.RequestURI(), body)
+		request.Header.Set(adminsign.ChallengeHeader, challenge)
+		request.Header.Set(adminsign.SignatureHeader, base64.RawURLEncoding.EncodeToString(ed25519.Sign(c.AdministratorKey, payload)))
 	}
 	return nil
 }
 
-// upgrade sends a GET request that the server switches to the exec stream
+// Upgrade sends a GET request that the server switches to the exec stream
 // protocol and returns the stream. The stream is closed when ctx ends.
-func (c *client) upgrade(ctx context.Context, target string) (io.ReadWriteCloser, error) {
+func (c *Client) Upgrade(ctx context.Context, target string) (io.ReadWriteCloser, error) {
 	for attempt := 0; attempt < 2; attempt++ {
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, http.NoBody)
 		if err != nil {
@@ -148,7 +171,7 @@ func (c *client) upgrade(ctx context.Context, target string) (io.ReadWriteCloser
 			return nil, err
 		}
 		execstream.SetUpgradeHeaders(request)
-		response, err := c.client.Do(request)
+		response, err := c.HTTP.Do(request)
 		if err != nil {
 			return nil, fmt.Errorf("executing request %s: %w", target, err)
 		}
@@ -160,12 +183,12 @@ func (c *client) upgrade(ctx context.Context, target string) (io.ReadWriteCloser
 			}
 			return closeWithContext(ctx, stream), nil
 		}
-		body, readErr := io.ReadAll(io.LimitReader(response.Body, maxResponseBody))
+		body, readErr := io.ReadAll(io.LimitReader(response.Body, MaxResponseBody))
 		_ = response.Body.Close()
 		if readErr != nil {
 			return nil, fmt.Errorf("read response body: %w", readErr)
 		}
-		if c.administratorKey != nil && attempt == 0 && response.Header.Get(auth.AdministratorChallengeStatusHeader) == auth.AdministratorChallengeInvalid {
+		if c.AdministratorKey != nil && attempt == 0 && response.Header.Get(adminsign.ChallengeStatusHeader) == adminsign.ChallengeInvalid {
 			continue
 		}
 		if !checkStatusCode(response.StatusCode) {
@@ -204,7 +227,7 @@ func (s *contextStream) Close() error {
 	return s.err
 }
 
-func (c *client) administratorChallenge(ctx context.Context, target string) (string, error) {
+func (c *Client) administratorChallenge(ctx context.Context, target string) (string, error) {
 	targetURL, err := url.Parse(target)
 	if err != nil {
 		return "", fmt.Errorf("parse administrator request URL: %w", err)
@@ -216,7 +239,7 @@ func (c *client) administratorChallenge(ctx context.Context, target string) (str
 	if err != nil {
 		return "", fmt.Errorf("construct administrator challenge request: %w", err)
 	}
-	response, err := c.client.Do(request)
+	response, err := c.HTTP.Do(request)
 	if err != nil {
 		return "", fmt.Errorf("request administrator challenge: %w", err)
 	}
@@ -235,20 +258,24 @@ func (c *client) administratorChallenge(ctx context.Context, target string) (str
 	return challenge.Challenge, nil
 }
 
-func (c *client) stream(ctx context.Context, url string) (io.ReadCloser, error) {
+// Stream sends a GET request and returns the response body for the caller
+// to read and close.
+func (c *Client) Stream(ctx context.Context, url string) (io.ReadCloser, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("constructing request %s: %w", url, err)
 	}
-	request.Header.Set("Authorization", "Bearer "+c.token)
-	response, err := c.client.Do(request)
+	if err := c.authenticate(ctx, request, nil); err != nil {
+		return nil, err
+	}
+	response, err := c.HTTP.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("executing request %s: %w", url, err)
 	}
 	if checkStatusCode(response.StatusCode) {
 		defer func() { _ = response.Body.Close() }()
-		body, _ := io.ReadAll(io.LimitReader(response.Body, maxResponseBody))
-		return nil, fmt.Errorf("status %d: %s", response.StatusCode, bytes.TrimSpace(body))
+		body, _ := io.ReadAll(io.LimitReader(response.Body, MaxResponseBody))
+		return nil, &HTTPError{Status: response.StatusCode, Body: body}
 	}
 	return response.Body, nil
 }

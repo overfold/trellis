@@ -33,8 +33,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"github.com/labstack/echo/v5/middleware"
+	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/internal/adminsign"
 	"github.com/overfold/trellis/orchestrator/internal/agent"
-	"github.com/overfold/trellis/orchestrator/internal/api"
 	"github.com/overfold/trellis/orchestrator/internal/auth"
 	"github.com/overfold/trellis/orchestrator/internal/client"
 	trellisdns "github.com/overfold/trellis/orchestrator/internal/dns"
@@ -42,6 +43,7 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/health"
 	"github.com/overfold/trellis/orchestrator/internal/localconfig"
 	"github.com/overfold/trellis/orchestrator/internal/network"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	containerruntime "github.com/overfold/trellis/orchestrator/internal/runtime"
 	secretstore "github.com/overfold/trellis/orchestrator/internal/secrets"
 	"github.com/overfold/trellis/orchestrator/internal/server"
@@ -836,8 +838,8 @@ func saveTLSToStorage(local *storage.LocalStorage, m *tlsutil.Materials) error {
 	return local.Put("tls/node-key", string(m.Key))
 }
 
-func joinClusterTLS(ctx context.Context, log *slog.Logger, joinAddr, enrollmentToken string, caCert []byte, serverAdvertise, agentAdvertise, raftAdvertise string) (*api.NodeEnrollmentResponse, error) {
-	body, err := json.Marshal(api.NodeEnrollmentRequest{ServerAdvertise: serverAdvertise, AgentAdvertise: agentAdvertise, RaftAdvertise: raftAdvertise})
+func joinClusterTLS(ctx context.Context, log *slog.Logger, joinAddr, enrollmentToken string, caCert []byte, serverAdvertise, agentAdvertise, raftAdvertise string) (*nodeapi.NodeEnrollmentResponse, error) {
+	body, err := json.Marshal(nodeapi.NodeEnrollmentRequest{ServerAdvertise: serverAdvertise, AgentAdvertise: agentAdvertise, RaftAdvertise: raftAdvertise})
 	if err != nil {
 		return nil, err
 	}
@@ -859,7 +861,7 @@ func joinClusterTLS(ctx context.Context, log *slog.Logger, joinAddr, enrollmentT
 			respBody, _ := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusCreated {
-				var joinResp api.NodeEnrollmentResponse
+				var joinResp nodeapi.NodeEnrollmentResponse
 				if err := json.Unmarshal(respBody, &joinResp); err != nil {
 					return nil, fmt.Errorf("decode join response: %w", err)
 				}
@@ -880,8 +882,8 @@ func joinClusterTLS(ctx context.Context, log *slog.Logger, joinAddr, enrollmentT
 	}
 }
 
-func joinClusterRaft(ctx context.Context, log *slog.Logger, joinAddr, serverAddr, raftAddr string, tlsConfig *tls.Config) (*api.RaftJoinResponse, error) {
-	body, err := json.Marshal(api.RaftJoinRequest{ServerAddress: serverAddr, RaftAddress: raftAddr})
+func joinClusterRaft(ctx context.Context, log *slog.Logger, joinAddr, serverAddr, raftAddr string, tlsConfig *tls.Config) (*nodeapi.RaftJoinResponse, error) {
+	body, err := json.Marshal(nodeapi.RaftJoinRequest{ServerAddress: serverAddr, RaftAddress: raftAddr})
 	if err != nil {
 		return nil, err
 	}
@@ -900,7 +902,7 @@ func joinClusterRaft(ctx context.Context, log *slog.Logger, joinAddr, serverAddr
 			respBody, _ := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
-				var joinResponse api.RaftJoinResponse
+				var joinResponse nodeapi.RaftJoinResponse
 				if err := json.Unmarshal(respBody, &joinResponse); err != nil {
 					return nil, fmt.Errorf("decode Raft join response: %w", err)
 				}
@@ -1061,9 +1063,6 @@ func nodeControlPlaneRoute(r *http.Request) bool {
 func leaderAuthMiddleware(administrator *auth.AdministratorAuthenticator, administratorVerification func() (ed25519.PublicKey, uint64, bool), enrollmentToken string, tokenManager *auth.TokenManager, authorizeNodeCertificate func(context.Context, uuid.UUID, *x509.Certificate) bool) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c *echo.Context) error {
-			if c.Request().URL.Path == "/metrics" {
-				return next(c)
-			}
 			if c.Request().URL.Path == "/v1/auth/administrator/challenge" {
 				if c.Request().Method != http.MethodPost {
 					return echo.NewHTTPError(http.StatusMethodNotAllowed, "administrator challenges require POST")
@@ -1085,24 +1084,24 @@ func leaderAuthMiddleware(administrator *auth.AdministratorAuthenticator, admini
 				c.SetRequest(c.Request().WithContext(ctx))
 				return next(c)
 			}
-			challenge := c.Request().Header.Get(auth.AdministratorChallengeHeader)
-			signature := c.Request().Header.Get(auth.AdministratorSignatureHeader)
+			challenge := c.Request().Header.Get(adminsign.ChallengeHeader)
+			signature := c.Request().Header.Get(adminsign.SignatureHeader)
 			if challenge != "" || signature != "" {
 				if challenge != "" {
 					defer administrator.Consume(challenge)
 				}
 				body, err := io.ReadAll(io.LimitReader(c.Request().Body, (64<<20)+1))
 				if err != nil {
-					c.Response().Header().Set(auth.AdministratorChallengeStatusHeader, auth.AdministratorChallengeInvalid)
+					c.Response().Header().Set(adminsign.ChallengeStatusHeader, adminsign.ChallengeInvalid)
 					return echo.NewHTTPError(http.StatusBadRequest, "unable to read signed request body")
 				}
 				if len(body) > 64<<20 {
-					c.Response().Header().Set(auth.AdministratorChallengeStatusHeader, auth.AdministratorChallengeInvalid)
+					c.Response().Header().Set(adminsign.ChallengeStatusHeader, adminsign.ChallengeInvalid)
 					return echo.NewHTTPError(http.StatusRequestEntityTooLarge, "signed request body exceeds 64 MiB")
 				}
 				c.Request().Body = io.NopCloser(bytes.NewReader(body))
 				publicKey, epoch, ok := administratorVerification()
-				payload := auth.AdministratorSigningPayload(challenge, c.Request().Method, c.Request().URL.RequestURI(), body)
+				payload := adminsign.Payload(challenge, c.Request().Method, c.Request().URL.RequestURI(), body)
 				if ok && challenge != "" && signature != "" && administrator.Verify(publicKey, epoch, challenge, signature, payload) {
 					principal := auth.AdministratorPrincipal()
 					ctx := context.WithValue(c.Request().Context(), server.AdminContextKey, true)
@@ -1110,7 +1109,7 @@ func leaderAuthMiddleware(administrator *auth.AdministratorAuthenticator, admini
 					c.SetRequest(c.Request().WithContext(ctx))
 					return next(c)
 				}
-				c.Response().Header().Set(auth.AdministratorChallengeStatusHeader, auth.AdministratorChallengeInvalid)
+				c.Response().Header().Set(adminsign.ChallengeStatusHeader, adminsign.ChallengeInvalid)
 				return echo.NewHTTPError(http.StatusUnauthorized, "invalid administrator challenge or signature")
 			}
 			if key != "" && tokenManager != nil {

@@ -24,11 +24,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/overfold/trellis/orchestrator/internal/api"
+	"github.com/overfold/trellis/orchestrator/api"
 	"github.com/overfold/trellis/orchestrator/internal/auth"
 	"github.com/overfold/trellis/orchestrator/internal/catalog"
 	"github.com/overfold/trellis/orchestrator/internal/client"
 	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/plan"
 	secretstore "github.com/overfold/trellis/orchestrator/internal/secrets"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
@@ -915,7 +916,7 @@ func (s *Server) ClusterCA() (certPEM, keyPEM string, err error) {
 // EnrollNode issues a server-assigned node identity and certificate in managed
 // signing mode. The CA key is withheld until the identity joins Raft, so an
 // enrollment credential alone cannot mint or duplicate an existing identity.
-func (s *Server) EnrollNode(ctx context.Context, advertised ...string) (*api.NodeEnrollmentResponse, error) {
+func (s *Server) EnrollNode(ctx context.Context, advertised ...string) (*nodeapi.NodeEnrollmentResponse, error) {
 	caCert, caKey, err := s.ClusterCA()
 	if err != nil || caKey == "" {
 		return nil, fmt.Errorf("managed node signer is unavailable")
@@ -936,7 +937,7 @@ func (s *Server) EnrollNode(ctx context.Context, advertised ...string) (*api.Nod
 	if err := s.BindNodeCertificate(ctx, nodeID, certificate); err != nil {
 		return nil, fmt.Errorf("reserve node identity: %w", err)
 	}
-	return &api.NodeEnrollmentResponse{
+	return &nodeapi.NodeEnrollmentResponse{
 		NodeID: nodeID,
 		CACert: caCert,
 		Cert:   string(cert),
@@ -1019,7 +1020,7 @@ func (s *Server) RegisterNode(ctx context.Context, nodeRegistration *NodeRegistr
 }
 
 // Heartbeat records a node heartbeat and allocation state.
-func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.AllocationStatus, version string, volumes []string, capabilities []spec.NodeCapability, resources nodeResourceObservation) error {
+func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []nodeapi.AllocationStatus, version string, volumes []string, capabilities []spec.NodeCapability, resources nodeResourceObservation) error {
 	if len(actual) > maxHeartbeatAllocationStatuses {
 		return fmt.Errorf("heartbeat allocation status count %d exceeds limit %d", len(actual), maxHeartbeatAllocationStatuses)
 	}
@@ -1037,21 +1038,21 @@ func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.A
 		Generation    uint64
 		Phase         lifecycle.Phase
 		Health        lifecycle.Health
-		Reason        api.OperationCode
+		Reason        nodeapi.OperationCode
 		Endpoints     []api.AllocationEndpoint
 		Ports         []api.PortMapping
 		ObservedTasks map[string]bool
-		StartFailure  *api.StartFailure
+		StartFailure  *nodeapi.StartFailure
 	}
 	statuses := make(map[string]statusInfo, len(actual))
 	for _, a := range actual {
 		if !a.Phase.Valid() || !a.Health.Valid() {
 			return fmt.Errorf("invalid allocation state for %s: phase=%q health=%q", a.ID, a.Phase, a.Health)
 		}
-		if a.Reason != "" && (a.Phase != lifecycle.PhaseFailed || a.Reason != api.OperationRestartExhausted) {
+		if a.Reason != "" && (a.Phase != lifecycle.PhaseFailed || a.Reason != nodeapi.OperationRestartExhausted) {
 			return fmt.Errorf("invalid failure reason for %s: phase=%q reason=%q", a.ID, a.Phase, a.Reason)
 		}
-		if a.StartFailure != nil && (a.Phase != lifecycle.PhaseStarting || a.StartFailure.Attempt < 0 || len(a.StartFailure.Message) > api.MaxStartFailureMessageBytes || !terminalStartFailureCode(a.StartFailure.Code)) {
+		if a.StartFailure != nil && (a.Phase != lifecycle.PhaseStarting || a.StartFailure.Attempt < 0 || len(a.StartFailure.Message) > nodeapi.MaxStartFailureMessageBytes || !terminalStartFailureCode(a.StartFailure.Code)) {
 			return fmt.Errorf("invalid start failure for %s: phase=%q attempt=%d message bytes=%d", a.ID, a.Phase, a.StartFailure.Attempt, len(a.StartFailure.Message))
 		}
 		phase, health := a.Phase, a.Health
@@ -1267,13 +1268,17 @@ func jobKey(namespace, name string) string {
 	return namespace + "\x00" + name
 }
 
-// RegisterJob creates or updates desired job state.
-func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spec.JobSpec, expectedVersion *int) (*api.JobRegistrationResponse, error) {
+// RegisterJob creates or updates desired job state. A nil preconditions
+// applies unconditionally.
+func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spec.JobSpec, preconditions *JobPreconditions) (*api.JobRegistrationResponse, error) {
+	if preconditions == nil {
+		preconditions = &JobPreconditions{}
+	}
+	if err := preconditions.validate(); err != nil {
+		return nil, err
+	}
 	if err := s.CanonicalizeJob(jobSpec); err != nil {
 		return nil, fmt.Errorf("validate job: %w", err)
-	}
-	if expectedVersion != nil && *expectedVersion < 0 {
-		return nil, fmt.Errorf("expected_version must not be negative")
 	}
 	if jobSpec.Namespace != namespace {
 		return nil, fmt.Errorf("job namespace does not match request namespace")
@@ -1288,11 +1293,11 @@ func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spe
 	s.mu.RLock()
 	existing := s.jobs[key]
 	s.mu.RUnlock()
-	if err := checkJobVersion(existing, expectedVersion); err != nil {
+	if err := preconditions.check(existing); err != nil {
 		return nil, err
 	}
 	if existing != nil && len(plan.Diff(existing.Spec, jobSpec)) == 0 {
-		return &api.JobRegistrationResponse{Namespace: namespace, Name: jobSpec.Name, Version: existing.Version, Revision: existing.Revision}, nil
+		return &api.JobRegistrationResponse{Namespace: namespace, Name: jobSpec.Name, Incarnation: existing.Incarnation, Version: existing.Version, Revision: existing.Revision}, nil
 	}
 	s.mu.RLock()
 	// Job limits can change between canonicalization and this point.
@@ -1357,27 +1362,89 @@ func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spe
 		At:        s.now().UTC(),
 	})
 
-	return &api.JobRegistrationResponse{Namespace: namespace, Name: jobSpec.Name, Version: version, Revision: revision}, nil
+	return &api.JobRegistrationResponse{Namespace: namespace, Name: jobSpec.Name, Incarnation: incarnation, Version: version, Revision: revision}, nil
 }
 
-// ErrJobVersionConflict indicates that a job apply's expected version did not
-// match the job's current version.
+// ErrJobVersionConflict indicates that a job apply's preconditions did not
+// match the job's current state.
 var ErrJobVersionConflict = errors.New("job version conflict")
+
+// ErrInvalidJobPreconditions indicates malformed job apply preconditions.
+var ErrInvalidJobPreconditions = errors.New("invalid job apply preconditions")
+
+// JobPreconditions make a job apply conditional on the job's current state.
+// Zero fields do not constrain the apply.
+type JobPreconditions struct {
+	// Version 0 requires that the job does not exist; N requires that the
+	// job is at version N and, because versions restart when a job is
+	// deleted and recreated, also requires Incarnation.
+	Version *int
+	// Incarnation requires that the job exists with this incarnation.
+	Incarnation string
+}
+
+func (p *JobPreconditions) validate() error {
+	switch {
+	case p.Version != nil && *p.Version < 0:
+		return fmt.Errorf("%w: expected_version must not be negative", ErrInvalidJobPreconditions)
+	case p.Version != nil && *p.Version > 0 && p.Incarnation == "":
+		return fmt.Errorf("%w: expected_version %d requires expected_incarnation", ErrInvalidJobPreconditions, *p.Version)
+	case p.Version != nil && *p.Version == 0 && p.Incarnation != "":
+		return fmt.Errorf("%w: expected_version 0 requires that the job does not exist and cannot be combined with expected_incarnation", ErrInvalidJobPreconditions)
+	}
+	return nil
+}
+
+// check enforces the preconditions against the current job, which is nil
+// when the job does not exist.
+func (p *JobPreconditions) check(existing *Job) error {
+	if p.Version == nil && p.Incarnation == "" {
+		return nil
+	}
+	conflict := &JobVersionConflictError{}
+	if p.Version != nil {
+		conflict.Expected = *p.Version
+	}
+	if existing == nil {
+		if p.Version != nil && *p.Version == 0 {
+			return nil
+		}
+		return conflict
+	}
+	conflict.Exists, conflict.Current = true, existing.Version
+	switch {
+	case p.Incarnation != "" && p.Incarnation != existing.Incarnation:
+		conflict.Recreated = true
+		return conflict
+	case p.Version != nil && *p.Version != existing.Version:
+		return conflict
+	}
+	return nil
+}
 
 // JobVersionConflictError describes a failed job apply precondition.
 type JobVersionConflictError struct {
+	// Expected is the expected version, or 0 when the apply required that
+	// the job does not exist or expected only an incarnation.
 	Expected int
 	// Current is the job's current version, or 0 when the job does not exist.
 	Current int
 	Exists  bool
+	// Recreated reports that the job was deleted and recreated since the
+	// expected incarnation was read.
+	Recreated bool
 }
 
 func (e *JobVersionConflictError) Error() string {
 	switch {
+	case e.Recreated:
+		return fmt.Sprintf("job version conflict: the job was deleted and recreated after it was read and is now at version %d; plan the manifest again", e.Current)
+	case !e.Exists && e.Expected > 0:
+		return fmt.Sprintf("job version conflict: expected version %d but the job does not exist; plan the manifest again", e.Expected)
+	case !e.Exists:
+		return "job version conflict: expected an existing job but the job does not exist; plan the manifest again"
 	case e.Expected == 0:
 		return fmt.Sprintf("job version conflict: job already exists at version %d; plan the manifest again", e.Current)
-	case !e.Exists:
-		return fmt.Sprintf("job version conflict: expected version %d but the job does not exist; plan the manifest again", e.Expected)
 	default:
 		return fmt.Sprintf("job version conflict: expected version %d but the job is at version %d; plan the manifest again", e.Expected, e.Current)
 	}
@@ -1385,24 +1452,6 @@ func (e *JobVersionConflictError) Error() string {
 
 // Is reports whether target is ErrJobVersionConflict.
 func (e *JobVersionConflictError) Is(target error) bool { return target == ErrJobVersionConflict }
-
-// checkJobVersion enforces an apply precondition. A nil expected version
-// applies unconditionally; 0 requires that the job does not exist.
-func checkJobVersion(existing *Job, expected *int) error {
-	if expected == nil {
-		return nil
-	}
-	if existing == nil {
-		if *expected == 0 {
-			return nil
-		}
-		return &JobVersionConflictError{Expected: *expected}
-	}
-	if *expected == 0 || existing.Version != *expected {
-		return &JobVersionConflictError{Expected: *expected, Current: existing.Version, Exists: true}
-	}
-	return nil
-}
 
 // ValidateNamespaceAllocationLimit checks a candidate job against the current
 // namespace desired-allocation budget without mutating state.
@@ -1588,7 +1637,7 @@ func (s *Server) resumeNodeAllocations(ctx context.Context, id uuid.UUID) error 
 			continue
 		}
 		address := fmt.Sprintf("%s:%d", node.Host, node.Port)
-		request := &api.DrainAllocationRequest{AllocationID: allocation.ID, Generation: allocation.Generation, Epoch: s.controlEpoch, Sequence: allocation.DrainSequence + 1}
+		request := &nodeapi.DrainAllocationRequest{AllocationID: allocation.ID, Generation: allocation.Generation, Epoch: s.controlEpoch, Sequence: allocation.DrainSequence + 1}
 		next, err := cloneAllocationForReconcile(allocation)
 		allocation.mu.Unlock()
 		if err != nil {
@@ -1637,7 +1686,7 @@ func (s *Server) resumeNodeAllocations(ctx context.Context, id uuid.UUID) error 
 type resumeDelivery struct {
 	allocation *Allocation
 	address    string
-	request    *api.DrainAllocationRequest
+	request    *nodeapi.DrainAllocationRequest
 }
 
 type resumeDeliveryKey struct {
@@ -1662,7 +1711,7 @@ func (s *Server) deliveredResumes(epoch uint64) map[resumeDeliveryKey]uint64 {
 	return delivered
 }
 
-func (s *Server) recordResumeDelivered(request *api.DrainAllocationRequest) {
+func (s *Server) recordResumeDelivered(request *nodeapi.DrainAllocationRequest) {
 	s.resumeMu.Lock()
 	defer s.resumeMu.Unlock()
 	if s.resumes == nil || s.resumeEpoch != request.Epoch {
@@ -1684,7 +1733,7 @@ func (s *Server) ListJobs(namespace string) api.JobListResponse {
 			continue
 		}
 		name := job.Spec.Name
-		r := api.JobStatusResponse{Name: name, Version: job.Version, Revision: job.Revision}
+		r := api.JobStatusResponse{Name: name, Incarnation: job.Incarnation, Version: job.Version, Revision: job.Revision}
 		for _, g := range job.Spec.TaskGroups {
 			r.Desired += g.Count
 		}
@@ -1720,8 +1769,12 @@ func (s *Server) GetJob(namespace, name string) (*api.JobStatusResponse, bool) {
 	if !ok {
 		return nil, false
 	}
-	specCopy := *job.Spec
-	r := &api.JobStatusResponse{Name: name, Version: job.Version, Revision: job.Revision, Spec: &specCopy}
+	rawSpec, err := json.Marshal(job.Spec)
+	if err != nil {
+		s.log.Error("encode job spec", "namespace", namespace, "job", name, "error", err)
+		return nil, false
+	}
+	r := &api.JobStatusResponse{Name: name, Incarnation: job.Incarnation, Version: job.Version, Revision: job.Revision, Spec: rawSpec}
 	for _, g := range job.Spec.TaskGroups {
 		r.Desired += g.Count
 	}
@@ -1743,6 +1796,19 @@ func (s *Server) GetJob(namespace, name string) (*api.JobStatusResponse, bool) {
 	}
 	r.ReplacementBackoff = s.replacementBackoffResponsesLocked(namespace, name)
 	return r, true
+}
+
+// PlanJob returns the semantic plan for applying desired, a canonical job.
+func (s *Server) PlanJob(desired *spec.JobSpec) api.JobPlanResponse {
+	s.mu.RLock()
+	current := s.jobs[jobKey(desired.Namespace, desired.Name)]
+	s.mu.RUnlock()
+	if current == nil {
+		return plan.Build(nil, plan.Base{}, desired)
+	}
+	// Job records are replaced, never mutated, so current is read safely
+	// without s.mu.
+	return plan.Build(current.Spec, plan.Base{Incarnation: current.Incarnation, Version: current.Version, Revision: current.Revision}, desired)
 }
 
 // DeleteJob removes desired job state.
@@ -1889,10 +1955,14 @@ func (s *Server) ListJobVersions(ctx context.Context, namespace, name string) (a
 	}
 	result := make(api.JobVersionListResponse, 0, len(records))
 	for _, r := range records {
+		rawSpec, err := json.Marshal(r.Spec)
+		if err != nil {
+			return nil, fmt.Errorf("encode job version %d: %w", r.Version, err)
+		}
 		result = append(result, api.JobVersionResponse{
 			Version:   r.Version,
 			Revision:  r.Revision,
-			Spec:      *r.Spec,
+			Spec:      rawSpec,
 			CreatedAt: r.CreatedAt,
 		})
 	}
@@ -2003,13 +2073,13 @@ func unwrapPathError(err error) error {
 }
 
 // ListServices returns discoverable service instances.
-func (s *Server) ListServices(namespace string, filter *catalog.ListFilter) api.ServiceListResponse {
+func (s *Server) ListServices(namespace string, filter *catalog.ListFilter) nodeapi.ServiceListResponse {
 	return s.catalog.List(namespace, filter)
 }
 
 // ListServicesForNode returns services only for namespaces with active
 // allocations assigned to the authenticated node.
-func (s *Server) ListServicesForNode(nodeID uuid.UUID, filter *catalog.ListFilter) api.ServiceListResponse {
+func (s *Server) ListServicesForNode(nodeID uuid.UUID, filter *catalog.ListFilter) nodeapi.ServiceListResponse {
 	s.mu.RLock()
 	namespaces := make(map[string]struct{})
 	for _, allocation := range s.allocations {
@@ -2027,7 +2097,7 @@ func (s *Server) ListServicesForNode(nodeID uuid.UUID, filter *catalog.ListFilte
 		names = append(names, namespace)
 	}
 	sort.Strings(names)
-	var result api.ServiceListResponse
+	var result nodeapi.ServiceListResponse
 	for _, namespace := range names {
 		result = append(result, s.catalog.List(namespace, filter)...)
 	}

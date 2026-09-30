@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/overfold/trellis/orchestrator/internal/api"
 	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
 	"github.com/overfold/trellis/orchestrator/internal/network"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
@@ -96,7 +96,7 @@ func TestStartExecutionHashIgnoresNetworkPeerChanges(t *testing.T) {
 	if len(calls) != 2 {
 		t.Fatalf("start calls = %d, want 2", len(calls))
 	}
-	var first, second api.AllocationRequest
+	var first, second nodeapi.AllocationRequest
 	if err := json.Unmarshal(calls[0].body, &first); err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestStartRequestCarriesDrainOutsideExecutionHash(t *testing.T) {
 	if len(calls) != 2 {
 		t.Fatalf("start calls = %d, want 2", len(calls))
 	}
-	var first, second api.AllocationRequest
+	var first, second nodeapi.AllocationRequest
 	if err := json.Unmarshal(calls[0].body, &first); err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestStartExecutionHashChangesWithNetworkPool(t *testing.T) {
 	if len(calls) != 2 {
 		t.Fatalf("start calls = %d, want 2", len(calls))
 	}
-	var first, second api.AllocationRequest
+	var first, second nodeapi.AllocationRequest
 	if err := json.Unmarshal(calls[0].body, &first); err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +231,7 @@ func TestSendNetworkPlanTargetUsesScaledDeadline(t *testing.T) {
 
 	started := time.Now()
 	called := false
-	s.sendNetworkPlanTarget(context.Background(), target, func(ctx context.Context, _ uuid.UUID, _ string, _ *api.NetworkPlanRequest) error {
+	s.sendNetworkPlanTarget(context.Background(), target, func(ctx context.Context, _ uuid.UUID, _ string, _ *nodeapi.NetworkPlanRequest) error {
 		called = true
 		deadline, ok := ctx.Deadline()
 		if !ok {
@@ -338,7 +338,7 @@ func TestNetworkPlanDispatcherIsolatesBlockedNodeAndRotatesNamespaces(t *testing
 	slowCalls := make(chan string, 2)
 	slowRelease := make(chan struct{}, 2)
 	healthyCalls := make(chan string, 2)
-	update := func(_ context.Context, _ uuid.UUID, address string, request *api.NetworkPlanRequest) error {
+	update := func(_ context.Context, _ uuid.UUID, address string, request *nodeapi.NetworkPlanRequest) error {
 		if request.Epoch != 7 {
 			t.Errorf("request epoch = %d, want 7", request.Epoch)
 		}

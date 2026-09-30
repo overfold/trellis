@@ -1,5 +1,8 @@
-// Package api defines the wire protocol shared by Trellis components.
-package api
+// Package nodeapi defines the node-internal wire protocol: leader-to-agent
+// operations, node registration and heartbeats, enrollment, Raft membership,
+// and internal service discovery. Operator-facing wire types live in the
+// public package github.com/overfold/trellis/orchestrator/api.
+package nodeapi
 
 import (
 	"github.com/overfold/trellis/orchestrator/internal/network"

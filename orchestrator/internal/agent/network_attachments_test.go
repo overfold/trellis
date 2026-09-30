@@ -9,9 +9,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/overfold/trellis/orchestrator/internal/api"
 	"github.com/overfold/trellis/orchestrator/internal/client"
 	"github.com/overfold/trellis/orchestrator/internal/network"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/runtime"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 	"github.com/overfold/trellis/orchestrator/internal/storage"
@@ -93,7 +93,7 @@ func (m *recoveringNetworkManager) isAttached(id string) bool {
 	return m.attached[id]
 }
 
-func wireGuardTestRequest() *api.AllocationRequest {
+func wireGuardTestRequest() *nodeapi.AllocationRequest {
 	request := operationTestRequest()
 	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard}}}
 	request.NetworkPlan = &network.Plan{}

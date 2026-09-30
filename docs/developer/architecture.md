@@ -24,4 +24,5 @@ Desired state is durable. Observations—heartbeats, runtime status, logs, much 
 - `internal/catalog`: healthy endpoint index.
 - `internal/health` and `internal/lifecycle`: health probes and state-machine vocabulary/events.
 - `internal/secrets` and `internal/auth`: envelope-style encrypted secret records and bearer token scopes.
-- `internal/api` / `internal/client`: shared wire types and HTTP clients.
+- `api` / `client`: public operator-API wire types and Go client, used by `trellisctl`, `trellis-proxy-sync`, and external integrations.
+- `internal/nodeapi` / `internal/client`: node-internal wire types and the agent and node clients; `internal/transport` is the HTTP transport shared with the public client.

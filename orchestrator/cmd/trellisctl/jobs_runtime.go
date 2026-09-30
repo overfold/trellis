@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,9 +12,9 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/overfold/trellis/orchestrator/internal/api"
-	"github.com/overfold/trellis/orchestrator/internal/client"
-	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/client"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
 func isHTTPStatus(err error, status int) bool {
@@ -21,7 +22,7 @@ func isHTTPStatus(err error, status int) bool {
 	return errors.As(err, &httpErr) && httpErr.Status == status
 }
 
-func waitForJob(parent context.Context, w io.Writer, serverClient *client.ServerClient, name string, interval, timeout time.Duration) error {
+func waitForJob(parent context.Context, w io.Writer, serverClient *client.Client, name string, interval, timeout time.Duration) error {
 	if interval <= 0 {
 		return fmt.Errorf("interval must be greater than zero")
 	}
@@ -64,7 +65,7 @@ func waitForJob(parent context.Context, w io.Writer, serverClient *client.Server
 	}
 }
 
-func waitForJobDeletion(parent context.Context, w io.Writer, serverClient *client.ServerClient, name string, interval, timeout time.Duration) error {
+func waitForJobDeletion(parent context.Context, w io.Writer, serverClient *client.Client, name string, interval, timeout time.Duration) error {
 	if interval <= 0 {
 		return fmt.Errorf("interval must be greater than zero")
 	}
@@ -100,15 +101,15 @@ func waitForJobDeletion(parent context.Context, w io.Writer, serverClient *clien
 }
 
 type jobAllocationEvent struct {
-	Allocation string          `json:"allocation"`
-	Group      string          `json:"group"`
-	Phase      lifecycle.Phase `json:"phase"`
-	Reason     string          `json:"reason,omitempty"`
-	Message    string          `json:"message,omitempty"`
-	At         time.Time       `json:"at"`
+	Allocation string              `json:"allocation"`
+	Group      string              `json:"group"`
+	Phase      api.AllocationPhase `json:"phase"`
+	Reason     string              `json:"reason,omitempty"`
+	Message    string              `json:"message,omitempty"`
+	At         time.Time           `json:"at"`
 }
 
-func loadJobEvents(ctx context.Context, serverClient *client.ServerClient, target, allocationRef string) ([]jobAllocationEvent, error) {
+func loadJobEvents(ctx context.Context, serverClient *client.Client, target, allocationRef string) ([]jobAllocationEvent, error) {
 	status, err := serverClient.GetJob(ctx, target)
 	if err != nil {
 		return nil, err
@@ -131,7 +132,7 @@ func loadJobEvents(ctx context.Context, serverClient *client.ServerClient, targe
 		if err != nil {
 			return nil, fmt.Errorf("allocation %s: %w", shortID(allocation.ID), err)
 		}
-		for _, event := range *events {
+		for _, event := range events {
 			result = append(result, jobAllocationEvent{
 				Allocation: allocation.ID,
 				Group:      allocation.Group,
@@ -192,7 +193,7 @@ type jobLogStream struct {
 	task       string
 }
 
-func runJobLogs(ctx context.Context, w io.Writer, serverClient *client.ServerClient, target, allocationRef, group, task string, follow bool, tail int) error {
+func runJobLogs(ctx context.Context, w io.Writer, serverClient *client.Client, target, allocationRef, group, task string, follow bool, tail int) error {
 	streams, err := resolveLogStreams(ctx, serverClient, target, allocationRef, group, task)
 	if err != nil {
 		return err
@@ -207,7 +208,7 @@ func runJobLogs(ctx context.Context, w io.Writer, serverClient *client.ServerCli
 				return err
 			}
 		}
-		logs, err := serverClient.AllocationTaskLogs(ctx, stream.allocation.ID, stream.task, follow, tail)
+		logs, err := serverClient.AllocationLogs(ctx, stream.allocation.ID, client.LogOptions{Task: stream.task, Follow: follow, Tail: tail})
 		if err != nil {
 			return err
 		}
@@ -228,7 +229,7 @@ func runJobLogs(ctx context.Context, w io.Writer, serverClient *client.ServerCli
 	return nil
 }
 
-func resolveLogStreams(ctx context.Context, serverClient *client.ServerClient, target, allocationRef, group, task string) ([]jobLogStream, error) {
+func resolveLogStreams(ctx context.Context, serverClient *client.Client, target, allocationRef, group, task string) ([]jobLogStream, error) {
 	status, err := serverClient.GetJob(ctx, target)
 	if err != nil {
 		return nil, err
@@ -248,8 +249,12 @@ func resolveLogStreams(ctx context.Context, serverClient *client.ServerClient, t
 	}
 
 	groupTasks := make(map[string][]string)
-	if status.Spec != nil {
-		for _, candidateGroup := range status.Spec.TaskGroups {
+	if len(status.Spec) > 0 {
+		var jobSpec spec.JobSpec
+		if err := json.Unmarshal(status.Spec, &jobSpec); err != nil {
+			return nil, fmt.Errorf("decode job %s spec: %w", target, err)
+		}
+		for _, candidateGroup := range jobSpec.TaskGroups {
 			for _, candidateTask := range candidateGroup.Tasks {
 				groupTasks[candidateGroup.Name] = append(groupTasks[candidateGroup.Name], candidateTask.Name)
 			}
@@ -310,7 +315,7 @@ func logStreamRefs(streams []jobLogStream) string {
 func preferActiveAllocations(allocations []api.AllocationResponse) []api.AllocationResponse {
 	var active []api.AllocationResponse
 	for _, a := range allocations {
-		if a.Phase != lifecycle.PhaseStopped && a.Phase != lifecycle.PhaseFailed && a.Phase != lifecycle.PhaseLost {
+		if a.Phase != api.PhaseStopped && a.Phase != api.PhaseFailed && a.Phase != api.PhaseLost {
 			active = append(active, a)
 		}
 	}

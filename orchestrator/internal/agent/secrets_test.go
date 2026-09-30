@@ -9,14 +9,14 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/overfold/trellis/orchestrator/internal/api"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/runtime"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 	"github.com/overfold/trellis/orchestrator/internal/storage"
 )
 
 func TestMaterializeSecretsDeliversEnvAndMemoryBackedFile(t *testing.T) {
-	delivered := []api.DeliveredSecret{
+	delivered := []nodeapi.DeliveredSecret{
 		{Task: "api", Name: "password", Target: spec.SecretTargetEnv, Env: "PASSWORD", Value: []byte("env-value")},
 		{Task: "api", Name: "key", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Mode: 0o400, Value: []byte("file-value")},
 		{Task: "other", Name: "ignored", Target: spec.SecretTargetEnv, Env: "IGNORED", Value: []byte("ignored")},
@@ -101,7 +101,7 @@ func TestSecretDirForRequiresTmpfsBacking(t *testing.T) {
 }
 
 func TestMaterializeSecretsEnvUsesMemoryBackedDirectory(t *testing.T) {
-	delivered := []api.DeliveredSecret{{Task: "api", Name: "password", Target: spec.SecretTargetEnv, Env: "PASSWORD", Value: []byte("value")}}
+	delivered := []nodeapi.DeliveredSecret{{Task: "api", Name: "password", Target: spec.SecretTargetEnv, Env: "PASSWORD", Value: []byte("value")}}
 	if !taskHasSecrets("api", delivered) {
 		t.Fatal("environment-only task did not report secrets")
 	}
@@ -121,7 +121,7 @@ func TestRemoveSecretDirCleansReadOnlyEnvironmentSecrets(t *testing.T) {
 	if err := createSecretDir(dir); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := materializeSecrets(dir, "api", []api.DeliveredSecret{{Task: "api", Target: spec.SecretTargetEnv, Env: "PASSWORD", Value: []byte("value")}}); err != nil {
+	if _, err := materializeSecrets(dir, "api", []nodeapi.DeliveredSecret{{Task: "api", Target: spec.SecretTargetEnv, Env: "PASSWORD", Value: []byte("value")}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := removeSecretDir(dir); err != nil {
@@ -148,7 +148,7 @@ func TestRunAllocationKeepsManagedEnvironmentSecretsOutOfRuntimeEnvironment(t *t
 	request := operationTestRequest()
 	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image"}}
 	request.EnvOverrides = map[string]string{"TRELLIS_TOKEN": "api-token-sentinel", "TRELLIS_NAMESPACE": "default"}
-	request.Secrets = []api.DeliveredSecret{{Task: "first", Name: "password", Target: spec.SecretTargetEnv, Env: "PASSWORD", Value: []byte("secret-sentinel")}}
+	request.Secrets = []nodeapi.DeliveredSecret{{Task: "first", Name: "password", Target: spec.SecretTargetEnv, Env: "PASSWORD", Value: []byte("secret-sentinel")}}
 	if err := runGroup(context.Background(), agent, request); err != nil {
 		t.Fatal(err)
 	}
@@ -287,7 +287,7 @@ func TestRunAllocationRecordsSecretDirBeforeWritingSecrets(t *testing.T) {
 	}
 	request := operationTestRequest()
 	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image"}}
-	request.Secrets = []api.DeliveredSecret{{Task: "first", Name: "key", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Mode: 0o400, Value: []byte("secret")}}
+	request.Secrets = []nodeapi.DeliveredSecret{{Task: "first", Name: "key", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Mode: 0o400, Value: []byte("secret")}}
 	err := runGroup(context.Background(), agent, request)
 	if err == nil || !strings.Contains(err.Error(), "persist secret metadata") {
 		t.Fatalf("run error = %v, want secret metadata persistence failure", err)
@@ -311,7 +311,7 @@ func TestRunAllocationUsesRecoverableSecretDir(t *testing.T) {
 	agent.ConfigureDurability(local, "test")
 	request := operationTestRequest()
 	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image"}}
-	request.Secrets = []api.DeliveredSecret{{Task: "first", Name: "key", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Mode: 0o400, Value: []byte("secret")}}
+	request.Secrets = []nodeapi.DeliveredSecret{{Task: "first", Name: "key", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Mode: 0o400, Value: []byte("secret")}}
 	if err := runGroup(context.Background(), agent, request); err != nil {
 		t.Fatal(err)
 	}
@@ -350,7 +350,7 @@ func TestRemoveOrphanedSecretDirsKeepsOwnedDirectories(t *testing.T) {
 		if err := createSecretDir(dir); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := materializeSecrets(dir, "task", []api.DeliveredSecret{{Task: "task", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Mode: 0o400, Value: []byte("secret")}}); err != nil {
+		if _, err := materializeSecrets(dir, "task", []nodeapi.DeliveredSecret{{Task: "task", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Mode: 0o400, Value: []byte("secret")}}); err != nil {
 			t.Fatal(err)
 		}
 		dirs[id] = dir
@@ -479,7 +479,7 @@ func TestRunAllocationKeepsSecretDirectoryItDidNotCreate(t *testing.T) {
 	}
 	request := operationTestRequest()
 	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image"}}
-	request.Secrets = []api.DeliveredSecret{{Task: "first", Name: "key", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Mode: 0o400, Value: []byte("secret")}}
+	request.Secrets = []nodeapi.DeliveredSecret{{Task: "first", Name: "key", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Mode: 0o400, Value: []byte("secret")}}
 	err = runGroup(context.Background(), agent, request)
 	if err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("run error = %v, want existing secret directory refusal", err)

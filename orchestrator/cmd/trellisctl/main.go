@@ -12,7 +12,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/overfold/trellis/orchestrator/internal/client"
+	"github.com/overfold/trellis/orchestrator/client"
 	"github.com/overfold/trellis/orchestrator/internal/localconfig"
 	"github.com/overfold/trellis/orchestrator/internal/version"
 	"github.com/spf13/cobra"
@@ -267,7 +267,7 @@ func loadConfig(cmd *cobra.Command) error {
 	return nil
 }
 
-func administratorServerClient() (*client.ServerClient, error) {
+func administratorServerClient() (*client.Client, error) {
 	tlsCfg, err := buildCLITLSConfig()
 	if err != nil {
 		return nil, err
@@ -276,11 +276,7 @@ func administratorServerClient() (*client.ServerClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	serverClient := client.NewServerClient("", config.ServerAddr, tlsCfg)
-	if err := serverClient.UseAdministratorKey(privateKey); err != nil {
-		return nil, err
-	}
-	return serverClient, nil
+	return client.New(client.Config{Address: config.ServerAddr, AdministratorKey: privateKey, TLSConfig: tlsCfg})
 }
 
 func loadAdministratorPrivateKey() (ed25519.PrivateKey, error) {

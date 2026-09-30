@@ -11,8 +11,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
-	"github.com/overfold/trellis/orchestrator/internal/api"
 	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
@@ -24,7 +24,7 @@ func TestHeartbeatReturnsNoContent(t *testing.T) {
 	usage := 0.25
 	used, available := int64(2<<30), int64(6<<30)
 	metricsAt := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
-	body, err := json.Marshal(api.HeartbeatRequest{
+	body, err := json.Marshal(nodeapi.HeartbeatRequest{
 		NodeID: node.ID, Version: "test",
 		CPUCapacity: 2000, MemoryCapacity: 8 << 30,
 		CPUAllocatable: 1900, MemoryAllocatable: 7 << 30,
@@ -60,7 +60,7 @@ func TestReconcileStopsHeartbeatObservedOrphanAfterRecoveryGrace(t *testing.T) {
 	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
 	s.nodes[node.ID] = node
 	s.leaderSince = s.now().Add(-leaderRecoveryGrace - time.Second)
-	if err := s.Heartbeat(context.Background(), node.ID, []api.AllocationStatus{{
+	if err := s.Heartbeat(context.Background(), node.ID, []nodeapi.AllocationStatus{{
 		ID: "orphan", Generation: 3, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy,
 	}}, "test", nil, nil, nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
@@ -71,7 +71,7 @@ func TestReconcileStopsHeartbeatObservedOrphanAfterRecoveryGrace(t *testing.T) {
 	if len(calls) != 1 || calls[0].method != http.MethodDelete || calls[0].path != "/v1/allocations/orphan" {
 		t.Fatalf("agent calls = %#v, want one orphan stop", calls)
 	}
-	var request api.StopAllocationRequest
+	var request nodeapi.StopAllocationRequest
 	if err := json.Unmarshal(calls[0].body, &request); err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestReconcileStopsTerminalAllocationReportedByReturningNode(t *testing.T) {
 				Diagnostic: lifecycle.Diagnostic{CreatedAt: s.now(), TransitionedAt: s.now()},
 			}
 			s.allocations = []*Allocation{old, replacement}
-			if err := s.Heartbeat(context.Background(), node.ID, []api.AllocationStatus{
+			if err := s.Heartbeat(context.Background(), node.ID, []nodeapi.AllocationStatus{
 				{ID: "old", Generation: 1, Task: "app", Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown},
 				{ID: "replacement", Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy},
 			}, "test", nil, nil, nodeResourceObservation{}); err != nil {
@@ -118,7 +118,7 @@ func TestReconcileStopsTerminalAllocationReportedByReturningNode(t *testing.T) {
 			if len(calls) != 1 || calls[0].method != http.MethodDelete || calls[0].path != "/v1/allocations/old" {
 				t.Fatalf("agent calls = %#v, want one stop of the %s allocation's container", calls, phase)
 			}
-			var request api.StopAllocationRequest
+			var request nodeapi.StopAllocationRequest
 			if err := json.Unmarshal(calls[0].body, &request); err != nil {
 				t.Fatal(err)
 			}
@@ -138,7 +138,7 @@ func TestReconcileProtectsRecoveredObservationDuringLeaderGrace(t *testing.T) {
 	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
 	s.nodes[node.ID] = node
 	s.leaderSince = s.now()
-	if err := s.Heartbeat(context.Background(), node.ID, []api.AllocationStatus{{
+	if err := s.Heartbeat(context.Background(), node.ID, []nodeapi.AllocationStatus{{
 		ID: "recovered", Generation: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy,
 	}}, "test", nil, nil, nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
@@ -165,7 +165,7 @@ func TestReconcileStopsStaleObservedGeneration(t *testing.T) {
 		Node: node, Generation: 2, JobRevision: 2, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy,
 		Diagnostic: lifecycle.Diagnostic{CreatedAt: s.now(), TransitionedAt: s.now()},
 	}}
-	if err := s.Heartbeat(context.Background(), node.ID, []api.AllocationStatus{
+	if err := s.Heartbeat(context.Background(), node.ID, []nodeapi.AllocationStatus{
 		{ID: "alloc", Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy},
 		{ID: "alloc", Generation: 2, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy},
 	}, "test", nil, nil, nodeResourceObservation{}); err != nil {
@@ -177,7 +177,7 @@ func TestReconcileStopsStaleObservedGeneration(t *testing.T) {
 	if len(calls) != 1 || calls[0].method != http.MethodDelete {
 		t.Fatalf("agent calls = %#v, want one stale-generation stop", calls)
 	}
-	var request api.StopAllocationRequest
+	var request nodeapi.StopAllocationRequest
 	if err := json.Unmarshal(calls[0].body, &request); err != nil {
 		t.Fatal(err)
 	}

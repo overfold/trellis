@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/overfold/trellis/orchestrator/internal/api"
-	"github.com/overfold/trellis/orchestrator/internal/client"
+	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/client"
 )
 
 // TestMultiNodeExecStream runs exec streams through a follower's API proxy,
@@ -32,14 +32,17 @@ func TestMultiNodeExecStream(t *testing.T) {
 
 	leader := h.leader()
 	follower := (leader + 1) % len(h.nodes)
-	operator := client.NewNamespaceServerClient(h.token, addr(h.nodes[follower].ports[1]), "default", &tls.Config{InsecureSkipVerify: true})
+	operator, err := client.New(client.Config{Address: addr(h.nodes[follower].ports[1]), Token: h.token, Namespace: "default", TLSConfig: &tls.Config{InsecureSkipVerify: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	var allocationID string
 	h.eventually(30*time.Second, func() bool {
-		allocations, err := operator.ListAllocations(context.Background(), "")
+		allocations, err := operator.ListAllocations(context.Background(), client.AllocationFilter{})
 		if err != nil {
 			return false
 		}
-		for _, allocation := range *allocations {
+		for _, allocation := range allocations {
 			if allocation.Job == "shell" && allocation.Phase == "running" {
 				allocationID = allocation.ID
 				return true
@@ -111,8 +114,8 @@ func TestMultiNodeExecStream(t *testing.T) {
 		if _, err := stream.Write([]byte("before failover")); err != nil {
 			t.Fatal(err)
 		}
-		administrator := client.NewServerClient("", addr(h.nodes[follower].ports[1]), &tls.Config{InsecureSkipVerify: true})
-		if err := administrator.UseAdministratorKey(h.adminKey); err != nil {
+		administrator, err := client.New(client.Config{Address: addr(h.nodes[follower].ports[1]), AdministratorKey: h.adminKey, TLSConfig: &tls.Config{InsecureSkipVerify: true}})
+		if err != nil {
 			t.Fatal(err)
 		}
 		if err := administrator.TransferLeadership(context.Background()); err != nil {

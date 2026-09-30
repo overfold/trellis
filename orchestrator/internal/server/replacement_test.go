@@ -15,9 +15,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
-	"github.com/overfold/trellis/orchestrator/internal/api"
+	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/client"
 	"github.com/overfold/trellis/orchestrator/internal/auth"
-	"github.com/overfold/trellis/orchestrator/internal/client"
 	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 	"github.com/overfold/trellis/orchestrator/internal/state"
@@ -869,7 +869,10 @@ func TestResetReplacementBackoffThroughClientAndRaft(t *testing.T) {
 
 	httpServer := httptest.NewServer(authenticatedHandler(s, auth.AccessNamespace, auth.AccessWrite, "default"))
 	defer httpServer.Close()
-	serverClient := client.NewNamespaceServerClient("token", httpServer.URL, "default", nil)
+	serverClient, err := client.New(client.Config{Address: httpServer.URL, Token: "token", Namespace: "default"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := serverClient.ResetReplacementBackoff(ctx, "web", "missing"); err == nil || !strings.Contains(err.Error(), "404") {
 		t.Fatalf("reset of unknown task group error = %v, want 404", err)
 	}

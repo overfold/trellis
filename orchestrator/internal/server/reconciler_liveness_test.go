@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/overfold/trellis/orchestrator/internal/api"
 	"github.com/overfold/trellis/orchestrator/internal/client"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 )
 
 func TestReconcileActionsDoNotQueueBehindStalledAgentBody(t *testing.T) {
@@ -31,7 +31,7 @@ func TestReconcileActionsDoNotQueueBehindStalledAgentBody(t *testing.T) {
 	fast := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
 		close(fastCalled)
 		response.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(response).Encode(api.OperationResponse{Code: "ok"})
+		_ = json.NewEncoder(response).Encode(nodeapi.OperationResponse{Code: "ok"})
 	}))
 	t.Cleanup(fast.Close)
 
@@ -93,7 +93,7 @@ func TestReconcileActionsPreserveOrderWithinNode(t *testing.T) {
 			close(secondStarted)
 		}
 		response.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(response).Encode(api.OperationResponse{Code: "ok"})
+		_ = json.NewEncoder(response).Encode(nodeapi.OperationResponse{Code: "ok"})
 	}))
 	t.Cleanup(server.Close)
 	host, portValue, err := net.SplitHostPort(server.Listener.Addr().String())
@@ -148,14 +148,14 @@ func TestReconcilePassesDoNotWaitForBusyNode(t *testing.T) {
 		case <-request.Context().Done():
 		}
 		response.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(response).Encode(api.OperationResponse{Code: "ok"})
+		_ = json.NewEncoder(response).Encode(nodeapi.OperationResponse{Code: "ok"})
 	}))
 	t.Cleanup(stalled.Close)
 	fastCalls := make(chan string, 4)
 	fast := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		fastCalls <- request.URL.Path
 		response.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(response).Encode(api.OperationResponse{Code: "ok"})
+		_ = json.NewEncoder(response).Encode(nodeapi.OperationResponse{Code: "ok"})
 	}))
 	t.Cleanup(fast.Close)
 	nodeAt := func(server *httptest.Server) *Node {
@@ -228,7 +228,7 @@ func TestQueueingPassWaitsForBusyNode(t *testing.T) {
 			}
 		}
 		response.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(response).Encode(api.OperationResponse{Code: "ok"})
+		_ = json.NewEncoder(response).Encode(nodeapi.OperationResponse{Code: "ok"})
 	}))
 	t.Cleanup(agent.Close)
 	host, portValue, err := net.SplitHostPort(agent.Listener.Addr().String())
