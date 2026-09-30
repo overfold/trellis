@@ -70,14 +70,19 @@ func (a *AdministratorAuthenticator) Issue(epoch uint64) (string, time.Time, err
 	expiresAt := now.Add(a.ttl)
 	challenge := base64.RawURLEncoding.EncodeToString(raw)
 	a.mu.Lock()
+	oldest := ""
+	var oldestExpiry time.Time
 	for value, existing := range a.challenges {
 		if !existing.expiresAt.After(now) || existing.epoch != epoch {
 			delete(a.challenges, value)
+			continue
+		}
+		if oldest == "" || existing.expiresAt.Before(oldestExpiry) {
+			oldest, oldestExpiry = value, existing.expiresAt
 		}
 	}
 	if len(a.challenges) >= maxAdministratorChallenges {
-		a.mu.Unlock()
-		return "", time.Time{}, fmt.Errorf("too many outstanding administrator challenges")
+		delete(a.challenges, oldest)
 	}
 	a.challenges[challenge] = administratorChallenge{expiresAt: expiresAt, epoch: epoch}
 	a.mu.Unlock()
