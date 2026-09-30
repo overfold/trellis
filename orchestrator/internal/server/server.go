@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
@@ -90,19 +89,37 @@ type Server struct {
 	joiner             ClusterJoiner
 	backupStore        desiredStore
 	clientTLS          *tls.Config
-	// Locking contract:
-	//   - mu protects the in-memory cluster, node, job, allocation, epoch, and
-	//     leadership snapshots. It must never be held during network or storage I/O.
-	//   - allocation.mu protects lifecycle fields on that allocation. When both
-	//     locks are required, mu is always acquired before allocation.mu.
+	// Locking contract. Locks are acquired in this order, and a lock is never
+	// acquired while one later in the order is held:
+	//
+	//	reconcileMu -> mutationMu -> mu -> allocation.mu -> leaf locks
+	//
 	//   - reconcileMu serializes reconciliation planning and its durable
 	//     commit; a pass's agent actions run after it is released.
+	//   - mutationMu serializes durable state mutations: reconciliation
+	//     commits, API mutations, agent action outcomes, and the observation
+	//     applier. Each reads the committed state, commits through Raft, and
+	//     applies the result while holding it, so no two overwrite each other.
+	//   - mu protects the in-memory cluster, node, job, allocation, epoch, and
+	//     leadership snapshots. It must never be held during network or storage
+	//     I/O.
+	//   - allocation.mu protects lifecycle fields on that allocation.
+	//   - Leaf locks guard self-contained state and acquire nothing while
+	//     held: liveness.mu, observations.mu, resumeMu, networkPlanMu, and
+	//     actionMu. actionMu guards actionNodes and actionSlots, which
+	//     serialize agent actions per node and bound them globally across
+	//     passes.
 	//   - refreshMu serializes the network-plan and catalog refresh after a
-	//     pass's actions, so overlapping passes cannot apply an older snapshot.
-	//   - actionMu guards actionNodes and actionSlots, which serialize agent
-	//     actions per node and bound them globally across passes.
-	//   - mutationMu serializes durable state mutations and is never acquired
-	//     while mu or allocation.mu is held.
+	//     pass's actions, so overlapping passes cannot apply an older
+	//     snapshot. It is acquired without reconcileMu or mutationMu, before
+	//     mu.
+	//   - membershipMu serializes Raft membership changes and is never
+	//     acquired while mu is held.
+	//
+	// Heartbeats acquire only the liveness and observations leaf locks, one
+	// at a time, so neither a reconciliation pass nor a slow Raft commit can
+	// delay the liveness stamp; the observation applier takes mutationMu on
+	// their behalf.
 	mu                 sync.RWMutex
 	reconcileMu        sync.Mutex
 	refreshMu          sync.Mutex
@@ -139,14 +156,17 @@ type Server struct {
 	// server so each change is applied to the configuration it was planned
 	// from. It is never acquired while mu is held.
 	membershipMu sync.Mutex
-	// raftProgress is each node's latest reported Raft applied index, a
-	// renewable observation used only to decide promotions. Protected by mu.
-	raftProgress map[uuid.UUID]raftProgress
 	// membershipWake asks the membership loop for an immediate pass.
 	membershipWake chan struct{}
 
 	// exec tracks the exec streams this leader relays.
 	exec execRelays
+
+	// liveness is the leader-local record of node heartbeats and reported
+	// Raft progress. It is never replicated.
+	liveness nodeLiveness
+	// observations hands heartbeat reports to the observation applier.
+	observations observationQueue
 }
 
 // SetSecretStore configures encrypted secret storage.
@@ -457,11 +477,14 @@ func validateNodeCapacity(cpuCapacity int, memoryCapacity int64, cpuAllocatable 
 
 // Node contains the in-memory state of a registered node.
 type Node struct {
-	ID                  uuid.UUID
-	Host                string
-	Port                int
+	ID   uuid.UUID
+	Host string
+	Port int
+	// Status is the node's drain intent or, for a node that is not
+	// draining, its liveness as of the latest reconciliation pass, so one
+	// pass plans against one view. Current liveness is read from
+	// Server.liveness.
 	Status              NodeStatus
-	LastHeartbeat       time.Time
 	CPUCapacity         int
 	MemoryCapacity      int64
 	CPUAllocatable      int
@@ -646,31 +669,6 @@ func nodeSummary(node *Node) *NodeSummary {
 	return &NodeSummary{ID: node.ID, Host: node.Host, Port: node.Port, CPUCapacity: node.CPUCapacity, MemoryCapacity: node.MemoryCapacity, CPUAllocatable: node.CPUAllocatable, MemoryAllocatable: node.MemoryAllocatable, OS: node.OS, Arch: node.Arch, Labels: node.Labels, Volumes: node.Volumes, Capabilities: node.Capabilities, Draining: node.Status == NodeStatusDraining, WireGuardPublicKey: node.WireGuardPublicKey, WireGuardEndpoint: node.WireGuardEndpoint, WireGuardPortBase: node.WireGuardPortBase, WireGuardPortCount: node.WireGuardPortCount, Version: node.Version}
 }
 
-// sameNodeSummary reports whether two nodes have identical durable facts.
-func sameNodeSummary(a, b *Node) (bool, error) {
-	aRaw, err := json.Marshal(nodeSummary(a))
-	if err != nil {
-		return false, err
-	}
-	bRaw, err := json.Marshal(nodeSummary(b))
-	if err != nil {
-		return false, err
-	}
-	return bytes.Equal(aRaw, bRaw), nil
-}
-
-// nodeSilentSince returns when the leader last had evidence that a node was
-// alive: its latest heartbeat in this leadership term, or the start of the
-// term when the node has not heartbeated to this leader yet. Heartbeat times
-// are leader observations and are not replicated, so a new leader measures
-// allocation loss from the start of its own term.
-func nodeSilentSince(node *Node, leaderSince time.Time) time.Time {
-	if node.LastHeartbeat.Before(leaderSince) {
-		return leaderSince
-	}
-	return node.LastHeartbeat
-}
-
 func applyNodeSnapshot(node, snapshot *Node) {
 	*node = *snapshot
 }
@@ -780,10 +778,13 @@ func (s *Server) AcquireLeadership(ctx context.Context) error {
 	// previous leader.
 	s.loadClusterLocked(cluster)
 	s.leaderSince = s.now()
-	// Raft progress is measured against this server's own applied index;
-	// reports from an earlier term must not decide promotions in this one.
-	s.raftProgress = nil
 	s.mu.Unlock()
+	// Liveness and pending heartbeat reports are leader observations of an
+	// earlier term. Raft progress is also measured against this server's own
+	// applied index, so reports from an earlier term must not decide
+	// promotions in this one.
+	s.liveness.startTerm()
+	s.observations.reset()
 
 	// Desired network plans are derived from the leader's in-memory topology.
 	// Never carry them across leadership terms: doing so could wrap stale
@@ -950,19 +951,30 @@ func (s *Server) Run(ctx context.Context) {
 	go s.runReconcileLoop(ctx)
 	go s.runNetworkPlanLoop(ctx)
 	go s.runMembershipLoop(ctx)
+	go s.runObservationApplier(ctx)
 }
 
 // ListNodes returns registered nodes.
-func (s *Server) ListNodes() []Node {
+func (s *Server) ListNodes() []NodeView {
+	heartbeats := s.liveness.heartbeats()
+	now := s.now()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	result := make([]Node, 0, len(s.nodes))
-
+	result := make([]NodeView, 0, len(s.nodes))
 	for _, node := range s.nodes {
-		result = append(result, *node)
+		view := NodeView{Node: *node.Clone(), LastHeartbeat: heartbeats[node.ID]}
+		view.Status = livenessStatus(node.Status, view.LastHeartbeat, now)
+		result = append(result, view)
 	}
-
 	return result
+}
+
+// NodeView is a node as the API reports it: its current liveness status and
+// the latest heartbeat this leader received, which is zero until the node
+// reports in the current leadership term.
+type NodeView struct {
+	Node
+	LastHeartbeat time.Time
 }
 
 // RegisterNode adds or updates a cluster node.
@@ -991,7 +1003,7 @@ func (s *Server) RegisterNode(ctx context.Context, nodeRegistration *NodeRegistr
 		status = existing.Status
 	}
 	if existing != nil {
-		*next = *existing
+		next = existing.Clone()
 	}
 	s.mu.RUnlock()
 	next.Host, next.Port, next.Status = nodeRegistration.Host, nodeRegistration.Port, status
@@ -1001,7 +1013,7 @@ func (s *Server) RegisterNode(ctx context.Context, nodeRegistration *NodeRegistr
 	next.Volumes, next.Capabilities = append([]string(nil), nodeRegistration.Volumes...), append([]spec.NodeCapability(nil), nodeRegistration.Capabilities...)
 	next.WireGuardPublicKey, next.WireGuardEndpoint = nodeRegistration.WireGuardPublicKey, nodeRegistration.WireGuardEndpoint
 	next.WireGuardPortBase, next.WireGuardPortCount = nodeRegistration.WireGuardPortBase, nodeRegistration.WireGuardPortCount
-	next.LastHeartbeat = s.now().UTC()
+	registeredAt := s.now().UTC()
 	if err := s.state.PutNode(ctx, nodeRegistration.ID.String(), nodeSummary(next)); err != nil {
 		return fmt.Errorf("save node remotely: %w", err)
 	}
@@ -1014,248 +1026,28 @@ func (s *Server) RegisterNode(ctx context.Context, nodeRegistration *NodeRegistr
 		s.nodes[nodeRegistration.ID] = node
 	}
 	applyNodeSnapshot(node, next)
-
+	// Registration is evidence of life, and it admits the node's heartbeats.
+	s.liveness.register(nodeRegistration.ID, registeredAt)
 	return nil
 }
 
-// Heartbeat records a node heartbeat and allocation state.
-func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []api.AllocationStatus, version string, volumes []string, capabilities []spec.NodeCapability, resources nodeResourceObservation) error {
-	if len(actual) > maxHeartbeatAllocationStatuses {
-		return fmt.Errorf("heartbeat allocation status count %d exceeds limit %d", len(actual), maxHeartbeatAllocationStatuses)
-	}
-	if err := validateNodeCapacity(resources.CPUCapacity, resources.MemoryCapacity, resources.CPUAllocatable, resources.MemoryAllocatable); err != nil {
+// Heartbeat records a node heartbeat. It stamps the node's liveness as soon
+// as the report is validated and hands the report to the observation
+// applier, which persists allocation and node observations asynchronously.
+// Heartbeats never wait for reconciliation or a Raft commit, so neither can
+// make a heartbeating node look silent. A heartbeat from a node that is not
+// registered fails with ErrNodeNotFound so the agent registers again.
+func (s *Server) Heartbeat(_ context.Context, nodeID uuid.UUID, actual []api.AllocationStatus, version string, volumes []string, capabilities []spec.NodeCapability, resources nodeResourceObservation) error {
+	receivedAt := s.now().UTC()
+	observation, err := newNodeObservation(nodeID, receivedAt, actual, version, volumes, capabilities, resources)
+	if err != nil {
 		return err
 	}
-	if resources.CPUUsage != nil && (*resources.CPUUsage < 0 || *resources.CPUUsage > 1) {
-		return fmt.Errorf("node CPU usage must be between 0 and 1")
+	if !s.liveness.stamp(nodeID, receivedAt) {
+		return fmt.Errorf("%w: %s", ErrNodeNotFound, nodeID)
 	}
-	if (resources.MemoryUsed != nil && *resources.MemoryUsed < 0) || (resources.MemoryAvailable != nil && *resources.MemoryAvailable < 0) {
-		return fmt.Errorf("node memory observations must be non-negative")
-	}
-	type statusInfo struct {
-		ID            string
-		Generation    uint64
-		Phase         lifecycle.Phase
-		Health        lifecycle.Health
-		Reason        api.OperationCode
-		Endpoints     []api.AllocationEndpoint
-		Ports         []api.PortMapping
-		ObservedTasks map[string]bool
-		StartFailure  *api.StartFailure
-	}
-	statuses := make(map[string]statusInfo, len(actual))
-	for _, a := range actual {
-		if !a.Phase.Valid() || !a.Health.Valid() {
-			return fmt.Errorf("invalid allocation state for %s: phase=%q health=%q", a.ID, a.Phase, a.Health)
-		}
-		if a.Reason != "" && (a.Phase != lifecycle.PhaseFailed || a.Reason != api.OperationRestartExhausted) {
-			return fmt.Errorf("invalid failure reason for %s: phase=%q reason=%q", a.ID, a.Phase, a.Reason)
-		}
-		if a.StartFailure != nil && (a.Phase != lifecycle.PhaseStarting || a.StartFailure.Attempt < 0 || len(a.StartFailure.Message) > api.MaxStartFailureMessageBytes || !terminalStartFailureCode(a.StartFailure.Code)) {
-			return fmt.Errorf("invalid start failure for %s: phase=%q attempt=%d message bytes=%d", a.ID, a.Phase, a.StartFailure.Attempt, len(a.StartFailure.Message))
-		}
-		phase, health := a.Phase, a.Health
-		key := fmt.Sprintf("%s/%d", a.ID, a.Generation)
-		info := statuses[key]
-		if len(info.ObservedTasks) == 0 {
-			info.ID, info.Generation, info.Phase, info.Health = a.ID, a.Generation, phase, health
-		} else {
-			// A terminally failed task fails the whole group regardless of
-			// the order in which the agent reports sibling tasks.
-			if phase != lifecycle.PhaseRunning && info.Phase != lifecycle.PhaseFailed {
-				info.Phase = phase
-			}
-			if info.Health == lifecycle.HealthUnhealthy || health == lifecycle.HealthUnhealthy {
-				info.Health = lifecycle.HealthUnhealthy
-			} else if info.Health == lifecycle.HealthUnknown || health == lifecycle.HealthUnknown {
-				info.Health = lifecycle.HealthUnknown
-			} else {
-				info.Health = lifecycle.HealthHealthy
-			}
-		}
-		if info.ObservedTasks == nil {
-			info.ObservedTasks = make(map[string]bool)
-		}
-		info.ObservedTasks[a.Task] = true
-		// Keep the reason of a failed task whatever the report order.
-		if a.Reason != "" && (info.Reason == "" || a.Reason < info.Reason) {
-			info.Reason = a.Reason
-		}
-		// Every task of a failed start carries the same failure; choose one
-		// deterministically whatever the report order.
-		if failure := a.StartFailure; failure != nil && (info.StartFailure == nil || failure.Attempt > info.StartFailure.Attempt ||
-			failure.Attempt == info.StartFailure.Attempt && failure.Message < info.StartFailure.Message) {
-			info.StartFailure = failure
-		}
-		info.Ports = append(info.Ports, a.Ports...)
-		if a.Task != "" || a.Address != "" || len(a.Ports) > 0 {
-			info.Endpoints = append(info.Endpoints, api.AllocationEndpoint{
-				Task: a.Task, Address: a.Address, Ports: append([]api.PortMapping(nil), a.Ports...),
-			})
-		}
-		statuses[key] = info
-	}
-	observed := make([]observedAllocation, 0, len(statuses))
-	for _, info := range statuses {
-		observed = append(observed, observedAllocation{ID: info.ID, Generation: info.Generation, Phase: info.Phase})
-	}
-	sort.Slice(observed, func(i, j int) bool {
-		if observed[i].ID == observed[j].ID {
-			return observed[i].Generation < observed[j].Generation
-		}
-		return observed[i].ID < observed[j].ID
-	})
-	s.mutationMu.Lock()
-	defer s.mutationMu.Unlock()
-	s.mu.RLock()
-	node := s.nodes[nodeID]
-	if node == nil {
-		s.mu.RUnlock()
-		return fmt.Errorf("node not found")
-	}
-	nextNode := *node
-	nextNode.Labels = maps.Clone(node.Labels)
-	nextNode.Volumes = append([]string(nil), volumes...)
-	nextNode.Capabilities = append([]spec.NodeCapability(nil), capabilities...)
-	if nextNode.Status != NodeStatusDraining {
-		nextNode.Status = NodeStatusHealthy
-	}
-	heartbeatAt := s.now().UTC()
-	nextNode.LastHeartbeat = heartbeatAt
-	nextNode.Version = version
-	nextNode.CPUCapacity, nextNode.MemoryCapacity = resources.CPUCapacity, resources.MemoryCapacity
-	nextNode.CPUAllocatable, nextNode.MemoryAllocatable = resources.CPUAllocatable, resources.MemoryAllocatable
-	nextNode.CPUUsage, nextNode.MemoryUsed = resources.CPUUsage, resources.MemoryUsed
-	nextNode.MemoryAvailable, nextNode.MetricsAt = resources.MemoryAvailable, resources.MetricsAt
-	nextNode.observedAllocations = observed
-	nextNode.observedAt = heartbeatAt
-	type allocationUpdate struct {
-		current *Allocation
-		next    *Allocation
-	}
-	if s.allocationsByNode == nil {
-		// Servers assembled directly by focused tests and older embedding code
-		// may not have passed through Reload or reconciliation yet.
-		s.mu.RUnlock()
-		s.mu.Lock()
-		if s.allocationsByNode == nil {
-			s.rebuildAllocationNodeIndexLocked()
-		}
-		s.mu.Unlock()
-		s.mu.RLock()
-	}
-	assigned := s.allocationsByNode[nodeID]
-	updates := make([]allocationUpdate, 0, len(assigned))
-	for _, allocation := range assigned {
-		allocation.mu.Lock()
-		next, err := cloneAllocationForReconcile(allocation)
-		allocation.mu.Unlock()
-		if err != nil {
-			s.mu.RUnlock()
-			return fmt.Errorf("snapshot allocation observation %s: %w", allocation.ID, err)
-		}
-		updates = append(updates, allocationUpdate{current: allocation, next: next})
-	}
-	s.mu.RUnlock()
-
-	changed := make([]allocationUpdate, 0, len(updates))
-	for _, update := range updates {
-		a := update.next
-		info, ok := statuses[fmt.Sprintf("%s/%d", a.ID, a.Generation)]
-		if !ok {
-			if a.Phase != lifecycle.PhaseRunning && a.Phase != lifecycle.PhaseStarting {
-				continue
-			}
-			info = statusInfo{Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown}
-		}
-		for _, task := range a.Tasks {
-			if !info.ObservedTasks[task.Name] {
-				if info.Phase == lifecycle.PhaseRunning {
-					// Retry the incomplete allocation on the next reconciliation pass.
-					info.Phase = lifecycle.PhaseStarting
-				}
-				if info.Health != lifecycle.HealthUnhealthy {
-					info.Health = lifecycle.HealthUnknown
-				}
-				break
-			}
-		}
-		// An unchanged phase keeps its reason, such as a counted start failure.
-		if info.Phase.Valid() && info.Phase != a.Phase && lifecycle.CanObserve(a.Phase, info.Phase) {
-			var reason string
-			if info.Phase == lifecycle.PhaseFailed {
-				reason = string(info.Reason)
-			}
-			if info.Phase == lifecycle.PhaseRunning && a.Phase != lifecycle.PhaseRunning {
-				// The start completed; later starts get a fresh attempt budget.
-				a.Attempt, a.NextRetryAt = 0, nil
-			}
-			_ = a.Transition(info.Phase, heartbeatAt, reason, "")
-		}
-		// Count the agent's failed background start once: the failure names
-		// the attempt it ran for, and counting advances the attempt.
-		if a.Phase == lifecycle.PhaseStarting && info.StartFailure != nil && info.StartFailure.Attempt == a.Attempt {
-			if code := info.StartFailure.Code; code != "" {
-				// Retrying the generation cannot fix it, as for the same
-				// operation code on a start request.
-				if a.Transition(lifecycle.PhaseFailed, heartbeatAt, string(code), info.StartFailure.Message) == nil {
-					a.NextRetryAt = nil
-				}
-			} else {
-				_ = recordStartFailure(a, heartbeatAt, info.StartFailure.Message)
-			}
-		}
-		_ = a.SetHealth(info.Health)
-		sort.Slice(info.Endpoints, func(i, j int) bool { return info.Endpoints[i].Task < info.Endpoints[j].Task })
-		a.Endpoints = append([]api.AllocationEndpoint(nil), info.Endpoints...)
-		a.Ports = append([]api.PortMapping(nil), info.Ports...)
-		update.current.mu.Lock()
-		same, err := sameAllocationState(update.current, update.next)
-		update.current.mu.Unlock()
-		if err != nil {
-			return fmt.Errorf("compare allocation observation %s: %w", a.ID, err)
-		}
-		if !same {
-			changed = append(changed, update)
-		}
-	}
-	persisted := make([]*Allocation, 0, len(changed))
-	for _, update := range changed {
-		persisted = append(persisted, update.next)
-	}
-	// Liveness, heartbeat time, host metrics, and observed allocations are
-	// leader observations. Only durable node facts and allocation changes
-	// reach Raft, so a steady-state heartbeat is not a write.
-	s.mu.RLock()
-	nodeUnchanged, err := sameNodeSummary(node, &nextNode)
-	s.mu.RUnlock()
-	if err != nil {
-		return fmt.Errorf("compare node %s: %w", nodeID, err)
-	}
-	switch {
-	case !nodeUnchanged:
-		err = s.state.PutNodeAndAllocations(ctx, nodeSummary(&nextNode), persisted)
-	case len(persisted) > 0:
-		err = s.state.PutAllocations(ctx, persisted)
-	}
-	if err != nil {
-		return fmt.Errorf("persist heartbeat: %w", err)
-	}
-	s.mu.Lock()
-	applyNodeSnapshot(node, &nextNode)
-	for _, update := range changed {
-		update.current.mu.Lock()
-		applyAllocationSnapshot(update.current, update.next)
-		update.current.mu.Unlock()
-	}
-	s.mu.Unlock()
-
-	if len(changed) > 0 {
-		changedAllocations := make([]*Allocation, len(changed))
-		for i := range changed {
-			changedAllocations[i] = changed[i].current
-		}
-		s.refreshCatalogAllocations(changedAllocations)
+	if s.observations.submit(observation) && s.metrics != nil {
+		s.metrics.ObservationsSuperseded.Inc()
 	}
 	return nil
 }
@@ -1482,9 +1274,12 @@ func (s *Server) Reload(ctx context.Context) error {
 		return fmt.Errorf("load replacement backoffs: %w", err)
 	}
 	nodes := make(map[uuid.UUID]*Node, len(nodeSummaries))
+	nodeIDs := make([]uuid.UUID, 0, len(nodeSummaries))
 	for _, summary := range nodeSummaries {
+		nodeIDs = append(nodeIDs, summary.ID)
 		// A node is unhealthy until it heartbeats to this leader; heartbeat
-		// observations are not replicated.
+		// observations are not replicated. The next reconciliation pass
+		// derives its status from liveness.
 		status := NodeStatusUnhealthy
 		if summary.Draining {
 			status = NodeStatusDraining
@@ -1506,6 +1301,7 @@ func (s *Server) Reload(ctx context.Context) error {
 	s.rebuildAllocationNodeIndexLocked()
 	s.replacementBackoffs = backoffs
 	s.mu.Unlock()
+	s.liveness.track(nodeIDs)
 	return nil
 }
 
@@ -1519,15 +1315,15 @@ func (s *Server) DrainNode(ctx context.Context, id uuid.UUID) error {
 		s.mutationMu.Unlock()
 		return fmt.Errorf("node not found")
 	}
-	next := *node
+	next := node.Clone()
 	next.Status = NodeStatusDraining
 	s.mu.RUnlock()
-	if err := s.state.PutNode(ctx, id.String(), nodeSummary(&next)); err != nil {
+	if err := s.state.PutNode(ctx, id.String(), nodeSummary(next)); err != nil {
 		s.mutationMu.Unlock()
 		return err
 	}
 	s.mu.Lock()
-	applyNodeSnapshot(node, &next)
+	applyNodeSnapshot(node, next)
 	s.mu.Unlock()
 	s.mutationMu.Unlock()
 	s.Reconcile(ctx)
@@ -1560,8 +1356,8 @@ func (s *Server) resumeNodeAllocations(ctx context.Context, id uuid.UUID) error 
 		s.mu.RUnlock()
 		return fmt.Errorf("%w: %s", ErrNodeNotFound, id)
 	}
-	nextNode := *node
-	nextNode.Status = NodeStatusHealthy
+	nextNode := node.Clone()
+	nextNode.Status = livenessStatus(NodeStatusHealthy, s.liveness.lastHeartbeat(id), s.now())
 	var resumes []resumeDelivery
 	var updates []*Allocation
 	for _, allocation := range s.allocations {
@@ -1589,12 +1385,8 @@ func (s *Server) resumeNodeAllocations(ctx context.Context, id uuid.UUID) error 
 		}
 		address := fmt.Sprintf("%s:%d", node.Host, node.Port)
 		request := &api.DrainAllocationRequest{AllocationID: allocation.ID, Generation: allocation.Generation, Epoch: s.controlEpoch, Sequence: allocation.DrainSequence + 1}
-		next, err := cloneAllocationForReconcile(allocation)
+		next := allocation.cloneOnto(nextNode)
 		allocation.mu.Unlock()
-		if err != nil {
-			s.mu.RUnlock()
-			return fmt.Errorf("snapshot resumed allocation %s: %w", allocation.ID, err)
-		}
 		next.Draining = false
 		next.DrainReason = ""
 		next.DrainSequence = request.Sequence
@@ -1602,11 +1394,11 @@ func (s *Server) resumeNodeAllocations(ctx context.Context, id uuid.UUID) error 
 		resumes = append(resumes, resumeDelivery{allocation: allocation, address: address, request: request})
 	}
 	s.mu.RUnlock()
-	if err := s.state.PutNodeAndAllocations(ctx, nodeSummary(&nextNode), updates); err != nil {
+	if err := s.state.PutNodeAndAllocations(ctx, nodeSummary(nextNode), updates); err != nil {
 		return err
 	}
 	s.mu.Lock()
-	applyNodeSnapshot(node, &nextNode)
+	applyNodeSnapshot(node, nextNode)
 	for i, resume := range resumes {
 		resume.allocation.mu.Lock()
 		applyAllocationSnapshot(resume.allocation, updates[i])
@@ -1799,17 +1591,14 @@ func (s *Server) persistJobRestart(ctx context.Context, namespace, name string) 
 	}
 	incarnation := job.Incarnation
 	allocations := append([]*Allocation(nil), s.allocations...)
-	s.mu.RUnlock()
 
+	// Copying an allocation copies its node, which s.mu guards.
 	updates := make([]*Allocation, 0)
 	for _, alloc := range allocations {
 		alloc.mu.Lock()
 		if alloc.Namespace == namespace && alloc.JobName == name && alloc.JobIncarnation == incarnation && alloc.Node != nil && alloc.DrainReason != "restart" && activeAllocationPhase(alloc.Phase) {
-			update, err := cloneAllocationForReconcile(alloc)
+			update := alloc.Clone()
 			alloc.mu.Unlock()
-			if err != nil {
-				return fmt.Errorf("snapshot restart intent: %w", err)
-			}
 			update.Draining = true
 			update.DrainSequence++
 			update.DrainReason = "restart"
@@ -1818,6 +1607,7 @@ func (s *Server) persistJobRestart(ctx context.Context, namespace, name string) 
 		}
 		alloc.mu.Unlock()
 	}
+	s.mu.RUnlock()
 	if err := s.state.PutAllocations(ctx, updates); err != nil {
 		return fmt.Errorf("persist restart intent: %w", err)
 	}

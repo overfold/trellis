@@ -75,13 +75,13 @@ func TestReconcileRollingFailedStopKeepsSurgeSlotReserved(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()
 	nodes := []*Node{
-		{ID: planTestNode(1, NodeStatusHealthy).ID, Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()},
-		{ID: planTestNode(2, NodeStatusHealthy).ID, Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()},
-		{ID: planTestNode(3, NodeStatusHealthy).ID, Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()},
-		{ID: planTestNode(4, NodeStatusHealthy).ID, Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()},
+		{ID: planTestNode(1, NodeStatusHealthy).ID, Host: agent.host, Port: agent.port, Status: NodeStatusHealthy},
+		{ID: planTestNode(2, NodeStatusHealthy).ID, Host: agent.host, Port: agent.port, Status: NodeStatusHealthy},
+		{ID: planTestNode(3, NodeStatusHealthy).ID, Host: agent.host, Port: agent.port, Status: NodeStatusHealthy},
+		{ID: planTestNode(4, NodeStatusHealthy).ID, Host: agent.host, Port: agent.port, Status: NodeStatusHealthy},
 	}
 	for _, node := range nodes {
-		s.nodes[node.ID] = node
+		addTestNode(s, node, s.now())
 	}
 	s.jobs[jobKey("default", "web")] = rollingPlanJob(2, 1)
 	oldA := drainingPlanAllocation("old-a", nodes[0])
@@ -244,7 +244,7 @@ func TestPlanRollingLostNodeEventuallyReleasesSurgeSlot(t *testing.T) {
 		t.Fatalf("replacement created before loss timeout: %#v", plan.NewAllocations)
 	}
 
-	lostNode.LastHeartbeat = planNow.Add(-DefaultAllocationLossTimeout)
+	input.Heartbeats[lostNode.ID] = planNow.Add(-DefaultAllocationLossTimeout)
 	oldLost.NextRetryAt = nil
 	plan, err = planReconciliation(input)
 	if err != nil {

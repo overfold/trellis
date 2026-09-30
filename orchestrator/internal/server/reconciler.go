@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -117,30 +116,6 @@ func updateStrategy(job *Job, groupName string) spec.UpdateStrategy {
 	return spec.UpdateRecreate
 }
 
-func cloneAllocationForReconcile(allocation *Allocation) (*Allocation, error) {
-	raw, err := json.Marshal(allocation)
-	if err != nil {
-		return nil, err
-	}
-	var clone Allocation
-	if err := json.Unmarshal(raw, &clone); err != nil {
-		return nil, err
-	}
-	// The record stores only the node ID. Plan against a copy of the node so
-	// planning sees its current status without sharing the canonical node.
-	if allocation.Node != nil {
-		node := *allocation.Node
-		clone.Node = &node
-	}
-	if allocation.Events != nil {
-		clone.Events = &lifecycle.RingBuffer{}
-		for _, event := range allocation.Events.Entries() {
-			clone.Events.Append(event)
-		}
-	}
-	return &clone, nil
-}
-
 func applyReconciledAllocation(allocation, update *Allocation, node *Node) {
 	allocation.Phase = update.Phase
 	allocation.Diagnostic = update.Diagnostic
@@ -156,12 +131,9 @@ func (s *Server) persistAllocationUpdate(ctx context.Context, allocation *Alloca
 	defer s.mutationMu.Unlock()
 	s.mu.RLock()
 	allocation.mu.Lock()
-	next, err := cloneAllocationForReconcile(allocation)
+	next := allocation.Clone()
 	allocation.mu.Unlock()
 	s.mu.RUnlock()
-	if err != nil {
-		return err
-	}
 	if err := update(next); err != nil {
 		return err
 	}
@@ -174,18 +146,6 @@ func (s *Server) persistAllocationUpdate(ctx context.Context, allocation *Alloca
 	allocation.mu.Unlock()
 	s.mu.RUnlock()
 	return nil
-}
-
-func sameAllocationState(a, b *Allocation) (bool, error) {
-	aRaw, err := json.Marshal(a)
-	if err != nil {
-		return false, err
-	}
-	bRaw, err := json.Marshal(b)
-	if err != nil {
-		return false, err
-	}
-	return bytes.Equal(aRaw, bRaw), nil
 }
 
 // Reconcile converges the in-memory allocation set on the latest job specs and
@@ -274,11 +234,13 @@ func (s *Server) reconcile(ctx context.Context, queue bool) (finished <-chan str
 		s.log.Error("load network subnet registrations", "error", err)
 		return
 	}
+	// The pass plans against one liveness view: each node's status is
+	// derived from the heartbeats received up to now, and later heartbeats
+	// are seen by the next pass.
+	heartbeats := s.liveness.heartbeats()
 	s.mu.Lock()
 	for _, node := range s.nodes {
-		if node.Status == NodeStatusHealthy && now.Sub(node.LastHeartbeat) > 3*heartbeatInterval {
-			node.Status = NodeStatusUnhealthy
-		}
+		node.Status = livenessStatus(node.Status, heartbeats[node.ID], now)
 	}
 	// Subnets are planned under s.mu so every node the scheduler can place on
 	// is addressed. Only namespaces with a port slot and a subnet on every
@@ -301,12 +263,7 @@ func (s *Server) reconcile(ctx context.Context, queue bool) (finished <-chan str
 			networkReady[namespace] = true
 		}
 	}
-	input, originals, err := s.reconcilePlanInputLocked(now, volumeOwners, networkReady)
-	if err != nil {
-		s.mu.Unlock()
-		s.log.Error("snapshot reconciliation state", "error", err)
-		return
-	}
+	input, originals := s.reconcilePlanInputLocked(now, heartbeats, volumeOwners, networkReady)
 	plan, err := planReconciliation(input)
 	if err != nil {
 		s.mu.Unlock()
@@ -442,13 +399,9 @@ func (s *Server) lockReconcileTargetsLocked(plan *reconcilePlan, originals map[*
 		snapshot := plan.Source[allocation]
 		original := originals[snapshot]
 		original.mu.Lock()
-		same, err := sameAllocationState(original, snapshot)
-		if err != nil || !same {
+		if !original.sameRecord(snapshot) {
 			original.mu.Unlock()
 			release()
-			if err != nil {
-				s.log.Error("compare allocation reconciliation snapshot", "allocation", allocation.ID, "error", err)
-			}
 			s.abortReconcile("allocation_changed", "abort reconciliation: allocation changed during planning", "allocation", allocation.ID)
 			return nil, nil, false
 		}
@@ -479,7 +432,7 @@ func (s *Server) abortReconcile(reason, message string, args ...any) {
 // from. It returns the input and a map from each allocation snapshot to the
 // stored allocation it copies. The caller must hold s.mu and keep holding it
 // while planning, because jobs, nodes, and backoffs are borrowed.
-func (s *Server) reconcilePlanInputLocked(now time.Time, volumeOwners map[string]uuid.UUID, networkReady map[string]bool) (*reconcilePlanInput, map[*Allocation]*Allocation, error) {
+func (s *Server) reconcilePlanInputLocked(now time.Time, heartbeats map[uuid.UUID]time.Time, volumeOwners map[string]uuid.UUID, networkReady map[string]bool) (*reconcilePlanInput, map[*Allocation]*Allocation) {
 	limits := s.jobLimits
 	if limits == (spec.Limits{}) {
 		limits = spec.DefaultLimits()
@@ -487,19 +440,24 @@ func (s *Server) reconcilePlanInputLocked(now time.Time, volumeOwners map[string
 	reconciliation := s.reconciliationSettingsLocked()
 	snapshots := make([]*Allocation, len(s.allocations))
 	originals := make(map[*Allocation]*Allocation, len(s.allocations))
+	// Snapshots are detached from the canonical nodes, and the snapshots of
+	// one node's allocations share one copy of it.
+	nodeCopies := make(map[*Node]*Node, len(s.nodes))
 	for i, allocation := range s.allocations {
 		allocation.mu.Lock()
-		snapshot, err := cloneAllocationForReconcile(allocation)
-		allocation.mu.Unlock()
-		if err != nil {
-			return nil, nil, fmt.Errorf("snapshot allocation %s: %w", allocation.ID, err)
+		node := allocation.Node
+		if node != nil && nodeCopies[node] == nil {
+			nodeCopies[node] = node.Clone()
 		}
+		snapshot := allocation.cloneOnto(nodeCopies[node])
+		allocation.mu.Unlock()
 		snapshots[i] = snapshot
 		originals[snapshot] = allocation
 	}
 	return &reconcilePlanInput{
 		Now:                   now,
 		LeaderSince:           s.leaderSince,
+		Heartbeats:            heartbeats,
 		Limits:                limits,
 		Policy:                reconciliation.replacementPolicy(),
 		AllocationLossTimeout: reconciliation.AllocationLossTimeout,
@@ -510,7 +468,7 @@ func (s *Server) reconcilePlanInputLocked(now time.Time, volumeOwners map[string
 		VolumeOwners:          volumeOwners,
 		NetworkReady:          networkReady,
 		DeliveredResumes:      s.deliveredResumes(s.controlEpoch),
-	}, originals, nil
+	}, originals
 }
 
 // dispatchReconcileActions runs a pass's actions. Retained originals must

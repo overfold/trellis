@@ -46,7 +46,7 @@ func observeStarted(t *testing.T, s *Server, nodeID uuid.UUID) {
 		allocation.mu.Unlock()
 	}
 	s.mu.RUnlock()
-	if err := s.Heartbeat(context.Background(), nodeID, statuses, "test", nil, nil, nodeResourceObservation{}); err != nil {
+	if err := heartbeatAndApply(t, s, nodeID, statuses, "test", nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -60,8 +60,8 @@ func TestReconcileDoesNotCreateAllocationsForInvalidJob(t *testing.T) {
 	limits.MaxTasksPerTaskGroup = 1
 	limits.MaxDesiredAllocations = 1
 	s.jobLimits = limits
-	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
-	s.nodes[node.ID] = node
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
+	addTestNode(s, node, s.now())
 	s.jobs[jobKey("default", "oversized")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "oversized", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 2, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}), Revision: 1}
 
 	s.Reconcile(context.Background())
@@ -75,8 +75,8 @@ func TestReconcileContinuesAfterWireGuardPortExhaustion(t *testing.T) {
 	defer agent.server.Close()
 	s.wireGuardPortCount = 1
 	s.networkPool = netip.MustParsePrefix("10.64.0.0/10")
-	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now(), Capabilities: []spec.NodeCapability{spec.CapabilityNamespaceNetworking}, WireGuardPortBase: 51820, WireGuardPortCount: 1}
-	s.nodes[node.ID] = node
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, Capabilities: []spec.NodeCapability{spec.CapabilityNamespaceNetworking}, WireGuardPortBase: 51820, WireGuardPortCount: 1}
+	addTestNode(s, node, s.now())
 	if err := s.state.PutNetworkPortRegistration(context.Background(), &NetworkPortRegistration{Namespace: "old", Slot: 0}); err != nil {
 		t.Fatal(err)
 	}
@@ -103,8 +103,8 @@ func TestReconcileContinuesAfterWireGuardPortExhaustion(t *testing.T) {
 func TestReconcileScaleDownSelectionIsDeterministic(t *testing.T) {
 	for _, ids := range [][]string{{"a", "z"}, {"z", "a"}} {
 		s, agent := newTestServerWithAgent()
-		node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
-		s.nodes[node.ID] = node
+		node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
+		addTestNode(s, node, s.now())
 		tasks := []spec.TaskSpec{{Name: "server", Image: "app"}}
 		s.jobs[jobKey("default", "web")] = &Job{
 			Spec: canonicalTestSpec(&spec.JobSpec{
@@ -152,8 +152,8 @@ func TestReconcileEnforcesNamespaceDesiredAllocationLimit(t *testing.T) {
 	limits := spec.DefaultLimits()
 	limits.MaxDesiredAllocationsPerNamespace = 2
 	s.jobLimits = limits
-	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
-	s.nodes[node.ID] = node
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
+	addTestNode(s, node, s.now())
 	for _, name := range []string{"first", "second", "third"} {
 		s.jobs[jobKey("default", name)] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: name, TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}}), Revision: 1}
 	}
@@ -175,8 +175,8 @@ func TestReconcileEnforcesNamespaceDesiredAllocationLimit(t *testing.T) {
 func TestReconcileRecreateStopsOldAllocations(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()
-	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
-	s.nodes[node.ID] = node
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
+	addTestNode(s, node, s.now())
 	s.leaderSince = s.now().Add(-time.Minute)
 
 	jobSpec := &spec.JobSpec{
@@ -225,8 +225,8 @@ func TestReconcileRecreateStopsOldAllocations(t *testing.T) {
 func TestReconcileRollingDrainsOldAllocations(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()
-	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
-	s.nodes[node.ID] = node
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
+	addTestNode(s, node, s.now())
 	s.leaderSince = s.now().Add(-time.Minute)
 
 	jobSpec := &spec.JobSpec{
@@ -302,8 +302,8 @@ func TestReconcileRollingDrainsOldAllocations(t *testing.T) {
 func TestReconcileRollingStopsDrainingAsNewBecomeHealthy(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()
-	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
-	s.nodes[node.ID] = node
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
+	addTestNode(s, node, s.now())
 	s.leaderSince = s.now().Add(-time.Minute)
 
 	newSpec := &spec.JobSpec{
@@ -356,8 +356,8 @@ func TestReconcileRollingStopsDrainingAsNewBecomeHealthy(t *testing.T) {
 func TestReconcileRollingDoesNotStopDrainingUntilNewHealthy(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()
-	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
-	s.nodes[node.ID] = node
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
+	addTestNode(s, node, s.now())
 	s.leaderSince = s.now().Add(-time.Minute)
 
 	newSpec := &spec.JobSpec{

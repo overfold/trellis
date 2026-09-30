@@ -22,7 +22,7 @@ const (
 	raftCatchUpLag = 256
 	// recentHeartbeat bounds how old a node's last heartbeat, and the Raft
 	// progress it reported, may be for the node to count as reachable.
-	recentHeartbeat = 3 * heartbeatInterval
+	recentHeartbeat = livenessWindow
 	// voterLossTimeout is how long a voter's node must be silent before its
 	// vote is handed to a healthy non-voter. The replaced node stays a member
 	// and can vote again later.
@@ -50,13 +50,7 @@ func (s *Server) RecordRaftProgress(id uuid.UUID, applied uint64) {
 	if s.joiner == nil || applied == 0 {
 		return
 	}
-	progress := raftProgress{applied: applied, leaderApplied: s.joiner.AppliedIndex(), at: s.now()}
-	s.mu.Lock()
-	if s.raftProgress == nil {
-		s.raftProgress = make(map[uuid.UUID]raftProgress)
-	}
-	s.raftProgress[id] = progress
-	s.mu.Unlock()
+	s.liveness.recordRaftProgress(id, raftProgress{applied: applied, leaderApplied: s.joiner.AppliedIndex(), at: s.now()})
 }
 
 // voterTarget returns the desired number of voters for a membership size: the
@@ -198,17 +192,13 @@ func (s *Server) memberStates(members []state.RaftMember) []memberState {
 			result = append(result, current)
 			continue
 		}
-		progress, reported := s.raftProgress[id]
+		progress, reported := s.liveness.raftProgress(id)
+		heartbeat := s.liveness.lastHeartbeat(id)
 		caughtUp := reported && now.Sub(progress.at) <= recentHeartbeat && progress.leaderApplied <= progress.applied+raftCatchUpLag
-		current.Eligible = node.Status == NodeStatusHealthy && caughtUp
-		current.Live = now.Sub(node.LastHeartbeat) <= recentHeartbeat
-		// A new leader may hold old heartbeat times until nodes report to it,
-		// so silence is measured from no earlier than its election.
-		silentSince := node.LastHeartbeat
-		if s.leaderSince.After(silentSince) {
-			silentSince = s.leaderSince
-		}
-		current.Gone = now.Sub(silentSince) >= voterLossTimeout
+		current.Live = heartbeatLive(heartbeat, now)
+		current.Eligible = livenessStatus(node.Status, heartbeat, now) == NodeStatusHealthy && caughtUp
+		// Silence is measured from no earlier than this leader's election.
+		current.Gone = now.Sub(silentSince(heartbeat, s.leaderSince)) >= voterLossTimeout
 		result = append(result, current)
 	}
 	return result
@@ -327,9 +317,7 @@ func (s *Server) RemoveMember(_ context.Context, id string) error {
 		return fmt.Errorf("remove Raft member %s: %w", id, err)
 	}
 	if nodeID, err := uuid.Parse(id); err == nil {
-		s.mu.Lock()
-		delete(s.raftProgress, nodeID)
-		s.mu.Unlock()
+		s.liveness.forgetRaftProgress(nodeID)
 	}
 	s.wakeMembership()
 	return nil

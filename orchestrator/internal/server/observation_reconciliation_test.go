@@ -20,7 +20,7 @@ func TestHeartbeatReturnsNoContent(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()
 	node := &Node{ID: uuid.New(), Status: NodeStatusHealthy}
-	s.nodes[node.ID] = node
+	addTestNode(s, node, time.Time{})
 	usage := 0.25
 	used, available := int64(2<<30), int64(6<<30)
 	metricsAt := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
@@ -43,6 +43,7 @@ func TestHeartbeatReturnsNoContent(t *testing.T) {
 	if recorder.Code != http.StatusNoContent || recorder.Body.Len() != 0 {
 		t.Fatalf("heartbeat response = status %d body %q, want empty 204", recorder.Code, recorder.Body.String())
 	}
+	s.applyObservations(context.Background())
 	if node.CPUCapacity != 2000 || node.CPUAllocatable != 1900 || node.CPUUsage == nil || *node.CPUUsage != usage {
 		t.Fatalf("node CPU observation = %#v", node)
 	}
@@ -57,12 +58,12 @@ func TestHeartbeatReturnsNoContent(t *testing.T) {
 func TestReconcileStopsHeartbeatObservedOrphanAfterRecoveryGrace(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()
-	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
-	s.nodes[node.ID] = node
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
+	addTestNode(s, node, s.now())
 	s.leaderSince = s.now().Add(-leaderRecoveryGrace - time.Second)
-	if err := s.Heartbeat(context.Background(), node.ID, []api.AllocationStatus{{
+	if err := heartbeatAndApply(t, s, node.ID, []api.AllocationStatus{{
 		ID: "orphan", Generation: 3, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy,
-	}}, "test", nil, nil, nodeResourceObservation{}); err != nil {
+	}}, "test", nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -85,8 +86,8 @@ func TestReconcileStopsTerminalAllocationReportedByReturningNode(t *testing.T) {
 		t.Run(string(phase), func(t *testing.T) {
 			s, agent := newTestServerWithAgent()
 			defer agent.server.Close()
-			node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
-			s.nodes[node.ID] = node
+			node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
+			addTestNode(s, node, s.now())
 			s.leaderSince = s.now().Add(-leaderRecoveryGrace - time.Second)
 			tasks := []spec.TaskSpec{{Name: "app", Image: "app"}}
 			s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{
@@ -103,10 +104,10 @@ func TestReconcileStopsTerminalAllocationReportedByReturningNode(t *testing.T) {
 				Diagnostic: lifecycle.Diagnostic{CreatedAt: s.now(), TransitionedAt: s.now()},
 			}
 			s.allocations = []*Allocation{old, replacement}
-			if err := s.Heartbeat(context.Background(), node.ID, []api.AllocationStatus{
+			if err := heartbeatAndApply(t, s, node.ID, []api.AllocationStatus{
 				{ID: "old", Generation: 1, Task: "app", Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown},
 				{ID: "replacement", Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy},
-			}, "test", nil, nil, nodeResourceObservation{}); err != nil {
+			}, "test", nodeResourceObservation{}); err != nil {
 				t.Fatal(err)
 			}
 			if old.Phase != phase {
@@ -135,12 +136,12 @@ func TestReconcileStopsTerminalAllocationReportedByReturningNode(t *testing.T) {
 func TestReconcileProtectsRecoveredObservationDuringLeaderGrace(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()
-	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
-	s.nodes[node.ID] = node
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
+	addTestNode(s, node, s.now())
 	s.leaderSince = s.now()
-	if err := s.Heartbeat(context.Background(), node.ID, []api.AllocationStatus{{
+	if err := heartbeatAndApply(t, s, node.ID, []api.AllocationStatus{{
 		ID: "recovered", Generation: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy,
-	}}, "test", nil, nil, nodeResourceObservation{}); err != nil {
+	}}, "test", nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -153,8 +154,8 @@ func TestReconcileProtectsRecoveredObservationDuringLeaderGrace(t *testing.T) {
 func TestReconcileStopsStaleObservedGeneration(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()
-	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
-	s.nodes[node.ID] = node
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
+	addTestNode(s, node, s.now())
 	s.leaderSince = s.now().Add(-leaderRecoveryGrace - time.Second)
 	tasks := []spec.TaskSpec{{Name: "app", Image: "app"}}
 	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{
@@ -165,10 +166,10 @@ func TestReconcileStopsStaleObservedGeneration(t *testing.T) {
 		Node: node, Generation: 2, JobRevision: 2, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy,
 		Diagnostic: lifecycle.Diagnostic{CreatedAt: s.now(), TransitionedAt: s.now()},
 	}}
-	if err := s.Heartbeat(context.Background(), node.ID, []api.AllocationStatus{
+	if err := heartbeatAndApply(t, s, node.ID, []api.AllocationStatus{
 		{ID: "alloc", Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy},
 		{ID: "alloc", Generation: 2, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy},
-	}, "test", nil, nil, nodeResourceObservation{}); err != nil {
+	}, "test", nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
 	}
 

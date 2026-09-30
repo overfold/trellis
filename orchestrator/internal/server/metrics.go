@@ -11,6 +11,12 @@ import (
 type Metrics struct {
 	ReconcileDuration prometheus.Histogram
 	ReconcileAborted  *prometheus.CounterVec
+	// ObservationsSuperseded counts heartbeat reports replaced by a newer
+	// report of the same node before the applier reached them.
+	ObservationsSuperseded prometheus.Counter
+	// ObservationsDiscarded counts heartbeat reports dropped without being
+	// applied, by reason. The node's next heartbeat reports its state again.
+	ObservationsDiscarded *prometheus.CounterVec
 }
 
 // RegisterMetrics registers all Trellis Prometheus metrics against reg and
@@ -26,8 +32,16 @@ func RegisterMetrics(s *Server, reg prometheus.Registerer) *Metrics {
 			Name: "trellis_reconcile_aborted_total",
 			Help: "Reconcile loop runs abandoned before commit because planned state changed, by reason.",
 		}, []string{"reason"}),
+		ObservationsSuperseded: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "trellis_heartbeat_observations_superseded_total",
+			Help: "Heartbeat reports replaced by a newer report of the same node before they were applied.",
+		}),
+		ObservationsDiscarded: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "trellis_heartbeat_observations_discarded_total",
+			Help: "Heartbeat reports dropped without being applied, by reason.",
+		}, []string{"reason"}),
 	}
-	reg.MustRegister(m.ReconcileDuration, m.ReconcileAborted)
+	reg.MustRegister(m.ReconcileDuration, m.ReconcileAborted, m.ObservationsSuperseded, m.ObservationsDiscarded)
 	reg.MustRegister(&metricsCollector{server: s})
 	s.metrics = m
 	return m
@@ -137,6 +151,7 @@ func (c *metricsCollector) Collect(ch chan<- prometheus.Metric) {
 
 	s := c.server
 	now := time.Now()
+	heartbeats := s.liveness.heartbeats()
 
 	s.mu.RLock()
 
@@ -192,7 +207,8 @@ func (c *metricsCollector) Collect(ch chan<- prometheus.Metric) {
 	nodeCounts := make(map[string]float64)
 	for _, node := range s.nodes {
 		nodeID := node.ID.String()
-		nodeCounts[string(node.Status)]++
+		heartbeat := heartbeats[node.ID]
+		nodeCounts[string(livenessStatus(node.Status, heartbeat, now))]++
 
 		ch <- prometheus.MustNewConstMetric(c.nodeCPUCapacityDesc, prometheus.GaugeValue, float64(node.CPUAllocatable), nodeID)
 		ch <- prometheus.MustNewConstMetric(c.nodeMemCapacityDesc, prometheus.GaugeValue, float64(node.MemoryAllocatable), nodeID)
@@ -202,8 +218,8 @@ func (c *metricsCollector) Collect(ch chan<- prometheus.Metric) {
 			ch <- prometheus.MustNewConstMetric(c.nodeMemAllocatedDesc, prometheus.GaugeValue, float64(u.memBytes), nodeID)
 		}
 
-		if !node.LastHeartbeat.IsZero() {
-			ch <- prometheus.MustNewConstMetric(c.nodeHeartbeatAgeDesc, prometheus.GaugeValue, now.Sub(node.LastHeartbeat).Seconds(), nodeID)
+		if !heartbeat.IsZero() {
+			ch <- prometheus.MustNewConstMetric(c.nodeHeartbeatAgeDesc, prometheus.GaugeValue, now.Sub(heartbeat).Seconds(), nodeID)
 		}
 	}
 
