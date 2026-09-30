@@ -2,7 +2,6 @@
 package spec
 
 import (
-	"encoding/json"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -71,18 +70,6 @@ func TestStarterManifestSurfacesMatchHelloExample(t *testing.T) {
 	}
 	if !reflect.DeepEqual(canonical, docsSpec) {
 		t.Fatalf("Getting Started starter manifest drifted from examples/hello/trellis.yaml")
-	}
-
-	uiRaw, err := os.ReadFile(filepath.Join(root, "ui", "src", "lib", "starter-manifest.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var uiSpec JobSpec
-	if err := json.Unmarshal(uiRaw, &uiSpec); err != nil {
-		t.Fatalf("parse dashboard starter manifest: %v", err)
-	}
-	if !reflect.DeepEqual(canonical, &uiSpec) {
-		t.Fatalf("dashboard starter manifest drifted from examples/hello/trellis.yaml")
 	}
 }
 

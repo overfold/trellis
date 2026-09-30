@@ -143,7 +143,7 @@ To grow the cluster beyond one node, see [Multi-node clusters](multi-node.md). I
 
 ## Mint operator credentials
 
-The installer creates one normal `cluster/write` credential for the installing user, but operators often need narrower credentials for another human, a read-only dashboard, or automation. `trellisctl credentials create` is the explicit administrative workflow for that.
+The installer creates one normal `cluster/write` credential for the installing user, but operators often need narrower credentials for another human, a read-only observer, or automation. `trellisctl credentials create` is the explicit administrative workflow for that.
 
 Credential minting requires the **administrator private key** held by the operator. Supply a PKCS#8 PEM file, or place unpadded base64 PKCS#8 DER in `TRELLIS_ADMINISTRATOR_KEY`; Trellis nodes do not store it:
 
@@ -188,7 +188,7 @@ curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/upgra
 
 It downloads and verifies the new release before touching the running daemon, then swaps the binaries, refreshes the installer-owned systemd unit, starts the daemon, and verifies both the service and control-plane API. If the new daemon does not become healthy, the previous binaries and unit are restored.
 
-After a successful core upgrade, the script refreshes a dashboard that was installed and recorded by the setup lifecycle state. A service that was already stopped remains stopped. On a multi-node cluster the script also evacuates the node first; see [Multi-node clusters](multi-node.md#maintain-a-multi-node-cluster).
+A service that was already stopped remains stopped. On a multi-node cluster the script also evacuates the node first; see [Multi-node clusters](multi-node.md#maintain-a-multi-node-cluster).
 
 ## Agent recovery refused
 

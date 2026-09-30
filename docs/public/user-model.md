@@ -1,6 +1,6 @@
 # Trellis user model
 
-Trellis has several interfaces — YAML manifests, the `trellisctl` CLI, the dashboard, and the HTTP API — but they describe the same model. This page defines the user-facing vocabulary those interfaces should share.
+Trellis has several interfaces — YAML manifests, the `trellisctl` CLI, and the HTTP API — but they describe the same model. This page defines the user-facing vocabulary those interfaces should share.
 
 ## The hierarchy
 
@@ -45,7 +45,7 @@ cluster
 
 ## Manifest versus API representation
 
-**YAML is the canonical human-authored representation of a job.** Documentation, examples, the CLI, and dashboard authoring should call it a **job manifest** and show YAML by default.
+**YAML is the canonical human-authored representation of a job.** Documentation, examples, and the CLI should call it a **job manifest** and show YAML by default.
 
 The HTTP API uses JSON because it is a transport API. JSON field names intentionally mirror the YAML schema, but JSON should be described as the **API representation**, not as a second job format users must learn.
 
@@ -84,9 +84,9 @@ Use the same verbs across interfaces:
 
 Every apply that changes the job specification advances the job's **version** and records the new specification in its history. Changes to execution content (for example an image, command, environment, resources, or networking) also advance the **revision** and roll allocations according to the update policy; label, `count`, and update-policy-only changes keep the revision, so scaling does not restart running allocations but still appears in history. Applying an unchanged manifest creates neither. Trellis keeps the 10 newest versions of each live job for inspection and backup. Deleting a job removes its history, so applying the same name later starts again at version 1 and revision 1.
 
-Applies are fenced by version. `trellisctl jobs apply` and the dashboard send the version their plan was computed against, and Trellis rejects the apply with a conflict when the job was changed, created, or deleted in between, so two concurrent pipelines cannot silently overwrite each other. Plan again to review the current state and apply that. Because a recreated job starts again at version 1, a delete followed by a recreation that reaches the same version before the stale apply arrives is not detected.
+Applies are fenced by version. `trellisctl jobs apply` sends the version their plan was computed against, and Trellis rejects the apply with a conflict when the job was changed, created, or deleted in between, so two concurrent pipelines cannot silently overwrite each other. Plan again to review the current state and apply that. Because a recreated job starts again at version 1, a delete followed by a recreation that reaches the same version before the stale apply arrives is not detected.
 
-Documentation and UI copy use these canonical terms; CLI aliases are convenience spellings rather than a second vocabulary.
+Documentation and CLI output use these canonical terms; CLI aliases are convenience spellings rather than a second vocabulary.
 
 ## What is not part of the basic model
 

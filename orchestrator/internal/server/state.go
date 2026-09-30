@@ -304,24 +304,28 @@ type ReconciliationCommit struct {
 	VolumeRegistrations         []*VolumeRegistration
 	NetworkPortRegistrations    []*NetworkPortRegistration
 	DeleteNetworkPortNamespaces []string
-	Backoffs                    []*ReplacementBackoff
-	DeleteBackoffs              []*ReplacementBackoff
+	// Subnet deletions are applied before registrations, so an index released
+	// in a pass can be reassigned in the same commit.
+	NetworkSubnetRegistrations       []*NetworkSubnetRegistration
+	DeleteNetworkSubnetRegistrations []*NetworkSubnetRegistration
+	Backoffs                         []*ReplacementBackoff
+	DeleteBackoffs                   []*ReplacementBackoff
 }
 
 // CommitReconciliation applies allocation updates, new volume bindings,
-// namespace network port changes, terminal-record pruning, and replacement
+// namespace network port and subnet changes, terminal-record pruning, and replacement
 // backoff changes as one durable state transition. The mutations carry every
 // value, including leader-chosen timestamps, so replaying the Raft entry is
 // deterministic.
 func (s *StateController) CommitReconciliation(ctx context.Context, commit *ReconciliationCommit) error {
-	if commit == nil || len(commit.Allocations)+len(commit.DeleteAllocations)+len(commit.VolumeRegistrations)+len(commit.NetworkPortRegistrations)+len(commit.DeleteNetworkPortNamespaces)+len(commit.Backoffs)+len(commit.DeleteBackoffs) == 0 {
+	if commit == nil || len(commit.Allocations)+len(commit.DeleteAllocations)+len(commit.VolumeRegistrations)+len(commit.NetworkPortRegistrations)+len(commit.DeleteNetworkPortNamespaces)+len(commit.NetworkSubnetRegistrations)+len(commit.DeleteNetworkSubnetRegistrations)+len(commit.Backoffs)+len(commit.DeleteBackoffs) == 0 {
 		return nil
 	}
 	atomic, ok := s.store.(state.AtomicStore)
 	if !ok {
 		return fmt.Errorf("state store does not support atomic reconciliation updates")
 	}
-	mutations := make([]state.Mutation, 0, len(commit.Allocations)+len(commit.DeleteAllocations)+len(commit.VolumeRegistrations)+len(commit.NetworkPortRegistrations)+len(commit.DeleteNetworkPortNamespaces)+len(commit.Backoffs)+len(commit.DeleteBackoffs))
+	mutations := make([]state.Mutation, 0, len(commit.Allocations)+len(commit.DeleteAllocations)+len(commit.VolumeRegistrations)+len(commit.NetworkPortRegistrations)+len(commit.DeleteNetworkPortNamespaces)+len(commit.NetworkSubnetRegistrations)+len(commit.DeleteNetworkSubnetRegistrations)+len(commit.Backoffs)+len(commit.DeleteBackoffs))
 	for _, allocation := range commit.Allocations {
 		raw, err := json.Marshal(allocation)
 		if err != nil {
@@ -357,6 +361,22 @@ func (s *StateController) CommitReconciliation(ctx context.Context, commit *Reco
 			return fmt.Errorf("marshal network port registration for %s: %w", registration.Namespace, err)
 		}
 		mutations = append(mutations, state.Mutation{Key: s.networkPortRegistrationKey(registration.Namespace), Value: raw})
+	}
+	for _, registration := range commit.DeleteNetworkSubnetRegistrations {
+		if !registration.valid() {
+			return fmt.Errorf("invalid network subnet registration")
+		}
+		mutations = append(mutations, state.Mutation{Key: s.networkSubnetRegistrationKey(registration.Namespace, registration.NodeID)})
+	}
+	for _, registration := range commit.NetworkSubnetRegistrations {
+		if !registration.valid() {
+			return fmt.Errorf("invalid network subnet registration")
+		}
+		raw, err := json.Marshal(registration)
+		if err != nil {
+			return fmt.Errorf("marshal network subnet registration for %s on %s: %w", registration.Namespace, registration.NodeID, err)
+		}
+		mutations = append(mutations, state.Mutation{Key: s.networkSubnetRegistrationKey(registration.Namespace, registration.NodeID), Value: raw})
 	}
 	for _, backoff := range commit.Backoffs {
 		raw, err := json.Marshal(backoff)

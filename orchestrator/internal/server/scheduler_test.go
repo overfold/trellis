@@ -216,16 +216,132 @@ func TestScheduleTreatsTaskGroupAsOneResourceUnit(t *testing.T) {
 	}
 }
 
-func TestScheduleSpreadsTaskGroupReplicas(t *testing.T) {
-	a := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000001"), Status: NodeStatusHealthy}
-	b := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000002"), Status: NodeStatusHealthy}
+func spreadTestNode(id string) *Node {
+	return &Node{ID: uuid.MustParse(id), Status: NodeStatusHealthy, CPUAllocatable: 4000, MemoryAllocatable: 8 << 30}
+}
 
-	placements := Schedule(&PlacementIntent{Namespace: "default", JobName: "web", TaskGroupName: "api", Count: 2, Nodes: []*Node{a, b}})
-	if len(placements) != 2 {
-		t.Fatalf("got %d placements, want 2", len(placements))
+func spreadTestTasks() []spec.TaskSpec {
+	return []spec.TaskSpec{{Name: "server", Resources: &spec.ResourcesSpec{CPU: 500, Memory: 512 << 20}}}
+}
+
+func placementCounts(placements []Placement) map[uuid.UUID]int {
+	counts := map[uuid.UUID]int{}
+	for _, placement := range placements {
+		counts[placement.NodeID]++
 	}
-	if placements[0].NodeID == placements[1].NodeID {
-		t.Fatalf("replicas were not spread: %#v", placements)
+	return counts
+}
+
+func TestScheduleSpreadsTaskGroupReplicas(t *testing.T) {
+	a := spreadTestNode("00000000-0000-0000-0000-000000000001")
+	b := spreadTestNode("00000000-0000-0000-0000-000000000002")
+	c := spreadTestNode("00000000-0000-0000-0000-000000000003")
+
+	placements := Schedule(&PlacementIntent{Namespace: "default", JobName: "web", TaskGroupName: "api", Count: 3, Nodes: []*Node{a, b, c}, Tasks: spreadTestTasks()})
+	if len(placements) != 3 {
+		t.Fatalf("got %d placements, want 3", len(placements))
+	}
+	counts := placementCounts(placements)
+	if counts[a.ID] != 1 || counts[b.ID] != 1 || counts[c.ID] != 1 {
+		t.Fatalf("replicas were not spread one per node: %#v", counts)
+	}
+}
+
+func TestScheduleSpreadsAroundExistingReplicas(t *testing.T) {
+	a := spreadTestNode("00000000-0000-0000-0000-000000000001")
+	b := spreadTestNode("00000000-0000-0000-0000-000000000002")
+	c := spreadTestNode("00000000-0000-0000-0000-000000000003")
+	tasks := spreadTestTasks()
+	replica := func(node *Node) *Allocation {
+		return &Allocation{Namespace: "default", JobName: "web", TaskGroupName: "api", Node: node, Tasks: tasks}
+	}
+	existing := []*Allocation{replica(a), replica(a), replica(c)}
+
+	placements := Schedule(&PlacementIntent{
+		Namespace: "default", JobName: "web", TaskGroupName: "api", Count: 3,
+		Nodes: []*Node{a, b, c}, Allocations: existing, DesiredAllocations: existing, Tasks: tasks,
+	})
+	counts := placementCounts(placements)
+	if len(placements) != 3 || counts[a.ID] != 0 || counts[b.ID] != 2 || counts[c.ID] != 1 {
+		t.Fatalf("placements = %#v, want two on the empty node and one on the node with one replica", counts)
+	}
+}
+
+func TestScheduleDoesNotCountDrainingReplicasForSpread(t *testing.T) {
+	a := spreadTestNode("00000000-0000-0000-0000-000000000001")
+	b := spreadTestNode("00000000-0000-0000-0000-000000000002")
+	c := spreadTestNode("00000000-0000-0000-0000-000000000003")
+	tasks := spreadTestTasks()
+	draining := &Allocation{Namespace: "default", JobName: "web", TaskGroupName: "api", Node: a, Tasks: tasks, Draining: true}
+	current := &Allocation{Namespace: "default", JobName: "web", TaskGroupName: "api", Node: b, Tasks: tasks}
+	allocations := []*Allocation{draining, current}
+
+	placements := Schedule(&PlacementIntent{
+		Namespace: "default", JobName: "web", TaskGroupName: "api", Count: 1,
+		Nodes: []*Node{a, b, c}, Allocations: allocations, DesiredAllocations: allocations, Tasks: tasks,
+	})
+	// The draining replica frees its spread slot but still occupies
+	// resources, so best fit prefers its node over the empty one.
+	if len(placements) != 1 || placements[0].NodeID != a.ID {
+		t.Fatalf("placements = %#v, want the node whose only replica is draining", placements)
+	}
+}
+
+func TestScheduleUsesBestFitAmongEquallySpreadNodes(t *testing.T) {
+	a := spreadTestNode("00000000-0000-0000-0000-000000000001")
+	b := spreadTestNode("00000000-0000-0000-0000-000000000002")
+	other := &Allocation{Namespace: "default", JobName: "db", TaskGroupName: "primary", Node: b, Tasks: []spec.TaskSpec{{Name: "db", Resources: &spec.ResourcesSpec{CPU: 2000, Memory: 1 << 30}}}}
+
+	placements := Schedule(&PlacementIntent{
+		Namespace: "default", JobName: "web", TaskGroupName: "api", Count: 1,
+		Nodes: []*Node{a, b}, Allocations: []*Allocation{other}, Tasks: spreadTestTasks(),
+	})
+	if len(placements) != 1 || placements[0].NodeID != b.ID {
+		t.Fatalf("placements = %#v, want the more utilized node", placements)
+	}
+}
+
+func TestScheduleColocatesReplicasUnderCapacityPressure(t *testing.T) {
+	large := spreadTestNode("00000000-0000-0000-0000-000000000001")
+	small := spreadTestNode("00000000-0000-0000-0000-000000000002")
+	small.CPUAllocatable = 500
+	tasks := spreadTestTasks()
+
+	placements := Schedule(&PlacementIntent{Namespace: "default", JobName: "web", TaskGroupName: "api", Count: 4, Nodes: []*Node{large, small}, Tasks: tasks})
+	counts := placementCounts(placements)
+	if len(placements) != 4 || counts[large.ID] != 3 || counts[small.ID] != 1 {
+		t.Fatalf("placements = %#v, want one replica on the small node and the rest co-located on the large node", counts)
+	}
+}
+
+func TestScheduleIsDeterministic(t *testing.T) {
+	a := spreadTestNode("00000000-0000-0000-0000-000000000001")
+	b := spreadTestNode("00000000-0000-0000-0000-000000000002")
+	c := spreadTestNode("00000000-0000-0000-0000-000000000003")
+	tasks := spreadTestTasks()
+	intent := func(nodes ...*Node) *PlacementIntent {
+		return &PlacementIntent{Namespace: "default", JobName: "web", TaskGroupName: "api", Count: 5, Nodes: nodes, Tasks: tasks}
+	}
+
+	nodes := []*Node{c, a, b}
+	want := Schedule(intent(nodes...))
+	wantOrder := []uuid.UUID{a.ID, b.ID, c.ID, a.ID, b.ID}
+	if len(want) != len(wantOrder) {
+		t.Fatalf("got %d placements, want %d", len(want), len(wantOrder))
+	}
+	for i, placement := range want {
+		if placement.NodeID != wantOrder[i] {
+			t.Fatalf("placement %d on %s, want %s (ties break by lowest node ID)", i, placement.NodeID, wantOrder[i])
+		}
+	}
+	shuffled := Schedule(intent(b, c, a))
+	for i := range want {
+		if shuffled[i].NodeID != want[i].NodeID {
+			t.Fatalf("node input order changed placement %d: %s != %s", i, shuffled[i].NodeID, want[i].NodeID)
+		}
+	}
+	if nodes[0] != c || nodes[1] != a || nodes[2] != b {
+		t.Fatal("Schedule reordered the intent's nodes")
 	}
 }
 

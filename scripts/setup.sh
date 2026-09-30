@@ -25,13 +25,11 @@ Options:
   --without-networking          Skip namespace networking
   --with-gvisor                 Install gVisor/runsc (default)
   --without-gvisor              Skip gVisor/runsc
-  --with-dashboard              Deploy the read-only dashboard
-  --dashboard-write             Deploy the dashboard with cluster/write access
   -y, --yes                     Use the resulting plan without the interactive planner
   -h, --help                    Show this help
 
 Interactive setup shows the complete plan first. Press Enter to install it, or
-choose Customize to change cluster mode, address, networking, gVisor, or dashboard.
+choose Customize to change cluster mode, address, networking, or gVisor.
 Flags provide the same choices for automation.
 
 Environment alternatives for joins:
@@ -79,7 +77,7 @@ source "$TMP/common-real.sh"
 require_root_linux_amd64
 
 advertise=""; join=""; enrollment_file=""; ca_file=""; key_file=""; key_id=""
-networking=true; gvisor=true; dashboard=off; assume_yes=false
+networking=true; gvisor=true; assume_yes=false
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --advertise) [ "$#" -ge 2 ] || ui_die "--advertise requires a value"; advertise="$2"; shift 2 ;;
@@ -92,8 +90,6 @@ while [ "$#" -gt 0 ]; do
         --without-networking) networking=false; shift ;;
         --with-gvisor) gvisor=true; shift ;;
         --without-gvisor) gvisor=false; shift ;;
-        --with-dashboard) dashboard=read; shift ;;
-        --dashboard-write) dashboard=write; shift ;;
         -y|--yes) assume_yes=true; shift ;;
         *) ui_die "Unknown option: $1" ;;
     esac
@@ -102,7 +98,6 @@ done
 load_install_state
 if [ "$NETWORKING_ENABLED" = true ]; then networking=true; fi
 if [ "$GVISOR_ENABLED" = true ]; then gvisor=true; fi
-if [ "$DASHBOARD_INSTALLED" = true ]; then dashboard="$DASHBOARD_ACCESS_STATE"; fi
 
 # Complete installs should retain the engine's fast already-installed path.
 if { [ "$STATE_COMPLETE" = true ] && [ -x "$INSTALL_DIR/trellis" ] && [ -f "$CONFIG_FILE" ]; } || \
@@ -125,7 +120,6 @@ fi
 fetch_latest_release
 
 cluster_label() { [ -n "$join" ] && printf 'join %s' "$join" || printf 'create a new cluster'; }
-dashboard_label() { case "$dashboard" in read) printf 'read-only' ;; write) printf 'read/write' ;; *) printf 'not installed' ;; esac; }
 
 show_plan() {
     ui_section "Plan"
@@ -134,7 +128,6 @@ show_plan() {
     ui_detail "Cluster       $(cluster_label)"
     ui_detail "Networking    $([ "$networking" = true ] && printf enabled || printf disabled)"
     ui_detail "gVisor        $([ "$gvisor" = true ] && printf installed || printf 'not installed')"
-    ui_detail "Dashboard     $(dashboard_label)"
 }
 
 customize() {
@@ -145,7 +138,6 @@ customize() {
         ui_detail "2. Node address         $advertise"
         ui_detail "3. Namespace networking $([ "$networking" = true ] && printf enabled || printf disabled)"
         ui_detail "4. Runtime sandbox      $([ "$gvisor" = true ] && printf 'gVisor installed' || printf 'gVisor not installed')"
-        ui_detail "5. Dashboard            $(dashboard_label)"
         printf '\nSelect a setting to change, or press Enter when done: '
         read -r choice </dev/tty
         case "$choice" in
@@ -164,11 +156,7 @@ customize() {
                 ;;
             3) [ "$NETWORKING_ENABLED" != true ] || { ui_warn "Networking was already installed and will be kept."; continue; }; [ "$networking" = true ] && networking=false || networking=true ;;
             4) [ "$GVISOR_ENABLED" != true ] || { ui_warn "gVisor was already installed and will be kept."; continue; }; [ "$gvisor" = true ] && gvisor=false || gvisor=true ;;
-            5)
-                printf 'Disabled [1], read-only [2], or read/write [3]: '; read -r value </dev/tty
-                case "$value" in 1) dashboard=off ;; 2) dashboard=read ;; 3) dashboard=write ;; *) ui_warn "Choose 1, 2, or 3." ;; esac
-                ;;
-            *) ui_warn "Choose 1-5, or press Enter when done." ;;
+            *) ui_warn "Choose 1-4, or press Enter when done." ;;
         esac
     done
 }
@@ -197,7 +185,6 @@ args=(--yes --advertise "$advertise")
 [ -z "$key_id" ] || args+=(--secrets-key-id "$key_id")
 [ "$networking" = true ] && args+=(--with-networking)
 [ "$gvisor" = true ] && args+=(--with-gvisor)
-case "$dashboard" in read) args+=(--with-dashboard) ;; write) args+=(--dashboard-write) ;; esac
 
 if [ "$confirmed" = true ]; then
     TRELLIS_SETUP_PLAN_CONFIRMED=1 bash "$TMP/setup-core.sh" "${args[@]}"
