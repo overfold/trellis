@@ -21,7 +21,6 @@ func main() {
 func run() error {
 	check := flag.Bool("check", false, "fail if the checked-in schemas differ from generated output")
 	outputDir := flag.String("output-dir", filepath.Join("..", "schemas"), "directory containing generated schema files")
-	uiSchema := flag.String("ui-schema", filepath.Join("..", "ui", "public", "trellis-job.schema.json"), "dashboard copy of the first-party authoring schema")
 	flag.Parse()
 
 	apiSchema, yamlSchema, err := specschema.Generate()
@@ -34,7 +33,6 @@ func run() error {
 	}{
 		{path: filepath.Join(*outputDir, "trellis-job-api.schema.json"), data: apiSchema},
 		{path: filepath.Join(*outputDir, "trellis-job.schema.json"), data: yamlSchema},
-		{path: *uiSchema, data: yamlSchema},
 	}
 
 	if *check {

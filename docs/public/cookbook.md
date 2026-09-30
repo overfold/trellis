@@ -361,6 +361,6 @@ Trellis keeps the maintenance container running and restarts it on failure. The 
 
 Use Trellis for the container layer: replica count, placement constraints, network attachment, secret delivery, local-volume requirements, restart policy, health observation, and discovery. Use the stateful system's native mechanisms for replication, leader election or consensus, fencing, membership changes, backups, and recovery.
 
-Do not infer a primary from Trellis scheduling order or health status. Scheduler replica spreading improves failure distribution but is not a consensus algorithm. Trellis discovery tells members where healthy allocations are; it does not decide which member may accept writes.
+Do not infer a primary from Trellis scheduling order or health status. The scheduler places replicas of a task group on different eligible nodes when it can, which improves failure distribution, but it co-locates them when constraints, volumes, host ports, or capacity leave fewer eligible nodes than replicas, and it is not a consensus algorithm. Use constraints or host volumes when members must be on particular nodes. Trellis discovery tells members where healthy allocations are; it does not decide which member may accept writes.
 
 Before treating such a deployment as highly available, test node loss, leader loss, stale members, replacement onto a node with different local data, restore from backup, and network partitions. If the storage layer is network-backed, verify that the application's own failover model safely controls which member mounts or writes the data.

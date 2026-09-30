@@ -24,9 +24,9 @@ cluster
             └── allocations (runtime instances)
 ```
 
-The first-party CLI and dashboard let humans author **YAML job manifests**. They convert that representation into Trellis's canonical JSON job model before contacting the control plane. Applying desired state creates or advances a job revision; Trellis then creates runtime **allocations** to satisfy the desired task-group replicas. Allocation **lifecycle** and **health** are separate concepts.
+The first-party CLI, `trellisctl`, lets humans author **YAML job manifests**. It converts that representation into Trellis's canonical JSON job model before contacting the control plane. Applying desired state creates or advances a job revision; Trellis then creates runtime **allocations** to satisfy the desired task-group replicas. Allocation **lifecycle** and **health** are separate concepts.
 
-See the [Trellis user model](docs/public/user-model.md) for the canonical vocabulary shared by `trellisctl`, the dashboard, docs, examples, and API.
+See the [Trellis user model](docs/public/user-model.md) for the canonical vocabulary shared by `trellisctl`, docs, examples, and API.
 
 ## Design principles
 
@@ -36,7 +36,7 @@ See the [Trellis user model](docs/public/user-model.md) for the canonical vocabu
 
 **Consumers own representation; Trellis owns meaning.** The control-plane API consumes canonical JSON, not YAML, HCL, Python, or another authoring language. A consumer may expose any representation it wants, but it must convert that representation into the canonical JSON model before calling Trellis. Human conveniences such as `64MiB` or `10s` therefore belong to the consumer; canonical validation, defaults, planning, revision semantics, and reconciliation belong to Trellis. This keeps custom frontends and abstractions open-ended without allowing each interface to invent different Trellis semantics.
 
-**Declarative, with open-ended delivery.** Trellis accepts declarative desired state. The first-party human-authored representation is YAML, but it is only one consumer of the canonical JSON model. You can use `trellisctl`, drive it from CI/CD, use the first-party dashboard, build a custom UI or HCL/Python abstraction, or integrate with any tooling that can produce the API model. The workflow that generates and submits desired state is entirely yours.
+**Declarative, with open-ended delivery.** Trellis accepts declarative desired state. The first-party human-authored representation is YAML, but it is only one consumer of the canonical JSON model. You can use `trellisctl`, drive it from CI/CD, build a custom UI or HCL/Python abstraction, or integrate with any tooling that can produce the API model. The workflow that generates and submits desired state is entirely yours.
 
 **Easy to use.** The tension between "flexible building blocks" and "easy to use" is addressed through thorough documentation and first-party examples. Trellis favors clear documentation over opinionated defaults that hide what is actually happening.
 
@@ -52,7 +52,6 @@ See the [Trellis user model](docs/public/user-model.md) for the canonical vocabu
 - Container resource limits, explicit host-port reservations, and persistent local volumes
 - Built-in DNS discovery for healthy job allocations and optional WireGuard namespace networking
 - Namespace-scoped, write-only secrets with encrypted persistence and memory-backed delivery
-- A Next.js operations dashboard for cluster health, job/allocation diagnostics, node draining, secret management, and opt-in job writes
 
 ## Documentation
 

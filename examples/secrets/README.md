@@ -27,7 +27,7 @@ trellisctl --namespace default secrets describe api-token
 trellisctl --namespace default jobs status secrets-demo
 ```
 
-Secret APIs and the dashboard return name, version, update time, and key ID—not plaintext. Avoid `env`, diagnostic dumps, shell tracing, or application logging that could reveal an environment-delivered value. Prefer file delivery when the application supports it.
+Secret APIs and `trellisctl secrets list` return name, version, update time, and key ID—not plaintext. Avoid `env`, diagnostic dumps, shell tracing, or application logging that could reveal an environment-delivered value. Prefer file delivery when the application supports it.
 
 ## Rotate safely
 

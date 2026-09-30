@@ -63,9 +63,6 @@ load_install_state() {
     WIREGUARD_OWNED="$(state_get wireguard_owned false)"
     NETWORKING_ENABLED="$(state_get networking_enabled false)"
     GVISOR_ENABLED="$(state_get gvisor_enabled false)"
-    DASHBOARD_INSTALLED="$(state_get dashboard_installed false)"
-    DASHBOARD_NAMESPACE="$(state_get dashboard_namespace default)"
-    DASHBOARD_ACCESS_STATE="$(state_get dashboard_access read)"
 }
 
 
@@ -97,9 +94,6 @@ gvisor_config_owned=${GVISOR_CONFIG_OWNED}
 wireguard_owned=${WIREGUARD_OWNED}
 networking_enabled=${NETWORKING_ENABLED}
 gvisor_enabled=${GVISOR_ENABLED}
-dashboard_installed=${DASHBOARD_INSTALLED}
-dashboard_namespace=${DASHBOARD_NAMESPACE}
-dashboard_access=${DASHBOARD_ACCESS_STATE}
 EOF
     chmod 600 "$tmp"
     mv "$tmp" "$STATE_FILE"
@@ -345,45 +339,6 @@ install_gvisor() {
     systemctl restart containerd
     GVISOR_ENABLED=true
     write_install_state
-}
-
-dashboard_manifest() {
-    local path="$1" tag="$2" namespace="$3" access="$4" allow_writes=""
-    [ "$access" = "write" ] && allow_writes='          TRELLIS_ALLOW_WRITES: "true"'
-    cat >"$path" <<EOF
-namespace: ${namespace}
-name: trellis-dashboard
-task_groups:
-  - name: web
-    count: 1
-    api_access:
-      scope: cluster
-      access: ${access}
-    tasks:
-      - name: dashboard
-        image: ghcr.io/overfold/trellis-ui:${tag}
-        env:
-          TRELLIS_NAMESPACE: ${namespace}
-${allow_writes}
-        resources:
-          cpu: 250
-          memory: 512MiB
-        networking:
-          mode: host
-          ports:
-            - port: 3000
-        health_check:
-          type: http
-          port: 3000
-          path: /
-EOF
-}
-
-deploy_dashboard() {
-    local temp_root="$1" tag="$2" namespace="$3" access="$4"
-    local manifest="${temp_root}/trellis-dashboard.yaml"
-    dashboard_manifest "$manifest" "$tag" "$namespace" "$access"
-    local_ctl "$temp_root" --namespace "$namespace" jobs apply --file "$manifest" --wait >/dev/null
 }
 
 package_installed() {

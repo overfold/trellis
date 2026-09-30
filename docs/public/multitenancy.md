@@ -12,10 +12,8 @@ There are therefore two different access models:
 
 | Access model | Trust assumption |
 | --- | --- |
-| Direct `trellisctl`, dashboard, or API access that can submit job manifests | The submitter is an operator trusted with every manifest capability their credential allows them to request. Namespace scope limits which Trellis resources they can address; it is not a manifest sandbox. |
+| Direct `trellisctl` or API access that can submit job manifests | The submitter is an operator trusted with every manifest capability their credential allows them to request. Namespace scope limits which Trellis resources they can address; it is not a manifest sandbox. |
 | A product frontend for untrusted tenants | The frontend owns the tenant-facing schema and admission rules, emits only an approved subset of the canonical job model, and keeps its Trellis credentials on the trusted backend. Tenants do not receive a direct write credential. |
-
-The first-party dashboard stays close to `trellisctl` and accepts the same job model. It is an operator interface, not a tenant admission layer.
 
 ## What namespaces isolate
 

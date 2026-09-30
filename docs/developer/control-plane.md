@@ -38,7 +38,11 @@ For each task-group deficit, `Schedule`:
 2. excludes non-healthy nodes and constraint/host-volume mismatches;
 3. sums all colocated task CPU/memory requirements and existing usage;
 4. excludes nodes whose declared capacity would be exceeded;
-5. selects the highest post-placement normalized CPU/memory utilization (best fit), using the number of same-group replicas as an anti-affinity tie-breaker.
+5. selects the node with the fewest replicas of the same task group, counting placed, non-draining allocations of the group and the placements already made in this pass;
+6. among those, selects the highest post-placement normalized CPU/memory utilization (best fit);
+7. breaks any remaining tie by the lowest node UUID.
+
+Spreading is therefore the primary criterion and a soft one: filtering happens first, so constraints, volume locality, host ports, or capacity can leave replicas co-located on the only eligible nodes.
 
 The result may contain fewer placements than requested. Reconciliation will try later as cluster conditions change. No preemption occurs.
 
@@ -68,7 +72,7 @@ Count reconciliation delays replacements for a task group whose allocations keep
 
 The backoff delays only placements that replace counted failed allocations. The record carries `delayed_replacements`, the number of failures counted while the backoff is active. For a group deficit `d` (desired count minus active allocations, after rolling-update limits), the pass withholds `min(d, delayed_replacements)` placements and places the rest immediately, so a deficit from an allocation lost with its node, or from a higher `count`, does not wait. The pass also lowers `delayed_replacements` to the group's missing capacity, so a failure whose capacity was scaled away is not held against a later count increase. The first reconciliation pass at or after `next_replacement_at` places the whole deficit and `delayed_replacements` returns to zero; failures counted in that pass start a new delayed set. The failure count and its reset rules are unchanged. While the backoff is active the pass still trims excess pending allocations. A record whose group is no longer desired has its failures cleared and is deleted together with the group's last allocation record.
 
-An operator can clear a group's backoff with `POST /v1/jobs/{name}/groups/{group}/replacement-backoff/reset` (`trellisctl jobs reset-backoff`, or **Reset backoff** in the dashboard). The leader writes the cleared record (zero failures, no `next_replacement_at`, nothing delayed, the seen list kept so retained failures are never counted again) through the state store, publishes `job.replacement_backoff_reset`, and runs a reconciliation pass that places the withheld replacements.
+An operator can clear a group's backoff with `POST /v1/jobs/{name}/groups/{group}/replacement-backoff/reset` (`trellisctl jobs reset-backoff`). The leader writes the cleared record (zero failures, no `next_replacement_at`, nothing delayed, the seen list kept so retained failures are never counted again) through the state store, publishes `job.replacement_backoff_reset`, and runs a reconciliation pass that places the withheld replacements.
 
 These are server defaults (`DefaultReplacementPolicy`), not manifest fields.
 

@@ -32,11 +32,8 @@ go.work.sum
 # Vagrant
 .vagrant/
 
-# Node / Next.js
-node_modules/
-.next/
-out/
-.env.local
+# Local tutorial build output
+/tutorial/tutorial
 
 # Amp orb portal metadata
 .amp/portals/
