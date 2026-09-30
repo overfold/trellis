@@ -17,23 +17,22 @@ Usage: setup.sh [options]
 Options:
   --advertise HOST              Address peers and workloads can use to reach this node
   --join HOST:8128              Join an existing cluster
-  --enrollment-token-file FILE  Read the managed-mode enrollment credential from FILE
+  --join-token-file FILE        Read the node join token from FILE
   --ca-cert-file FILE           Pin the existing cluster node CA certificate
   --secrets-key-file FILE       Read the existing cluster secrets key from FILE
   --secrets-key-id ID           Existing cluster key ID, when explicitly configured
-  --with-networking             Install namespace networking (default)
-  --without-networking          Skip namespace networking
   --with-gvisor                 Install gVisor/runsc (default)
   --without-gvisor              Skip gVisor/runsc
   -y, --yes                     Use the resulting plan without the interactive planner
   -h, --help                    Show this help
 
 Interactive setup shows the complete plan first. Press Enter to install it, or
-choose Customize to change cluster mode, address, networking, or gVisor.
+choose Customize to change cluster mode, address, or gVisor. Every node gets
+WireGuard namespace networking.
 Flags provide the same choices for automation.
 
 Environment alternatives for joins:
-  TRELLIS_ENROLLMENT_TOKEN      Existing managed-mode enrollment credential
+  TRELLIS_JOIN_TOKEN            Node join token from 'trellisctl nodes join-token create'
   TRELLIS_SECRETS_KEY           Existing cluster 32-byte/base64 secrets key
   TRELLIS_SECRETS_KEY_ID        Existing cluster key ID, when explicitly configured
 HELP
@@ -76,18 +75,16 @@ resolve_engine
 source "$TMP/common-real.sh"
 require_root_linux_amd64
 
-advertise=""; join=""; enrollment_file=""; ca_file=""; key_file=""; key_id=""
-networking=true; gvisor=true; assume_yes=false
+advertise=""; join=""; join_token_file=""; ca_file=""; key_file=""; key_id=""
+gvisor=true; assume_yes=false
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --advertise) [ "$#" -ge 2 ] || ui_die "--advertise requires a value"; advertise="$2"; shift 2 ;;
         --join) [ "$#" -ge 2 ] || ui_die "--join requires HOST:8128"; join="$2"; shift 2 ;;
-        --enrollment-token-file) [ "$#" -ge 2 ] || ui_die "--enrollment-token-file requires a path"; enrollment_file="$2"; shift 2 ;;
+        --join-token-file) [ "$#" -ge 2 ] || ui_die "--join-token-file requires a path"; join_token_file="$2"; shift 2 ;;
         --ca-cert-file) [ "$#" -ge 2 ] || ui_die "--ca-cert-file requires a path"; ca_file="$2"; shift 2 ;;
         --secrets-key-file) [ "$#" -ge 2 ] || ui_die "--secrets-key-file requires a path"; key_file="$2"; shift 2 ;;
         --secrets-key-id) [ "$#" -ge 2 ] || ui_die "--secrets-key-id requires a value"; key_id="$2"; shift 2 ;;
-        --with-networking) networking=true; shift ;;
-        --without-networking) networking=false; shift ;;
         --with-gvisor) gvisor=true; shift ;;
         --without-gvisor) gvisor=false; shift ;;
         -y|--yes) assume_yes=true; shift ;;
@@ -96,7 +93,6 @@ while [ "$#" -gt 0 ]; do
 done
 
 load_install_state
-if [ "$NETWORKING_ENABLED" = true ]; then networking=true; fi
 if [ "$GVISOR_ENABLED" = true ]; then gvisor=true; fi
 
 # Complete installs should retain the engine's fast already-installed path.
@@ -126,7 +122,6 @@ show_plan() {
     ui_detail "Version       $RELEASE_TAG"
     ui_detail "Node address  $advertise"
     ui_detail "Cluster       $(cluster_label)"
-    ui_detail "Networking    $([ "$networking" = true ] && printf enabled || printf disabled)"
     ui_detail "gVisor        $([ "$gvisor" = true ] && printf installed || printf 'not installed')"
 }
 
@@ -136,8 +131,7 @@ customize() {
         printf '\n'; ui_section "Customize setup"
         ui_detail "1. Cluster              $(cluster_label)"
         ui_detail "2. Node address         $advertise"
-        ui_detail "3. Namespace networking $([ "$networking" = true ] && printf enabled || printf disabled)"
-        ui_detail "4. Runtime sandbox      $([ "$gvisor" = true ] && printf 'gVisor installed' || printf 'gVisor not installed')"
+        ui_detail "3. Runtime sandbox      $([ "$gvisor" = true ] && printf 'gVisor installed' || printf 'gVisor not installed')"
         printf '\nSelect a setting to change, or press Enter when done: '
         read -r choice </dev/tty
         case "$choice" in
@@ -154,9 +148,8 @@ customize() {
                 [ "$existing_config" = false ] || { ui_warn "Node address is fixed while resuming setup."; continue; }
                 printf 'Node address [%s]: ' "$advertise"; read -r value </dev/tty; [ -z "$value" ] || advertise="$value"
                 ;;
-            3) [ "$NETWORKING_ENABLED" != true ] || { ui_warn "Networking was already installed and will be kept."; continue; }; [ "$networking" = true ] && networking=false || networking=true ;;
-            4) [ "$GVISOR_ENABLED" != true ] || { ui_warn "gVisor was already installed and will be kept."; continue; }; [ "$gvisor" = true ] && gvisor=false || gvisor=true ;;
-            *) ui_warn "Choose 1-4, or press Enter when done." ;;
+            3) [ "$GVISOR_ENABLED" != true ] || { ui_warn "gVisor was already installed and will be kept."; continue; }; [ "$gvisor" = true ] && gvisor=false || gvisor=true ;;
+            *) ui_warn "Choose 1-3, or press Enter when done." ;;
         esac
     done
 }
@@ -179,11 +172,10 @@ fi
 
 args=(--yes --advertise "$advertise")
 [ -z "$join" ] || args+=(--join "$join")
-[ -z "$enrollment_file" ] || args+=(--enrollment-token-file "$enrollment_file")
+[ -z "$join_token_file" ] || args+=(--join-token-file "$join_token_file")
 [ -z "$ca_file" ] || args+=(--ca-cert-file "$ca_file")
 [ -z "$key_file" ] || args+=(--secrets-key-file "$key_file")
 [ -z "$key_id" ] || args+=(--secrets-key-id "$key_id")
-[ "$networking" = true ] && args+=(--with-networking)
 [ "$gvisor" = true ] && args+=(--with-gvisor)
 
 if [ "$confirmed" = true ]; then

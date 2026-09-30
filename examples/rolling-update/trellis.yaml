@@ -11,7 +11,6 @@ task_groups:
       - name: tutorial
         image: ghcr.io/overfold/trellis-tutorial:v1
         networking:
-          mode: host
           ports:
             - port: 8080
         resources:

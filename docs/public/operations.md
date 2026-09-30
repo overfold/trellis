@@ -19,14 +19,13 @@ Commands with a coherent structured result expose a local `--output json` flag; 
 
 ## Node configuration
 
-Installer-managed nodes keep their durable daemon configuration at `/etc/trellis/trellis.yaml`. The file is root-readable and contains the managed-enrollment credential and operator-managed settings such as advertise addresses, labels, secret-encryption key path, and WireGuard transport settings. The first node also contains only the Ed25519 administrator public key used to initialize replicated cluster state; the private key remains operator-side and is never retained by a daemon. Volume placement is not configured here; namespace-scoped volume ownership is established by first placement and stored in the control plane.
+Installer-managed nodes keep their durable daemon configuration at `/etc/trellis/trellis.yaml`. The file is root-readable and contains operator-managed settings such as advertise addresses, labels, secret-encryption key path, and WireGuard transport settings. The first node also contains only the Ed25519 administrator public key used to initialize replicated cluster state; the private key remains operator-side and is never retained by a daemon. Volume placement is not configured here; namespace-scoped volume ownership is established by first placement and stored in the control plane.
 
 A minimal installed node resembles:
 
 ```yaml
 cluster: default
 administrator_public_key: MCowBQYDK2VwAyEA...
-enrollment_token: trls_enroll_...
 node_signing_mode: managed
 data_dir: /var/lib/trellis/data
 agent_advertise: node-a:8127
@@ -43,6 +42,8 @@ job_limits:
   max_task_cpu: 1000000
   max_task_memory: 1TiB
 ```
+
+A node joining a managed-mode cluster also sets `join` and `ca_cert`, plus `join_token` until it has enrolled; see [Multi-node clusters](multi-node.md#add-a-node). The join token is used once, at first start, and the installer removes it afterwards.
 
 `job_limits` is operator-only admission policy. Jobs cannot override it. The
 defaults shown above are used when the section is omitted. Every task without a
@@ -157,9 +158,9 @@ the timeout for nodes that are already down.
 
 To grow the cluster beyond one node, see [Multi-node clusters](multi-node.md). It covers cluster sizing, networking between nodes, settings that must match, and both the managed and external-signing join workflows.
 
-## Mint operator credentials
+## Manage operator credentials
 
-The installer creates one normal `cluster/write` credential for the installing user, but operators often need narrower credentials for another human, a read-only observer, or automation. `trellisctl credentials create` is the explicit administrative workflow for that.
+The installer creates one normal `cluster/write` credential for the installing user, but operators often need narrower or shorter-lived credentials for another human, a read-only observer, or automation. `trellisctl credentials create`, `list`, and `revoke` are the explicit administrative workflow for that.
 
 Credential minting requires the **administrator private key** held by the operator. Supply a PKCS#8 PEM file, or place unpadded base64 PKCS#8 DER in `TRELLIS_ADMINISTRATOR_KEY`; Trellis nodes do not store it:
 
@@ -167,12 +168,15 @@ Credential minting requires the **administrator private key** held by the operat
 # Read-only cluster observer
 trellisctl --administrator-key ./trellis-administrator.pem credentials create --scope cluster --access read
 
-# Writer restricted to one namespace
+# Writer restricted to one namespace, expiring after 30 days
 trellisctl --administrator-key ./trellis-administrator.pem credentials create \
   --scope namespace \
   --namespace-scope staging \
-  --access write
+  --access write \
+  --ttl 720h
 ```
+
+Without `--ttl` a credential does not expire. Once it expires, requests using it are rejected as unauthenticated.
 
 The default output is the newly minted bearer token so it can be handed directly to a password manager or context setup. Use `--output json` when automation needs the response object instead:
 
@@ -188,7 +192,16 @@ trellisctl --token "$TOKEN" --namespace staging context save staging --use
 unset TOKEN
 ```
 
-`trellisctl` fetches the signing challenge and signs the request automatically. Enrollment credentials and ordinary `cluster/write` bearer credentials cannot mint credentials, change Raft membership, or perform backup/restore.
+The cluster stores only a hash of each token, so a lost token cannot be recovered, only replaced. To see and withdraw credentials:
+
+```sh
+trellisctl --administrator-key ./trellis-administrator.pem credentials list
+trellisctl --administrator-key ./trellis-administrator.pem credentials revoke 3f9c2a7d41b0e865
+```
+
+`credentials list` shows each operator credential's ID, scope, access, namespace, creation time, and expiry, including expired credentials, but never a token. `credentials revoke ID` rejects the credential on its next use. Workload credentials injected through `api_access` are managed with their allocations and are neither listed nor revocable here.
+
+`trellisctl` fetches the signing challenge and signs the request automatically. Join tokens and ordinary `cluster/write` bearer credentials cannot manage credentials, change Raft membership, or perform backup/restore.
 
 ## Drain and maintenance
 
@@ -304,7 +317,9 @@ For normal workload diagnosis, start and usually finish with `jobs status`. `rea
 
 ## Networking and TLS
 
-Workloads use Trellis's node-local DNS resolver on the reserved internal address `198.18.0.53:53`; it is not intended to be exposed on external interfaces. Node and Raft transports require mutually authenticated TLS. Possession of the CA key is not API or leader authorization: requests still need the durably bound certificate for one immutable node ID, and leader work is executed only by the current Raft leader with control-epoch, generation, revision, and execution-hash fencing where applicable. Followers preserve that certificate identity by redirecting node-authenticated control-plane requests, and Raft streams verify the peer's joined advertised address. Administrator and enrollment bearer credentials are separate from node identity; managed enrollment receives the CA key only after certificate-bound Raft admission.
+Every node runs namespace networking, the default task network, and requires WireGuard tools, iproute2, and iptables; the installer sets them up and the daemon refuses to start without them. Trellis enables IPv4 forwarding and keeps its rules in its own iptables chains, jumped to first from `FORWARD`, `INPUT`, and the nat table's `PREROUTING`, `OUTPUT`, and `POSTROUTING`. Namespace-networked tasks reach beyond their namespace network through the node, masqueraded to its address, so they can reach whatever the node can, including its private network and cloud metadata endpoints; block destinations tasks must not reach with firewalling outside Trellis. Published task ports are forwarded to their task before your host `FORWARD` rules run, so a host firewall does not restrict who can reach them; restrict access to published ports at the network edge instead. See [Networking and ports](job-specification.md#networking-and-ports) and [Multitenancy](multitenancy.md#networking).
+
+Workloads use Trellis's node-local DNS resolver on the reserved internal address `198.18.0.53:53`; it is not intended to be exposed on external interfaces. Node and Raft transports require mutually authenticated TLS. Possession of the CA key is not API or leader authorization: requests still need the durably bound certificate for one immutable node ID, and leader work is executed only by the current Raft leader with control-epoch, generation, revision, and execution-hash fencing where applicable. Followers preserve that certificate identity by redirecting node-authenticated control-plane requests, and Raft streams verify the peer's joined advertised address. Inbound Raft streams additionally require the peer's certificate to be the one bound to a current Raft member's UUID, so a certificate that merely chains to the cluster CA cannot replicate or vote. Removing a node tombstones its UUID, which every node-authenticated path rejects. Administrator credentials and join tokens are separate from node identity; managed enrollment receives the CA key only after certificate-bound Raft admission, and in managed mode every member therefore holds it (see [Multi-node clusters](multi-node.md#managed-signing-default)).
 
 Ports and WireGuard settings needed between nodes are described in [Multi-node clusters](multi-node.md#prepare-the-network-and-configuration).
 

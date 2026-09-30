@@ -47,8 +47,9 @@ const AdminContextKey contextKey = "trellis-admin"
 // NodeContextKey stores the immutable node ID authenticated by mutual TLS.
 const NodeContextKey contextKey = "trellis-node"
 
-// EnrollmentContextKey marks a request authenticated with the enrollment credential.
-const EnrollmentContextKey contextKey = "trellis-enrollment"
+// JoinTokenContextKey stores the join token presented to the node enrollment
+// endpoint. The middleware does not validate it; enrollment consumes it.
+const JoinTokenContextKey contextKey = "trellis-join-token"
 
 type requestAuthorization struct {
 	root      bool
@@ -146,8 +147,13 @@ func (h *Handler) Register(e *echo.Echo) {
 	e.GET("/metrics", h.handleMetrics)
 	v1 := e.Group("/v1")
 	v1.POST("/credentials", h.handleCreateCredential)
+	v1.GET("/credentials", h.handleListCredentials)
+	v1.DELETE("/credentials/:id", h.handleRevokeCredential)
 	v1.GET("/nodes", h.handleListNodes)
 	v1.POST("/nodes/enroll", h.handleEnrollNode)
+	v1.POST("/nodes/join-tokens", h.handleCreateJoinToken)
+	v1.GET("/nodes/join-tokens", h.handleListJoinTokens)
+	v1.DELETE("/nodes/join-tokens/:id", h.handleRevokeJoinToken)
 	v1.POST("/nodes", h.handleRegisterNode)
 	v1.POST("/nodes/:id/heartbeat", h.handleHeartbeat)
 	v1.POST("/nodes/:id/drain", h.handleDrainNode)
@@ -211,12 +217,118 @@ func (h *Handler) handleCreateCredential(c *echo.Context) error {
 	} else if request.Namespace != "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "cluster scope must not include a namespace")
 	}
-	token, err := h.server.CreateCredential(c.Request().Context(), scope, access, request.Namespace)
+	if request.TTLSeconds < 0 || request.TTLSeconds > maxTTLSeconds {
+		return echo.NewHTTPError(http.StatusBadRequest, "ttl_seconds must be between 0 and "+strconv.FormatInt(maxTTLSeconds, 10))
+	}
+	token, credential, err := h.server.CreateCredential(c.Request().Context(), scope, access, request.Namespace, time.Duration(request.TTLSeconds)*time.Second)
+	if errors.Is(err, ErrInvalidCredentialRequest) {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
 	if err != nil {
 		return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error())
 	}
 	c.Response().Header().Set("Cache-Control", "no-store")
-	return c.JSON(http.StatusCreated, api.CredentialCreateResponse{Token: token})
+	return c.JSON(http.StatusCreated, api.CredentialCreateResponse{Token: token, CredentialResponse: credentialResponse(credential)})
+}
+
+// maxTTLSeconds bounds requested lifetimes so their durations cannot overflow.
+const maxTTLSeconds = int64(100 * 365 * 24 * 60 * 60)
+
+func credentialResponse(credential auth.OperatorCredential) api.CredentialResponse {
+	response := api.CredentialResponse{
+		ID:        credential.ID,
+		Scope:     string(credential.Principal.Scope),
+		Access:    string(credential.Principal.Access),
+		Namespace: credential.Principal.Namespace,
+		CreatedAt: credential.Principal.CreatedAt,
+	}
+	if !credential.Principal.ExpiresAt.IsZero() {
+		expiresAt := credential.Principal.ExpiresAt
+		response.ExpiresAt = &expiresAt
+	}
+	return response
+}
+
+func (h *Handler) handleListCredentials(c *echo.Context) error {
+	if err := requireRoot(c, "listing credentials requires the administrator credential"); err != nil {
+		return err
+	}
+	credentials, err := h.server.ListCredentials(c.Request().Context())
+	if err != nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "unable to list credentials")
+	}
+	response := make(api.CredentialListResponse, 0, len(credentials))
+	for _, credential := range credentials {
+		response = append(response, credentialResponse(credential))
+	}
+	c.Response().Header().Set("Cache-Control", "no-store")
+	return c.JSON(http.StatusOK, response)
+}
+
+func (h *Handler) handleRevokeCredential(c *echo.Context) error {
+	if err := requireRoot(c, "revoking credentials requires the administrator credential"); err != nil {
+		return err
+	}
+	err := h.server.RevokeCredential(c.Request().Context(), c.Param("id"))
+	if errors.Is(err, auth.ErrCredentialNotFound) {
+		return echo.NewHTTPError(http.StatusNotFound, "credential not found")
+	}
+	if err != nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "unable to revoke credential")
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
+func (h *Handler) handleCreateJoinToken(c *echo.Context) error {
+	if err := requireRoot(c, "creating join tokens requires the administrator credential"); err != nil {
+		return err
+	}
+	var request api.JoinTokenCreateRequest
+	if err := decodeJSON(c, &request, maxSmallRequestBytes); err != nil {
+		return err
+	}
+	if request.TTLSeconds < 0 || request.TTLSeconds > maxTTLSeconds {
+		return echo.NewHTTPError(http.StatusBadRequest, "ttl_seconds is out of range")
+	}
+	token, record, err := h.server.CreateJoinToken(c.Request().Context(), time.Duration(request.TTLSeconds)*time.Second, request.MaxUses)
+	if errors.Is(err, ErrInvalidJoinTokenRequest) {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+	if err != nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "unable to create join token")
+	}
+	c.Response().Header().Set("Cache-Control", "no-store")
+	return c.JSON(http.StatusCreated, api.JoinTokenCreateResponse{Token: token, JoinTokenResponse: record.API()})
+}
+
+func (h *Handler) handleListJoinTokens(c *echo.Context) error {
+	if err := requireRoot(c, "listing join tokens requires the administrator credential"); err != nil {
+		return err
+	}
+	tokens, err := h.server.ListJoinTokens(c.Request().Context())
+	if err != nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "unable to list join tokens")
+	}
+	response := make(api.JoinTokenListResponse, 0, len(tokens))
+	for _, token := range tokens {
+		response = append(response, token.API())
+	}
+	c.Response().Header().Set("Cache-Control", "no-store")
+	return c.JSON(http.StatusOK, response)
+}
+
+func (h *Handler) handleRevokeJoinToken(c *echo.Context) error {
+	if err := requireRoot(c, "revoking join tokens requires the administrator credential"); err != nil {
+		return err
+	}
+	err := h.server.RevokeJoinToken(c.Request().Context(), c.Param("id"))
+	if errors.Is(err, ErrJoinTokenNotFound) {
+		return echo.NewHTTPError(http.StatusNotFound, "join token not found")
+	}
+	if err != nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "unable to revoke join token")
+	}
+	return c.NoContent(http.StatusNoContent)
 }
 
 func (h *Handler) handleGetClusterSettings(c *echo.Context) error {
@@ -699,6 +811,15 @@ func (h *Handler) handleRaftJoin(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusForbidden, "Raft join identity does not match certificate")
 	}
 	nodeID = certificateNodeID
+	// In managed signing mode every member holds the CA key and could mint a
+	// certificate for a new UUID. Only identities bound by join-token
+	// enrollment (or the bootstrap node) may join; external mode lets the
+	// operator's CA decide and binds on first join.
+	if _, caKey, err := h.server.ClusterCA(); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "load managed signing material")
+	} else if caKey != "" && !h.server.AuthorizeNodeCertificate(c.Request().Context(), nodeID, certificate) {
+		return echo.NewHTTPError(http.StatusForbidden, "Raft join requires an identity enrolled with a join token")
+	}
 	if err := h.server.BindNodeCertificate(c.Request().Context(), nodeID, certificate); err != nil {
 		return echo.NewHTTPError(http.StatusForbidden, err.Error())
 	}
@@ -717,7 +838,11 @@ func (h *Handler) handleRaftJoin(c *echo.Context) error {
 	if err := h.server.RecordNodeServerAddress(c.Request().Context(), nodeID, request.ServerAddress); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
-	if err := h.server.JoinMember(nodeID, request.RaftAddress); err != nil {
+	members, err := h.server.JoinMember(c.Request().Context(), nodeID, request.RaftAddress)
+	if errors.Is(err, ErrNodeRemoved) {
+		return echo.NewHTTPError(http.StatusForbidden, err.Error())
+	}
+	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 	_, caKey, err := h.server.ClusterCA()
@@ -725,18 +850,22 @@ func (h *Handler) handleRaftJoin(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "load managed signing material")
 	}
 	c.Response().Header().Set("Cache-Control", "no-store")
-	return c.JSON(http.StatusOK, api.RaftJoinResponse{CAKey: caKey})
+	return c.JSON(http.StatusOK, api.RaftJoinResponse{CAKey: caKey, Members: members})
 }
 
 func (h *Handler) handleEnrollNode(c *echo.Context) error {
-	if enrolled, _ := c.Request().Context().Value(EnrollmentContextKey).(bool); !enrolled {
-		return echo.NewHTTPError(http.StatusForbidden, "node enrollment requires the enrollment credential")
+	joinToken, _ := c.Request().Context().Value(JoinTokenContextKey).(string)
+	if joinToken == "" {
+		return echo.NewHTTPError(http.StatusUnauthorized, "node enrollment requires a join token")
 	}
 	var request api.NodeEnrollmentRequest
 	if err := decodeJSON(c, &request, maxSmallRequestBytes); err != nil {
 		return err
 	}
-	response, err := h.server.EnrollNode(c.Request().Context(), request.ServerAdvertise, request.AgentAdvertise, request.RaftAdvertise)
+	response, err := h.server.EnrollNode(c.Request().Context(), joinToken, request.ServerAdvertise, request.AgentAdvertise, request.RaftAdvertise)
+	if errors.Is(err, ErrInvalidJoinToken) {
+		return echo.NewHTTPError(http.StatusUnauthorized, err.Error())
+	}
 	if err != nil {
 		return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error())
 	}
@@ -756,6 +885,9 @@ func (h *Handler) handleRaftMemberRemove(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusServiceUnavailable, "cluster membership changes not available")
 	}
 	if err := h.server.RemoveMember(c.Request().Context(), id); err != nil {
+		if errors.Is(err, ErrInvalidNodeID) {
+			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+		}
 		if errors.Is(err, ErrMembershipUnsafe) {
 			return echo.NewHTTPError(http.StatusConflict, err.Error())
 		}

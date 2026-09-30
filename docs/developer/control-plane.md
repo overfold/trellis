@@ -2,7 +2,7 @@
 
 ## Registration and heartbeats
 
-Nodes register UUID, agent address, capacity, OS/architecture, labels, volume inventory, and optional WireGuard identity. Periodic heartbeats (every 10 seconds) prove the node is alive and report allocation generation, task, phase, health, each task's observed namespace-network address when present, ports, capabilities, and version. The control plane retains endpoint observations per task rather than collapsing a multi-task allocation onto whichever task was reported first. A successful heartbeat is acknowledged without returning desired state. The leader keeps each node's latest observed allocation generations and their aggregated phase for reconciliation.
+Nodes register UUID, agent address, capacity, OS/architecture, labels, volume inventory, and WireGuard identity. Periodic heartbeats (every 10 seconds) prove the node is alive and report allocation generation, task, phase, health, each task's observed namespace-network address when present, ports, capabilities, and version. The control plane retains endpoint observations per task rather than collapsing a multi-task allocation onto whichever task was reported first. A successful heartbeat is acknowledged without returning desired state. The leader keeps each node's latest observed allocation generations and their aggregated phase for reconciliation.
 
 A heartbeat carries two different things, handled separately so that neither a reconciliation pass nor a slow Raft commit can make a live node look silent:
 
@@ -53,6 +53,14 @@ Every node runs the same daemon and is a Raft member, but only a bounded set of 
 Removal (`DELETE /v1/raft/members/{id}`) of a voter promotes an eligible non-voter before removing it. The removal is refused before changing anything with `ErrMembershipUnsafe` (`409`) when the reachable remaining voters (the leader, the replacement, and voters whose nodes heartbeated within 30 seconds) are not a majority of the remaining voters, because such a configuration would leave the leader unable to commit, including the removal itself. Raft leadership transfer only selects voters.
 
 Heartbeat progress is a leader-local renewable observation; nothing about eligibility is persisted. Configuration changes are ordinary Raft configuration entries, so every member applies the same membership.
+
+Removal writes a node tombstone (`trellis/<cluster>/node-tombstones/<uuid>`, carrying the leader's removal time as data) before changing the configuration, still under `membershipMu`. Raft join checks the tombstone under the same lock before `AddNonvoter`, so a join cannot interleave with a removal and readmit the node. A removal refused for quorum, or of the current leader, records no tombstone. Tombstones are never deleted: a removed machine rejoins only as a new UUID.
+
+### Raft transport authorization
+
+The Raft listener requires a client certificate that chains to the cluster CA and then, during the TLS handshake, asks `RaftPeerAuthorizer` whether that peer may open a stream. The CA proves only that a certificate was issued for some UUID; in managed mode every member holds the CA key and could mint one. The authorizer reads the receiving node's local replicated state and Raft configuration and admits a peer only when its UUID has no tombstone, its certificate fingerprint matches the UUID's durable binding, and the UUID is in the current configuration. Every member's binding commits before its `AddNonvoter` entry, so a configured member's binding is known wherever its configuration entry is.
+
+A newly admitted node has neither state nor configuration until the leader first replicates to it. It therefore also trusts the member IDs returned by its Raft join response (the configuration at admission), still subject to the tombstone and binding checks once those replicate. Until the join response arrives it rejects every inbound stream, and the leader's replication retries. A member that was offline while every node it knows left the voter set cannot authenticate the new leaders and must be removed and replaced with a fresh identity.
 
 ## Scheduling algorithm
 

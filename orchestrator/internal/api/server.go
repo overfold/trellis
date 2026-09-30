@@ -289,12 +289,17 @@ type RaftJoinRequest struct {
 }
 
 // RaftJoinResponse returns managed signing material only after the node's
-// certificate-bound identity has been admitted as a Raft voter.
+// certificate-bound identity has been admitted as a Raft member. Members lists
+// the Raft member node IDs at admission; a new member accepts inbound Raft
+// streams only from these nodes until it has replicated the cluster's own
+// membership and certificate bindings.
 type RaftJoinResponse struct {
-	CAKey string `json:"ca_key,omitempty"`
+	CAKey   string   `json:"ca_key,omitempty"`
+	Members []string `json:"members"`
 }
 
-// NodeEnrollmentRequest asks a managed cluster to issue one node identity.
+// NodeEnrollmentRequest asks a managed cluster to issue one node identity. The
+// request authenticates with a join token as its bearer credential.
 type NodeEnrollmentRequest struct {
 	ServerAdvertise string `json:"server_advertise"`
 	AgentAdvertise  string `json:"agent_advertise"`
@@ -414,3 +419,32 @@ type ClusterEvent struct {
 	NextReplacementAt *time.Time `json:"next_replacement_at,omitempty"`
 	At                time.Time  `json:"at"`
 }
+
+// JoinTokenCreateRequest asks the administrator to mint a node join token.
+// TTLSeconds defaults to one hour and may not exceed seven days. A positive
+// MaxUses limits how many nodes may enroll with the token; zero or absent
+// allows any number until it expires.
+type JoinTokenCreateRequest struct {
+	TTLSeconds int64 `json:"ttl_seconds,omitempty"`
+	MaxUses    int   `json:"max_uses,omitempty"`
+}
+
+// JoinTokenResponse is the listable metadata of a node join token. It never
+// contains the token itself.
+type JoinTokenResponse struct {
+	ID        string    `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+	MaxUses   int       `json:"max_uses,omitempty"`
+	Uses      int       `json:"uses"`
+}
+
+// JoinTokenCreateResponse returns a newly minted join token exactly once,
+// together with the metadata later listings show for it.
+type JoinTokenCreateResponse struct {
+	Token string `json:"token"`
+	JoinTokenResponse
+}
+
+// JoinTokenListResponse lists unexpired join tokens ordered by creation time.
+type JoinTokenListResponse []JoinTokenResponse

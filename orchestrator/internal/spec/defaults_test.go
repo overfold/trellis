@@ -25,7 +25,7 @@ func TestCanonicalizeMakesEveryDefaultExplicit(t *testing.T) {
 		t.Fatalf("update = %#v, want defaults", group.Update)
 	}
 	if task.Networking == nil || task.Networking.Mode != DefaultTaskNetworkMode {
-		t.Fatalf("networking = %#v, want isolated", task.Networking)
+		t.Fatalf("networking = %#v, want namespace", task.Networking)
 	}
 	check := task.HealthCheck
 	if check.Interval != DefaultHealthCheckInterval || check.Timeout != DefaultHealthCheckTimeout || check.Threshold != DefaultHealthCheckThreshold || check.Path != DefaultHealthCheckPath {

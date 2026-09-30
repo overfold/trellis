@@ -49,8 +49,8 @@ See the [Trellis user model](docs/public/user-model.md) for the canonical vocabu
 - Node registration, heartbeats, draining, and balanced placement
 - Allocation lifecycle management, health checks, restart handling, diagnostics, and filterable runtime queries
 - Rolling and recreate update strategies
-- Container resource limits, explicit host-port reservations, and persistent local volumes
-- Built-in DNS discovery for healthy job allocations and optional WireGuard namespace networking
+- Container resource limits, per-node port publishing and reservation, and persistent local volumes
+- Per-namespace WireGuard networking with built-in DNS discovery, NAT egress, and published ports
 - Namespace-scoped, write-only secrets with encrypted persistence and memory-backed delivery
 
 ## Documentation

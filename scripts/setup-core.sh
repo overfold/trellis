@@ -43,17 +43,16 @@ Usage:
 Options:
   --advertise HOST              Address peers and workloads can use to reach this node
   --join HOST:8128              Join an existing cluster instead of creating one
-  --enrollment-token-file FILE  Read the managed-mode node enrollment token from FILE
+  --join-token-file FILE        Read the node join token from FILE
   --ca-cert-file FILE           Pin the existing cluster node CA certificate
   --secrets-key-file FILE       Read the existing cluster secrets key from FILE
   --secrets-key-id ID           Existing cluster key ID when it was explicitly configured
-  --with-networking             Install WireGuard dependencies for namespace networking
   --with-gvisor                 Install gVisor/runsc
   -y, --yes                     Apply the displayed plan without confirmation
   -h, --help                    Show this help
 
 Environment alternatives for joins:
-  TRELLIS_ENROLLMENT_TOKEN      Existing managed-mode enrollment token
+  TRELLIS_JOIN_TOKEN            Node join token from 'trellisctl nodes join-token create'
   TRELLIS_SECRETS_KEY           Existing cluster 32-byte/base64 secrets key
   TRELLIS_SECRETS_KEY_ID        Existing cluster key ID when explicitly configured
 EOF_USAGE
@@ -61,11 +60,10 @@ EOF_USAGE
 
 advertise_host=""
 join_addr=""
-enrollment_token_file=""
+join_token_file=""
 ca_cert_file=""
 join_secrets_file=""
 join_secrets_key_id="${TRELLIS_SECRETS_KEY_ID:-}"
-with_networking=false
 with_gvisor=false
 assume_yes=false
 administrator_private_key="${TRELLIS_ADMINISTRATOR_KEY:-}"
@@ -74,11 +72,10 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --advertise) [ "$#" -ge 2 ] || ui_die "--advertise requires a value"; advertise_host="$2"; shift 2 ;;
         --join) [ "$#" -ge 2 ] || ui_die "--join requires a host:port"; join_addr="$2"; shift 2 ;;
-        --enrollment-token-file) [ "$#" -ge 2 ] || ui_die "--enrollment-token-file requires a path"; enrollment_token_file="$2"; shift 2 ;;
+        --join-token-file) [ "$#" -ge 2 ] || ui_die "--join-token-file requires a path"; join_token_file="$2"; shift 2 ;;
         --ca-cert-file) [ "$#" -ge 2 ] || ui_die "--ca-cert-file requires a path"; ca_cert_file="$2"; shift 2 ;;
         --secrets-key-file) [ "$#" -ge 2 ] || ui_die "--secrets-key-file requires a path"; join_secrets_file="$2"; shift 2 ;;
         --secrets-key-id) [ "$#" -ge 2 ] || ui_die "--secrets-key-id requires a value"; join_secrets_key_id="$2"; shift 2 ;;
-        --with-networking) with_networking=true; shift ;;
         --with-gvisor) with_gvisor=true; shift ;;
         -y|--yes) assume_yes=true; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -92,7 +89,6 @@ load_install_state
 
 # An interrupted setup keeps the features it already installed. Explicit flags
 # may add capabilities, but rerunning the installer never silently removes them.
-[ "$NETWORKING_ENABLED" != true ] || with_networking=true
 [ "$GVISOR_ENABLED" != true ] || with_gvisor=true
 
 # Recognize complete installs that predate the install-state file without claiming
@@ -135,7 +131,7 @@ fi
 if [ -n "$join_addr" ] && [[ "$join_addr" != *:* ]]; then
     ui_die "--join must be an existing node address such as node-a:8128"
 fi
-if [ -n "$enrollment_token_file" ] && [ ! -r "$enrollment_token_file" ]; then ui_die "Cannot read $enrollment_token_file"; fi
+if [ -n "$join_token_file" ] && [ ! -r "$join_token_file" ]; then ui_die "Cannot read $join_token_file"; fi
 if [ -n "$ca_cert_file" ] && [ ! -r "$ca_cert_file" ]; then ui_die "Cannot read $ca_cert_file"; fi
 if [ -n "$join_secrets_file" ] && [ ! -r "$join_secrets_file" ]; then ui_die "Cannot read $join_secrets_file"; fi
 
@@ -143,6 +139,9 @@ fetch_latest_release
 
 containerd_action="reuse existing installation"
 if ! command -v containerd >/dev/null 2>&1; then containerd_action="install automatically"; fi
+# Every node runs namespace networking, the default task network.
+networking_action="reuse existing installation"
+if ! networking_tools_present; then networking_action="install automatically"; fi
 cluster_action="create a new cluster"
 if [ "$existing_config" = true ]; then
     cluster_action="reuse existing node configuration"
@@ -161,7 +160,7 @@ ui_detail "Version       ${RELEASE_TAG}"
 ui_detail "Node address  ${advertise_host}"
 ui_detail "Cluster       ${cluster_action}"
 ui_detail "containerd    ${containerd_action}"
-ui_detail "Networking    $([ "$with_networking" = true ] && printf 'enabled' || printf 'disabled')"
+ui_detail "WireGuard     ${networking_action}"
 ui_detail "gVisor        $([ "$with_gvisor" = true ] && printf 'enabled' || printf 'disabled')"
 
 if [ "$assume_yes" != true ]; then
@@ -185,6 +184,11 @@ if command -v containerd >/dev/null 2>&1; then
     fi
 else
     install_containerd
+fi
+if networking_tools_present; then
+    ui_step "WireGuard, iproute2, and iptables are ready"
+else
+    install_networking
 fi
 
 WORK_TMP="$(mktemp -d)"
@@ -218,8 +222,9 @@ read_secret() {
 
 if [ ! -f "$CONFIG_FILE" ]; then
     admin_public_key_config=""
+    join_token=""
     if [ -n "$join_addr" ]; then
-        enrollment_token="$(read_secret "Existing cluster enrollment token" "$enrollment_token_file" "${TRELLIS_ENROLLMENT_TOKEN:-}")"
+        join_token="$(read_secret "Node join token" "$join_token_file" "${TRELLIS_JOIN_TOKEN:-}")"
         [ -n "$ca_cert_file" ] || ui_die "--ca-cert-file is required when joining so enrollment uses the pinned cluster CA."
         install -m 0644 "$ca_cert_file" "${CONFIG_DIR}/node-ca.crt"
         secrets_value="$(read_secret "Existing cluster secrets key" "$join_secrets_file" "${TRELLIS_SECRETS_KEY:-}")"
@@ -231,14 +236,12 @@ if [ ! -f "$CONFIG_FILE" ]; then
         administrator_public_key="$(printf '%s\n' "$administrator_key_pem" | openssl pkey -pubout -outform DER | base64 | tr -d '=\n')"
         unset administrator_key_pem
         admin_public_key_config="administrator_public_key: ${administrator_public_key}"
-        enrollment_token="trls_enroll_$(head -c 32 /dev/urandom | base64 | tr -d '=\n')"
         openssl rand -base64 32 >"$SECRETS_KEY_FILE"
     fi
     chmod 600 "$SECRETS_KEY_FILE"
     cat >"$CONFIG_FILE" <<EOF_CONFIG
 cluster: default
 ${admin_public_key_config}
-enrollment_token: ${enrollment_token}
 node_signing_mode: managed
 data_dir: ${DATA_DIR}
 agent_advertise: ${advertise_host}:8127
@@ -248,6 +251,7 @@ secrets_key: ${SECRETS_KEY_FILE}
 EOF_CONFIG
     if [ -n "$join_addr" ]; then
         printf 'join: %s\n' "$join_addr" >>"$CONFIG_FILE"
+        printf 'join_token: %s\n' "$join_token" >>"$CONFIG_FILE"
         printf 'ca_cert: %s\n' "${CONFIG_DIR}/node-ca.crt" >>"$CONFIG_FILE"
         [ -z "$join_secrets_key_id" ] || printf 'secrets_key_id: %s\n' "$join_secrets_key_id" >>"$CONFIG_FILE"
     fi
@@ -269,10 +273,15 @@ if ! wait_for_service "$WORK_TMP"; then
     ui_die "Trellis did not become healthy."
 fi
 ui_step "Trellis service is healthy"
+# A healthy node has enrolled and stores its own identity; it never presents
+# the join token again, so do not keep it on disk.
+if grep -q '^join_token: ' "$CONFIG_FILE"; then
+    sed -i '/^join_token: /d' "$CONFIG_FILE"
+    ui_step "Removed the consumed join token from the node configuration"
+fi
 
-if [ "$with_networking" = true ] && [ "$NETWORKING_ENABLED" != true ]; then install_networking; fi
 if [ "$with_gvisor" = true ] && [ "$GVISOR_ENABLED" != true ]; then install_gvisor; fi
-if [ "$with_networking" = true ] || [ "$with_gvisor" = true ]; then
+if [ "$with_gvisor" = true ]; then
     systemctl restart trellis
     wait_for_service "$WORK_TMP" || ui_die "Trellis did not become healthy after dependency setup."
 fi
@@ -309,7 +318,7 @@ else
         ui_step "Saved local cluster/write context for ${operator_user}"
     fi
 fi
-unset administrator_private_key administrator_public_key admin_public_key_config enrollment_token
+unset administrator_private_key administrator_public_key admin_public_key_config join_token
 
 STATE_COMPLETE=true
 STATE_VERSION="$RELEASE_TAG"

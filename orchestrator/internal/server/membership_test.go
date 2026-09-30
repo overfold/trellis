@@ -110,7 +110,7 @@ func (f *fakeMembership) voters() []string {
 // election, with every listed node healthy, heartbeating, and caught up.
 func membershipTestServer(joiner *fakeMembership, leader uuid.UUID, healthy ...uuid.UUID) *Server {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
-	s := &Server{joiner: joiner, nodeID: leader, now: func() time.Time { return now }, leaderSince: now.Add(-time.Hour), nodes: map[uuid.UUID]*Node{}}
+	s := &Server{joiner: joiner, nodeID: leader, now: func() time.Time { return now }, leaderSince: now.Add(-time.Hour), nodes: map[uuid.UUID]*Node{}, state: NewStateController(memoryStore{}, "test")}
 	for _, id := range healthy {
 		addTestNode(s, &Node{ID: id, Status: NodeStatusHealthy}, now)
 		s.RecordRaftProgress(id, joiner.AppliedIndex())
@@ -194,12 +194,16 @@ func TestJoinMemberAddsNonvoter(t *testing.T) {
 	leader, joining := uuid.New(), uuid.New()
 	joiner := newFakeMembership(fakeMember(leader, true))
 	s := membershipTestServer(joiner, leader)
-	if err := s.JoinMember(joining, "joining:8129"); err != nil {
+	members, err := s.JoinMember(context.Background(), joining, "joining:8129")
+	if err != nil {
 		t.Fatal(err)
 	}
-	members, _ := joiner.Membership()
-	if len(members) != 2 || members[1].ID != joining.String() || members[1].Voter {
-		t.Fatalf("membership = %+v, want the joining node as a non-voter", members)
+	if want := sortedIDs(leader, joining); !slices.Equal(members, want) {
+		t.Fatalf("admitted members = %v, want %v", members, want)
+	}
+	configuration, _ := joiner.Membership()
+	if len(configuration) != 2 || configuration[1].ID != joining.String() || configuration[1].Voter {
+		t.Fatalf("membership = %+v, want the joining node as a non-voter", configuration)
 	}
 }
 

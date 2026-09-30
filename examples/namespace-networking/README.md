@@ -1,9 +1,9 @@
 # Namespace networking and discovery
 
 **Level:** intermediate  
-**Prerequisites:** complete the sidecar stage; enable namespace networking on every node that may run this job; use at least two schedulable nodes if you want to observe real cross-node traffic.
+**Prerequisites:** complete the sidecar stage; use at least two schedulable nodes if you want to observe real cross-node traffic.
 
-This example introduces the private network attached to a Trellis namespace without introducing a proxy, ingress abstraction, or application platform. Both task groups request `networking.mode: namespace` to join the private namespace network.
+This example introduces the private network attached to a Trellis namespace without introducing a proxy, ingress abstraction, or application platform. Both task groups request `networking.mode: namespace` to join the private namespace network. It is also the default when `networking.mode` is omitted; the manifest states it to make the lesson explicit.
 
 The `web` task group runs two tutorial allocations. Once they are healthy, Trellis publishes them through DNS as:
 
@@ -58,7 +58,7 @@ trellisctl jobs status namespace-networking --history
 - `namespace` is the manifest-level networking semantic; WireGuard is a current node implementation detail. `runsc` is installed by default but remains an explicitly selected task runtime.
 - Healthy task-group allocations are discoverable at `group.job.namespace.trellis`.
 - Discovery returns runtime endpoints; it is not leader election, locking, or application consensus.
-- No host port is declared or exposed. Communication stays on the namespace network.
+- No port is published on the node. Communication stays on the namespace network, where tasks reach each other's listening ports directly.
 - The namespace remains the isolation and discovery boundary. Jobs in another namespace do not join this network merely because they know the DNS name.
 
 Remove the example when finished:

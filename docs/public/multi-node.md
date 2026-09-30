@@ -50,7 +50,7 @@ Before joining nodes, make sure they can reach each other:
 
 Node and Raft transports use mutually authenticated TLS. Each node's `agent_advertise`, `server_advertise`, and `raft_advertise` addresses must be routable from the other nodes; wildcard bind addresses are not valid advertised addresses. The installer auto-detects a private address and accepts `--advertise HOST` when peers cannot reach the detected one.
 
-Namespace networking gives each namespace one stable UDP port from the cluster's WireGuard range: `wireguard_port` (default `51820`) plus the cluster's `wireguard_port_count` (default `256`). Allow that range between every node that may run namespace-networked tasks. `wireguard_pool` (default `10.64.0.0/10`) supplies a `/24` for each namespace on each node; the default pool addresses 16384 namespace-node pairs, and when it is full new placements for another namespace wait instead of reusing an address. `wireguard_endpoint` sets the externally reachable host or base `host:port` other nodes use; Trellis applies each namespace's port offset to that base.
+Namespace networking gives each namespace one stable UDP port from the cluster's WireGuard range: `wireguard_port` (default `51820`) plus the cluster's `wireguard_port_count` (default `256`). Allow that range between every node. Because namespace networking is the default task network, every namespace with desired or running namespace-networked tasks holds one of these ports, so `wireguard_port_count` bounds how many such namespaces a cluster can run at once; when every port is held, new placements for another namespace wait until one is released. `wireguard_pool` (default `10.64.0.0/10`) supplies a `/24` for each namespace on each node; the default pool addresses 16384 namespace-node pairs, and when it is full new placements for another namespace wait instead of reusing an address. `wireguard_endpoint` sets the externally reachable host or base `host:port` other nodes use; Trellis applies each namespace's port offset to that base.
 
 **Cluster settings** are replicated with the rest of the cluster state, so any node can become leader without changing them. The first node's `job_limits`, `wireguard_pool`, and `wireguard_port_count` (or the matching flags) initialize them when it creates the cluster; after that, node configuration no longer changes them, on the first node or any other. Reconciliation settings, such as the allocation loss timeout, start at their defaults and have no node configuration. Inspect them with `trellisctl cluster settings`, change job limits with `trellisctl cluster set-job-limits`, and change reconciliation settings with `trellisctl cluster set-reconciliation` ([CLI](cli.md#inspect-and-change-cluster-settings)). The pool and port count are fixed for the life of the cluster. A node started with different values behaves as follows:
 
@@ -66,40 +66,47 @@ Some node settings must still match on every node, because any node may become l
 
 ### Managed signing (default)
 
-Adding a node is explicit rather than another branch in the first-install questionnaire. The joining node needs four pieces of information from an existing member:
+Adding a node is explicit rather than another branch in the first-install questionnaire. The joining node needs four pieces of information:
 
 - an existing control-plane address such as `node-a:8128`;
-- the dedicated node-enrollment credential;
+- a **join token** minted for this purpose by the administrator;
 - a pinned copy of the trusted node CA certificate;
 - the **same secrets-encryption key used by the existing nodes**.
 
 A joining node must not generate its own secrets key; see the matching settings above.
 
-On an existing node, make temporary root-readable copies for secure transfer:
+Mint a join token from an operator context that holds the administrator key. A join token expires after `--ttl` (default `1h`, at most `168h`), and `--max-uses N` limits how many nodes may enroll with it; a token for one machine should be single-use:
 
 ```sh
-sudo awk -F': ' '$1 == "enrollment_token" { print $2; exit }' \
-  /etc/trellis/trellis.yaml | \
-  sudo tee /root/trellis-enrollment-token >/dev/null
-sudo chmod 600 /root/trellis-enrollment-token
+trellisctl --administrator-key ./trellis-administrator.pem \
+  nodes join-token create --ttl 30m --max-uses 1 > trellis-join-token
+```
+
+The token is printed once; the cluster stores only its hash. `trellisctl nodes join-token list` shows unexpired tokens with their use counts, and `trellisctl nodes join-token revoke ID` withdraws one before it expires. Revoking a token does not affect nodes that already enrolled with it. Each enrollment attempt that the leader accepts uses the token once, even if its response is lost before the node stores its identity; if a node then reports that its token is exhausted, mint another.
+
+On an existing node, make temporary root-readable copies of the CA certificate and secrets key for secure transfer:
+
+```sh
 sudo install -m 644 /var/lib/trellis/data/node-ca.crt /root/trellis-node-ca.crt
 sudo install -m 600 /etc/trellis/secrets.key /root/trellis-secrets.key
 ```
 
-Transfer those files to the new machine over a secure channel, then run:
+Transfer those files and the join token to the new machine over a secure channel, then run:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/setup.sh | \
   sudo bash -s -- \
     --join node-a:8128 \
-    --enrollment-token-file /root/trellis-enrollment-token \
+    --join-token-file /root/trellis-join-token \
     --ca-cert-file /root/trellis-node-ca.crt \
     --secrets-key-file /root/trellis-secrets.key
 ```
 
+`TRELLIS_JOIN_TOKEN` may carry the token instead of `--join-token-file`. The installer removes the token from the node configuration once the node has enrolled; the node never presents it again.
+
 Normal installer-created clusters derive the secrets key ID from the shared key, so no additional argument is needed. If the existing cluster explicitly sets `secrets_key_id` in its node configuration, pass that same value with `--secrets-key-id ID` (or `TRELLIS_SECRETS_KEY_ID`) on the joining node.
 
-The installer shows the complete plan before making changes; choose **Customize** to change it interactively. Namespace networking and gVisor/runsc are installed by default on joining nodes, as on the first node; `--without-networking` and `--without-gvisor` are the automation opt-outs. Delete the temporary transferred copies after setup succeeds.
+The installer shows the complete plan before making changes; choose **Customize** to change it interactively. Namespace networking, which every node requires, and gVisor/runsc are installed on joining nodes, as on the first node; `--without-gvisor` is the automation opt-out. Delete the temporary transferred copies after setup succeeds.
 
 After the daemon starts, verify membership from any operator context:
 
@@ -107,13 +114,15 @@ After the daemon starts, verify membership from any operator context:
 trellisctl nodes list
 ```
 
-The enrollment credential is accepted only by the managed enrollment endpoint and is never administrator API authority. Enrollment sends it only over TLS authenticated by the pinned CA. The leader assigns the new UUID rather than accepting a caller-selected identity and initially returns only that node's certificate and private key. The managed CA signing key is delivered only after the node proves that certificate and is admitted under the assigned UUID as a Raft member. This keeps managed signing available after failover without allowing the enrollment credential alone to duplicate an existing node identity. After enrollment, node registration, heartbeats, Raft joins, and node-to-agent traffic use the node's unique certificate-bound UUID instead of a shared bearer token. Administrator requests are checked by the current leader against the replicated public key, so followers do not need or retain the administrator private key. Managed mode deliberately trusts every admitted Trellis node and makes the CA signing key available to every leader-capable member so failover does not disable enrollment. Treat compromise of any admitted node in managed mode as compromise of the cluster.
+A join token is accepted only by the managed enrollment endpoint and is never administrator API authority. Enrollment sends it only over TLS authenticated by the pinned CA, and each enrollment consumes one use in the same replicated transaction that records the new identity, so a use limit holds even when enrollments race. The leader assigns the new UUID rather than accepting a caller-selected identity and initially returns only that node's certificate and private key. The managed CA signing key is delivered only after the node proves that certificate and is admitted under the assigned UUID as a Raft member. After enrollment, node registration, heartbeats, Raft joins, Raft replication, and node-to-agent traffic use the node's unique certificate-bound UUID instead of a shared bearer token. Administrator requests are checked by the current leader against the replicated public key, so followers do not need or retain the administrator private key.
+
+**In managed mode every node holds the cluster CA private key.** Each admitted member receives it so that any node can lead enrollment after failover. Anyone who controls any node can therefore issue certificates, so treat compromise of any admitted node in managed mode as compromise of the cluster. Trellis still limits what a stolen CA key alone achieves: a certificate for a new UUID was never enrolled with a join token, so Raft join and the Raft transport refuse it, a certificate for an existing UUID does not match that UUID's durably bound certificate, and a removed UUID is refused everywhere. When no node should hold the CA private key, use `node_signing_mode: external`.
 
 To grow a single node into a fault-tolerant cluster, repeat this for two more machines.
 
 ### External signing
 
-Set `node_signing_mode: external` when the operator owns the node CA. Every node configuration must provide `ca_cert`, `cert`, and `key`; omit `ca_key` and `enrollment_token`. Trellis verifies the key pair, trust chain, client-auth usage, and immutable node ID at startup, stores the trusted CA certificate and node key pair, and does not require or persist the CA private key.
+Set `node_signing_mode: external` when the operator owns the node CA. This is the mode in which no Trellis node holds the CA private key. Every node configuration must provide `ca_cert`, `cert`, and `key`; omit `ca_key` and `join_token`, since join tokens only authorize managed enrollment. Trellis verifies the key pair, trust chain, client-auth usage, and immutable node ID at startup, stores the trusted CA certificate and node key pair, and does not require or persist the CA private key.
 
 Before first start, choose a UUID, write it to `<data_dir>/node-id` with mode `0600`, and have the external signer issue a certificate containing that UUID as URI SAN `trellis-node:UUID`. The certificate must allow TLS client and server authentication and include `trellis` plus the node's agent, control-plane, and Raft advertised DNS names or IP addresses as SANs. A minimal first-node configuration is:
 
@@ -132,7 +141,7 @@ openssl genpkey -algorithm ED25519 -out trellis-administrator.pem
 openssl pkey -in trellis-administrator.pem -pubout -outform DER | base64 | tr -d '=\n'
 ```
 
-For another pre-issued node, omit `administrator_public_key` and add `join: node-a:8128`; its authenticated node certificate authorizes only that certificate's UUID as the Raft member ID. Its advertised control-plane and Raft hosts must match certificate SANs. Loss of the external signer prevents issuing certificates for new nodes but does not affect operation or leader failover among nodes that already have certificates. A certificate from any other CA, or one whose node ID differs from `<data_dir>/node-id`, is rejected.
+For another pre-issued node, omit `administrator_public_key` and add `join: node-a:8128`; its authenticated node certificate authorizes only that certificate's UUID as the Raft member ID. In external mode the CA itself decides which machines may join, so issue node certificates only for machines that should become members. Its advertised control-plane and Raft hosts must match certificate SANs. Loss of the external signer prevents issuing certificates for new nodes but does not affect operation or leader failover among nodes that already have certificates. A certificate from any other CA, or one whose node ID differs from `<data_dir>/node-id`, is rejected.
 
 ## Try it locally with Vagrant
 
@@ -160,9 +169,9 @@ This lab is not a supported production installation method. Any three compatible
 
 Workload semantics are the same on one node or many, but some constraints only become visible with several nodes. Each is documented with its feature:
 
-- **Fixed host ports** can be used once per node, so replicas reserving the same port need distinct nodes, and rolling updates need a spare node while old and new allocations overlap. See [host networking](job-specification.md#networking-and-ports).
+- **Node ports**, whether published from namespace networking or reserved by host networking, can be used once per node, so replicas using the same node port need distinct nodes, and rolling updates need a spare node while old and new allocations overlap. See [networking and ports](job-specification.md#networking-and-ports).
 - **Named volumes** are bound to the node where they were first placed. Later allocations return to that node, and Trellis does not create a second copy elsewhere if it is lost. See [volumes](job-specification.md#volumes).
-- **Namespace networking** connects tasks across nodes; each participating node needs the WireGuard setup described above. See [namespace networking](learning-path.md#8-namespace-networking-and-discovery).
+- **Namespace networking** connects tasks across nodes; every node runs it and needs the WireGuard UDP range open as described above. See [namespace networking](learning-path.md#8-namespace-networking-and-discovery).
 - **Placement** considers each node's labels, capabilities, capacity, and volume registrations. `trellisctl nodes list` and `nodes status NODE` show what the scheduler sees. See [scheduling](core-concepts.md#scheduling).
 
 ## Maintain a multi-node cluster
@@ -173,7 +182,9 @@ The [upgrade script](operations.md#upgrade-a-node) is safe to run one node at a 
 
 The [uninstall script](operations.md#uninstall-a-node) on a live multi-node cluster drains the node, waits for healthy replacements, transfers leadership away when necessary, and removes the local Raft member before deleting local software.
 
-To remove a node that can no longer be uninstalled cleanly—for example, a machine that has permanently failed—run `trellisctl --administrator-key ./trellis-administrator.pem nodes remove NODE` from any operator context. It removes the node's Raft membership, promoting a healthy non-voter first when the node was a voter. Trellis refuses a removal that would leave the remaining voters without a reachable majority; bring back or remove the unreachable voters first. Remove nodes one at a time.
+To remove a node that can no longer be uninstalled cleanly—for example, a machine that has permanently failed or may be compromised—run `trellisctl --administrator-key ./trellis-administrator.pem nodes remove NODE` from any operator context. It removes the node's Raft membership, promoting a healthy non-voter first when the node was a voter. Trellis refuses a removal that would leave the remaining voters without a reachable majority; bring back or remove the unreachable voters first. It also refuses to remove the current leader; run `nodes transfer-leadership` first. Remove nodes one at a time.
+
+Removal is permanent and revokes the node's identity. Before changing Raft membership, Trellis records a replicated tombstone for the node's UUID; from then on its certificate is rejected by the control-plane API, the agent API, the Raft transport, and Raft join, even if the machine still has its data directory and restarts. A removed machine returns to the cluster only as a new node: wipe its data directory (the uninstall script archives it) and add it again with a new join token. In managed mode a removed node may still hold a copy of the CA private key; removal stops it from acting as its old identity or joining as a member, but if the machine is untrusted, treat the key as exposed.
 
 To move control-plane leadership deliberately before maintenance, the advanced command `trellisctl --administrator-key ./trellis-administrator.pem nodes transfer-leadership` requests a transfer to another voter; non-voters never receive leadership. It is hidden from normal CLI help because workload operations should not require understanding Raft leadership.
 

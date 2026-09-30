@@ -180,8 +180,14 @@
     "PortSpec": {
       "additionalProperties": false,
       "properties": {
+        "host_port": {
+          "description": "Namespace mode only: node port that forwards to port, preserving the client source address. Omit to publish on the same number as port; Trellis stores the resolved value.",
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        },
         "port": {
-          "description": "Node port Trellis reserves and the process must bind directly when using host networking.",
+          "description": "Port the task process listens on. In host mode it is also the node port Trellis reserves.",
           "maximum": 65535,
           "minimum": 1,
           "type": "integer"
@@ -389,16 +395,14 @@
       "allOf": [
         {
           "if": {
-            "not": {
-              "properties": {
-                "mode": {
-                  "const": "host"
-                }
-              },
-              "required": [
-                "mode"
-              ]
-            }
+            "properties": {
+              "mode": {
+                "const": "none"
+              }
+            },
+            "required": [
+              "mode"
+            ]
           },
           "then": {
             "properties": {
@@ -407,20 +411,45 @@
               }
             }
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "host"
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          },
+          "then": {
+            "properties": {
+              "ports": {
+                "items": {
+                  "not": {
+                    "required": [
+                      "host_port"
+                    ]
+                  }
+                }
+              }
+            }
+          }
         }
       ],
       "properties": {
         "mode": {
-          "description": "Network attachment: isolated, host, or the private Trellis namespace network. Omit for isolated; Trellis stores the resolved mode.",
+          "description": "Network attachment: none (loopback only), namespace (the private Trellis namespace network with service DNS, NAT egress, and published ports), or host (the node's network stack). Omit for namespace; Trellis stores the resolved mode.",
           "enum": [
-            "isolated",
-            "host",
-            "namespace"
+            "none",
+            "namespace",
+            "host"
           ],
           "type": "string"
         },
         "ports": {
-          "description": "Direct host-port reservations. Valid only with mode: host; Trellis does not perform NAT or port translation.",
+          "description": "Ports the task listens on, unique on the node within the task group. Namespace mode publishes each on the node; host mode reserves each node port for scheduling. Not allowed with mode none.",
           "items": {
             "$ref": "#/$defs/PortSpec"
           },
@@ -455,7 +484,7 @@
         },
         "networking": {
           "$ref": "#/$defs/TaskNetworkingSpec",
-          "description": "Network attachment and, for host mode, direct node-port reservations."
+          "description": "Network attachment mode and the ports the task listens on."
         },
         "resources": {
           "$ref": "#/$defs/ResourcesSpec",

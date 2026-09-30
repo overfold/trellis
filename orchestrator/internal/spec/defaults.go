@@ -20,7 +20,7 @@ const (
 	// DefaultMaxParallel is the rolling-update parallelism when omitted or zero.
 	DefaultMaxParallel = 1
 	// DefaultTaskNetworkMode is the network mode of a task that omits it.
-	DefaultTaskNetworkMode = TaskNetworkIsolated
+	DefaultTaskNetworkMode = TaskNetworkWireGuard
 	// DefaultHealthCheckInterval is the delay between health checks when omitted.
 	DefaultHealthCheckInterval = 10 * time.Second
 	// DefaultHealthCheckTimeout bounds one health check when omitted.
@@ -63,6 +63,14 @@ func applyDefaults(job *JobSpec, limits Limits) {
 			}
 			if task.Networking.Mode == TaskNetworkDefault {
 				task.Networking.Mode = DefaultTaskNetworkMode
+			}
+			if task.Networking.Mode == TaskNetworkWireGuard {
+				for portIndex := range task.Networking.Ports {
+					port := &task.Networking.Ports[portIndex]
+					if port.HostPort == 0 {
+						port.HostPort = port.Port
+					}
+				}
 			}
 			if check := task.HealthCheck; check != nil {
 				if check.Interval == 0 {
@@ -146,6 +154,12 @@ func ValidateCanonicalTask(task *TaskSpec) error {
 	}
 	if task.Networking == nil || task.Networking.Mode == TaskNetworkDefault {
 		missing("networking.mode")
+	} else if task.Networking.Mode == TaskNetworkWireGuard {
+		for i, port := range task.Networking.Ports {
+			if port.HostPort == 0 {
+				missing(fmt.Sprintf("networking.ports[%d].host_port", i))
+			}
+		}
 	}
 	if check := task.HealthCheck; check != nil {
 		if check.Interval <= 0 {

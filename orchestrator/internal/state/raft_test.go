@@ -3,9 +3,12 @@ package state
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"fmt"
 	"net"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -57,12 +60,13 @@ func newTestRaftStore(t *testing.T) *RaftStore {
 	port := freePort(t)
 	bind := fmt.Sprintf("127.0.0.1:%d", port)
 	store, err := NewRaftStore(RaftConfig{
-		DataDir:   dir,
-		BindAddr:  bind,
-		Advertise: bind,
-		ServerID:  bind,
-		Bootstrap: true,
-		TLS:       testTLSConfig(t),
+		DataDir:       dir,
+		BindAddr:      bind,
+		Advertise:     bind,
+		ServerID:      bind,
+		Bootstrap:     true,
+		TLS:           testTLSConfig(t),
+		AuthorizePeer: allowAnyRaftPeer,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -125,6 +129,76 @@ func TestRaftTLSStreamBindsPeerToAdvertisedAddress(t *testing.T) {
 	}
 	if err := dial(t, "other.example"); err == nil {
 		t.Fatal("Raft stream accepted a cluster certificate not bound to the advertised host")
+	}
+}
+
+func allowAnyRaftPeer(*x509.Certificate) error { return nil }
+
+func TestRaftListenerRequiresPeerAuthorizer(t *testing.T) {
+	bind := fmt.Sprintf("127.0.0.1:%d", freePort(t))
+	if _, err := NewRaftStore(RaftConfig{DataDir: t.TempDir(), BindAddr: bind, Advertise: bind, ServerID: bind, Bootstrap: true, TLS: testTLSConfig(t)}); err == nil {
+		t.Fatal("Raft TLS listener started without a peer authorizer")
+	}
+}
+
+// A certificate that chains to the cluster CA is not by itself entitled to
+// open Raft streams: the listener asks the authorizer about every peer.
+func TestRaftListenerRejectsUnauthorizedPeers(t *testing.T) {
+	allowed := uuid.New()
+	var seen atomic.Int32
+	bind := fmt.Sprintf("127.0.0.1:%d", freePort(t))
+	store, err := NewRaftStore(RaftConfig{
+		DataDir: t.TempDir(), BindAddr: bind, Advertise: bind, ServerID: bind, Bootstrap: true, TLS: testTLSConfig(t),
+		AuthorizePeer: func(certificate *x509.Certificate) error {
+			id, err := tlsutil.NodeID(certificate)
+			if err != nil {
+				return err
+			}
+			seen.Add(1)
+			if id != allowed {
+				return errors.New("not a member")
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	connect := func(id uuid.UUID) error {
+		t.Helper()
+		cert, key, err := tlsutil.GenerateNodeCert(testCACert, testCAKey, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := tlsutil.PeerTLSConfig(&tlsutil.Materials{CACert: testCACert, Cert: cert, Key: key})
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn, err := tls.Dial("tcp", bind, cfg)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = conn.Close() }()
+		// TLS 1.3 clients finish their handshake before the server has
+		// judged the client certificate; the rejection arrives on read.
+		_ = conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+		_, err = conn.Read(make([]byte, 1))
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			return nil
+		}
+		return err
+	}
+	if err := connect(allowed); err != nil {
+		t.Fatalf("authorized peer was rejected: %v", err)
+	}
+	if err := connect(uuid.New()); err == nil {
+		t.Fatal("CA-signed peer rejected by the authorizer opened a Raft stream")
+	}
+	if seen.Load() < 2 {
+		t.Fatalf("authorizer saw %d peers, want every inbound handshake", seen.Load())
 	}
 }
 
@@ -245,12 +319,13 @@ func TestRaftStore_Replication(t *testing.T) {
 	followerPort := freePort(t)
 	followerBind := fmt.Sprintf("127.0.0.1:%d", followerPort)
 	follower, err := NewRaftStore(RaftConfig{
-		DataDir:   followerDir,
-		BindAddr:  followerBind,
-		Advertise: followerBind,
-		ServerID:  followerBind,
-		Bootstrap: false,
-		TLS:       testTLSConfig(t),
+		DataDir:       followerDir,
+		BindAddr:      followerBind,
+		Advertise:     followerBind,
+		ServerID:      followerBind,
+		Bootstrap:     false,
+		TLS:           testTLSConfig(t),
+		AuthorizePeer: allowAnyRaftPeer,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -297,12 +372,13 @@ func TestRaftStore_Snapshot(t *testing.T) {
 	followerPort := freePort(t)
 	followerBind := fmt.Sprintf("127.0.0.1:%d", followerPort)
 	follower, err := NewRaftStore(RaftConfig{
-		DataDir:   followerDir,
-		BindAddr:  followerBind,
-		Advertise: followerBind,
-		ServerID:  followerBind,
-		Bootstrap: false,
-		TLS:       testTLSConfig(t),
+		DataDir:       followerDir,
+		BindAddr:      followerBind,
+		Advertise:     followerBind,
+		ServerID:      followerBind,
+		Bootstrap:     false,
+		TLS:           testTLSConfig(t),
+		AuthorizePeer: allowAnyRaftPeer,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -332,7 +408,7 @@ func TestRaftStore_RejoinExistingState(t *testing.T) {
 	bind := fmt.Sprintf("127.0.0.1:%d", port)
 	tlsCfg := testTLSConfig(t)
 
-	store1, err := NewRaftStore(RaftConfig{DataDir: dir, BindAddr: bind, Advertise: bind, ServerID: bind, Bootstrap: true, TLS: tlsCfg})
+	store1, err := NewRaftStore(RaftConfig{DataDir: dir, BindAddr: bind, Advertise: bind, ServerID: bind, Bootstrap: true, TLS: tlsCfg, AuthorizePeer: allowAnyRaftPeer})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +416,7 @@ func TestRaftStore_RejoinExistingState(t *testing.T) {
 	_ = store1.Put(context.Background(), "persist", []byte("yes"))
 	_ = store1.Close()
 
-	store2, err := NewRaftStore(RaftConfig{DataDir: dir, BindAddr: bind, Advertise: bind, ServerID: bind, Bootstrap: true, TLS: tlsCfg})
+	store2, err := NewRaftStore(RaftConfig{DataDir: dir, BindAddr: bind, Advertise: bind, ServerID: bind, Bootstrap: true, TLS: tlsCfg, AuthorizePeer: allowAnyRaftPeer})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +442,7 @@ func TestRaftStore_RejoinExistingState(t *testing.T) {
 func newTestRaftFollower(t *testing.T) (*RaftStore, string) {
 	t.Helper()
 	bind := fmt.Sprintf("127.0.0.1:%d", freePort(t))
-	follower, err := NewRaftStore(RaftConfig{DataDir: t.TempDir(), BindAddr: bind, Advertise: bind, ServerID: bind, TLS: testTLSConfig(t)})
+	follower, err := NewRaftStore(RaftConfig{DataDir: t.TempDir(), BindAddr: bind, Advertise: bind, ServerID: bind, TLS: testTLSConfig(t), AuthorizePeer: allowAnyRaftPeer})
 	if err != nil {
 		t.Fatal(err)
 	}

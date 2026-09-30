@@ -100,8 +100,7 @@ func (s *StateController) GetNodeServerAddress(ctx context.Context, id string) (
 
 // PutNodeCertificateFingerprint binds an immutable node ID to one certificate.
 func (s *StateController) PutNodeCertificateFingerprint(ctx context.Context, id, fingerprint string) error {
-	key := fmt.Sprintf("%s/%s/node-certificate-fingerprints/%s", trellisNamespace, s.cluster, id)
-	if err := s.put(ctx, key, fingerprint); err != nil {
+	if err := s.put(ctx, s.nodeCertificateFingerprintKey(id), fingerprint); err != nil {
 		return fmt.Errorf("put node certificate fingerprint: %w", err)
 	}
 	return nil
@@ -109,9 +108,8 @@ func (s *StateController) PutNodeCertificateFingerprint(ctx context.Context, id,
 
 // GetNodeCertificateFingerprint returns the certificate bound to a node ID.
 func (s *StateController) GetNodeCertificateFingerprint(ctx context.Context, id string) (string, bool, error) {
-	key := fmt.Sprintf("%s/%s/node-certificate-fingerprints/%s", trellisNamespace, s.cluster, id)
 	var fingerprint string
-	found, err := s.get(ctx, key, &fingerprint)
+	found, err := s.get(ctx, s.nodeCertificateFingerprintKey(id), &fingerprint)
 	if err != nil {
 		return "", false, fmt.Errorf("get node certificate fingerprint: %w", err)
 	}

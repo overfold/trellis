@@ -24,6 +24,7 @@ import (
 
 	"github.com/overfold/trellis/internal/api"
 	"github.com/overfold/trellis/internal/client"
+	"github.com/overfold/trellis/internal/storage"
 )
 
 // TestMultiNodeFailureRecovery intentionally uses OS processes, loopback TCP,
@@ -114,10 +115,7 @@ func TestMultiNodeVoterMembership(t *testing.T) {
 	if nonvoter == "" || removed == "" {
 		t.Fatalf("membership = %v, want a non-voter and a non-leader voter", membership)
 	}
-	administrator := client.NewServerClient("", addr(h.nodes[h.endpoint()].ports[1]), &tls.Config{InsecureSkipVerify: true})
-	if err := administrator.UseAdministratorKey(h.adminKey); err != nil {
-		t.Fatal(err)
-	}
+	administrator := h.administrator()
 	if err := administrator.RemoveRaftMember(t.Context(), removed); err != nil {
 		t.Fatalf("remove voter: %v", err)
 	}
@@ -135,6 +133,97 @@ func TestMultiNodeVoterMembership(t *testing.T) {
 	}
 }
 
+// TestMultiNodeRemovedNodeIsRevoked checks that removing a node revokes its
+// identity: its certificate is rejected by the control plane, restarting it
+// cannot bring it back, enrollment needs a valid join token, and the machine
+// can return only as a fresh identity enrolled with a join token.
+func TestMultiNodeRemovedNodeIsRevoked(t *testing.T) {
+	if testing.Short() {
+		t.Skip("multi-process integration test")
+	}
+	h := newHarness(t, 3)
+	defer h.close()
+	h.waitNodes(3)
+	h.waitVoters(3, 3)
+	leader := h.leader()
+	victim := (leader + 1) % len(h.nodes)
+	victimID := h.nodeID(victim)
+	victimTLS := h.nodeClientTLS(victim)
+
+	if err := h.administrator().RemoveRaftMember(t.Context(), victimID); err != nil {
+		t.Fatalf("remove node: %v", err)
+	}
+	membership := h.waitVoters(2, 1)
+	if role := membership[victimID]; role != "" {
+		t.Fatalf("removed node %s still has control-plane role %q", victimID, role)
+	}
+	// The removed node's certificate chains to the cluster CA, but the
+	// control plane rejects it.
+	nodeClient := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: victimTLS}}
+	h.eventually(20*time.Second, func() bool {
+		resp, err := nodeClient.Get("https://" + addr(h.nodes[h.leader()].ports[1]) + "/v1/internal/discovery")
+		if err != nil {
+			return false
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode == http.StatusForbidden
+	}, "removed node certificate was not rejected")
+
+	// Restarting the removed node with its old identity and Raft state does
+	// not readmit it: no member accepts its Raft streams or sends it a log.
+	h.stop(victim)
+	h.start(victim)
+	if err := h.waitExit(victim, 90*time.Second); err == nil {
+		t.Fatal("removed node restarted successfully with its revoked identity")
+	}
+	if role := h.waitVoters(2, 1)[victimID]; role != "" {
+		t.Fatalf("restarted removed node regained control-plane role %q", role)
+	}
+
+	// Enrollment rejects an unknown join token without retrying.
+	bogus := h.addNode("trls_join_0123456789abcdef.not-a-token")
+	h.start(bogus)
+	if err := h.waitExit(bogus, 30*time.Second); err == nil {
+		t.Fatal("node enrolled with an unknown join token")
+	}
+	if log, _ := os.ReadFile(filepath.Join(h.nodes[bogus].dir, "node.log")); !strings.Contains(string(log), "join token is invalid") {
+		t.Fatalf("bogus join token failure is not explained:\n%s", log)
+	}
+
+	// A wiped machine returns as a new identity enrolled with a join token.
+	if err := os.RemoveAll(h.nodes[victim].dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(h.nodes[victim].dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	h.start(victim)
+	h.waitHTTP(victim)
+	membership = h.waitVoters(3, 3)
+	if newID := h.nodeID(victim); newID == victimID || membership[newID] != api.ControlPlaneVoter {
+		t.Fatalf("rejoined node identity %s (removed %s) has role %q, want a new voter", newID, victimID, membership[newID])
+	}
+}
+
+// nodeClientTLS returns a client configuration presenting node i's stored
+// certificate.
+func (h *harness) nodeClientTLS(i int) *tls.Config {
+	h.t.Helper()
+	local := storage.NewLocalStorage(h.nodes[i].dir)
+	var certPEM, keyPEM string
+	if err := local.Get("tls/node-cert", &certPEM); err != nil {
+		h.t.Fatal(err)
+	}
+	if err := local.Get("tls/node-key", &keyPEM); err != nil {
+		h.t.Fatal(err)
+	}
+	certificate, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM))
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return &tls.Config{Certificates: []tls.Certificate{certificate}, InsecureSkipVerify: true} //nolint:gosec // The test targets loopback nodes by address.
+}
+
 type node struct {
 	dir      string
 	ports    [5]int
@@ -144,12 +233,15 @@ type node struct {
 	logStart int64
 }
 type harness struct {
-	t        *testing.T
-	bin      string
-	token    string
-	adminKey ed25519.PrivateKey
-	nodes    []*node
-	client   *http.Client
+	t         *testing.T
+	bin       string
+	token     string
+	joinToken string
+	adminKey  ed25519.PrivateKey
+	publicKey string
+	base      string
+	nodes     []*node
+	client    *http.Client
 }
 
 func newHarness(t *testing.T, count int) *harness {
@@ -172,42 +264,80 @@ func newHarness(t *testing.T, count int) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := &harness{t: t, bin: bin, adminKey: privateKey, client: &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}}
-	base := t.TempDir()
-	for i := 0; i < count; i++ {
-		n := &node{dir: filepath.Join(base, fmt.Sprintf("node-%d", i))}
-		_ = os.MkdirAll(n.dir, 0o750)
-		listeners := reservePorts(t, len(n.ports))
-		for p, listener := range listeners {
-			n.ports[p] = listener.Addr().(*net.TCPAddr).Port
-		}
-		n.args = []string{"--enrollment-token", "integration-enrollment", "--cluster", "integration", "--data-dir", n.dir, "--runtime", "injected", "--runtime-faults", filepath.Join(n.dir, "fault.json"), "--agent-listen", addr(n.ports[0]), "--agent-advertise", addr(n.ports[0]), "--server-listen", addr(n.ports[1]), "--server-advertise", addr(n.ports[1]), "--raft-listen", addr(n.ports[2]), "--raft-advertise", addr(n.ports[2]), "--dns-listen", addr(n.ports[3]), "--wireguard-port", fmt.Sprint(n.ports[4]), "--wireguard-port-count", "1"}
-		if i == 0 {
-			n.args = append(n.args, "--administrator-public-key", base64.RawStdEncoding.EncodeToString(publicDER))
-		}
-		if i > 0 {
-			n.args = append(n.args, "--join", addr(h.nodes[0].ports[1]), "--ca-cert", filepath.Join(h.nodes[0].dir, "node-ca.crt"))
-		}
-		for _, listener := range listeners {
-			_ = listener.Close()
-		}
-		h.nodes = append(h.nodes, n)
+	h := &harness{t: t, bin: bin, adminKey: privateKey, publicKey: base64.RawStdEncoding.EncodeToString(publicDER), base: t.TempDir(), client: &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}}
+	for range count {
+		i := h.addNode(h.joinToken)
 		h.start(i)
 		h.waitHTTP(i)
 		if i == 0 {
-			administrator := client.NewServerClient("", addr(n.ports[1]), &tls.Config{InsecureSkipVerify: true})
-			if err := administrator.UseAdministratorKey(h.adminKey); err != nil {
-				t.Fatal(err)
-			}
+			administrator := h.administrator()
 			credential, err := administrator.CreateCredential(t.Context(), &api.CredentialCreateRequest{Scope: "cluster", Access: "write"})
 			if err != nil {
 				t.Fatalf("mint integration operator credential: %v", err)
 			}
 			h.token = credential.Token
+			joinToken, err := administrator.CreateJoinToken(t.Context(), &api.JoinTokenCreateRequest{})
+			if err != nil {
+				t.Fatalf("mint integration join token: %v", err)
+			}
+			h.joinToken = joinToken.Token
 		}
 	}
 	return h
 }
+
+// addNode prepares, without starting, a node that bootstraps the cluster when
+// it is the first node and otherwise joins it with joinToken.
+func (h *harness) addNode(joinToken string) int {
+	h.t.Helper()
+	i := len(h.nodes)
+	n := &node{dir: filepath.Join(h.base, fmt.Sprintf("node-%d", i))}
+	_ = os.MkdirAll(n.dir, 0o750)
+	listeners := reservePorts(h.t, len(n.ports))
+	for p, listener := range listeners {
+		n.ports[p] = listener.Addr().(*net.TCPAddr).Port
+	}
+	n.args = []string{"--cluster", "integration", "--data-dir", n.dir, "--runtime", "injected", "--runtime-faults", filepath.Join(n.dir, "fault.json"), "--agent-listen", addr(n.ports[0]), "--agent-advertise", addr(n.ports[0]), "--server-listen", addr(n.ports[1]), "--server-advertise", addr(n.ports[1]), "--raft-listen", addr(n.ports[2]), "--raft-advertise", addr(n.ports[2]), "--dns-listen", addr(n.ports[3]), "--wireguard-port", fmt.Sprint(n.ports[4]), "--wireguard-port-count", "1"}
+	if i == 0 {
+		n.args = append(n.args, "--administrator-public-key", h.publicKey)
+	} else {
+		n.args = append(n.args, "--join", addr(h.nodes[0].ports[1]), "--ca-cert", filepath.Join(h.nodes[0].dir, "node-ca.crt"), "--join-token", joinToken)
+	}
+	for _, listener := range listeners {
+		_ = listener.Close()
+	}
+	h.nodes = append(h.nodes, n)
+	return i
+}
+
+func (h *harness) administrator() *client.ServerClient {
+	h.t.Helper()
+	administrator := client.NewServerClient("", addr(h.nodes[h.endpoint()].ports[1]), &tls.Config{InsecureSkipVerify: true})
+	if err := administrator.UseAdministratorKey(h.adminKey); err != nil {
+		h.t.Fatal(err)
+	}
+	return administrator
+}
+
+// waitExit waits for a node process to exit on its own and returns its error.
+func (h *harness) waitExit(i int, timeout time.Duration) error {
+	h.t.Helper()
+	n := h.nodes[i]
+	done := make(chan error, 1)
+	go func() { done <- n.cmd.Wait() }()
+	select {
+	case err := <-done:
+		_ = n.log.Close()
+		n.cmd = nil
+		return err
+	case <-time.After(timeout):
+		h.stop(i)
+		b, _ := os.ReadFile(filepath.Join(n.dir, "node.log"))
+		h.t.Fatalf("node %d did not exit within %s:\n%s", i, timeout, b)
+		return nil
+	}
+}
+
 func addr(p int) string { return fmt.Sprintf("127.0.0.1:%d", p) }
 func reservePorts(t *testing.T, count int) []net.Listener {
 	t.Helper()
