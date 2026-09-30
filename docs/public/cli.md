@@ -264,7 +264,7 @@ Ambiguous prefixes are rejected and the CLI shows the matching nodes rather than
 
 ## Inspect and change cluster settings
 
-Job limits and namespace-network settings apply to the whole cluster and are replicated with the rest of its state, so they do not change when leadership moves. Show them with:
+Job limits, reconciliation settings, and namespace-network settings apply to the whole cluster and are replicated with the rest of its state, so they do not change when leadership moves. Show them with:
 
 ```sh
 trellisctl cluster settings
@@ -276,7 +276,15 @@ Change job limits with the administrator key. Only the flags you pass change; me
 trellisctl --administrator-key ./trellis-administrator.pem cluster set-job-limits --max-replicas-per-task-group 1000 --max-task-memory 2TiB
 ```
 
-The leader refuses limits that would stop admitting a job that is already applied. The WireGuard pool and port count are fixed when the cluster is created.
+The leader refuses limits that would stop admitting a job that is already applied.
+
+Change how the leader replaces lost and failed allocations the same way. Durations use Go syntax:
+
+```sh
+trellisctl --administrator-key ./trellis-administrator.pem cluster set-reconciliation --allocation-loss-timeout 2m --terminal-allocation-retention 10
+```
+
+The flags are `--allocation-loss-timeout` (30s–24h, default `45s`), `--replacement-backoff-base` (1s–24h, default `10s`), `--replacement-backoff-max` (at least the base, at most 24h, default `5m`), `--replacement-stable-after` (10s–24h, default `10m`), and `--terminal-allocation-retention` (0–100, default `5`). See [cluster settings](operations.md#cluster-settings) for what each controls. The WireGuard pool and port count are fixed when the cluster is created.
 
 ## Structured output and automation
 

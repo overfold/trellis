@@ -183,6 +183,7 @@ func (h *Handler) Register(e *echo.Echo) {
 	v1.POST("/raft/leadership-transfer", h.handleRaftLeadershipTransfer)
 	v1.GET("/cluster/settings", h.handleGetClusterSettings)
 	v1.PUT("/cluster/settings/job-limits", h.handleUpdateJobLimits)
+	v1.PUT("/cluster/settings/reconciliation", h.handleUpdateReconciliationSettings)
 	v1.GET("/backup", h.handleBackupCreate)
 	v1.POST("/backup/restore", h.handleBackupRestore)
 }
@@ -234,6 +235,22 @@ func (h *Handler) handleUpdateJobLimits(c *echo.Context) error {
 		return err
 	}
 	settings, err := h.server.UpdateJobLimits(c.Request().Context(), limits)
+	return clusterSettingsResponse(c, settings, err)
+}
+
+func (h *Handler) handleUpdateReconciliationSettings(c *echo.Context) error {
+	if err := requireRoot(c, "changing cluster settings requires the administrator credential"); err != nil {
+		return err
+	}
+	var reconciliation api.ReconciliationSettings
+	if err := decodeJSON(c, &reconciliation, maxSmallRequestBytes); err != nil {
+		return err
+	}
+	settings, err := h.server.UpdateReconciliationSettings(c.Request().Context(), ReconciliationSettingsFromAPI(reconciliation))
+	return clusterSettingsResponse(c, settings, err)
+}
+
+func clusterSettingsResponse(c *echo.Context, settings ClusterSettings, err error) error {
 	switch {
 	case errors.Is(err, ErrInvalidClusterSettings):
 		return echo.NewHTTPError(http.StatusUnprocessableEntity, err.Error())

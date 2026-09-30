@@ -35,6 +35,7 @@ import (
 	"github.com/overfold/trellis/internal/state"
 	"github.com/overfold/trellis/internal/storage"
 	"github.com/overfold/trellis/internal/tlsutil"
+	"github.com/overfold/trellis/internal/version"
 
 	"github.com/google/uuid"
 )
@@ -126,17 +127,13 @@ type Server struct {
 	resumes     map[resumeDeliveryKey]uint64
 	resumeEpoch uint64
 
-	// replacementPolicy bounds failed-allocation replacement and terminal
-	// record retention; the zero value selects DefaultReplacementPolicy.
-	replacementPolicy ReplacementPolicy
+	// reconciliation holds the replicated reconciliation settings; the zero
+	// value selects DefaultReconciliationSettings. Protected by mu.
+	reconciliation ReconciliationSettings
 	// replacementBackoffs holds the committed replacement backoff record of
 	// each job task group, keyed by replacementBackoffKey. Records are
 	// replaced, never mutated in place. Protected by mu.
 	replacementBackoffs map[string]*ReplacementBackoff
-	// allocationLossTimeout is how long a node must go without a heartbeat
-	// before the leader marks its allocations lost; zero selects
-	// DefaultAllocationLossTimeout. Protected by mu.
-	allocationLossTimeout time.Duration
 
 	// membershipMu serializes Raft membership reads and changes made by this
 	// server so each change is applied to the configuration it was planned
@@ -155,7 +152,8 @@ type Server struct {
 // SetSecretStore configures encrypted secret storage.
 func (s *Server) SetSecretStore(store *secretstore.Store) { s.secrets = store }
 
-// Backup captures desired cluster state.
+// Backup captures desired cluster state and the replicated cluster settings
+// from one consistent view.
 func (s *Server) Backup(_ context.Context) (*api.BackupSnapshot, error) {
 	if s.backupStore == nil {
 		return nil, fmt.Errorf("backup is unavailable")
@@ -164,9 +162,21 @@ func (s *Server) Backup(_ context.Context) (*api.BackupSnapshot, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(snapshot.Cluster) == 0 {
+		return nil, fmt.Errorf("backup: cluster is not initialized")
+	}
+	var cluster Cluster
+	if err := json.Unmarshal(snapshot.Cluster, &cluster); err != nil {
+		return nil, fmt.Errorf("backup: decode cluster record: %w", err)
+	}
+	if err := cluster.Settings.Validate(); err != nil {
+		return nil, fmt.Errorf("backup: replicated cluster settings: %w", err)
+	}
 	result := &api.BackupSnapshot{
 		FormatVersion:              api.BackupFormatVersion,
+		TrellisVersion:             version.Current(),
 		CreatedAt:                  s.now().UTC(),
+		ClusterSettings:            cluster.Settings.API(),
 		Jobs:                       make(map[string]json.RawMessage, len(snapshot.Jobs)),
 		JobRevisions:               make(map[string]json.RawMessage, len(snapshot.JobRevisions)),
 		Secrets:                    make(map[string]json.RawMessage, len(snapshot.Secrets)),
@@ -195,13 +205,39 @@ func (s *Server) Backup(_ context.Context) (*api.BackupSnapshot, error) {
 	return result, nil
 }
 
-// Restore replaces desired state from a backup.
+// checkBackupFormat refuses a backup whose format differs from this
+// release's. Backups are not migrated between formats.
+func checkBackupFormat(backup *api.BackupSnapshot) error {
+	if backup.FormatVersion == api.BackupFormatVersion {
+		return nil
+	}
+	creator := "an unrecorded Trellis release"
+	if backup.TrellisVersion != "" {
+		creator = "Trellis " + backup.TrellisVersion
+	}
+	return fmt.Errorf("backup format version %d, created by %s, cannot be restored by Trellis %s, which reads backup format version %d only; restore it into a new cluster running a Trellis release with backup format version %d, such as the release that created it", backup.FormatVersion, creator, version.Current(), api.BackupFormatVersion, backup.FormatVersion)
+}
+
+// Restore replaces desired state and the mutable cluster settings from a
+// backup. The target must be a fresh cluster created with the backup's
+// network settings, because namespace subnets and WireGuard port slots are
+// derived from them.
 func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error {
-	if backup.FormatVersion != api.BackupFormatVersion {
-		return fmt.Errorf("unsupported backup format version %d", backup.FormatVersion)
+	if err := checkBackupFormat(backup); err != nil {
+		return err
 	}
 	if s.backupStore == nil {
 		return fmt.Errorf("restore is unavailable")
+	}
+	settings, err := ClusterSettingsFromAPI(backup.ClusterSettings)
+	if err != nil {
+		return fmt.Errorf("backup cluster settings: %w", err)
+	}
+	s.mu.RLock()
+	pool, portCount := s.networkPool, s.wireGuardPortCount
+	s.mu.RUnlock()
+	if settings.WireGuardPool != pool || settings.WireGuardPortCount != portCount {
+		return fmt.Errorf("backup network settings (wireguard_pool %s, wireguard_port_count %d) differ from this cluster's (wireguard_pool %s, wireguard_port_count %d); restore into a new cluster created with the backup's values", settings.WireGuardPool, settings.WireGuardPortCount, pool, portCount)
 	}
 	snapshot := &state.DesiredSnapshot{
 		Jobs:                       make(map[string][]byte, len(backup.Jobs)),
@@ -211,31 +247,22 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 		NetworkPortRegistrations:   make(map[string][]byte, len(backup.NetworkPortRegistrations)),
 		NetworkSubnetRegistrations: make(map[string][]byte, len(backup.NetworkSubnetRegistrations)),
 	}
-	canonicalizeJob := func(raw json.RawMessage) (*Job, []byte, error) {
-		var record Job
-		if err := json.Unmarshal(raw, &record); err != nil {
-			return nil, nil, err
-		}
-		if err := s.CanonicalizeJob(record.Spec); err != nil {
-			return nil, nil, err
-		}
-		canonical, err := json.Marshal(record)
-		if err != nil {
-			return nil, nil, err
-		}
-		return &record, canonical, nil
-	}
-	var restoredJobs []*Job
+	restored := make(map[string]*Job, len(backup.Jobs))
 	for key, value := range backup.Jobs {
-		if !json.Valid(value) {
+		var record Job
+		if err := json.Unmarshal(value, &record); err != nil {
 			return fmt.Errorf("job %q contains invalid JSON", key)
 		}
-		job, canonical, err := canonicalizeJob(value)
-		if err != nil {
-			return fmt.Errorf("validate job %q: %w", key, err)
+		if record.Spec == nil {
+			return fmt.Errorf("validate job %q: job spec is missing", key)
 		}
-		snapshot.Jobs[key] = canonical
-		restoredJobs = append(restoredJobs, job)
+		snapshot.Jobs[key] = value
+		restored[jobKey(record.Spec.Namespace, record.Spec.Name)] = &record
+	}
+	// Restored jobs are canonical and must be admitted by the restored
+	// limits, exactly as they were when the backup was taken.
+	if violations := jobLimitViolations(restored, settings.JobLimits); len(violations) > 0 {
+		return fmt.Errorf("restored jobs are not admitted by the backup's job limits: %s", joinViolations(violations))
 	}
 	for key, value := range backup.JobRevisions {
 		if !json.Valid(value) {
@@ -249,9 +276,6 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 			return fmt.Errorf("validate job revision %q: invalid revision record", key)
 		}
 		snapshot.JobRevisions[key] = value
-	}
-	if err := s.validateNamespaceAllocationLimit(restoredJobs, "", nil); err != nil {
-		return err
 	}
 	for key, value := range backup.Secrets {
 		if !json.Valid(value) {
@@ -277,7 +301,7 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 		}
 		snapshot.NetworkSubnetRegistrations[key] = value
 	}
-	// Validate the complete backup before dropping legacy excess or orphaned
+	// Validate the complete backup before dropping excess or orphaned
 	// revisions so malformed records cannot hide outside the retained window.
 	if err := state.ValidateDesiredSnapshot(snapshot, nil); err != nil {
 		return err
@@ -289,24 +313,28 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 	snapshot.JobRevisions = retainedRevisions
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
-	// Job limits can change between validation and this point.
-	restored := make(map[string]*Job, len(restoredJobs))
-	for _, job := range restoredJobs {
-		restored[jobKey(job.Spec.Namespace, job.Spec.Name)] = job
+	cluster, err := s.state.GetCluster(ctx)
+	if err != nil {
+		return fmt.Errorf("load cluster settings: %w", err)
 	}
-	s.mu.RLock()
-	limits := s.jobLimits
-	s.mu.RUnlock()
-	if limits == (spec.Limits{}) {
-		limits = spec.DefaultLimits()
+	if cluster == nil {
+		return fmt.Errorf("load cluster settings: cluster is not initialized")
 	}
-	violations := jobLimitViolations(restored, limits)
-	if len(violations) > 0 {
-		return fmt.Errorf("restored jobs exceed the current job limits: %s", joinViolations(violations))
+	// The restored record keeps this cluster's identity, administrator key,
+	// fencing epoch, and fixed network settings, and takes the backup's job
+	// limits and reconciliation settings.
+	cluster.Settings.JobLimits = settings.JobLimits
+	cluster.Settings.Reconciliation = settings.Reconciliation
+	snapshot.Cluster, err = json.Marshal(cluster)
+	if err != nil {
+		return fmt.Errorf("encode restored cluster record: %w", err)
 	}
 	if err := s.backupStore.RestoreDesired(s.clusterName, snapshot); err != nil {
 		return err
 	}
+	s.mu.Lock()
+	s.loadClusterLocked(cluster)
+	s.mu.Unlock()
 	return s.Reload(ctx)
 }
 
@@ -702,24 +730,12 @@ func NewServer(log *slog.Logger, storage *storage.LocalStorage, state *StateCont
 		serverAddr:         serverAddr,
 		clusterName:        cluster,
 		jobLimits:          settings.JobLimits,
-		replacementPolicy:  DefaultReplacementPolicy(),
+		reconciliation:     settings.Reconciliation,
 		now:                time.Now,
 	}
 	s.backupStore, _ = store.(desiredStore)
 	s.events = newEventBus()
 	return s
-}
-
-// SetAllocationLossTimeout configures how long a node must go without a
-// heartbeat before the leader marks its allocations lost.
-func (s *Server) SetAllocationLossTimeout(timeout time.Duration) error {
-	if err := ValidateAllocationLossTimeout(timeout); err != nil {
-		return err
-	}
-	s.mu.Lock()
-	s.allocationLossTimeout = timeout
-	s.mu.Unlock()
-	return nil
 }
 
 // CanonicalizeJob resolves operator defaults and validates a job before use.
@@ -759,11 +775,10 @@ func (s *Server) AcquireLeadership(ctx context.Context) error {
 		return fmt.Errorf("persist leadership activation: %w", err)
 	}
 	s.mu.Lock()
-	s.cluster = cluster
 	s.controlEpoch = epoch
-	// Job limits may have changed under a previous leader. Network settings
-	// are fixed when the cluster is created and were loaded by Init.
-	s.jobLimits = cluster.Settings.JobLimits
+	// Job limits and reconciliation settings may have changed under a
+	// previous leader.
+	s.loadClusterLocked(cluster)
 	s.leaderSince = s.now()
 	// Raft progress is measured against this server's own applied index;
 	// reports from an earlier term must not decide promotions in this one.
@@ -815,9 +830,8 @@ func (s *Server) Init(ctx context.Context, bootstrap ClusterBootstrap) error {
 	}
 
 	s.mu.Lock()
-	s.cluster = cluster
 	s.controlEpoch = cluster.ControlEpoch
-	s.jobLimits = cluster.Settings.JobLimits
+	s.loadClusterLocked(cluster)
 	s.networkPool = cluster.Settings.WireGuardPool
 	s.wireGuardPortCount = cluster.Settings.WireGuardPortCount
 	s.mu.Unlock()
@@ -1290,7 +1304,7 @@ func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spe
 	if err != nil {
 		err = fmt.Errorf("validate job: %w", err)
 	} else {
-		err = s.validateNamespaceAllocationLimitLocked(nil, namespace, jobSpec, key)
+		err = s.validateNamespaceAllocationLimitLocked(namespace, jobSpec, key)
 	}
 	s.mu.RUnlock()
 	if err != nil {
@@ -1395,32 +1409,20 @@ func checkJobVersion(existing *Job, expected *int) error {
 func (s *Server) ValidateNamespaceAllocationLimit(namespace string, job *spec.JobSpec) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.validateNamespaceAllocationLimitLocked(nil, namespace, job, jobKey(namespace, job.Name))
+	return s.validateNamespaceAllocationLimitLocked(namespace, job, jobKey(namespace, job.Name))
 }
 
-func (s *Server) validateNamespaceAllocationLimit(restored []*Job, namespace string, candidate *spec.JobSpec) error {
-	return s.validateNamespaceAllocationLimitLocked(restored, namespace, candidate, "")
-}
-
-func (s *Server) validateNamespaceAllocationLimitLocked(source []*Job, namespace string, candidate *spec.JobSpec, replacingKey string) error {
+func (s *Server) validateNamespaceAllocationLimitLocked(namespace string, candidate *spec.JobSpec, replacingKey string) error {
 	limits := s.jobLimits
 	if limits == (spec.Limits{}) {
 		limits = spec.DefaultLimits()
 	}
 	totals := make(map[string]int64)
-	if source == nil {
-		for key, job := range s.jobs {
-			if key == replacingKey || job == nil || job.Spec == nil {
-				continue
-			}
-			totals[job.Spec.Namespace] += desiredAllocations(job.Spec)
+	for key, job := range s.jobs {
+		if key == replacingKey || job == nil || job.Spec == nil {
+			continue
 		}
-	} else {
-		for _, job := range source {
-			if job != nil && job.Spec != nil {
-				totals[job.Spec.Namespace] += desiredAllocations(job.Spec)
-			}
-		}
+		totals[job.Spec.Namespace] += desiredAllocations(job.Spec)
 	}
 	if candidate != nil {
 		totals[namespace] += desiredAllocations(candidate)

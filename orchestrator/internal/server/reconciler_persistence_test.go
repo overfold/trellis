@@ -52,7 +52,7 @@ func newObsoletePendingReconcileServer(t *testing.T, store state.Store) (*Server
 	controller := NewStateController(store, "test")
 	s := NewServer(slog.Default(), nil, controller, store, "test", "")
 	s.jobs[jobKey("default", "web")] = &Job{
-		Spec: &spec.JobSpec{
+		Spec: canonicalTestSpec(&spec.JobSpec{
 			Namespace: "default",
 			Name:      "web",
 			TaskGroups: []spec.TaskGroupSpec{{
@@ -60,7 +60,7 @@ func newObsoletePendingReconcileServer(t *testing.T, store state.Store) (*Server
 				Count: 1,
 				Tasks: []spec.TaskSpec{{Name: "server", Image: "app:v2"}},
 			}},
-		},
+		}),
 		Revision: 2,
 	}
 	allocation := &Allocation{
@@ -158,7 +158,7 @@ func TestReconcileCommitsVolumeRegistrationWithAllocation(t *testing.T) {
 	node := &Node{ID: uuid.New(), Status: NodeStatusHealthy, LastHeartbeat: time.Now()}
 	s.nodes[node.ID] = node
 	s.jobs[jobKey("acme", "database")] = &Job{
-		Spec: &spec.JobSpec{
+		Spec: canonicalTestSpec(&spec.JobSpec{
 			Namespace: "acme",
 			Name:      "database",
 			TaskGroups: []spec.TaskGroupSpec{{
@@ -174,7 +174,7 @@ func TestReconcileCommitsVolumeRegistrationWithAllocation(t *testing.T) {
 					}},
 				}},
 			}},
-		},
+		}),
 		Revision: 1,
 	}
 
@@ -219,7 +219,7 @@ func TestReconcileCommitsNetworkPortRegistrationWithAllocation(t *testing.T) {
 	node := &Node{ID: uuid.New(), Status: NodeStatusHealthy, LastHeartbeat: time.Now(), Capabilities: []spec.NodeCapability{spec.CapabilityNamespaceNetworking}}
 	s.nodes[node.ID] = node
 	s.jobs[jobKey("acme", "web")] = &Job{
-		Spec: &spec.JobSpec{
+		Spec: canonicalTestSpec(&spec.JobSpec{
 			Namespace: "acme",
 			Name:      "web",
 			TaskGroups: []spec.TaskGroupSpec{{
@@ -227,7 +227,7 @@ func TestReconcileCommitsNetworkPortRegistrationWithAllocation(t *testing.T) {
 				Count: 1,
 				Tasks: []spec.TaskSpec{{Name: "server", Image: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard}}},
 			}},
-		},
+		}),
 		Revision: 1,
 	}
 
@@ -282,14 +282,14 @@ func TestReconcileAppliesVolumeClaimsAcrossTaskGroups(t *testing.T) {
 	s.nodes[a.ID], s.nodes[b.ID] = a, b
 	volume := []spec.VolumeSpec{{Name: "data", HostPath: "@/data", ContainerPath: "/data"}}
 	s.jobs[jobKey("acme", "database")] = &Job{
-		Spec: &spec.JobSpec{
+		Spec: canonicalTestSpec(&spec.JobSpec{
 			Namespace: "acme",
 			Name:      "database",
 			TaskGroups: []spec.TaskGroupSpec{
 				{Name: "first", Count: 1, Constraints: []spec.ConstraintSpec{{Attribute: "zone", Value: "a"}}, Tasks: []spec.TaskSpec{{Name: "first", Image: "app", Volumes: volume}}},
 				{Name: "second", Count: 1, Constraints: []spec.ConstraintSpec{{Attribute: "zone", Value: "b"}}, Tasks: []spec.TaskSpec{{Name: "second", Image: "app", Volumes: volume}}},
 			},
-		},
+		}),
 		Revision: 1,
 	}
 

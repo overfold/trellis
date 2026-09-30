@@ -11,12 +11,6 @@ import (
 	"github.com/overfold/trellis/internal/spec"
 )
 
-const (
-	defaultCheckInterval  = 10 * time.Second
-	defaultCheckTimeout   = 5 * time.Second
-	defaultCheckThreshold = 3
-)
-
 // HealthSubscriber receives allocation health changes.
 //
 //nolint:revive // The established name emphasizes that this type belongs to health checking.
@@ -105,26 +99,19 @@ func (h *HealthManager) RegisterTask(allocID string, containerID string, spec *s
 	go h.runHealthCheckLoop(ctx, newTrackedTask)
 }
 
+// newHealthConfig copies a canonical health check. Job canonicalization
+// resolves every default, and the agent refuses starts whose checks are not
+// canonical, so no value is defaulted here.
 func newHealthConfig(spec *spec.HealthCheckSpec) HealthConfig {
-	config := HealthConfig{
+	return HealthConfig{
 		Type:      string(spec.Type),
 		Port:      spec.Port,
 		Path:      spec.Path,
 		Command:   spec.Command,
-		Interval:  defaultCheckInterval,
-		Timeout:   defaultCheckTimeout,
-		Threshold: defaultCheckThreshold,
+		Interval:  spec.Interval,
+		Timeout:   spec.Timeout,
+		Threshold: spec.Threshold,
 	}
-	if spec.Interval != 0 {
-		config.Interval = spec.Interval
-	}
-	if spec.Timeout != 0 {
-		config.Timeout = spec.Timeout
-	}
-	if spec.Threshold != 0 {
-		config.Threshold = spec.Threshold
-	}
-	return config
 }
 
 // DeregisterTask stops health checking an allocation.

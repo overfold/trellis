@@ -33,15 +33,3 @@ func TestTaskHealthInitializingTransitionsToUnhealthy(t *testing.T) {
 		t.Fatalf("second pass after unhealthy = (%v, %q), want changed healthy", changed, status)
 	}
 }
-
-func TestTaskHealthUsesDefaultThresholdForZero(t *testing.T) {
-	health := NewTaskHealth(0)
-	for i := 0; i < defaultCheckThreshold-1; i++ {
-		if changed, _ := health.RecordResult(true); changed {
-			t.Fatalf("status changed after %d passes", i+1)
-		}
-	}
-	if changed, status := health.RecordResult(true); !changed || status != StatusHealthy {
-		t.Fatalf("default threshold result = (%v, %q), want changed healthy", changed, status)
-	}
-}

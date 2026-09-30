@@ -23,7 +23,8 @@ func (s UpdateStrategy) Valid() bool { return s == "" || s == UpdateRecreate || 
 type Runtime string
 
 const (
-	// RuntimeDefault uses the orchestrator default OCI runtime.
+	// RuntimeDefault means the author omitted runtime; canonicalization
+	// resolves it to DefaultRuntime.
 	RuntimeDefault Runtime = ""
 	// RuntimeRunc selects runc.
 	RuntimeRunc Runtime = "runc"
@@ -70,7 +71,8 @@ type APIAccessSpec struct {
 type TaskNetworkMode string
 
 const (
-	// TaskNetworkDefault selects the default isolated task network when mode is omitted.
+	// TaskNetworkDefault means the author omitted mode; canonicalization
+	// resolves it to DefaultTaskNetworkMode.
 	TaskNetworkDefault TaskNetworkMode = ""
 	// TaskNetworkIsolated gives the container a private network namespace with no external routes.
 	TaskNetworkIsolated TaskNetworkMode = "isolated"

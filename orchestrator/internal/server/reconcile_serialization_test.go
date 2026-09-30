@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -21,12 +22,16 @@ func TestReconcileDoesNotMutateStoredJobSpec(t *testing.T) {
 	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
 	s.nodes[node.ID] = node
 	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}
-	s.jobs[jobKey("default", "web")] = &Job{Spec: jobSpec, Revision: 1}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(jobSpec), Revision: 1}
+	before, err := json.Marshal(jobSpec)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	s.Reconcile(context.Background())
 
-	if jobSpec.TaskGroups[0].Tasks[0].Resources != nil {
-		t.Fatal("reconciliation resolved resource defaults into the stored job spec")
+	if after, err := json.Marshal(jobSpec); err != nil || string(after) != string(before) {
+		t.Fatalf("reconciliation changed the stored job spec:\nbefore %s\nafter  %s", before, after)
 	}
 	if len(s.allocations) != 1 || s.allocations[0].Tasks[0].Resources == nil {
 		t.Fatalf("allocations = %d, want one placed with canonical resources", len(s.allocations))
@@ -65,7 +70,7 @@ func newAbortFixture(t *testing.T) (*Server, *bytes.Buffer, *prometheus.Registry
 	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
 	s.nodes[node.ID] = node
 	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}
-	s.jobs[jobKey("default", "web")] = &Job{Spec: jobSpec, Revision: 1}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(jobSpec), Revision: 1}
 	pending := &Allocation{ID: "pending", Namespace: "default", JobName: "web", TaskGroupName: "api", Tasks: jobSpec.TaskGroups[0].Tasks, Generation: 1, JobRevision: 1, Phase: lifecycle.PhasePending, Health: lifecycle.HealthUnknown}
 	s.allocations = []*Allocation{pending}
 	return s, logs, registry, node, pending
@@ -137,7 +142,7 @@ func TestStopAllocationByIDWaitsForNodeActionsAndReplaces(t *testing.T) {
 	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
 	s.nodes[node.ID] = node
 	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}
-	s.jobs[jobKey("default", "web")] = &Job{Spec: jobSpec, Revision: 1}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(jobSpec), Revision: 1}
 	original := &Allocation{ID: "original", Namespace: "default", JobName: "web", TaskGroupName: "api", Tasks: jobSpec.TaskGroups[0].Tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
 	s.allocations = []*Allocation{original}
 
@@ -175,7 +180,7 @@ func TestRestartJobReconcilesImmediately(t *testing.T) {
 	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
 	s.nodes[node.ID] = node
 	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}
-	s.jobs[jobKey("default", "web")] = &Job{Spec: jobSpec, Revision: 1}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(jobSpec), Revision: 1}
 	original := &Allocation{ID: "original", Namespace: "default", JobName: "web", TaskGroupName: "api", Tasks: jobSpec.TaskGroups[0].Tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
 	s.allocations = []*Allocation{original}
 

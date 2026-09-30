@@ -9,14 +9,20 @@ import (
 	"github.com/overfold/trellis/internal/spec"
 )
 
-// BackupFormatVersion is the current desired-state backup format.
-const BackupFormatVersion = 4
+// BackupFormatVersion is the current desired-state backup format. A backup is
+// restored only by a Trellis release that uses the same format version.
+const BackupFormatVersion = 5
 
-// BackupSnapshot contains desired state only. Secret values remain encrypted
-// exactly as stored in Raft and still require the separately managed KEK.
+// BackupSnapshot contains desired state and the replicated cluster settings.
+// Secret values remain encrypted exactly as stored in Raft and still require
+// the separately managed KEK. Jobs are canonical: every default is explicit.
 type BackupSnapshot struct {
-	FormatVersion            int                        `json:"format_version"`
+	FormatVersion int `json:"format_version"`
+	// TrellisVersion is the version of the Trellis release that created the
+	// backup, so an operator can pick a release able to restore it.
+	TrellisVersion           string                     `json:"trellis_version"`
 	CreatedAt                time.Time                  `json:"created_at"`
+	ClusterSettings          ClusterSettings            `json:"cluster_settings"`
 	Jobs                     map[string]json.RawMessage `json:"jobs"`
 	JobRevisions             map[string]json.RawMessage `json:"job_revisions"`
 	Secrets                  map[string]json.RawMessage `json:"secrets"`

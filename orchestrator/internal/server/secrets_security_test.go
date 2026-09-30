@@ -87,7 +87,7 @@ func TestAllocationReceivesSecretFromMatchingNamespace(t *testing.T) {
 	s.secrets = store
 	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
 	task := spec.TaskSpec{Name: "app", Image: "app", Secrets: []spec.SecretRefSpec{{Name: "token", Target: spec.SecretTargetEnv, Env: "TOKEN"}}}
-	s.jobs[jobKey("default", "web")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Tasks: []spec.TaskSpec{task}}}}, Revision: 1}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Tasks: []spec.TaskSpec{task}}}}), Revision: 1}
 	allocation := &Allocation{ID: "allocation", Namespace: "default", JobName: "web", TaskGroupName: "app", Tasks: []spec.TaskSpec{task}, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhasePlaced}
 	if err := s.Execute(context.Background(), &Action{Type: ActionStart, Allocation: allocation}); err != nil {
 		t.Fatal(err)
@@ -123,7 +123,8 @@ func TestBackupContainsCiphertextOnlySecretRecords(t *testing.T) {
 		Jobs: map[string][]byte{}, JobRevisions: map[string][]byte{},
 		Secrets: map[string][]byte{"default/token": raw}, VolumeRegistrations: map[string][]byte{}, NetworkPortRegistrations: map[string][]byte{},
 	}}
-	s := NewServer(slog.Default(), nil, newNopStateController(), backupState, "test", "")
+	backupState.data = memoryStore{}
+	s := newBackupTestServer(t, backupState, DefaultClusterSettings())
 	backup, err := s.Backup(ctx)
 	if err != nil {
 		t.Fatal(err)

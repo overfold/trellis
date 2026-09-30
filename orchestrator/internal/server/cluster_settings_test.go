@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -9,9 +10,11 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
+	"github.com/overfold/trellis/internal/api"
 	"github.com/overfold/trellis/internal/auth"
 	"github.com/overfold/trellis/internal/spec"
 	"github.com/overfold/trellis/internal/storage"
@@ -160,7 +163,7 @@ func TestUpdateJobLimitsRefusesLimitsThatWouldStopDesiredJobs(t *testing.T) {
 	if err := s.CanonicalizeJob(job); err != nil {
 		t.Fatal(err)
 	}
-	s.jobs[jobKey("default", "web")] = &Job{Spec: job, Revision: 1}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(job), Revision: 1}
 
 	limits := spec.DefaultLimits()
 	limits.MaxReplicasPerTaskGroup = 2
@@ -250,5 +253,96 @@ func TestClusterSettingsEndpointsAuthorization(t *testing.T) {
 	}
 	if got := control.ClusterSettings().JobLimits.MaxReplicasPerTaskGroup; got != 900 {
 		t.Fatalf("max replicas per task group = %d, want 900", got)
+	}
+}
+
+func TestUpdateReconciliationSettingsIsReplicatedToLaterLeaders(t *testing.T) {
+	ctx := context.Background()
+	store := memoryStore{}
+	_, encoded := encodedAdministratorPublicKey(t)
+	leader := newSettingsTestServer(t, store)
+	if err := leader.Init(ctx, ClusterBootstrap{AdministratorPublicKey: encoded, Settings: DefaultClusterSettings()}); err != nil {
+		t.Fatal(err)
+	}
+	follower := newSettingsTestServer(t, store)
+	if err := follower.Init(ctx, ClusterBootstrap{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := leader.AcquireLeadership(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	reconciliation := DefaultReconciliationSettings()
+	reconciliation.AllocationLossTimeout = 5 * time.Minute
+	reconciliation.ReplacementBackoffBase = time.Minute
+	reconciliation.ReplacementBackoffMax = time.Hour
+	reconciliation.TerminalAllocationRetention = 20
+	if _, err := leader.UpdateReconciliationSettings(ctx, reconciliation); err != nil {
+		t.Fatal(err)
+	}
+	invalid := reconciliation
+	invalid.AllocationLossTimeout = time.Second
+	if _, err := leader.UpdateReconciliationSettings(ctx, invalid); !errors.Is(err, ErrInvalidClusterSettings) {
+		t.Fatalf("invalid settings error = %v, want ErrInvalidClusterSettings", err)
+	}
+	if err := follower.AcquireLeadership(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := follower.ClusterSettings().Reconciliation; got != reconciliation {
+		t.Fatalf("later leader reconciliation = %+v, want %+v", got, reconciliation)
+	}
+	follower.mu.Lock()
+	input, _, err := follower.reconcilePlanInputLocked(follower.now(), nil, nil)
+	follower.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if input.AllocationLossTimeout != reconciliation.AllocationLossTimeout || input.Policy != reconciliation.replacementPolicy() {
+		t.Fatalf("planner input = %s/%+v, want the replicated settings", input.AllocationLossTimeout, input.Policy)
+	}
+}
+
+func TestReconciliationSettingsEndpoint(t *testing.T) {
+	ctx := context.Background()
+	store := memoryStore{}
+	_, encoded := encodedAdministratorPublicKey(t)
+	control := newSettingsTestServer(t, store)
+	if err := control.Init(ctx, ClusterBootstrap{AdministratorPublicKey: encoded, Settings: DefaultClusterSettings()}); err != nil {
+		t.Fatal(err)
+	}
+	e := echo.New()
+	NewHandler(control).Register(e)
+	serve := func(req *http.Request) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		return rec
+	}
+	admin := func(req *http.Request) *http.Request {
+		return req.WithContext(context.WithValue(req.Context(), AdminContextKey, true))
+	}
+	const path = "/v1/cluster/settings/reconciliation"
+	body := `{"allocation_loss_timeout":120000000000,"replacement_backoff_base":10000000000,"replacement_backoff_max":300000000000,"replacement_stable_after":600000000000,"terminal_allocation_retention":8}`
+	if rec := serve(scopedRequest(t, http.MethodPut, path, body, auth.AccessCluster, auth.AccessWrite, "")); rec.Code != http.StatusForbidden {
+		t.Fatalf("cluster/write status = %d, want 403", rec.Code)
+	}
+	if rec := serve(admin(scopedRequest(t, http.MethodPut, path, `{"allocation_loss_timeout":120000000000,"unknown":1}`, "", "", ""))); rec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown field status = %d, want 400", rec.Code)
+	}
+	if rec := serve(admin(scopedRequest(t, http.MethodPut, path, `{"allocation_loss_timeout":120000000000}`, "", "", ""))); rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("incomplete settings status = %d, want 422", rec.Code)
+	}
+	rec := serve(admin(scopedRequest(t, http.MethodPut, path, body, "", "", "")))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("administrator status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var response api.ClusterSettings
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Reconciliation.AllocationLossTimeout != 2*time.Minute || response.Reconciliation.TerminalAllocationRetention != 8 {
+		t.Fatalf("response reconciliation = %+v", response.Reconciliation)
+	}
+	if got := control.ClusterSettings().Reconciliation.AllocationLossTimeout; got != 2*time.Minute {
+		t.Fatalf("allocation loss timeout = %s, want 2m", got)
 	}
 }

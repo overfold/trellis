@@ -14,9 +14,10 @@ import (
 )
 
 // ReplacementPolicy bounds how quickly count reconciliation replaces failed
-// allocations and how many terminal allocation records it retains. These are
-// server defaults rather than manifest fields: they protect the control plane
-// from crash-looping workloads without changing job semantics.
+// allocations and how many terminal allocation records it retains. It is
+// derived from the replicated ReconciliationSettings rather than manifest
+// fields: it protects the control plane from crash-looping workloads without
+// changing job semantics.
 type ReplacementPolicy struct {
 	// BackoffBase is the delay after the first consecutive failure.
 	BackoffBase time.Duration
@@ -30,14 +31,10 @@ type ReplacementPolicy struct {
 	RetainTerminal int
 }
 
-// DefaultReplacementPolicy returns the server's replacement defaults.
+// DefaultReplacementPolicy returns the replacement policy of the default
+// reconciliation settings.
 func DefaultReplacementPolicy() ReplacementPolicy {
-	return ReplacementPolicy{
-		BackoffBase:    10 * time.Second,
-		BackoffMax:     5 * time.Minute,
-		StableAfter:    10 * time.Minute,
-		RetainTerminal: 5,
-	}
+	return DefaultReconciliationSettings().replacementPolicy()
 }
 
 // ReplacementBackoff is the persisted replacement backoff state of one job

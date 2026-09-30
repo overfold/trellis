@@ -176,7 +176,7 @@ func TestReconcileWithholdsPlacementWhenSubnetPoolIsExhausted(t *testing.T) {
 	s.nodes[node.ID] = node
 	for _, namespace := range []string{"acme", "globex", "initech"} {
 		s.jobs[jobKey(namespace, "web")] = &Job{
-			Spec: &spec.JobSpec{
+			Spec: canonicalTestSpec(&spec.JobSpec{
 				Namespace: namespace,
 				Name:      "web",
 				TaskGroups: []spec.TaskGroupSpec{{
@@ -184,7 +184,7 @@ func TestReconcileWithholdsPlacementWhenSubnetPoolIsExhausted(t *testing.T) {
 					Count: 1,
 					Tasks: []spec.TaskSpec{{Name: "server", Image: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard}}},
 				}},
-			},
+			}),
 			Revision: 1,
 		}
 	}

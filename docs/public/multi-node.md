@@ -52,7 +52,7 @@ Node and Raft transports use mutually authenticated TLS. Each node's `agent_adve
 
 Namespace networking gives each namespace one stable UDP port from the cluster's WireGuard range: `wireguard_port` (default `51820`) plus the cluster's `wireguard_port_count` (default `256`). Allow that range between every node that may run namespace-networked tasks. `wireguard_pool` (default `10.64.0.0/10`) supplies a `/24` for each namespace on each node; the default pool addresses 16384 namespace-node pairs, and when it is full new placements for another namespace wait instead of reusing an address. `wireguard_endpoint` sets the externally reachable host or base `host:port` other nodes use; Trellis applies each namespace's port offset to that base.
 
-**Cluster settings** are replicated with the rest of the cluster state, so any node can become leader without changing them. The first node's `job_limits`, `wireguard_pool`, and `wireguard_port_count` (or the matching flags) initialize them when it creates the cluster; after that, node configuration no longer changes them, on the first node or any other. Inspect them with `trellisctl cluster settings` and change job limits with `trellisctl cluster set-job-limits` ([CLI](cli.md#inspect-and-change-cluster-settings)). The pool and port count are fixed for the life of the cluster. A node started with different values behaves as follows:
+**Cluster settings** are replicated with the rest of the cluster state, so any node can become leader without changing them. The first node's `job_limits`, `wireguard_pool`, and `wireguard_port_count` (or the matching flags) initialize them when it creates the cluster; after that, node configuration no longer changes them, on the first node or any other. Reconciliation settings, such as the allocation loss timeout, start at their defaults and have no node configuration. Inspect them with `trellisctl cluster settings`, change job limits with `trellisctl cluster set-job-limits`, and change reconciliation settings with `trellisctl cluster set-reconciliation` ([CLI](cli.md#inspect-and-change-cluster-settings)). The pool and port count are fixed for the life of the cluster. A node started with different values behaves as follows:
 
 - a different `job_limits` or `wireguard_pool` is ignored, and the node logs a warning at startup;
 - a node that leaves `wireguard_port_count` unset uses the cluster's count; one that sets a different count refuses to start and names the cluster's value, because the leader would reject its registration.
@@ -60,7 +60,6 @@ Namespace networking gives each namespace one stable UDP port from the cluster's
 Some node settings must still match on every node, because any node may become leader or take part in the same namespace network:
 
 - the **secrets-encryption key** (and `secrets_key_id`, if set explicitly), so every potential leader can decrypt replicated secret records;
-- `allocation_loss_timeout`, so how long a silent node is tolerated does not change with leadership;
 - the node signing mode and trusted node CA.
 
 ## Add a node
@@ -180,7 +179,7 @@ To move control-plane leadership deliberately before maintenance, the advanced c
 
 ## Node failure
 
-A node that misses heartbeats for 30 seconds becomes unhealthy and receives no new allocations. Once it has been silent for the allocation loss timeout (`allocation_loss_timeout`, default 45 seconds), and the current leader has been leader for at least 30 seconds, its allocations become lost. A newly elected leader counts that silence from the start of its leadership. Reconciliation then replaces the missing capacity on other nodes when placement remains valid.
+A node that misses heartbeats for 30 seconds becomes unhealthy and receives no new allocations. Once it has been silent for the allocation loss timeout (the `allocation_loss_timeout` cluster setting, default 45 seconds), and the current leader has been leader for at least 30 seconds, its allocations become lost. A newly elected leader counts that silence from the start of its leadership. Reconciliation then replaces the missing capacity on other nodes when placement remains valid.
 
 A lost allocation is not re-adopted. While its record is retained, if its node returns with the old containers still running, Trellis keeps them running until enough replacements are `running`, then stops them. If an older pruned allocation is later reported, Trellis stops it as an observed orphan. It stops them sooner if they block a replacement, such as one that needs the same host port on that node. Allocations that depend on a volume bound to the failed node stay unplaced rather than starting with an empty copy elsewhere. If that data is intentionally abandoned, use a new volume name; changing only `host_path` does not change the owning node.
 

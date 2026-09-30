@@ -34,8 +34,12 @@ type RaftStore struct {
 // bootstrapped cluster with a different name. Volume registrations preserve
 // locality metadata only; volume bytes remain external to the backup. Namespace
 // network port and subnet registrations preserve stable WireGuard pathway
-// assignments.
+// assignments. Cluster is the replicated cluster record, which carries the
+// cluster settings. A backup reads it from the same view as the desired
+// state; a restore installs it in the same transaction, so settings and the
+// jobs they admit are never restored separately.
 type DesiredSnapshot struct {
+	Cluster                    []byte            `json:"cluster,omitempty"`
 	Jobs                       map[string][]byte `json:"jobs"`
 	JobRevisions               map[string][]byte `json:"job_revisions,omitempty"`
 	Secrets                    map[string][]byte `json:"secrets"`

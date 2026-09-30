@@ -89,9 +89,9 @@ func TestReconcileStopsTerminalAllocationReportedByReturningNode(t *testing.T) {
 			s.nodes[node.ID] = node
 			s.leaderSince = s.now().Add(-leaderRecoveryGrace - time.Second)
 			tasks := []spec.TaskSpec{{Name: "app", Image: "app"}}
-			s.jobs[jobKey("default", "web")] = &Job{Spec: &spec.JobSpec{
+			s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{
 				Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: tasks}},
-			}, Revision: 1}
+			}), Revision: 1}
 			old := &Allocation{
 				ID: "old", Namespace: "default", JobName: "web", TaskGroupName: "app", Tasks: tasks,
 				Node: node, Generation: 1, JobRevision: 1, Phase: phase, Health: lifecycle.HealthUnknown,
@@ -157,9 +157,9 @@ func TestReconcileStopsStaleObservedGeneration(t *testing.T) {
 	s.nodes[node.ID] = node
 	s.leaderSince = s.now().Add(-leaderRecoveryGrace - time.Second)
 	tasks := []spec.TaskSpec{{Name: "app", Image: "app"}}
-	s.jobs[jobKey("default", "web")] = &Job{Spec: &spec.JobSpec{
+	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{
 		Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: tasks}},
-	}, Revision: 2}
+	}), Revision: 2}
 	s.allocations = []*Allocation{{
 		ID: "alloc", Namespace: "default", JobName: "web", TaskGroupName: "app", Tasks: tasks,
 		Node: node, Generation: 2, JobRevision: 2, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy,

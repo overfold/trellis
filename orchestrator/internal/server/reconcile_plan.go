@@ -134,20 +134,17 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 		jobKeys = append(jobKeys, key)
 	}
 	sort.Strings(jobKeys)
-	// admittedJobs holds canonical copies of the jobs this pass converges on.
+	// admittedJobs holds the stored canonical jobs this pass converges on.
 	// Stored jobs are never modified while planning.
 	admittedJobs := make(map[string]*Job, len(jobKeys))
 	namespaceDesired := make(map[string]int64)
 	for _, key := range jobKeys {
 		stored := in.Jobs[key]
-		canonical, err := spec.Canonical(stored.Spec, limits)
-		if err != nil {
+		if err := spec.ValidateWithLimits(stored.Spec, limits); err != nil {
 			plan.Diagnostics = append(plan.Diagnostics, reconcileDiagnostic{Message: "skip invalid job during reconciliation", Args: []any{"job", key, "error", err}})
 			continue
 		}
-		copied := *stored
-		copied.Spec = canonical
-		job := &copied
+		job := stored
 		namespace := job.Spec.Namespace
 		desired := desiredAllocations(job.Spec)
 		if namespaceDesired[namespace]+desired > int64(limits.MaxDesiredAllocationsPerNamespace) {
@@ -439,10 +436,10 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 				}
 			}
 			deficit := group.Count - len(current) - unavailable
-			strategy := updateStrategy(job, group.Name)
+			strategy := group.Update.Strategy
 			parallel := 0
 			if strategy == spec.UpdateRolling {
-				parallel = maxParallel(job, group.Name)
+				parallel = group.Update.MaxParallel
 			}
 			if backoff != nil && backoff.DelayedReplacements > max(deficit, 0) {
 				// Failed allocations whose capacity is no longer missing have

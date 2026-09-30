@@ -23,10 +23,31 @@ type backupStore struct {
 	data     memoryStore
 }
 
-func (b *backupStore) BackupDesired(string) (*state.DesiredSnapshot, error) { return b.snapshot, nil }
-func (b *backupStore) RestoreDesired(_ string, snapshot *state.DesiredSnapshot) error {
+// BackupDesired reads the cluster record from data, as the Bolt store reads
+// it from the same view as the desired state.
+func (b *backupStore) BackupDesired(cluster string) (*state.DesiredSnapshot, error) {
+	snapshot := *b.snapshot
+	snapshot.Cluster = b.data["trellis/"+cluster+"/meta"]
+	return &snapshot, nil
+}
+func (b *backupStore) RestoreDesired(cluster string, snapshot *state.DesiredSnapshot) error {
 	b.snapshot = snapshot
+	if len(snapshot.Cluster) > 0 {
+		b.data["trellis/"+cluster+"/meta"] = snapshot.Cluster
+	}
 	return nil
+}
+
+// newBackupTestServer returns a server whose state and backup store share
+// data, with an initialized cluster record.
+func newBackupTestServer(t *testing.T, store *backupStore, settings ClusterSettings) *Server {
+	t.Helper()
+	_, encoded := encodedAdministratorPublicKey(t)
+	s := NewServer(slog.Default(), nil, NewStateController(store.data, "test"), store, "test", "")
+	if err := s.Init(context.Background(), ClusterBootstrap{AdministratorPublicKey: encoded, Settings: settings}); err != nil {
+		t.Fatal(err)
+	}
+	return s
 }
 func (b *backupStore) Get(ctx context.Context, key string) ([]byte, error) {
 	return b.data.Get(ctx, key)
@@ -109,7 +130,7 @@ func TestJobRevisionRetentionAndDeletion(t *testing.T) {
 	controller := NewStateController(store, "test")
 	identity := jobKey("default", "web")
 	for revision := 1; revision <= jobRevisionRetention+3; revision++ {
-		job := &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "web"}, Revision: revision, Version: revision}
+		job := &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web"}), Revision: revision, Version: revision}
 		record := &JobRevisionRecord{Version: revision, Revision: revision, Spec: job.Spec, CreatedAt: time.Unix(int64(revision), 0).UTC()}
 		if err := controller.PutJobWithRevision(ctx, identity, job, record); err != nil {
 			t.Fatal(err)
@@ -192,7 +213,7 @@ func TestCompactJobRevisionsBoundsLegacyHistoryAndRemovesOrphans(t *testing.T) {
 func TestStateControllerRoundTripsDurableLeaderState(t *testing.T) {
 	ctx := context.Background()
 	controller := NewStateController(memoryStore{}, "test")
-	job := &Job{Spec: &spec.JobSpec{Name: "web"}, Revision: 3}
+	job := &Job{Spec: canonicalTestSpec(&spec.JobSpec{Name: "web"}), Revision: 3}
 	if err := controller.PutJob(ctx, "web", job); err != nil {
 		t.Fatal(err)
 	}
@@ -232,28 +253,49 @@ func TestStateControllerRoundTripsDurableLeaderState(t *testing.T) {
 func TestBackupRestoreRoundTripsPersistedJob(t *testing.T) {
 	ctx := context.Background()
 	store := &backupStore{data: memoryStore{}, snapshot: &state.DesiredSnapshot{Jobs: map[string][]byte{}, JobRevisions: map[string][]byte{}, Secrets: map[string][]byte{}, VolumeRegistrations: map[string][]byte{}, NetworkPortRegistrations: map[string][]byte{}}}
-	job := &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}}, Incarnation: uuid.NewString(), Revision: 1, Version: 1}
+	job := &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}}), Incarnation: uuid.NewString(), Revision: 1, Version: 1}
 	raw, err := json.Marshal(job)
 	if err != nil {
 		t.Fatal(err)
 	}
 	store.snapshot.Jobs["default%00web"] = raw
-	historical := &JobRevisionRecord{Version: 1, Revision: 1, Spec: &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 2000, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}}, CreatedAt: time.Now()}
+	historical := &JobRevisionRecord{Version: 1, Revision: 1, Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 2000, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}}), CreatedAt: time.Now()}
 	historicalRaw, err := json.Marshal(historical)
 	if err != nil {
 		t.Fatal(err)
 	}
 	store.snapshot.JobRevisions["default%00web/1"] = historicalRaw
-	s := NewServer(slog.Default(), nil, newNopStateController(), store, "test", "")
-	if err := s.Restore(ctx, mustBackup(t, s)); err != nil {
+	source := DefaultClusterSettings()
+	source.JobLimits.DefaultTaskCPU = 250
+	source.Reconciliation.AllocationLossTimeout = 3 * time.Minute
+	source.Reconciliation.TerminalAllocationRetention = 9
+	backup := mustBackup(t, newBackupTestServer(t, store, source))
+	if backup.FormatVersion != api.BackupFormatVersion || backup.TrellisVersion == "" {
+		t.Fatalf("backup format %d from %q, want format %d with the producing Trellis version", backup.FormatVersion, backup.TrellisVersion, api.BackupFormatVersion)
+	}
+	if backup.ClusterSettings.Reconciliation.AllocationLossTimeout != 3*time.Minute || backup.ClusterSettings.JobLimits.DefaultTaskCPU != 250 {
+		t.Fatalf("backup settings = %+v, want the replicated settings", backup.ClusterSettings)
+	}
+
+	target := &backupStore{data: memoryStore{}, snapshot: &state.DesiredSnapshot{}}
+	s := newBackupTestServer(t, target, DefaultClusterSettings())
+	if err := s.Restore(ctx, backup); err != nil {
 		t.Fatalf("restore backup containing persisted job: %v", err)
 	}
+	if got := s.ClusterSettings(); got != source {
+		t.Fatalf("restored settings = %+v, want %+v", got, source)
+	}
+	persisted, err := NewStateController(target.data, "test").GetCluster(ctx)
+	if err != nil || persisted == nil || persisted.Settings != source {
+		t.Fatalf("persisted restored cluster = %+v, %v; want settings %+v", persisted, err, source)
+	}
+	store = target
 	var restored Job
 	if err := json.Unmarshal(store.snapshot.Jobs["default%00web"], &restored); err != nil {
 		t.Fatal(err)
 	}
 	if restored.Spec == nil || restored.Spec.TaskGroups[0].Tasks[0].Resources == nil || restored.Incarnation != job.Incarnation {
-		t.Fatalf("restored job was not canonicalized: %#v", restored)
+		t.Fatalf("restored job is not the canonical backed-up job: %#v", restored)
 	}
 	if string(store.snapshot.JobRevisions["default%00web/1"]) != string(historicalRaw) {
 		t.Fatal("restore rewrote historical revision")
@@ -297,4 +339,46 @@ func mustBackup(t *testing.T, s *Server) *api.BackupSnapshot {
 		t.Fatal(err)
 	}
 	return backup
+}
+
+func TestRestoreRefusesOtherBackupFormatsWithActionableError(t *testing.T) {
+	store := &backupStore{data: memoryStore{}, snapshot: &state.DesiredSnapshot{}}
+	s := newBackupTestServer(t, store, DefaultClusterSettings())
+	backup := mustBackup(t, s)
+	backup.FormatVersion = api.BackupFormatVersion - 1
+	backup.TrellisVersion = "v0.4.2"
+	err := s.Restore(context.Background(), backup)
+	if err == nil {
+		t.Fatal("restored a backup with a different format version")
+	}
+	for _, want := range []string{fmt.Sprintf("backup format version %d", api.BackupFormatVersion-1), "Trellis v0.4.2", fmt.Sprintf("reads backup format version %d only", api.BackupFormatVersion), "release"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not mention %q", err, want)
+		}
+	}
+	backup.TrellisVersion = ""
+	if err := s.Restore(context.Background(), backup); err == nil || !strings.Contains(err.Error(), "unrecorded Trellis release") {
+		t.Fatalf("error without a recorded version = %v", err)
+	}
+}
+
+func TestRestoreRequiresMatchingNetworkSettings(t *testing.T) {
+	store := &backupStore{data: memoryStore{}, snapshot: &state.DesiredSnapshot{}}
+	backup := mustBackup(t, newBackupTestServer(t, store, DefaultClusterSettings()))
+	other := DefaultClusterSettings()
+	other.WireGuardPortCount = 64
+	target := newBackupTestServer(t, &backupStore{data: memoryStore{}, snapshot: &state.DesiredSnapshot{}}, other)
+	if err := target.Restore(context.Background(), backup); err == nil || !strings.Contains(err.Error(), "wireguard_port_count 256") {
+		t.Fatalf("restore into a cluster with other network settings: %v", err)
+	}
+}
+
+func TestRestoreRefusesInvalidBackupSettings(t *testing.T) {
+	store := &backupStore{data: memoryStore{}, snapshot: &state.DesiredSnapshot{}}
+	s := newBackupTestServer(t, store, DefaultClusterSettings())
+	backup := mustBackup(t, s)
+	backup.ClusterSettings.Reconciliation.AllocationLossTimeout = 0
+	if err := s.Restore(context.Background(), backup); err == nil || !strings.Contains(err.Error(), "allocation_loss_timeout") {
+		t.Fatalf("restore with invalid settings: %v", err)
+	}
 }

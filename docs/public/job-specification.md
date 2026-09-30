@@ -78,6 +78,21 @@ The canonical JSON representation uses machine values instead:
 
 Memory is bytes and durations are nanoseconds in the current API model. Parsing strings such as `256MiB`, `4GB`, or `10s` is therefore a responsibility of the authoring consumer, not the Trellis HTTP API. Omitted values and their effective defaults remain Trellis semantics; a consumer should not duplicate those rules.
 
+### Defaults and the stored job
+
+Before a job is planned or stored, Trellis resolves every omitted optional field to its effective value. The stored job, `trellisctl jobs get`, and plans therefore show exactly what Trellis runs, and later changes to cluster settings or Trellis defaults never change the behavior of a job that is already stored. Applying the same manifest again produces no change because its resolved form is identical.
+
+| Omitted field | Resolved value |
+| --- | --- |
+| task group `runtime` | `runc` |
+| task group `restart` | `max_restarts: 3`, `window: 10m` |
+| task group `update` | `strategy: recreate`, `max_parallel: 1` (zero also means one) |
+| task `networking` or `networking.mode` | `mode: isolated` |
+| task `resources` | the cluster's `default_task_cpu` and `default_task_memory` job limits at apply time |
+| `health_check.interval`, `timeout`, `threshold` | `10s`, `5s`, `3` (zero also selects the default) |
+| HTTP `health_check.path` | `/` |
+| file secret `mode` | `0400` (zero also selects the default) |
+
 ## Job fields
 
 | Field | Required | Meaning |
@@ -95,7 +110,7 @@ There is no job-level networking block. Network attachment belongs to each task 
 | `name` | Yes | Group identifier, unique within the job. |
 | `count` | Yes | Desired allocation count; must be at least one. |
 | `tasks` | Yes | One or more containers placed in every allocation. |
-| `runtime` | No | Default runtime (`""`), `runc`, or `runsc`. |
+| `runtime` | No | `runc` (the default) or `runsc`. |
 | `labels` | No | Discovery and routing metadata. |
 | `api_access` | No | Least-privilege API credential request. Omit it for no injected API credentials. |
 | `constraints` | No | Exact matches against `os`, `arch`, or node labels. |
@@ -138,13 +153,13 @@ Enabled API access injects `TRELLIS_ADDR`, `TRELLIS_TOKEN`, and `TRELLIS_NAMESPA
 
 `api_access` is a task-group privilege boundary: every task in the group can read the credential. Do not colocate untrusted sidecars with an API-enabled controller. Request the narrowest scope and access level the workload needs.
 
-When `restart` is omitted, the agent allows three restarts per ten-minute window. An explicit `restart.max_restarts` is zero or greater and `restart.window` is a positive Go-style duration such as `5m`. The agent restarts a stopped task in place while the budget allows. Restarts are counted in fixed windows of `restart.window`, and the count resets when a window elapses. The count belongs to the allocation: control-plane start retries and agent restarts keep it and never grant a fresh budget, while a replacement allocation starts with its own. Once a task stops after the allowed restarts in the current window are used up, the allocation becomes `failed` with reason `restart_budget_exhausted` and is not restarted again, even after the window elapses. The failed allocation record and its event history remain for operator diagnosis; to keep the group at `count`, the control plane schedules a new allocation in its place.
+When `restart` is omitted, Trellis stores a policy of three restarts per ten-minute window. An explicit `restart.max_restarts` is zero or greater and `restart.window` is a positive Go-style duration such as `5m`. The agent restarts a stopped task in place while the budget allows. Restarts are counted in fixed windows of `restart.window`, and the count resets when a window elapses. The count belongs to the allocation: control-plane start retries and agent restarts keep it and never grant a fresh budget, while a replacement allocation starts with its own. Once a task stops after the allowed restarts in the current window are used up, the allocation becomes `failed` with reason `restart_budget_exhausted` and is not restarted again, even after the window elapses. The failed allocation record and its event history remain for operator diagnosis; to keep the group at `count`, the control plane schedules a new allocation in its place.
 
-Replacements of failed allocations are delayed by a per-task-group backoff so that a workload that always fails does not produce an unbounded series of allocations. The first replacement waits 10s, and each further consecutive failure doubles the delay up to 5m. The count resets once an allocation placed after the latest failure has run for 10 minutes without being reported unhealthy, and applying a new job revision starts from zero. While the backoff is active, only the replacements of failed allocations wait: an allocation lost with its node, or a higher `count`, is placed immediately. `trellisctl jobs status` shows the backoff under **Replacement backoff**, with the failure count, the latest failed allocation and its reason, and the next replacement time. After fixing the cause without applying a new revision, `trellisctl jobs reset-backoff JOB GROUP` clears the backoff so the failed allocations are replaced at once. The control plane also keeps only the five newest stopped, failed, or lost allocation records per task group. If a node later reports a container for a pruned allocation, reconciliation treats it as an orphan and stops it. These limits are server defaults rather than manifest fields.
+Replacements of failed allocations are delayed by a per-task-group backoff so that a workload that always fails does not produce an unbounded series of allocations. With the default cluster settings, the first replacement waits 10s, and each further consecutive failure doubles the delay up to 5m. The count resets once an allocation placed after the latest failure has run for 10 minutes without being reported unhealthy, and applying a new job revision starts from zero. While the backoff is active, only the replacements of failed allocations wait: an allocation lost with its node, or a higher `count`, is placed immediately. `trellisctl jobs status` shows the backoff under **Replacement backoff**, with the failure count, the latest failed allocation and its reason, and the next replacement time. After fixing the cause without applying a new revision, `trellisctl jobs reset-backoff JOB GROUP` clears the backoff so the failed allocations are replaced at once. The control plane also keeps only the five newest (by default) stopped, failed, or lost allocation records per task group. If a node later reports a container for a pruned allocation, reconciliation treats it as an orphan and stops it. These values are replicated [cluster settings](operations.md#cluster-settings) rather than manifest fields.
 
-When a node stops sending heartbeats for longer than the allocation loss timeout (45 seconds by default), its allocations become `lost` and are replaced like failed ones. Lost is terminal: if the node returns, its lost allocations are never adopted again. While a lost allocation record is retained, containers the returning node still runs for it keep running until the group has `count` running replacements, and are then stopped. If an older pruned allocation is later reported, Trellis stops it as an observed orphan. They are stopped earlier when they block a replacement, for example by holding a host port the replacement needs on the same node. The loss timeout is server configuration (`allocation_loss_timeout`), not a manifest field. See [lost allocations](user-model.md#lost-allocations).
+When a node stops sending heartbeats for longer than the allocation loss timeout (45 seconds by default), its allocations become `lost` and are replaced like failed ones. Lost is terminal: if the node returns, its lost allocations are never adopted again. While a lost allocation record is retained, containers the returning node still runs for it keep running until the group has `count` running replacements, and are then stopped. If an older pruned allocation is later reported, Trellis stops it as an observed orphan. They are stopped earlier when they block a replacement, for example by holding a host port the replacement needs on the same node. The loss timeout is a replicated [cluster setting](operations.md#cluster-settings) (`allocation_loss_timeout`), not a manifest field. See [lost allocations](user-model.md#lost-allocations).
 
-`update.strategy` is `recreate` (the default) or `rolling`. For rolling updates, `max_parallel` limits both the number of not-yet-healthy replacements in flight and temporary live capacity above `count`. A stop frees capacity only after it succeeds, so a failed stop cannot admit an excess replacement. Zero uses the effective default of one.
+`update.strategy` is `recreate` (the default) or `rolling`. For rolling updates, `max_parallel` limits both the number of not-yet-healthy replacements in flight and temporary live capacity above `count`. A stop frees capacity only after it succeeds, so a failed stop cannot admit an excess replacement. Omission or zero resolves to one.
 
 Task groups are the unit of placement, scaling, updates, restart behavior, and draining. Every task in a group is coupled to that lifecycle.
 
@@ -172,7 +187,7 @@ networking:
 
 `networking.mode` is:
 
-- omitted or `isolated`: a private container network namespace with no external routes;
+- `isolated` (the default when omitted): a private container network namespace with no external routes;
 - `host`: join the node network namespace directly;
 - `namespace`: join the private Trellis network belonging to the workload namespace.
 
@@ -234,7 +249,7 @@ secrets:
     mode: 256 # decimal form of 0400
 ```
 
-An environment target requires only a valid `env` name and may not collide with `env`. Its plaintext is not stored in containerd's OCI metadata, but it necessarily exists in the running process environment. A file target requires a clean path below `/run/trellis-secrets/`; mode may be `0400` or `0600` (or their YAML numeric values), and zero selects the default. Trellis assigns the mounted file to the image-configured process UID/GID so owner-only files work for non-root images. Names, environment targets, and file paths must be unique within a task.
+An environment target requires only a valid `env` name and may not collide with `env`. Its plaintext is not stored in containerd's OCI metadata, but it necessarily exists in the running process environment. A file target requires a clean path below `/run/trellis-secrets/`; mode may be `0400` or `0600` (or their YAML numeric values), and omission or zero resolves to `0400`. Trellis assigns the mounted file to the image-configured process UID/GID so owner-only files work for non-root images. Names, environment targets, and file paths must be unique within a task.
 
 ### Health checks
 
@@ -258,13 +273,13 @@ health_check:
   command: ["/usr/local/bin/check-ready"]
 ```
 
-`interval`, `timeout`, and `threshold` must be non-negative. Zero or omission selects the effective defaults: a 10-second interval, 5-second timeout, and threshold of 3. Positive values override those defaults. HTTP and TCP checks target the configured port on loopback inside the task's own network environment, regardless of networking mode or runtime. An HTTP check's `path` is the request path and optional query sent unchanged to that port. It must begin with `/` and be at most 1024 bytes, and may contain only letters, digits, `-._~!$&'()*+,;=:@/?`, and `%XX` percent-encodings (encode anything else; a `#fragment` is not allowed). An empty path requests `/`. TCP and script checks ignore `path`. A response from 200 through 399 is healthy. The probe follows plain-HTTP redirects to `127.0.0.1` or `localhost` on the same port; more than 10 such redirects fails the check. A redirect anywhere else, including another loopback address or port, is not followed and its 3xx response is the result, so a service that only redirects elsewhere (for example to HTTPS) passes its check. A check never leaves task-local loopback. Script checks execute the supplied command in the task normally. `/run/trellis` is reserved for Trellis-managed task files and cannot be used as a volume destination. A running task without an explicit health check is treated as healthy, which is useful for the first tutorial but weaker than application-aware readiness for a service.
+`interval`, `timeout`, and `threshold` must be non-negative. Zero or omission resolves to a 10-second interval, 5-second timeout, and threshold of 3 when the job is applied. Positive values override those defaults. HTTP and TCP checks target the configured port on loopback inside the task's own network environment, regardless of networking mode or runtime. An HTTP check's `path` is the request path and optional query sent unchanged to that port. It must begin with `/` and be at most 1024 bytes, and may contain only letters, digits, `-._~!$&'()*+,;=:@/?`, and `%XX` percent-encodings (encode anything else; a `#fragment` is not allowed). An omitted path resolves to `/`. TCP and script checks ignore `path`. A response from 200 through 399 is healthy. The probe follows plain-HTTP redirects to `127.0.0.1` or `localhost` on the same port; more than 10 such redirects fails the check. A redirect anywhere else, including another loopback address or port, is not followed and its 3xx response is the result, so a service that only redirects elsewhere (for example to HTTPS) passes its check. A check never leaves task-local loopback. Script checks execute the supplied command in the task normally. `/run/trellis` is reserved for Trellis-managed task files and cannot be used as a volume destination. A running task without an explicit health check is treated as healthy, which is useful for the first tutorial but weaker than application-aware readiness for a service.
 
 ## Validation and editor tooling
 
 Job, namespace, group, task, secret, and volume identifiers accept letters, digits, `_`, `.`, and `-`, must begin with a letter or digit, and are limited to 63 characters. Unknown YAML fields are rejected by the first-party parser.
 
-The server also applies operator-configured admission limits after resolving default resources. Defaults are 500 replicas per task group, 64 task groups per job, 32 tasks per task group, 1,000 desired allocations per job, 10,000 desired allocations per namespace, 1,000,000 millicores per task, and 1 TiB memory per task. Operators may choose different values; see [Node configuration](operations.md#node-configuration). A manifest can therefore satisfy the structural schema yet exceed the target cluster's policy.
+The server also applies operator-configured admission limits after resolving default resources. Defaults are 500 replicas per task group, 64 task groups per job, 32 tasks per task group, 1,000 desired allocations per job, 10,000 desired allocations per namespace, 1,000,000 millicores per task, and 1 TiB memory per task. Operators may choose different values; see [Cluster settings](operations.md#cluster-settings). A manifest can therefore satisfy the structural schema yet exceed the target cluster's policy.
 
 The YAML schema is intended for VS Code, Neovim, Zed, and other editors that support YAML language-server schemas. Checked-in beginner/intermediate examples use a stable raw-GitHub `yaml-language-server` schema URL, so completion and basic diagnostics continue to work when a manifest is copied out of the repository. Schema diagnostics are structural assistance only; `trellisctl jobs apply --check`, `POST /v1/namespaces/{namespace}/jobs/plan`, and apply use Trellis's authoritative validator, which reports all independently actionable validation issues with paths and error codes.
 

@@ -250,9 +250,14 @@ func materializeSecrets(dir, taskName string, delivered []api.DeliveredSecret) (
 		if dir == "" {
 			return nil, fmt.Errorf("secret directory is required")
 		}
-		mode := os.FileMode(secret.Mode)
-		if mode == 0 || secret.Target == spec.SecretTargetEnv {
-			mode = 0o400
+		// Environment values are private delivery files read only by the
+		// runtime wrapper. File secrets carry their canonical mode.
+		mode := os.FileMode(0o400)
+		if secret.Target == spec.SecretTargetFile {
+			if secret.Mode != 0o400 && secret.Mode != 0o600 {
+				return nil, fmt.Errorf("secret %q file mode %#o must be 0400 or 0600", secret.Name, secret.Mode)
+			}
+			mode = os.FileMode(secret.Mode)
 		}
 		file, err := os.OpenFile(hostPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, mode)
 		if err != nil {

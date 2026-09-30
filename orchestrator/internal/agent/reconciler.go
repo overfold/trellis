@@ -11,11 +11,7 @@ import (
 	"github.com/overfold/trellis/internal/spec"
 )
 
-const (
-	reconcileInterval    = 3 * time.Second
-	defaultMaxRestarts   = 3
-	defaultRestartWindow = 10 * time.Minute
-)
+const reconcileInterval = 3 * time.Second
 
 // AllocationReconciler is the single authority for local allocation lifecycle
 // decisions. Runtime inspection and health checks provide observations; this
@@ -87,13 +83,6 @@ func (r *AllocationReconciler) TrackRecovered(allocID string, healthManaged bool
 	r.track(allocID, policy, &allocationReconcileState{healthManaged: healthManaged, attempts: attempts, window: window, exhausted: exhausted})
 }
 
-func restartPolicyLimits(policy *spec.RestartPolicySpec) (int, time.Duration) {
-	if policy == nil {
-		return defaultMaxRestarts, defaultRestartWindow
-	}
-	return policy.MaxRestarts, policy.Window
-}
-
 func advanceRestartState(attempts int, window time.Time, maxRestarts int, restartWindow time.Duration, now time.Time) (int, time.Time, bool) {
 	if window.IsZero() {
 		window = now
@@ -112,7 +101,12 @@ func (r *AllocationReconciler) track(allocID string, policy *spec.RestartPolicyS
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	state.maxRestarts, state.restartWindow = restartPolicyLimits(policy)
+	// Start requests carry the job's canonical restart policy and the
+	// handler refuses requests without one, so policy is nil only for a
+	// caller error; such an allocation is never restarted locally.
+	if policy != nil {
+		state.maxRestarts, state.restartWindow = policy.MaxRestarts, policy.Window
+	}
 	if state.window.IsZero() {
 		state.window = time.Now()
 	}

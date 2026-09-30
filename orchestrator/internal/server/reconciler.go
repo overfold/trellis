@@ -51,25 +51,6 @@ type Action struct {
 }
 
 const (
-	// DefaultAllocationLossTimeout is how long a node must go without a
-	// heartbeat before its allocations become lost, unless configured.
-	DefaultAllocationLossTimeout = 45 * time.Second
-	// MinAllocationLossTimeout keeps the loss timeout at or above the point
-	// where a silent node is marked unhealthy (three heartbeat intervals).
-	MinAllocationLossTimeout = 3 * heartbeatInterval
-	// MaxAllocationLossTimeout bounds the configurable loss timeout.
-	MaxAllocationLossTimeout = 24 * time.Hour
-)
-
-// ValidateAllocationLossTimeout checks an operator-configured loss timeout.
-func ValidateAllocationLossTimeout(timeout time.Duration) error {
-	if timeout < MinAllocationLossTimeout || timeout > MaxAllocationLossTimeout {
-		return fmt.Errorf("allocation loss timeout %s must be between %s and %s", timeout, MinAllocationLossTimeout, MaxAllocationLossTimeout)
-	}
-	return nil
-}
-
-const (
 	leaderRecoveryGrace           = 30 * time.Second
 	maxExecutionAttempts          = 8
 	networkPlanBaseTimeout        = 15 * time.Second
@@ -123,28 +104,17 @@ func workloadAPIAddress(serverAddr string) (string, error) {
 	return net.JoinHostPort("trellis", port), nil
 }
 
+// updateStrategy returns the canonical update strategy of a job task group.
+// Admitted jobs are canonical, so every group carries an explicit strategy. A
+// group removed from the job has nothing to roll to, so its allocations are
+// replaced as with recreate.
 func updateStrategy(job *Job, groupName string) spec.UpdateStrategy {
 	for i := range job.Spec.TaskGroups {
 		if job.Spec.TaskGroups[i].Name == groupName {
-			if job.Spec.TaskGroups[i].Update != nil && job.Spec.TaskGroups[i].Update.Strategy != "" {
-				return job.Spec.TaskGroups[i].Update.Strategy
-			}
-			return spec.UpdateRecreate
+			return job.Spec.TaskGroups[i].Update.Strategy
 		}
 	}
 	return spec.UpdateRecreate
-}
-
-func maxParallel(job *Job, groupName string) int {
-	for i := range job.Spec.TaskGroups {
-		if job.Spec.TaskGroups[i].Name == groupName {
-			if job.Spec.TaskGroups[i].Update != nil && job.Spec.TaskGroups[i].Update.MaxParallel > 0 {
-				return job.Spec.TaskGroups[i].Update.MaxParallel
-			}
-			return 1
-		}
-	}
-	return 1
 }
 
 func cloneAllocationForReconcile(allocation *Allocation) (*Allocation, error) {
@@ -514,14 +484,7 @@ func (s *Server) reconcilePlanInputLocked(now time.Time, volumeOwners map[string
 	if limits == (spec.Limits{}) {
 		limits = spec.DefaultLimits()
 	}
-	policy := s.replacementPolicy
-	if policy == (ReplacementPolicy{}) {
-		policy = DefaultReplacementPolicy()
-	}
-	allocationLossTimeout := s.allocationLossTimeout
-	if allocationLossTimeout == 0 {
-		allocationLossTimeout = DefaultAllocationLossTimeout
-	}
+	reconciliation := s.reconciliationSettingsLocked()
 	snapshots := make([]*Allocation, len(s.allocations))
 	originals := make(map[*Allocation]*Allocation, len(s.allocations))
 	for i, allocation := range s.allocations {
@@ -538,8 +501,8 @@ func (s *Server) reconcilePlanInputLocked(now time.Time, volumeOwners map[string
 		Now:                   now,
 		LeaderSince:           s.leaderSince,
 		Limits:                limits,
-		Policy:                policy,
-		AllocationLossTimeout: allocationLossTimeout,
+		Policy:                reconciliation.replacementPolicy(),
+		AllocationLossTimeout: reconciliation.AllocationLossTimeout,
 		Jobs:                  s.jobs,
 		Nodes:                 s.nodes,
 		Allocations:           snapshots,

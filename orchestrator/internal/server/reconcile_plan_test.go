@@ -24,7 +24,7 @@ func planTestJob(name string, count, revision int, strategy spec.UpdateStrategy)
 	if strategy != "" {
 		group.Update = &spec.UpdateSpec{Strategy: strategy}
 	}
-	return &Job{Spec: &spec.JobSpec{Namespace: "default", Name: name, TaskGroups: []spec.TaskGroupSpec{group}}, Revision: revision}
+	return &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: name, TaskGroups: []spec.TaskGroupSpec{group}}), Revision: revision}
 }
 
 func planTestAllocation(id string, node *Node, phase lifecycle.Phase, revision int) *Allocation {
@@ -334,6 +334,7 @@ func TestPlanReconciliationPersistsPlacementDiagnosticsAndRecovers(t *testing.T)
 				job := planTestJob("web", 2, 1, "")
 				tasks := []spec.TaskSpec{{Name: "server", Image: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkHost, Ports: []spec.PortSpec{{Port: 8080}}}}}
 				job.Spec.TaskGroups[0].Tasks = tasks
+				canonicalTestSpec(job.Spec)
 				node := healthyNode(1)
 				existing := planTestAllocation("existing", node, lifecycle.PhaseRunning, 1)
 				existing.Tasks = tasks
@@ -404,6 +405,7 @@ func TestPlanReconciliationDoesNotMutateInputs(t *testing.T) {
 	healthy := planTestNode(1, NodeStatusHealthy)
 	job := planTestJob("web", 2, 2, spec.UpdateRolling)
 	job.Spec.TaskGroups[0].Tasks[0].Volumes = []spec.VolumeSpec{{Name: "data", HostPath: "@/data", ContainerPath: "/data"}}
+	canonicalTestSpec(job.Spec)
 	outdated := planTestAllocation("a", healthy, lifecycle.PhaseRunning, 1)
 	failed := planTestAllocation("b", healthy, lifecycle.PhaseFailed, 1)
 	input := planTestInput(map[string]*Job{jobKey("default", "web"): job}, []*Node{healthy}, outdated, failed)
@@ -429,9 +431,6 @@ func TestPlanReconciliationDoesNotMutateInputs(t *testing.T) {
 	}
 	if after := before(); after != snapshot {
 		t.Fatalf("planning mutated its inputs:\nbefore %s\nafter  %s", snapshot, after)
-	}
-	if job.Spec.TaskGroups[0].Tasks[0].Resources != nil {
-		t.Fatal("planning resolved resource defaults into the stored job spec")
 	}
 	if len(plan.NewAllocations) == 0 || plan.NewAllocations[0].Tasks[0].Resources == nil {
 		t.Fatal("new allocation did not receive the canonical task resources")

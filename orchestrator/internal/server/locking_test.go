@@ -33,7 +33,7 @@ func TestExecuteAcquiresServerLockBeforeAllocationLock(t *testing.T) {
 			Tasks: []spec.TaskSpec{{Name: "server", Image: "app:v1"}},
 		}},
 	}
-	s.jobs[jobKey("default", "web")] = &Job{Spec: jobSpec, Revision: 1}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(jobSpec), Revision: 1}
 
 	alloc := &Allocation{
 		ID:            "default-web-api-deadbeef",

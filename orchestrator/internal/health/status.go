@@ -22,11 +22,9 @@ type TaskHealth struct {
 	threshold       int
 }
 
-// NewTaskHealth creates a tracker with the supplied success threshold.
+// NewTaskHealth creates a tracker with the supplied canonical, positive
+// consecutive-result threshold.
 func NewTaskHealth(threshold int) *TaskHealth {
-	if threshold <= 0 {
-		threshold = defaultCheckThreshold
-	}
 	return &TaskHealth{
 		Status:          StatusInitializing,
 		ConsecutivePass: 0,
