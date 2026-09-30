@@ -13,11 +13,15 @@ import (
 
 func validSnapshotJob(t *testing.T, namespace, name string, revision int) (string, []byte) {
 	t.Helper()
-	value, err := json.Marshal(persistedJob{Spec: &spec.JobSpec{
+	job := &spec.JobSpec{
 		Namespace:  namespace,
 		Name:       name,
 		TaskGroups: []spec.TaskGroupSpec{{Name: "group", Count: 1, Tasks: []spec.TaskSpec{{Name: "task", Image: "example/image:1"}}}},
-	}, Revision: revision, Version: revision})
+	}
+	if err := spec.Canonicalize(job, spec.DefaultLimits()); err != nil {
+		t.Fatal(err)
+	}
+	value, err := json.Marshal(persistedJob{Spec: job, Revision: revision, Version: revision})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -337,3 +341,34 @@ func TestBoltBatchDeletesPrefixAtomically(t *testing.T) {
 var _ Store = (*BoltStore)(nil)
 var _ AtomicStore = (*BoltStore)(nil)
 var _ PrefixIterator = (*BoltStore)(nil)
+
+func TestDesiredSnapshotCarriesClusterRecord(t *testing.T) {
+	store, err := NewBoltStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	ctx := context.Background()
+	if err := store.Put(ctx, "trellis/old/meta", []byte(`{"settings":{"a":1}}`)); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.DesiredSnapshot("old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(snapshot.Cluster) != `{"settings":{"a":1}}` {
+		t.Fatalf("snapshot cluster = %q", snapshot.Cluster)
+	}
+
+	snapshot.Cluster = []byte(`{"settings":{"a":2}}`)
+	if err := store.RestoreDesired("new", snapshot); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := store.Get(ctx, "trellis/new/meta")
+	if err != nil || string(restored) != `{"settings":{"a":2}}` {
+		t.Fatalf("restored cluster record = %q, %v", restored, err)
+	}
+	if err := store.RestoreDesired("other", &DesiredSnapshot{Cluster: []byte(`{`)}); err == nil {
+		t.Fatal("restored an invalid cluster record")
+	}
+}

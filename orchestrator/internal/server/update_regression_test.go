@@ -68,7 +68,7 @@ func TestHandleUndrainNodeReportsResumeFailure(t *testing.T) {
 	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusDraining}
 	s.nodes[node.ID] = node
 	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}
-	s.jobs[jobKey("default", "web")] = &Job{Spec: jobSpec, Revision: 1}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(jobSpec), Revision: 1}
 	s.allocations = []*Allocation{{ID: "original", Namespace: "default", JobName: "web", TaskGroupName: "api", Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning, Draining: true, DrainReason: "node"}}
 	e := echo.New()
 	NewHandler(s).Register(e)
@@ -122,7 +122,7 @@ func TestReconcileRollingDoesNotReuseHealthyReplacement(t *testing.T) {
 		}},
 	}
 	s.jobs[jobKey("default", "web")] = &Job{
-		Spec:          newSpec,
+		Spec:          canonicalTestSpec(newSpec),
 		Revision:      2,
 		ContentHashes: map[string]string{"api": spec.TaskGroupContentHash(&newSpec.TaskGroups[0])},
 	}
@@ -172,7 +172,7 @@ func TestReconcileStopsPendingFromOldRevision(t *testing.T) {
 	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
 	s.nodes[node.ID] = node
 	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app:v2"}}}}}
-	s.jobs[jobKey("default", "web")] = &Job{Spec: jobSpec, Revision: 2}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(jobSpec), Revision: 2}
 	old := &Allocation{ID: "old", Namespace: "default", JobName: "web", TaskGroupName: "api", Tasks: []spec.TaskSpec{{Name: "server", Image: "app:v1"}}, Generation: 1, JobRevision: 1, Phase: lifecycle.PhasePending}
 	s.allocations = []*Allocation{old}
 
@@ -201,7 +201,7 @@ func TestReconcileChargesAllocationsQueuedForStop(t *testing.T) {
 		{
 			name: "deleted job CPU",
 			setup: func(_ *testing.T, s *Server, node *Node, tasks []spec.TaskSpec) *Allocation {
-				s.jobs[jobKey("default", "wanted")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "wanted", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: tasks}}}, Revision: 1}
+				s.jobs[jobKey("default", "wanted")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "wanted", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: tasks}}}), Revision: 1}
 				return &Allocation{ID: "obsolete", Namespace: "default", JobName: "deleted", TaskGroupName: "app", Tasks: tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning}
 			},
 			tasks:             []spec.TaskSpec{{Name: "app", Image: "app", Resources: &spec.ResourcesSpec{CPU: 1000, Memory: 128 << 20}}},
@@ -214,8 +214,8 @@ func TestReconcileChargesAllocationsQueuedForStop(t *testing.T) {
 				limits := spec.DefaultLimits()
 				limits.MaxDesiredAllocationsPerNamespace = 1
 				s.jobLimits = limits
-				s.jobs[jobKey("default", "admitted")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "admitted", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: tasks}}}, Revision: 1}
-				s.jobs[jobKey("default", "unadmitted")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "unadmitted", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: tasks}}}, Revision: 1}
+				s.jobs[jobKey("default", "admitted")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "admitted", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: tasks}}}), Revision: 1}
+				s.jobs[jobKey("default", "unadmitted")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "unadmitted", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: tasks}}}), Revision: 1}
 				return &Allocation{ID: "obsolete", Namespace: "default", JobName: "unadmitted", TaskGroupName: "app", Tasks: tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning}
 			},
 			tasks:             []spec.TaskSpec{{Name: "app", Image: "app", Resources: &spec.ResourcesSpec{CPU: 100, Memory: 1 << 30}}},
@@ -225,7 +225,7 @@ func TestReconcileChargesAllocationsQueuedForStop(t *testing.T) {
 		{
 			name: "recreate-obsolete static host port",
 			setup: func(_ *testing.T, s *Server, node *Node, tasks []spec.TaskSpec) *Allocation {
-				s.jobs[jobKey("default", "web")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: tasks}}}, Revision: 2}
+				s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: tasks}}}), Revision: 2}
 				return &Allocation{ID: "obsolete", Namespace: "default", JobName: "web", TaskGroupName: "app", Tasks: tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning}
 			},
 			tasks:             []spec.TaskSpec{{Name: "app", Image: "app:v2", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkHost, Ports: []spec.PortSpec{{Port: 8080}}}}},
@@ -300,7 +300,7 @@ func TestReconcileStopsObsoletePendingGroupsAndReplicas(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()
 	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}
-	s.jobs[jobKey("default", "web")] = &Job{Spec: jobSpec, Revision: 2}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(jobSpec), Revision: 2}
 	makePending := func(id, group string) *Allocation {
 		return &Allocation{ID: id, Namespace: "default", JobName: "web", TaskGroupName: group, Generation: 1, JobRevision: 2, Phase: lifecycle.PhasePending}
 	}
@@ -326,7 +326,7 @@ func TestDrainNodeStopsAllocationAfterReplacementHealthy(t *testing.T) {
 	s.leaderSince = s.now().Add(-time.Minute)
 
 	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}
-	s.jobs[jobKey("default", "web")] = &Job{Spec: jobSpec, Revision: 1}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(jobSpec), Revision: 1}
 	original := &Allocation{ID: "original", Namespace: "default", JobName: "web", TaskGroupName: "api", Tasks: jobSpec.TaskGroups[0].Tasks, Node: drainingNode, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy, Diagnostic: lifecycle.Diagnostic{CreatedAt: s.now(), TransitionedAt: s.now()}}
 	s.allocations = []*Allocation{original}
 
@@ -356,7 +356,7 @@ func TestUndrainNodeRetainsCurrentAllocation(t *testing.T) {
 	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
 	s.nodes[node.ID] = node
 	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}
-	s.jobs[jobKey("default", "web")] = &Job{Spec: jobSpec, Revision: 2}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(jobSpec), Revision: 2}
 	allocation := &Allocation{ID: "original", Namespace: "default", JobName: "web", TaskGroupName: "api", Tasks: jobSpec.TaskGroups[0].Tasks, Node: node, Generation: 1, JobRevision: 2, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy, Diagnostic: lifecycle.Diagnostic{CreatedAt: s.now(), TransitionedAt: s.now()}}
 	s.allocations = []*Allocation{allocation}
 
@@ -402,7 +402,7 @@ func TestUndrainNodeRetriesRecoveredStartingAllocation(t *testing.T) {
 	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusDraining, LastHeartbeat: s.now()}
 	s.nodes[node.ID] = node
 	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}
-	s.jobs[jobKey("default", "web")] = &Job{Spec: jobSpec, Revision: 1}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(jobSpec), Revision: 1}
 	allocation := &Allocation{ID: "original", Namespace: "default", JobName: "web", TaskGroupName: "api", Tasks: jobSpec.TaskGroups[0].Tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown, Draining: true, DrainReason: "node", Diagnostic: lifecycle.Diagnostic{CreatedAt: s.now(), TransitionedAt: s.now()}}
 	s.allocations = []*Allocation{allocation}
 
@@ -432,7 +432,7 @@ func TestUndrainNodePreservesRestartIntent(t *testing.T) {
 	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
 	s.nodes[node.ID] = node
 	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}
-	s.jobs[jobKey("default", "web")] = &Job{Spec: jobSpec, Revision: 1}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(jobSpec), Revision: 1}
 	allocation := &Allocation{ID: "original", Namespace: "default", JobName: "web", TaskGroupName: "api", Tasks: jobSpec.TaskGroups[0].Tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
 	s.allocations = []*Allocation{allocation}
 
@@ -475,7 +475,7 @@ func newDrainedNodeFixture(t *testing.T) (*Server, *testAgent, *Node, *Allocatio
 	s.nodes[node.ID] = node
 	s.controlEpoch = 1
 	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}
-	s.jobs[jobKey("default", "web")] = &Job{Spec: jobSpec, Revision: 1}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(jobSpec), Revision: 1}
 	allocation := &Allocation{ID: "original", Namespace: "default", JobName: "web", TaskGroupName: "api", Tasks: jobSpec.TaskGroups[0].Tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
 	s.allocations = []*Allocation{allocation}
 	if err := s.DrainNode(context.Background(), node.ID); err != nil {
@@ -591,7 +591,7 @@ func TestReconcileStopsRemovedGroupOnDrainingNode(t *testing.T) {
 	s.nodes[healthyNode.ID] = healthyNode
 
 	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app:v2"}}}}}
-	s.jobs[jobKey("default", "web")] = &Job{Spec: jobSpec, Revision: 2}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(jobSpec), Revision: 2}
 	now := s.now()
 	removed := &Allocation{ID: "removed", Namespace: "default", JobName: "web", TaskGroupName: "worker", Tasks: []spec.TaskSpec{{Name: "worker", Image: "app:v1"}}, Node: drainingNode, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy, Diagnostic: lifecycle.Diagnostic{CreatedAt: now, TransitionedAt: now}}
 	retained := &Allocation{ID: "retained", Namespace: "default", JobName: "web", TaskGroupName: "api", Tasks: jobSpec.TaskGroups[0].Tasks, Node: healthyNode, Generation: 1, JobRevision: 2, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy, Diagnostic: lifecycle.Diagnostic{CreatedAt: now, TransitionedAt: now}}

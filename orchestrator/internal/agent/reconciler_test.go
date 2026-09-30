@@ -131,7 +131,7 @@ func TestAllocationReconcilerRestartsStoppedAllocation(t *testing.T) {
 	rt := &reconcilerRuntime{status: runtime.StatusStopped}
 	subscriber := &statusRecorder{}
 	r := NewAllocationReconciler(rt, subscriber)
-	r.Track("alloc-1", false, nil)
+	r.Track("alloc-1", false, testRestartPolicy())
 
 	if err := r.Reconcile(context.Background(), "alloc-1"); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -178,7 +178,7 @@ func TestAllocationReconcilerPersistsAttemptBeforeRuntimeRestart(t *testing.T) {
 func TestDrainGroupSuppressesAutomaticRestart(t *testing.T) {
 	rt := &reconcilerRuntime{status: runtime.StatusStopped}
 	r := NewAllocationReconciler(rt, nil)
-	r.Track("task", false, nil)
+	r.Track("task", false, testRestartPolicy())
 	agent := &Agent{
 		allocations: map[string]*Allocation{
 			"task": {ID: "task", AllocationID: "alloc", Generation: 2},
@@ -203,7 +203,7 @@ func TestDrainGroupSuppressesAutomaticRestart(t *testing.T) {
 func TestResumeGroupRestoresAutomaticRestart(t *testing.T) {
 	rt := &reconcilerRuntime{status: runtime.StatusStopped}
 	r := NewAllocationReconciler(rt, nil)
-	r.Track("task", false, nil)
+	r.Track("task", false, testRestartPolicy())
 	agent := &Agent{
 		allocations: map[string]*Allocation{"task": {ID: "task", AllocationID: "alloc", Generation: 2, Status: "running", Spec: &spec.TaskSpec{}}},
 		reconciler:  r,
@@ -229,7 +229,7 @@ func TestResumeGroupRestoresAutomaticRestart(t *testing.T) {
 func TestLateDrainDoesNotSuppressRestartsAfterResume(t *testing.T) {
 	rt := &reconcilerRuntime{status: runtime.StatusStopped}
 	r := NewAllocationReconciler(rt, nil)
-	r.Track("task", false, nil)
+	r.Track("task", false, testRestartPolicy())
 	agent := &Agent{
 		allocations: map[string]*Allocation{"task": {ID: "task", AllocationID: "alloc", Generation: 2, Status: "running", Spec: &spec.TaskSpec{}}},
 		reconciler:  r,
@@ -267,7 +267,7 @@ func TestAllocationReconcilerWaitsForHealthAfterRestart(t *testing.T) {
 		health:      manager,
 	}
 	r := NewAllocationReconciler(rt, agent)
-	r.Track("alloc-1", true, nil)
+	r.Track("alloc-1", true, testRestartPolicy())
 
 	if err := r.Reconcile(context.Background(), "alloc-1"); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -342,15 +342,15 @@ func TestAllocationReconcilerPublishesFailedAfterRestartBudget(t *testing.T) {
 	rt := &reconcilerRuntime{status: runtime.StatusStopped}
 	subscriber := &statusRecorder{}
 	r := NewAllocationReconciler(rt, subscriber)
-	r.Track("alloc-1", false, nil)
+	r.Track("alloc-1", false, &spec.RestartPolicySpec{MaxRestarts: spec.DefaultMaxRestarts, Window: spec.DefaultRestartWindow})
 
-	for i := 0; i < defaultMaxRestarts+1; i++ {
+	for i := 0; i < spec.DefaultMaxRestarts+1; i++ {
 		if err := r.Reconcile(context.Background(), "alloc-1"); err != nil {
 			t.Fatalf("reconcile %d: %v", i, err)
 		}
 	}
-	if rt.restartCount != defaultMaxRestarts {
-		t.Fatalf("restart count = %d, want %d", rt.restartCount, defaultMaxRestarts)
+	if rt.restartCount != spec.DefaultMaxRestarts {
+		t.Fatalf("restart count = %d, want %d", rt.restartCount, spec.DefaultMaxRestarts)
 	}
 	if got := subscriber.statuses[len(subscriber.statuses)-1]; got != "failed" {
 		t.Fatalf("status = %q, want failed", got)
@@ -360,7 +360,7 @@ func TestAllocationReconcilerPublishesFailedAfterRestartBudget(t *testing.T) {
 func TestAllocationReconcilerDoesNothingWhenRunning(t *testing.T) {
 	rt := &reconcilerRuntime{status: runtime.StatusRunning}
 	r := NewAllocationReconciler(rt, nil)
-	r.Track("alloc-1", false, nil)
+	r.Track("alloc-1", false, testRestartPolicy())
 
 	if err := r.Reconcile(context.Background(), "alloc-1"); err != nil {
 		t.Fatalf("reconcile: %v", err)

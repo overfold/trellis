@@ -46,14 +46,13 @@ job_limits:
 
 `job_limits` is operator-only admission policy. Jobs cannot override it. The
 defaults shown above are used when the section is omitted. Every task without a
-`resources` block receives the configured CPU and memory requests before it is
-stored, scheduled, and sent to containerd. Explicit zero or negative resource
+`resources` block receives the default CPU and memory requests current when the
+job is applied; they are stored in the job, so later changes to the defaults
+do not affect jobs that are already applied. Explicit zero or negative resource
 values are invalid. `job_limits`, `wireguard_pool`, and `wireguard_port_count`
-are [cluster settings](multi-node.md#prepare-the-network-and-configuration):
-they only initialize a new cluster, and afterwards every node uses the
-replicated values. Editing them here and restarting has no effect on an
-existing cluster; use `trellisctl cluster settings` to inspect them and
-`trellisctl cluster set-job-limits` to change job limits.
+are [cluster settings](#cluster-settings): they only initialize a new cluster,
+and afterwards every node uses the replicated values. Editing them here and
+restarting has no effect on an existing cluster.
 
 Every task container a node creates is limited to `resources.task_pids_limit`
 processes and threads (default `4096`, maximum `4194304`; flag
@@ -78,31 +77,6 @@ including `trellisctl exec` sessions and script health checks, so a task at its
 limit also cannot start those. Raise it for workloads that legitimately run
 many threads or processes. Keep it consistent across nodes unless you
 deliberately want different per-node bounds.
-
-`allocation_loss_timeout` (flag `--allocation-loss-timeout`) is how long a
-node may go without a heartbeat before the leader marks its allocations
-`lost` and replaces them. It is a Go-style duration between `30s` and `24h`
-and defaults to `45s`:
-
-```yaml
-allocation_loss_timeout: 2m
-```
-
-Lost is terminal, so this is the point at which Trellis gives up on the
-node's allocations. While a lost allocation record is retained, its old
-containers keep running until enough replacements are running when the node
-returns, and are then stopped. They are stopped sooner if they block a
-replacement. If an older pruned allocation is later reported, Trellis stops
-it as an observed orphan. See [lost allocations](user-model.md#lost-allocations).
-Raise the timeout when nodes can be briefly unreachable, for example during
-reboots or on unreliable networks, and replacing their work would cost more
-than waiting. This matters most for groups bound to one node by a volume,
-because their replacement can only run on that node anyway. Lower values
-replace work faster after a real failure. The leader still waits 30 seconds
-after it is elected before marking anything lost, and a newly elected leader
-counts a node's silence from the start of its leadership, so each failover
-restarts the timeout for nodes that are already down. The timeout applies on
-whichever node is leader, so keep it the same on every node.
 
 Each node admits at most 256 concurrent UDP DNS queries and 128 active TCP DNS
 connections. UDP queries above the limit receive `SERVFAIL`; excess TCP
@@ -136,6 +110,48 @@ Installer-created nodes also keep `/var/lib/trellis/install-state`. It records o
 The root-run containerd runtime stores task logs and generated DNS/hosts mount files in `/var/lib/trellis/runtime`, independently of `data_dir` and `TMPDIR`. It creates this directory with mode `0750`. The directory and its ancestors must be root-owned, must not be symlinks, and must not be group- or world-writable; the runtime directory must also deny access to other users. Unsafe existing paths cause allocation creation/start to fail rather than being repaired automatically. Do not remove these files while allocations still use them. Allocation removal cleans up their files.
 
 Logs from allocations already running at the former `$TMPDIR/trellis-logs` location (`/tmp/trellis-logs` by default) remain readable only when that directory is owned by the runtime user, is not group- or world-writable, and denies access to other users. Legacy symlinks and non-regular log files are rejected. New task starts use the protected location; Trellis does not migrate existing mount files.
+
+## Cluster settings
+
+Settings that every leader must apply identically are replicated with the
+cluster state instead of living in node configuration, so they never change
+when leadership moves. Inspect them with `trellisctl cluster settings`. Job
+limits change with `trellisctl cluster set-job-limits` and reconciliation
+settings with `trellisctl cluster set-reconciliation`; both require the
+administrator key, and only the flags given change. The namespace WireGuard
+pool and port count are fixed when the cluster is created. See
+[the CLI reference](cli.md#inspect-and-change-cluster-settings).
+
+The reconciliation settings are:
+
+| Setting | Default | Bounds | Meaning |
+| --- | --- | --- | --- |
+| `allocation_loss_timeout` | `45s` | `30s`–`24h` | How long a node may go without a heartbeat before the leader marks its allocations `lost` and replaces them. |
+| `replacement_backoff_base` | `10s` | `1s`–`24h` | Delay before replacing a task group's allocation after its first consecutive failure; each further failure doubles it. |
+| `replacement_backoff_max` | `5m` | base–`24h` | Cap on the doubling replacement delay. |
+| `replacement_stable_after` | `10m` | `10s`–`24h` | How long a replacement must run without being reported unhealthy before the failure count resets. |
+| `terminal_allocation_retention` | `5` | `0`–`100` | Stopped, failed, or lost allocation records kept per task group for diagnosis. |
+
+Lost is terminal, so `allocation_loss_timeout` is the point at which Trellis
+gives up on a node's allocations. While a lost allocation record is retained,
+its old containers keep running until enough replacements are running when
+the node returns, and are then stopped. They are stopped sooner if they block
+a replacement. If an older pruned allocation is later reported, Trellis stops
+it as an observed orphan. See [lost allocations](user-model.md#lost-allocations).
+Raise the timeout when nodes can be briefly unreachable, for example during
+reboots or on unreliable networks, and replacing their work would cost more
+than waiting:
+
+```sh
+trellisctl --administrator-key ./trellis-administrator.pem cluster set-reconciliation --allocation-loss-timeout 2m
+```
+
+This matters most for groups bound to one node by a volume, because their
+replacement can only run on that node anyway. Lower values replace work
+faster after a real failure. The leader still waits 30 seconds after it is
+elected before marking anything lost, and a newly elected leader counts a
+node's silence from the start of its leadership, so each failover restarts
+the timeout for nodes that are already down.
 
 ## Add a node
 
@@ -262,7 +278,11 @@ trellisctl --administrator-key ./trellis-administrator.pem backup create trellis
 trellisctl --administrator-key ./trellis-administrator.pem backup restore trellis-backup.json
 ```
 
-Backups contain desired jobs and each live job's retained version history (at most the 10 newest versions), encrypted secret records, volume-registration locality metadata, and durable namespace WireGuard port assignments. They do **not** contain allocations, container images, local volume bytes, deleted-job history, TLS private keys, or the secret encryption key. Restoring the locality metadata deliberately prevents Trellis from silently treating a previously bound volume as new; recovering a volume-backed workload therefore also requires the owning node identity and its data, or an intentional manifest change to a new volume name. Secure and separately back up the 32-byte secrets key referenced by `secrets_key` in the node config; encrypted records are unusable without it.
+Backups contain the replicated [cluster settings](#cluster-settings), desired jobs and each live job's retained version history (at most the 10 newest versions), encrypted secret records, volume-registration locality metadata, and durable namespace WireGuard port assignments. Jobs are stored in their resolved form, with every default explicit, so a restored job behaves exactly as it did when the backup was taken. They do **not** contain allocations, container images, local volume bytes, deleted-job history, TLS private keys, or the secret encryption key. Restoring the locality metadata deliberately prevents Trellis from silently treating a previously bound volume as new; recovering a volume-backed workload therefore also requires the owning node identity and its data, or an intentional manifest change to a new volume name. Secure and separately back up the 32-byte secrets key referenced by `secrets_key` in the node config; encrypted records are unusable without it.
+
+Restore into a freshly created cluster that has no jobs, secrets, volume or network port registrations, or allocations. Create that cluster with the same `wireguard_pool` and `wireguard_port_count` as the backed-up cluster; the restore is refused otherwise, because namespace subnets and WireGuard ports are derived from them. The restore replaces the new cluster's job limits and reconciliation settings with the backed-up values, and refuses a backup whose jobs those limits would not admit.
+
+Each backup records its `format_version` and the `trellis_version` that created it. Trellis restores only backups in its own format and does not convert older formats. If a restore reports a different format version, restore the backup with a Trellis release that uses that format, such as the release named in the error. Take a fresh backup after upgrading so you always hold one your current release can restore.
 
 ## Secrets
 

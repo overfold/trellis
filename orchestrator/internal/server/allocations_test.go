@@ -111,7 +111,7 @@ func TestListJobsIncludesAllocationDiagnostics(t *testing.T) {
 
 func TestListJobsGroupsAllocationsByNamespacedJob(t *testing.T) {
 	job := func(namespace, name string) *Job {
-		return &Job{Spec: &spec.JobSpec{Namespace: namespace, Name: name, TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1}}}, Revision: 1}
+		return &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: namespace, Name: name, TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1}}}), Revision: 1}
 	}
 	allocation := func(namespace, name, id string) *Allocation {
 		return &Allocation{Namespace: namespace, JobName: name, TaskGroupName: "app", ID: id, JobRevision: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
@@ -496,7 +496,7 @@ func TestHeartbeatMissingTaskRetriesRunningAllocation(t *testing.T) {
 	s.nodes[node.ID] = node
 	tasks := []spec.TaskSpec{{Name: "app", Image: "app"}, {Name: "sidecar", Image: "sidecar"}}
 	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "web", Count: 1, Tasks: tasks}}}
-	s.jobs[jobKey("default", "web")] = &Job{Spec: jobSpec, Revision: 1}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(jobSpec), Revision: 1}
 	allocation := &Allocation{
 		ID: "default-web-1", Namespace: "default", JobName: "web", TaskGroupName: "web",
 		Node: node, Tasks: tasks, Generation: 1, JobRevision: 1,
@@ -540,7 +540,7 @@ func TestHeartbeatEmptyTaskReportRetriesRunningAllocation(t *testing.T) {
 	s.nodes[node.ID] = node
 	tasks := []spec.TaskSpec{{Name: "app", Image: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkHost, Ports: []spec.PortSpec{{Port: 8080}}}}}
 	s.jobs[jobKey("default", "web")] = &Job{
-		Spec:     &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "web", Count: 1, Tasks: tasks}}},
+		Spec:     canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "web", Count: 1, Tasks: tasks}}}),
 		Revision: 1,
 	}
 	allocation := &Allocation{

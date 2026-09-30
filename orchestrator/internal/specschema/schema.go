@@ -300,13 +300,13 @@ func describeAuthoringFields(root schema) {
 
 	describeDef(root, "TaskGroupSpec", "name", "Task-group identifier, unique within this job.")
 	describeDef(root, "TaskGroupSpec", "count", "Desired number of allocations for this task group.")
-	describeDef(root, "TaskGroupSpec", "runtime", "Optional OCI runtime override. Omit to use the node default; supported explicit values are runc and runsc.")
+	describeDef(root, "TaskGroupSpec", "runtime", "OCI runtime: runc or runsc. Omit for runc; Trellis stores the resolved value.")
 	describeDef(root, "TaskGroupSpec", "tasks", "Containers colocated in every allocation of this group; they share placement, scaling, update, restart, and drain lifecycle.")
 	describeDef(root, "TaskGroupSpec", "labels", "Discovery and routing metadata attached to allocations from this group.")
 	describeDef(root, "TaskGroupSpec", "api_access", "Optional least-privilege Trellis API credential request for every task in this group.")
 	describeDef(root, "TaskGroupSpec", "constraints", "Exact node attribute or label matches required for placement.")
-	describeDef(root, "TaskGroupSpec", "restart", "Retry policy for task failures inside an allocation.")
-	describeDef(root, "TaskGroupSpec", "update", "How allocations from an older job revision are replaced.")
+	describeDef(root, "TaskGroupSpec", "restart", "Retry policy for task failures inside an allocation. Omit for 3 restarts within 10m; Trellis stores the resolved policy.")
+	describeDef(root, "TaskGroupSpec", "update", "How allocations from an older job revision are replaced. Omit for recreate; Trellis stores the resolved policy.")
 
 	describeDef(root, "APIAccessSpec", "scope", "Where the injected workload credential may operate: only this namespace or the whole cluster.")
 	describeDef(root, "APIAccessSpec", "access", "Whether the injected credential is read-only or may perform ordinary writes within its scope.")
@@ -315,7 +315,7 @@ func describeAuthoringFields(root schema) {
 	describeDef(root, "RestartPolicySpec", "max_restarts", "Maximum failures allowed inside the restart window. Zero disables retries.")
 	describeDef(root, "RestartPolicySpec", "window", "Time window used to count restart attempts.")
 	describeDef(root, "UpdateSpec", "strategy", "Replacement strategy. Omit for recreate; rolling starts healthy replacement capacity incrementally.")
-	describeDef(root, "UpdateSpec", "max_parallel", "Maximum not-yet-healthy rolling replacements in flight and temporary live capacity above count. Zero uses Trellis's effective default of one.")
+	describeDef(root, "UpdateSpec", "max_parallel", "Maximum not-yet-healthy rolling replacements in flight and temporary live capacity above count. Omit or zero for one.")
 
 	describeDef(root, "TaskSpec", "name", "Task identifier, unique within this task group.")
 	describeDef(root, "TaskSpec", "image", "Pullable OCI image reference. Pin a version or digest for reproducible deployments.")
@@ -326,7 +326,7 @@ func describeAuthoringFields(root schema) {
 	describeDef(root, "TaskSpec", "health_check", "Optional HTTP, TCP, or script readiness/health observation. A running task without one is considered healthy.")
 	describeDef(root, "TaskSpec", "secrets", "Stored namespace secrets delivered to the task as environment variables or files.")
 
-	describeDef(root, "TaskNetworkingSpec", "mode", "Network attachment: isolated, host, or the private Trellis namespace network. Omission means isolated.")
+	describeDef(root, "TaskNetworkingSpec", "mode", "Network attachment: isolated, host, or the private Trellis namespace network. Omit for isolated; Trellis stores the resolved mode.")
 	describeDef(root, "TaskNetworkingSpec", "ports", "Direct host-port reservations. Valid only with mode: host; Trellis does not perform NAT or port translation.")
 	describeDef(root, "PortSpec", "port", "Node port Trellis reserves and the process must bind directly when using host networking.")
 	describeDef(root, "ResourcesSpec", "cpu", "CPU request in millicores; 1000 represents one CPU core.")
@@ -334,17 +334,17 @@ func describeAuthoringFields(root schema) {
 
 	describeDef(root, "HealthCheckSpec", "type", "Health-check implementation: http, tcp, or script.")
 	describeDef(root, "HealthCheckSpec", "port", "Port checked by HTTP or TCP health checks.")
-	describeDef(root, "HealthCheckSpec", "path", "HTTP request path and optional query on task-local loopback, beginning with /; ignored by TCP and script checks.")
+	describeDef(root, "HealthCheckSpec", "path", "HTTP request path and optional query on task-local loopback, beginning with /. Omit for /; ignored by TCP and script checks.")
 	describeDef(root, "HealthCheckSpec", "command", "Command argv executed for a script health check.")
-	describeDef(root, "HealthCheckSpec", "interval", "Delay between health checks. Omit to use the Trellis default.")
-	describeDef(root, "HealthCheckSpec", "timeout", "Maximum duration of one health check. Omit to use the Trellis default.")
-	describeDef(root, "HealthCheckSpec", "threshold", "Consecutive failed checks required before unhealthy. Zero uses the Trellis default.")
+	describeDef(root, "HealthCheckSpec", "interval", "Delay between health checks. Omit for 10s.")
+	describeDef(root, "HealthCheckSpec", "timeout", "Maximum duration of one health check. Omit for 5s.")
+	describeDef(root, "HealthCheckSpec", "threshold", "Consecutive results required to become healthy or unhealthy. Omit or zero for 3.")
 
 	describeDef(root, "SecretRefSpec", "name", "Name of a stored secret in this job's namespace.")
 	describeDef(root, "SecretRefSpec", "target", "Delivery mechanism: env or file.")
 	describeDef(root, "SecretRefSpec", "env", "Environment variable name used by an env target.")
 	describeDef(root, "SecretRefSpec", "path", "Destination path below /run/trellis-secrets/ used by a file target.")
-	describeDef(root, "SecretRefSpec", "mode", "File mode for a file target: 0400 or 0600 (or decimal 256/384). Zero uses the default.")
+	describeDef(root, "SecretRefSpec", "mode", "File mode for a file target: 0400 or 0600 (or decimal 256/384). Omit or zero for 0400.")
 
 	describeDef(root, "VolumeSpec", "name", "Stable namespace-scoped volume identity used for placement.")
 	describeDef(root, "VolumeSpec", "host_path", "Node-side backing directory. @/ is resolved below Trellis's namespace volume root; absolute paths are used verbatim and are not namespace-isolated on disk.")

@@ -62,7 +62,7 @@ func TestReconcileDoesNotCreateAllocationsForInvalidJob(t *testing.T) {
 	s.jobLimits = limits
 	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
 	s.nodes[node.ID] = node
-	s.jobs[jobKey("default", "oversized")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "oversized", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 2, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}, Revision: 1}
+	s.jobs[jobKey("default", "oversized")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "oversized", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 2, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}), Revision: 1}
 
 	s.Reconcile(context.Background())
 	if len(s.allocations) != 0 {
@@ -83,8 +83,8 @@ func TestReconcileContinuesAfterWireGuardPortExhaustion(t *testing.T) {
 	networkTask := spec.TaskSpec{Name: "app", Image: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard}}
 	old := &Allocation{ID: "old-allocation", Namespace: "old", JobName: "deleted", TaskGroupName: "app", Tasks: []spec.TaskSpec{networkTask}, Node: node, Generation: 1, Phase: lifecycle.PhaseRunning}
 	s.allocations = []*Allocation{old}
-	s.jobs[jobKey("new", "networked")] = &Job{Spec: &spec.JobSpec{Namespace: "new", Name: "networked", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: []spec.TaskSpec{networkTask}}}}, Revision: 1}
-	s.jobs[jobKey("plain", "worker")] = &Job{Spec: &spec.JobSpec{Namespace: "plain", Name: "worker", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}}, Revision: 1}
+	s.jobs[jobKey("new", "networked")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "new", Name: "networked", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: []spec.TaskSpec{networkTask}}}}), Revision: 1}
+	s.jobs[jobKey("plain", "worker")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "plain", Name: "worker", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}}), Revision: 1}
 
 	s.Reconcile(context.Background())
 	if old.Phase != lifecycle.PhaseStopped {
@@ -107,11 +107,11 @@ func TestReconcileScaleDownSelectionIsDeterministic(t *testing.T) {
 		s.nodes[node.ID] = node
 		tasks := []spec.TaskSpec{{Name: "server", Image: "app"}}
 		s.jobs[jobKey("default", "web")] = &Job{
-			Spec: &spec.JobSpec{
+			Spec: canonicalTestSpec(&spec.JobSpec{
 				Namespace:  "default",
 				Name:       "web",
 				TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: tasks}},
-			},
+			}),
 			Revision: 1,
 		}
 		byID := make(map[string]*Allocation, len(ids))
@@ -136,7 +136,7 @@ func TestNamespaceDesiredAllocationLimitIncludesOtherJobs(t *testing.T) {
 	limits := spec.DefaultLimits()
 	limits.MaxDesiredAllocationsPerNamespace = 2
 	s.jobLimits = limits
-	s.jobs[jobKey("default", "first")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "first", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 2, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}}}
+	s.jobs[jobKey("default", "first")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "first", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 2, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}})}
 	candidate := &spec.JobSpec{Namespace: "default", Name: "second", TaskGroups: []spec.TaskGroupSpec{{Name: "worker", Count: 1, Tasks: []spec.TaskSpec{{Name: "worker", Image: "worker"}}}}}
 	if err := s.CanonicalizeJob(candidate); err != nil {
 		t.Fatal(err)
@@ -155,7 +155,7 @@ func TestReconcileEnforcesNamespaceDesiredAllocationLimit(t *testing.T) {
 	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
 	s.nodes[node.ID] = node
 	for _, name := range []string{"first", "second", "third"} {
-		s.jobs[jobKey("default", name)] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: name, TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}}, Revision: 1}
+		s.jobs[jobKey("default", name)] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: name, TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}}), Revision: 1}
 	}
 	s.allocations = append(s.allocations, &Allocation{ID: "third-existing", Namespace: "default", JobName: "third", TaskGroupName: "app", Tasks: s.jobs[jobKey("default", "third")].Spec.TaskGroups[0].Tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhasePlaced, Health: lifecycle.HealthUnknown, Diagnostic: lifecycle.Diagnostic{CreatedAt: s.now(), TransitionedAt: s.now()}})
 
@@ -187,7 +187,7 @@ func TestReconcileRecreateStopsOldAllocations(t *testing.T) {
 		}},
 	}
 	hashes := map[string]string{"api": spec.TaskGroupContentHash(&jobSpec.TaskGroups[0])}
-	s.jobs[jobKey("default", "web")] = &Job{Spec: jobSpec, Revision: 1, ContentHashes: hashes}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(jobSpec), Revision: 1, ContentHashes: hashes}
 
 	now := s.now()
 	for i := 0; i < 2; i++ {
@@ -209,7 +209,7 @@ func TestReconcileRecreateStopsOldAllocations(t *testing.T) {
 		}},
 	}
 	newHashes := map[string]string{"api": spec.TaskGroupContentHash(&newSpec.TaskGroups[0])}
-	s.jobs[jobKey("default", "web")] = &Job{Spec: newSpec, Revision: 2, ContentHashes: newHashes}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(newSpec), Revision: 2, ContentHashes: newHashes}
 
 	s.Reconcile(context.Background())
 
@@ -238,7 +238,7 @@ func TestReconcileRollingDrainsOldAllocations(t *testing.T) {
 		}},
 	}
 	hashes := map[string]string{"api": spec.TaskGroupContentHash(&jobSpec.TaskGroups[0])}
-	s.jobs[jobKey("default", "web")] = &Job{Spec: jobSpec, Revision: 1, ContentHashes: hashes}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(jobSpec), Revision: 1, ContentHashes: hashes}
 
 	now := s.now()
 	for i := 0; i < 2; i++ {
@@ -261,7 +261,7 @@ func TestReconcileRollingDrainsOldAllocations(t *testing.T) {
 		}},
 	}
 	newHashes := map[string]string{"api": spec.TaskGroupContentHash(&newSpec.TaskGroups[0])}
-	s.jobs[jobKey("default", "web")] = &Job{Spec: newSpec, Revision: 2, ContentHashes: newHashes}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(newSpec), Revision: 2, ContentHashes: newHashes}
 
 	s.Reconcile(context.Background())
 
@@ -315,7 +315,7 @@ func TestReconcileRollingStopsDrainingAsNewBecomeHealthy(t *testing.T) {
 		}},
 	}
 	newHashes := map[string]string{"api": spec.TaskGroupContentHash(&newSpec.TaskGroups[0])}
-	s.jobs[jobKey("default", "web")] = &Job{Spec: newSpec, Revision: 2, ContentHashes: newHashes}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(newSpec), Revision: 2, ContentHashes: newHashes}
 
 	now := s.now()
 	makeDraining := func(id string) *Allocation {
@@ -369,7 +369,7 @@ func TestReconcileRollingDoesNotStopDrainingUntilNewHealthy(t *testing.T) {
 		}},
 	}
 	newHashes := map[string]string{"api": spec.TaskGroupContentHash(&newSpec.TaskGroups[0])}
-	s.jobs[jobKey("default", "web")] = &Job{Spec: newSpec, Revision: 2, ContentHashes: newHashes}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(newSpec), Revision: 2, ContentHashes: newHashes}
 
 	now := s.now()
 	draining := &Allocation{

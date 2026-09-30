@@ -290,7 +290,7 @@ func newBackoffReconcileServer(t *testing.T, store state.Store) (*Server, *Node,
 	s.now = func() time.Time { return clock.now }
 	node := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000001"), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: clock.now}
 	s.nodes[node.ID] = node
-	s.jobs[jobKey("default", "web")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}, Revision: 1}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}), Revision: 1}
 	return s, node, clock
 }
 
@@ -462,7 +462,8 @@ func TestReconcileRemovesBackoffOfDeletedJobWithItsRecords(t *testing.T) {
 		t.Fatalf("backoff while records remain = %#v, want retained without failures", record)
 	}
 
-	s.replacementPolicy.RetainTerminal = 0
+	s.reconciliation = DefaultReconciliationSettings()
+	s.reconciliation.TerminalAllocationRetention = 0
 	node.observedAt = clock.now.Add(time.Second)
 	clock.advance(node, 2*time.Second)
 	s.Reconcile(ctx)
@@ -561,7 +562,8 @@ func TestReplacementStateIsDeterministicAcrossRaftReplayAndSnapshot(t *testing.T
 	s.Reconcile(ctx)
 	clock.advance(node, 5*time.Second)
 	failActive(t, s, clock.now)
-	s.replacementPolicy.RetainTerminal = 1
+	s.reconciliation = DefaultReconciliationSettings()
+	s.reconciliation.TerminalAllocationRetention = 1
 	node.observedAt = clock.now.Add(time.Second)
 	clock.advance(node, 2*time.Second)
 	s.Reconcile(ctx)
@@ -959,7 +961,8 @@ func TestReconcilePrunesRecordsOfRemovedAndUnavailableNodes(t *testing.T) {
 	if err := s.state.PutNode(ctx, node.ID.String(), nodeSummary(node)); err != nil {
 		t.Fatal(err)
 	}
-	s.replacementPolicy.RetainTerminal = 0
+	s.reconciliation = DefaultReconciliationSettings()
+	s.reconciliation.TerminalAllocationRetention = 0
 	for i, n := range []*Node{removed, down} {
 		allocation := failedAllocation(fmt.Sprintf("t%d", i), 1, clock.now.Add(-time.Minute))
 		allocation.Phase = lifecycle.PhaseStopped

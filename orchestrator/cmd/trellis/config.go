@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/overfold/trellis/internal/nodecapacity"
 	"github.com/overfold/trellis/internal/spec"
@@ -62,8 +61,6 @@ type nodeConfigFile struct {
 	Labels             *[]string            `yaml:"labels"`
 	Resources          *nodeResourcesConfig `yaml:"resources"`
 	JobLimits          *jobLimitsConfig     `yaml:"job_limits"`
-	// AllocationLossTimeout is a Go duration such as "45s" or "5m".
-	AllocationLossTimeout *string `yaml:"allocation_loss_timeout"`
 }
 
 func loadNodeConfig(path string, cfg *config, flags *pflag.FlagSet) error {
@@ -117,13 +114,6 @@ func loadNodeConfig(path string, cfg *config, flags *pflag.FlagSet) error {
 	cfg.Explicit.WireGuardPool = parsed.WireGuardPool != nil
 	cfg.Explicit.WireGuardPortCount = parsed.WireGuardPortCount != nil
 	cfg.Explicit.JobLimits = parsed.JobLimits != nil
-	if parsed.AllocationLossTimeout != nil && !flags.Changed("allocation-loss-timeout") {
-		timeout, err := time.ParseDuration(*parsed.AllocationLossTimeout)
-		if err != nil {
-			return fmt.Errorf("allocation_loss_timeout: %w", err)
-		}
-		cfg.AllocationLossTimeout = timeout
-	}
 	if parsed.Labels != nil && !flags.Changed("label") {
 		cfg.Labels = append([]string(nil), (*parsed.Labels)...)
 	}

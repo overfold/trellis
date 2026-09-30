@@ -7,19 +7,6 @@ import (
 	"github.com/overfold/trellis/internal/spec"
 )
 
-func TestNewHealthConfigUsesDefaults(t *testing.T) {
-	config := newHealthConfig(&spec.HealthCheckSpec{Type: "tcp", Port: 8080})
-	if config.Interval != defaultCheckInterval {
-		t.Fatalf("interval = %s, want %s", config.Interval, defaultCheckInterval)
-	}
-	if config.Timeout != defaultCheckTimeout {
-		t.Fatalf("timeout = %s, want %s", config.Timeout, defaultCheckTimeout)
-	}
-	if config.Threshold != defaultCheckThreshold {
-		t.Fatalf("threshold = %d, want %d", config.Threshold, defaultCheckThreshold)
-	}
-}
-
 func TestNewHealthConfigUsesConfiguredValues(t *testing.T) {
 	config := newHealthConfig(&spec.HealthCheckSpec{
 		Type: "tcp", Port: 8080, Interval: 2 * time.Second, Timeout: time.Second, Threshold: 5,

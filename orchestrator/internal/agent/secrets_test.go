@@ -287,7 +287,7 @@ func TestRunAllocationRecordsSecretDirBeforeWritingSecrets(t *testing.T) {
 	}
 	request := operationTestRequest()
 	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image"}}
-	request.Secrets = []api.DeliveredSecret{{Task: "first", Name: "key", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Value: []byte("secret")}}
+	request.Secrets = []api.DeliveredSecret{{Task: "first", Name: "key", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Mode: 0o400, Value: []byte("secret")}}
 	err := runGroup(context.Background(), agent, request)
 	if err == nil || !strings.Contains(err.Error(), "persist secret metadata") {
 		t.Fatalf("run error = %v, want secret metadata persistence failure", err)
@@ -311,7 +311,7 @@ func TestRunAllocationUsesRecoverableSecretDir(t *testing.T) {
 	agent.ConfigureDurability(local, "test")
 	request := operationTestRequest()
 	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image"}}
-	request.Secrets = []api.DeliveredSecret{{Task: "first", Name: "key", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Value: []byte("secret")}}
+	request.Secrets = []api.DeliveredSecret{{Task: "first", Name: "key", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Mode: 0o400, Value: []byte("secret")}}
 	if err := runGroup(context.Background(), agent, request); err != nil {
 		t.Fatal(err)
 	}
@@ -350,7 +350,7 @@ func TestRemoveOrphanedSecretDirsKeepsOwnedDirectories(t *testing.T) {
 		if err := createSecretDir(dir); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := materializeSecrets(dir, "task", []api.DeliveredSecret{{Task: "task", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Value: []byte("secret")}}); err != nil {
+		if _, err := materializeSecrets(dir, "task", []api.DeliveredSecret{{Task: "task", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Mode: 0o400, Value: []byte("secret")}}); err != nil {
 			t.Fatal(err)
 		}
 		dirs[id] = dir
@@ -479,7 +479,7 @@ func TestRunAllocationKeepsSecretDirectoryItDidNotCreate(t *testing.T) {
 	}
 	request := operationTestRequest()
 	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image"}}
-	request.Secrets = []api.DeliveredSecret{{Task: "first", Name: "key", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Value: []byte("secret")}}
+	request.Secrets = []api.DeliveredSecret{{Task: "first", Name: "key", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Mode: 0o400, Value: []byte("secret")}}
 	err = runGroup(context.Background(), agent, request)
 	if err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("run error = %v, want existing secret directory refusal", err)

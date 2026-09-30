@@ -175,7 +175,12 @@ func (b *BoltStore) DesiredSnapshot(cluster string) (*DesiredSnapshot, error) {
 	var result *DesiredSnapshot
 	err := b.db.View(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(bucketName)
+		var cluster []byte
+		if value := bucket.Get([]byte(prefix + "meta")); value != nil {
+			cluster = append([]byte(nil), value...)
+		}
 		result = &DesiredSnapshot{
+			Cluster:                  cluster,
 			Jobs:                     relativeEntries(listBucket(bucket, prefix+"jobs/"), prefix+"jobs/"),
 			JobRevisions:             relativeEntries(listBucket(bucket, prefix+"job-revisions/"), prefix+"job-revisions/"),
 			Secrets:                  relativeEntries(listBucket(bucket, prefix+"secrets/"), prefix+"secrets/"),
@@ -320,8 +325,9 @@ func (b *BoltStore) RestoreReader(r io.Reader) error {
 }
 
 // RestoreDesired atomically verifies that the target is fresh and installs
-// job definitions, encrypted secret records, volume locality metadata, and
-// namespace WireGuard port assignments.
+// job definitions, encrypted secret records, volume locality metadata,
+// namespace WireGuard port assignments, and, when present, the replacement
+// cluster record.
 func (b *BoltStore) RestoreDesired(cluster string, snapshot *DesiredSnapshot) error {
 	if err := ValidateDesiredSnapshot(snapshot, nil); err != nil {
 		return err
@@ -338,6 +344,11 @@ func (b *BoltStore) RestoreDesired(cluster string, snapshot *DesiredSnapshot) er
 			key, _ := bucket.Cursor().Seek(prefix)
 			if key != nil && len(key) >= len(prefix) && string(key[:len(prefix)]) == string(prefix) {
 				return fmt.Errorf("restore requires a fresh cluster with no jobs, secrets, volume registrations, network port registrations, or allocations")
+			}
+		}
+		if len(snapshot.Cluster) > 0 {
+			if err := bucket.Put([]byte(fmt.Sprintf("trellis/%s/meta", cluster)), snapshot.Cluster); err != nil {
+				return err
 			}
 		}
 		for key, value := range snapshot.JobRevisions {
@@ -425,6 +436,9 @@ func ValidateDesiredSnapshot(snapshot *DesiredSnapshot, additionalJobValidation 
 	if snapshot == nil {
 		return fmt.Errorf("restore snapshot is missing")
 	}
+	if len(snapshot.Cluster) > 0 && !json.Valid(snapshot.Cluster) {
+		return fmt.Errorf("invalid cluster record")
+	}
 	for key, raw := range snapshot.Jobs {
 		var job persistedJob
 		if key == "" || json.Unmarshal(raw, &job) != nil || job.Spec == nil || job.Revision < 1 || job.Version < job.Revision {
@@ -489,7 +503,7 @@ func ValidateDesiredSnapshot(snapshot *DesiredSnapshot, additionalJobValidation 
 }
 
 func validateRestoredJob(job *spec.JobSpec, additional func(*spec.JobSpec) error) error {
-	if err := spec.Validate(job); err != nil {
+	if err := spec.ValidateCanonical(job); err != nil {
 		return err
 	}
 	if additional != nil {

@@ -111,7 +111,7 @@ func TestExecutePersistenceFailuresDoNotAdvanceMemory(t *testing.T) {
 			node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
 			s.nodes[node.ID] = node
 			jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}
-			s.jobs[jobKey("default", "web")] = &Job{Spec: jobSpec, Revision: 1}
+			s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(jobSpec), Revision: 1}
 			allocation := &Allocation{ID: "web-1", Namespace: "default", JobName: "web", TaskGroupName: "api", Tasks: jobSpec.TaskGroups[0].Tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhasePlaced, Health: lifecycle.HealthUnknown}
 			s.allocations = []*Allocation{allocation}
 			store := &auditStore{memoryStore: memoryStore{}, failPutAfter: tc.failAfter}

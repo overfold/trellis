@@ -120,7 +120,7 @@
           "type": "array"
         },
         "interval": {
-          "description": "Delay between health checks. Omit to use the Trellis default.",
+          "description": "Delay between health checks. Omit for 10s.",
           "oneOf": [
             {
               "description": "Nanoseconds.",
@@ -134,7 +134,7 @@
           ]
         },
         "path": {
-          "description": "HTTP request path and optional query on task-local loopback, beginning with /; ignored by TCP and script checks.",
+          "description": "HTTP request path and optional query on task-local loopback, beginning with /. Omit for /; ignored by TCP and script checks.",
           "type": "string"
         },
         "port": {
@@ -144,12 +144,12 @@
           "type": "integer"
         },
         "threshold": {
-          "description": "Consecutive failed checks required before unhealthy. Zero uses the Trellis default.",
+          "description": "Consecutive results required to become healthy or unhealthy. Omit or zero for 3.",
           "minimum": 0,
           "type": "integer"
         },
         "timeout": {
-          "description": "Maximum duration of one health check. Omit to use the Trellis default.",
+          "description": "Maximum duration of one health check. Omit for 5s.",
           "oneOf": [
             {
               "description": "Nanoseconds.",
@@ -284,7 +284,7 @@
           "type": "string"
         },
         "mode": {
-          "description": "File mode for a file target: 0400 or 0600 (or decimal 256/384). Zero uses the default.",
+          "description": "File mode for a file target: 0400 or 0600 (or decimal 256/384). Omit or zero for 0400.",
           "enum": [
             0,
             256,
@@ -354,10 +354,10 @@
         },
         "restart": {
           "$ref": "#/$defs/RestartPolicySpec",
-          "description": "Retry policy for task failures inside an allocation."
+          "description": "Retry policy for task failures inside an allocation. Omit for 3 restarts within 10m; Trellis stores the resolved policy."
         },
         "runtime": {
-          "description": "Optional OCI runtime override. Omit to use the node default; supported explicit values are runc and runsc.",
+          "description": "OCI runtime: runc or runsc. Omit for runc; Trellis stores the resolved value.",
           "enum": [
             "runc",
             "runsc"
@@ -374,7 +374,7 @@
         },
         "update": {
           "$ref": "#/$defs/UpdateSpec",
-          "description": "How allocations from an older job revision are replaced."
+          "description": "How allocations from an older job revision are replaced. Omit for recreate; Trellis stores the resolved policy."
         }
       },
       "required": [
@@ -411,7 +411,7 @@
       ],
       "properties": {
         "mode": {
-          "description": "Network attachment: isolated, host, or the private Trellis namespace network. Omission means isolated.",
+          "description": "Network attachment: isolated, host, or the private Trellis namespace network. Omit for isolated; Trellis stores the resolved mode.",
           "enum": [
             "isolated",
             "host",
@@ -486,7 +486,7 @@
       "additionalProperties": false,
       "properties": {
         "max_parallel": {
-          "description": "Maximum not-yet-healthy rolling replacements in flight and temporary live capacity above count. Zero uses Trellis's effective default of one.",
+          "description": "Maximum not-yet-healthy rolling replacements in flight and temporary live capacity above count. Omit or zero for one.",
           "minimum": 0,
           "type": "integer"
         },

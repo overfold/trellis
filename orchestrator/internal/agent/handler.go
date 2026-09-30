@@ -4,12 +4,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 
 	"github.com/labstack/echo/v5"
 	"github.com/overfold/trellis/internal/api"
+	"github.com/overfold/trellis/internal/spec"
 )
 
 // Handler exposes agent operations through HTTP.
@@ -156,6 +158,9 @@ func (h *Handler) handleRun(c *echo.Context) error {
 	}
 	if request.Epoch == 0 {
 		return echo.NewHTTPError(http.StatusBadRequest, ErrInvalidEpoch.Error())
+	}
+	if err := validateCanonicalRequest(&request); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
 	defer func() {
 		for i := range request.Secrets {
@@ -346,4 +351,21 @@ func operationError(err error) error {
 	}
 	raw, _ := json.Marshal(api.OperationResponse{Code: code, Message: err.Error()})
 	return echo.NewHTTPError(status, string(raw))
+}
+
+// validateCanonicalRequest refuses a start whose task group settings were not
+// resolved by job canonicalization. The agent applies no defaults of its own.
+func validateCanonicalRequest(request *api.AllocationRequest) error {
+	if !spec.Runtime(request.Runtime).Valid() || request.Runtime == string(spec.RuntimeDefault) {
+		return fmt.Errorf("runtime must be explicit")
+	}
+	if request.Restart == nil {
+		return fmt.Errorf("restart policy is required")
+	}
+	for i := range request.Tasks {
+		if err := spec.ValidateCanonicalTask(&request.Tasks[i]); err != nil {
+			return fmt.Errorf("task %q: %w", request.Tasks[i].Name, err)
+		}
+	}
+	return nil
 }

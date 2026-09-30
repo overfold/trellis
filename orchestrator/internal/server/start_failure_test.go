@@ -20,7 +20,7 @@ func newStartingTestServer(t *testing.T, attempt int) (*Server, *testAgent, *Nod
 	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
 	s.nodes[node.ID] = node
 	tasks := []spec.TaskSpec{{Name: "app", Image: "app"}}
-	s.jobs[jobKey("default", "web")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "web", Count: 1, Tasks: tasks}}}, Revision: 1}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "web", Count: 1, Tasks: tasks}}}), Revision: 1}
 	allocation := &Allocation{
 		ID: "default-web-1", Namespace: "default", JobName: "web", TaskGroupName: "web",
 		Node: node, Tasks: tasks, Generation: 1, JobRevision: 1,

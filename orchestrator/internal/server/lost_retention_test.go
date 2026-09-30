@@ -39,9 +39,9 @@ func newLostReturnFixture(t *testing.T, tasks []spec.TaskSpec, withNodeB bool) *
 	if withNodeB {
 		s.nodes[lostNodeBID] = &Node{ID: lostNodeBID, Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: now}
 	}
-	s.jobs[jobKey("default", "web")] = &Job{Spec: &spec.JobSpec{
+	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{
 		Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: tasks}},
-	}, Revision: 1}
+	}), Revision: 1}
 	original := &Allocation{
 		ID: "original", Namespace: "default", JobName: "web", TaskGroupName: "app", Tasks: tasks,
 		Node: nodeA, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseLost, Health: lifecycle.HealthUnknown,
@@ -318,6 +318,7 @@ func TestReconcileLostOriginalHostPortConflict(t *testing.T) {
 		other[0].Name = "worker"
 		job := f.s.jobs[jobKey("default", "web")]
 		job.Spec.TaskGroups = append(job.Spec.TaskGroups, spec.TaskGroupSpec{Name: "worker", Count: 1, Tasks: other})
+		canonicalTestSpec(job.Spec)
 		f.heartbeatA(t)
 
 		f.s.Reconcile(context.Background())
@@ -384,9 +385,7 @@ func TestReconcileAllocationLossTimeout(t *testing.T) {
 			s, agent := newTestServerWithAgent()
 			defer agent.server.Close()
 			if tc.timeout != 0 {
-				if err := s.SetAllocationLossTimeout(tc.timeout); err != nil {
-					t.Fatal(err)
-				}
+				s.reconciliation.AllocationLossTimeout = tc.timeout
 			}
 			now := s.now()
 			s.leaderSince = now.Add(-tc.leaderFor)
@@ -396,9 +395,9 @@ func TestReconcileAllocationLossTimeout(t *testing.T) {
 			}
 			s.nodes[node.ID] = node
 			tasks := []spec.TaskSpec{{Name: "app", Image: "app"}}
-			s.jobs[jobKey("default", "web")] = &Job{Spec: &spec.JobSpec{
+			s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{
 				Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: tasks}},
-			}, Revision: 1}
+			}), Revision: 1}
 			allocation := &Allocation{
 				ID: "alloc", Namespace: "default", JobName: "web", TaskGroupName: "app", Tasks: tasks,
 				Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy,
@@ -417,30 +416,39 @@ func TestReconcileAllocationLossTimeout(t *testing.T) {
 	}
 }
 
-func TestValidateAllocationLossTimeout(t *testing.T) {
-	for _, tc := range []struct {
-		timeout time.Duration
-		valid   bool
-	}{
-		{timeout: 0},
-		{timeout: -time.Second},
-		{timeout: MinAllocationLossTimeout - time.Second},
-		{timeout: MinAllocationLossTimeout, valid: true},
-		{timeout: DefaultAllocationLossTimeout, valid: true},
-		{timeout: MaxAllocationLossTimeout, valid: true},
-		{timeout: MaxAllocationLossTimeout + time.Second},
+func TestValidateReconciliationSettings(t *testing.T) {
+	valid := DefaultReconciliationSettings()
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("default settings are invalid: %v", err)
+	}
+	for name, mutate := range map[string]func(*ReconciliationSettings){
+		"zero loss timeout":         func(r *ReconciliationSettings) { r.AllocationLossTimeout = 0 },
+		"loss timeout below min":    func(r *ReconciliationSettings) { r.AllocationLossTimeout = MinAllocationLossTimeout - time.Second },
+		"loss timeout above max":    func(r *ReconciliationSettings) { r.AllocationLossTimeout = MaxAllocationLossTimeout + time.Second },
+		"backoff base below min":    func(r *ReconciliationSettings) { r.ReplacementBackoffBase = MinReplacementBackoff - 1 },
+		"backoff max below base":    func(r *ReconciliationSettings) { r.ReplacementBackoffMax = r.ReplacementBackoffBase - 1 },
+		"backoff max above max":     func(r *ReconciliationSettings) { r.ReplacementBackoffMax = MaxReplacementBackoff + 1 },
+		"stable after below min":    func(r *ReconciliationSettings) { r.ReplacementStableAfter = MinReplacementStableAfter - 1 },
+		"negative retention":        func(r *ReconciliationSettings) { r.TerminalAllocationRetention = -1 },
+		"retention above the bound": func(r *ReconciliationSettings) { r.TerminalAllocationRetention = MaxTerminalAllocationRetention + 1 },
 	} {
-		err := ValidateAllocationLossTimeout(tc.timeout)
-		if (err == nil) != tc.valid {
-			t.Fatalf("ValidateAllocationLossTimeout(%s) error = %v, want valid=%t", tc.timeout, err, tc.valid)
+		settings := valid
+		mutate(&settings)
+		if err := settings.Validate(); err == nil {
+			t.Errorf("%s: settings %+v accepted", name, settings)
 		}
-		s, agent := newTestServerWithAgent()
-		agent.server.Close()
-		if err := s.SetAllocationLossTimeout(tc.timeout); (err == nil) != tc.valid {
-			t.Fatalf("SetAllocationLossTimeout(%s) error = %v, want valid=%t", tc.timeout, err, tc.valid)
-		}
-		if !tc.valid && s.allocationLossTimeout != 0 {
-			t.Fatalf("rejected timeout %s was stored", tc.timeout)
+	}
+	for name, mutate := range map[string]func(*ReconciliationSettings){
+		"minimum loss timeout":  func(r *ReconciliationSettings) { r.AllocationLossTimeout = MinAllocationLossTimeout },
+		"maximum loss timeout":  func(r *ReconciliationSettings) { r.AllocationLossTimeout = MaxAllocationLossTimeout },
+		"equal backoff":         func(r *ReconciliationSettings) { r.ReplacementBackoffMax = r.ReplacementBackoffBase },
+		"no terminal retention": func(r *ReconciliationSettings) { r.TerminalAllocationRetention = 0 },
+		"maximum retention":     func(r *ReconciliationSettings) { r.TerminalAllocationRetention = MaxTerminalAllocationRetention },
+	} {
+		settings := valid
+		mutate(&settings)
+		if err := settings.Validate(); err != nil {
+			t.Errorf("%s: %v", name, err)
 		}
 	}
 	if DefaultAllocationLossTimeout != 45*time.Second || MinAllocationLossTimeout != 3*heartbeatInterval {

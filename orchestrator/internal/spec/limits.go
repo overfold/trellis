@@ -46,8 +46,11 @@ func ValidateLimits(limits Limits) error {
 	return nil
 }
 
-// Canonicalize resolves operator-owned task resource defaults, then validates
-// the complete canonical job. Explicit zero is invalid and never means default.
+// Canonicalize resolves every job default, including operator-owned task
+// resource defaults, then validates the complete canonical job. The result is
+// what Trellis persists: every optional behavior is explicit, so later limit
+// or release changes never alter a stored job's effective behavior. Explicit
+// zero resources are invalid and never mean default.
 func Canonicalize(job *JobSpec, limits Limits) error {
 	if err := ValidateLimits(limits); err != nil {
 		return err
@@ -55,33 +58,8 @@ func Canonicalize(job *JobSpec, limits Limits) error {
 	if job == nil {
 		return Validate(job)
 	}
-	for groupIndex := range job.TaskGroups {
-		for taskIndex := range job.TaskGroups[groupIndex].Tasks {
-			task := &job.TaskGroups[groupIndex].Tasks[taskIndex]
-			if task.Resources == nil {
-				task.Resources = &ResourcesSpec{CPU: limits.DefaultTaskCPU, Memory: limits.DefaultTaskMemory}
-			}
-		}
-	}
+	applyDefaults(job, limits)
 	return ValidateWithLimits(job, limits)
-}
-
-// Canonical returns a canonical copy of job and leaves job unchanged. The copy
-// owns its task groups and tasks; other nested values are shared with job and
-// must be treated as read-only.
-func Canonical(job *JobSpec, limits Limits) (*JobSpec, error) {
-	if job == nil {
-		return nil, Canonicalize(nil, limits)
-	}
-	copied := *job
-	copied.TaskGroups = append([]TaskGroupSpec(nil), job.TaskGroups...)
-	for i := range copied.TaskGroups {
-		copied.TaskGroups[i].Tasks = append([]TaskSpec(nil), copied.TaskGroups[i].Tasks...)
-	}
-	if err := Canonicalize(&copied, limits); err != nil {
-		return nil, err
-	}
-	return &copied, nil
 }
 
 // ValidateWithLimits validates a resolved canonical job against its operator
@@ -90,7 +68,7 @@ func ValidateWithLimits(job *JobSpec, limits Limits) error {
 	if err := ValidateLimits(limits); err != nil {
 		return err
 	}
-	if err := Validate(job); err != nil {
+	if err := ValidateCanonical(job); err != nil {
 		return err
 	}
 	issues := ValidationErrors{}

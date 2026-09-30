@@ -26,3 +26,13 @@ func (s *ServerClient) UpdateJobLimits(ctx context.Context, limits spec.Limits) 
 	}
 	return &response, nil
 }
+
+// UpdateReconciliationSettings replaces the cluster's reconciliation settings
+// with the administrator credential.
+func (s *ServerClient) UpdateReconciliationSettings(ctx context.Context, settings api.ReconciliationSettings) (*api.ClusterSettings, error) {
+	var response api.ClusterSettings
+	if err := s.client.request(ctx, http.MethodPut, s.address()+"/v1/cluster/settings/reconciliation", settings, &response); err != nil {
+		return nil, fmt.Errorf("update reconciliation settings: %w", err)
+	}
+	return &response, nil
+}

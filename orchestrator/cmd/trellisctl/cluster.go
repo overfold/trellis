@@ -5,6 +5,7 @@ import (
 	"io"
 	"slices"
 	"text/tabwriter"
+	"time"
 
 	"github.com/overfold/trellis/internal/api"
 	"github.com/overfold/trellis/internal/client"
@@ -18,7 +19,7 @@ func NewClusterCmd() *cobra.Command {
 		Short: "Inspect and change cluster-wide settings",
 		Long:  "Cluster settings are replicated with the rest of the control-plane state, so every leader applies the same values. The node that creates the cluster supplies their initial values; later node configuration does not change them.",
 	}
-	cmd.AddCommand(newClusterSettingsCmd(), newClusterSetJobLimitsCmd())
+	cmd.AddCommand(newClusterSettingsCmd(), newClusterSetJobLimitsCmd(), newClusterSetReconciliationCmd())
 	return cmd
 }
 
@@ -112,8 +113,62 @@ func newClusterSetJobLimitsCmd() *cobra.Command {
 	return cmd
 }
 
+var reconciliationFlags = []string{"allocation-loss-timeout", "replacement-backoff-base", "replacement-backoff-max", "replacement-stable-after", "terminal-allocation-retention"}
+
+func newClusterSetReconciliationCmd() *cobra.Command {
+	var lossTimeout, backoffBase, backoffMax, stableAfter time.Duration
+	var retention int
+	cmd := &cobra.Command{
+		Use:   "set-reconciliation",
+		Short: "Change how the cluster replaces lost and failed allocations",
+		Long:  "Change the replicated reconciliation settings every leader applies: how long a silent node's allocations wait before becoming lost, the replacement backoff after repeated failures, and how many terminal allocation records each task group keeps. Only the flags given change; the rest keep their replicated values.",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			flags := cmd.Flags()
+			if !slices.ContainsFunc(reconciliationFlags, flags.Changed) {
+				return fmt.Errorf("set at least one reconciliation flag")
+			}
+			serverClient, err := administratorServerClient()
+			if err != nil {
+				return err
+			}
+			current, err := serverClient.ClusterSettings(cmd.Context())
+			if err != nil {
+				return err
+			}
+			reconciliation := current.Reconciliation
+			for name, target := range map[string]*time.Duration{
+				"allocation-loss-timeout":  &reconciliation.AllocationLossTimeout,
+				"replacement-backoff-base": &reconciliation.ReplacementBackoffBase,
+				"replacement-backoff-max":  &reconciliation.ReplacementBackoffMax,
+				"replacement-stable-after": &reconciliation.ReplacementStableAfter,
+			} {
+				if flags.Changed(name) {
+					*target, _ = flags.GetDuration(name)
+				}
+			}
+			if flags.Changed("terminal-allocation-retention") {
+				reconciliation.TerminalAllocationRetention = retention
+			}
+			settings, err := serverClient.UpdateReconciliationSettings(cmd.Context(), reconciliation)
+			if err != nil {
+				return err
+			}
+			return writeClusterSettings(cmd.OutOrStdout(), settings)
+		},
+	}
+	flags := cmd.Flags()
+	flags.DurationVar(&lossTimeout, "allocation-loss-timeout", 0, "How long a node may miss heartbeats before its allocations become lost and are replaced, such as 2m")
+	flags.DurationVar(&backoffBase, "replacement-backoff-base", 0, "Replacement delay after a task group's first consecutive failure")
+	flags.DurationVar(&backoffMax, "replacement-backoff-max", 0, "Maximum replacement delay after repeated failures")
+	flags.DurationVar(&stableAfter, "replacement-stable-after", 0, "How long a replacement must run without being unhealthy before the failure count resets")
+	flags.IntVar(&retention, "terminal-allocation-retention", 0, "Stopped, failed, or lost allocation records kept per task group")
+	return cmd
+}
+
 func writeClusterSettings(out io.Writer, settings *api.ClusterSettings) error {
 	limits := settings.JobLimits
+	reconciliation := settings.Reconciliation
 	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	rows := [][2]string{
 		{"Job limits", ""},
@@ -126,6 +181,12 @@ func writeClusterSettings(out io.Writer, settings *api.ClusterSettings) error {
 		{"  Default task memory", limits.DefaultTaskMemory.String()},
 		{"  Max task CPU", fmt.Sprintf("%dm", limits.MaxTaskCPU)},
 		{"  Max task memory", limits.MaxTaskMemory.String()},
+		{"Reconciliation", ""},
+		{"  Allocation loss timeout", reconciliation.AllocationLossTimeout.String()},
+		{"  Replacement backoff base", reconciliation.ReplacementBackoffBase.String()},
+		{"  Replacement backoff max", reconciliation.ReplacementBackoffMax.String()},
+		{"  Replacement stable after", reconciliation.ReplacementStableAfter.String()},
+		{"  Terminal allocation retention", fmt.Sprint(reconciliation.TerminalAllocationRetention)},
 		{"Network", ""},
 		{"  WireGuard pool", settings.Network.WireGuardPool},
 		{"  WireGuard port count", fmt.Sprint(settings.Network.WireGuardPortCount)},

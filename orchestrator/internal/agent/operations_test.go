@@ -355,11 +355,16 @@ func persistTestRecoveryEpoch(t *testing.T, local *storage.LocalStorage) {
 	}
 }
 
+func testRestartPolicy() *spec.RestartPolicySpec {
+	return &spec.RestartPolicySpec{MaxRestarts: spec.DefaultMaxRestarts, Window: spec.DefaultRestartWindow}
+}
+
 func operationTestRequest() *api.AllocationRequest {
 	return &api.AllocationRequest{
 		AllocationID: "allocation", Generation: 2, JobRevision: 7, Epoch: 1, ExecutionHash: "execution-hash",
-		Namespace: "default", JobName: "job", GroupName: "group",
-		Tasks: []spec.TaskSpec{{Name: "first", Image: "image"}, {Name: "second", Image: "image"}},
+		Namespace: "default", JobName: "job", GroupName: "group", Runtime: string(spec.DefaultRuntime),
+		Tasks:   []spec.TaskSpec{{Name: "first", Image: "image"}, {Name: "second", Image: "image"}},
+		Restart: testRestartPolicy(),
 	}
 }
 
@@ -822,7 +827,7 @@ func TestFailedRunStopPreservesStartedAllocationResources(t *testing.T) {
 	agent.ConfigureDurability(local, "test")
 	request := operationTestRequest()
 	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image", Networking: &spec.TaskNetworkingSpec{Ports: []spec.PortSpec{{}}}}}
-	request.Secrets = []api.DeliveredSecret{{Task: "first", Name: "key", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Value: []byte("secret")}}
+	request.Secrets = []api.DeliveredSecret{{Task: "first", Name: "key", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Mode: 0o400, Value: []byte("secret")}}
 	id := "allocation-g2-first"
 	recordDir := filepath.Join(root, "agent", "allocations")
 	rt.onStart = func() error {
@@ -1236,7 +1241,7 @@ func TestAmbiguousStartStopsBeforeReleasingResources(t *testing.T) {
 	agent.SetNetworkManager(manager)
 	request := operationTestRequest()
 	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image", Networking: &spec.TaskNetworkingSpec{Ports: []spec.PortSpec{{}}}}}
-	request.Secrets = []api.DeliveredSecret{{Task: "first", Name: "key", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Value: []byte("secret")}}
+	request.Secrets = []api.DeliveredSecret{{Task: "first", Name: "key", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/key", Mode: 0o400, Value: []byte("secret")}}
 	id := "allocation-g2-first"
 	rt.onStop = func() {
 		alloc := agent.allocations[id]

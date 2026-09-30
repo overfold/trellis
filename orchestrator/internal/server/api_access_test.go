@@ -96,7 +96,7 @@ func TestStartRetryRedeliversWorkloadTokenWithStableExecutionHash(t *testing.T) 
 	s.nodes[node.ID] = node
 	task := spec.TaskSpec{Name: "app", Image: "app"}
 	group := spec.TaskGroupSpec{Name: "app", APIAccess: &spec.APIAccessSpec{Scope: spec.APIAccessNamespace, Access: spec.APIAccessWrite}, Tasks: []spec.TaskSpec{task}}
-	s.jobs[jobKey("default", "web")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{group}}, Revision: 1}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{group}}), Revision: 1}
 	alloc := &Allocation{ID: "allocation", Namespace: "default", JobName: "web", TaskGroupName: "app", Tasks: []spec.TaskSpec{task}, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhasePlaced}
 	start := &Action{Type: ActionStart, Allocation: alloc}
 	for range 2 {
@@ -143,7 +143,7 @@ func TestRevokeStaleWorkloadCredentials(t *testing.T) {
 	s, _ := newAPIAccessServer(t)
 	ctx := context.Background()
 	access := &spec.APIAccessSpec{Scope: spec.APIAccessNamespace, Access: spec.APIAccessRead}
-	s.jobs[jobKey("default", "web")] = &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", APIAccess: access}}}}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", APIAccess: access}}})}
 	issue := func(id string) string {
 		t.Helper()
 		token, err := s.apiAccessToken(ctx, access, &api.AllocationRequest{AllocationID: id, Generation: 1, Namespace: "default", JobName: "web", GroupName: "app"})

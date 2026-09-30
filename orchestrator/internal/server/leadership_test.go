@@ -68,7 +68,7 @@ func TestAcquireLeadershipCompactionFailureLeavesEpochAndMemoryUnchanged(t *test
 		t.Fatal(err)
 	}
 	identity := jobKey("default", "web")
-	job := &Job{Spec: &spec.JobSpec{Namespace: "default", Name: "web"}, Revision: 12}
+	job := &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web"}), Revision: 12}
 	prefix := "trellis/test-cluster/job-revisions/" + url.QueryEscape(identity) + "/"
 	for version := 1; version <= 12; version++ {
 		raw, err := json.Marshal(&JobRevisionRecord{Version: version, Revision: version, Spec: job.Spec, CreatedAt: time.Unix(int64(version), 0).UTC()})

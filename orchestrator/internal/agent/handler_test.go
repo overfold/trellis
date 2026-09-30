@@ -140,3 +140,48 @@ func TestOperationErrorReportsRestartExhaustion(t *testing.T) {
 		t.Fatalf("operation error = %d/%q, want %d/%q", httpErr.Code, response.Code, http.StatusConflict, api.OperationRestartExhausted)
 	}
 }
+
+func TestHandleRunRequiresCanonicalTaskGroup(t *testing.T) {
+	canonicalTask := func() spec.TaskSpec {
+		return spec.TaskSpec{Name: "task", Image: "image", Resources: &spec.ResourcesSpec{CPU: 100, Memory: 1 << 20}, Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkIsolated}}
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*api.AllocationRequest)
+		want   string
+	}{
+		{name: "runtime", mutate: func(r *api.AllocationRequest) { r.Runtime = "" }, want: "runtime must be explicit"},
+		{name: "restart", mutate: func(r *api.AllocationRequest) { r.Restart = nil }, want: "restart policy is required"},
+		{name: "networking", mutate: func(r *api.AllocationRequest) { r.Tasks[0].Networking = nil }, want: "networking.mode"},
+		{name: "resources", mutate: func(r *api.AllocationRequest) { r.Tasks[0].Resources = nil }, want: "resources"},
+		{name: "health interval", mutate: func(r *api.AllocationRequest) {
+			r.Tasks[0].HealthCheck = &spec.HealthCheckSpec{Type: spec.HealthCheckTCP, Port: 80, Timeout: 1, Threshold: 1}
+		}, want: "health_check.interval"},
+		{name: "secret mode", mutate: func(r *api.AllocationRequest) {
+			r.Tasks[0].Secrets = []spec.SecretRefSpec{{Name: "s", Target: spec.SecretTargetFile, Path: "/run/trellis-secrets/s"}}
+		}, want: "secrets[0].mode"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			e := echo.New()
+			NewHandler(&Agent{}).Register(e)
+			allocation := api.AllocationRequest{
+				AllocationID: "allocation", Generation: 1, JobRevision: 1, Epoch: 1, ExecutionHash: "hash",
+				Runtime: string(spec.DefaultRuntime), Restart: testRestartPolicy(), Tasks: []spec.TaskSpec{canonicalTask()},
+			}
+			test.mutate(&allocation)
+			body, err := json.Marshal(allocation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodPost, "/v1/allocations", bytes.NewReader(body))
+			request.Header.Set("Content-Type", "application/json")
+			recorder := httptest.NewRecorder()
+
+			e.ServeHTTP(recorder, request)
+
+			if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), test.want) {
+				t.Fatalf("response = %d %s, want 400 mentioning %q", recorder.Code, recorder.Body.String(), test.want)
+			}
+		})
+	}
+}
