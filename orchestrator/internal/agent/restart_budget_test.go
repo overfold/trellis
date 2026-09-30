@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -130,6 +132,62 @@ func TestStartRetryKeepsFixedRestartWindow(t *testing.T) {
 	got := agent.allocations["task"]
 	if rt.restartCount != 1 || got.RestartAttempts != 1 || got.RestartWindow.Before(before) || got.RestartExhausted {
 		t.Fatalf("restart=%d record=%d/%v exhausted=%v, want one restart in a new window", rt.restartCount, got.RestartAttempts, got.RestartWindow, got.RestartExhausted)
+	}
+}
+
+func TestRestartPersistenceFailureLeavesRuntimeAndDurableBudgetUnchanged(t *testing.T) {
+	policy := &spec.RestartPolicySpec{MaxRestarts: 1, Window: time.Hour}
+	rt := &reconcilerRuntime{status: runtime.StatusStopped}
+	agent := newOperationTestAgent(t, rt)
+	root := t.TempDir()
+	local := storage.NewLocalStorage(root)
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	agent.ConfigureDurability(local, "test")
+	record := recoveryTestAllocation(0)
+	record.Ports = nil
+	record.Restart = policy
+	agent.allocations[record.ID] = record
+	if err := agent.persistAllocation(record); err != nil {
+		t.Fatal(err)
+	}
+	agent.reconciler.Subscriber = agent
+	agent.reconciler.TrackRecovered(record.ID, false, policy, 0, time.Time{}, false)
+
+	recordDir := filepath.Join(root, "agent", "allocations")
+	savedRecordDir := filepath.Join(root, "saved-allocations")
+	if err := os.Rename(recordDir, savedRecordDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(recordDir, []byte("blocked"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.reconciler.Reconcile(context.Background(), record.ID); err == nil {
+		t.Fatal("reconcile succeeded although the restart attempt could not be persisted")
+	}
+	if rt.restartCount != 0 || record.RestartAttempts != 0 {
+		t.Fatalf("restart count = %d, in-memory attempts = %d; want neither changed", rt.restartCount, record.RestartAttempts)
+	}
+
+	if err := os.Remove(recordDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(savedRecordDir, recordDir); err != nil {
+		t.Fatal(err)
+	}
+	var stored Allocation
+	if err := local.Get(allocationRecordKey(record.ID), &stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.RestartAttempts != 0 {
+		t.Fatalf("durable restart attempts = %d, want unchanged", stored.RestartAttempts)
+	}
+	if err := agent.reconciler.Reconcile(context.Background(), record.ID); err != nil {
+		t.Fatalf("retry after storage recovery: %v", err)
+	}
+	if rt.restartCount != 1 || record.RestartAttempts != 1 {
+		t.Fatalf("restart count = %d, attempts = %d; want one recorded restart", rt.restartCount, record.RestartAttempts)
 	}
 }
 

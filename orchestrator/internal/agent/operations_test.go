@@ -79,6 +79,7 @@ type stoppedWithErrorRuntime struct {
 	stopErr    error
 	startCount int
 	managedID  string
+	labels     map[string]string
 }
 
 type createdRecoveryRuntime struct {
@@ -191,7 +192,7 @@ func (r *stoppedWithErrorRuntime) ListManaged(context.Context, string) ([]runtim
 	if r.managedID == "" {
 		return nil, nil
 	}
-	return []runtime.ContainerInfo{{ID: r.managedID, Status: r.status}}, nil
+	return []runtime.ContainerInfo{{ID: r.managedID, Status: r.status, Labels: r.labels}}, nil
 }
 
 type blockingStopRuntime struct {
@@ -360,6 +361,26 @@ func operationTestRequest() *api.AllocationRequest {
 		Namespace: "default", JobName: "job", GroupName: "group",
 		Tasks: []spec.TaskSpec{{Name: "first", Image: "image"}, {Name: "second", Image: "image"}},
 	}
+}
+
+func completeRecoveryTestAllocation(allocation *Allocation) *Allocation {
+	if allocation.Generation == 0 {
+		allocation.Generation = 1
+	}
+	if allocation.JobRevision == 0 {
+		allocation.JobRevision = 1
+	}
+	if allocation.ExecutionHash == "" {
+		allocation.ExecutionHash = "hash"
+	}
+	allocation.Namespace, allocation.JobName, allocation.GroupName = "default", "job", "group"
+	if allocation.TaskName == "" {
+		allocation.TaskName = "task"
+		if allocation.Spec != nil && allocation.Spec.Name != "" {
+			allocation.TaskName = allocation.Spec.Name
+		}
+	}
+	return allocation
 }
 
 func TestRunAllocationRejectsSameGenerationRevisionConflict(t *testing.T) {
@@ -1484,11 +1505,12 @@ func TestRecoverCreatedAllocationCanBeRetriedByControlPlane(t *testing.T) {
 	}
 	request := operationTestRequest()
 	request.Tasks = request.Tasks[:1]
-	stale := &Allocation{
+	stale := completeRecoveryTestAllocation(&Allocation{
 		ID: id, AllocationID: request.AllocationID, ContainerID: id,
 		Generation: request.Generation, JobRevision: request.JobRevision, ExecutionHash: request.ExecutionHash,
 		Spec: &request.Tasks[0], Status: "starting", Health: "unknown", Draining: true,
-	}
+	})
+	rt.labels = recoveryTestLabels(stale)
 
 	first := newOperationTestAgent(t, rt)
 	first.ConfigureDurability(local, "test")
@@ -1546,11 +1568,12 @@ func recoverCreatedAllocationForRetry(t *testing.T, rt *createdRecoveryRuntime, 
 	id := rt.managedID
 	first := newOperationTestAgent(t, rt)
 	first.ConfigureDurability(local, "test")
-	first.allocations[id] = &Allocation{
+	first.allocations[id] = completeRecoveryTestAllocation(&Allocation{
 		ID: id, AllocationID: request.AllocationID, ContainerID: id,
 		Generation: request.Generation, JobRevision: request.JobRevision, ExecutionHash: request.ExecutionHash,
 		Spec: &request.Tasks[0], Status: "starting", Health: "unknown",
-	}
+	})
+	rt.labels = recoveryTestLabels(first.allocations[id])
 	if drainSequence != 0 {
 		drain := &api.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: request.Epoch, Sequence: drainSequence}
 		if err := first.DrainGroup(drain); err != nil {
@@ -1871,12 +1894,13 @@ func TestRecoverNonRunningAllocationDefersRestartToServer(t *testing.T) {
 			if err := local.Init(); err != nil {
 				t.Fatal(err)
 			}
-			stale := &Allocation{
+			stale := completeRecoveryTestAllocation(&Allocation{
 				ID: "task", AllocationID: "allocation", ContainerID: "task",
 				Generation: 1, JobRevision: 1, ExecutionHash: "hash",
 				Spec:   &spec.TaskSpec{Name: "task", Image: "image"},
 				Status: durableStatus, Health: "healthy",
-			}
+			})
+			rt.labels = recoveryTestLabels(stale)
 			first := newOperationTestAgent(t, rt)
 			first.ConfigureDurability(local, "test")
 			if err := first.persistAllocation(stale); err != nil {
@@ -1929,11 +1953,13 @@ func TestRecoverRunningAllocationResetsHealthUntilProbe(t *testing.T) {
 	check := &spec.HealthCheckSpec{Type: "script", Interval: time.Hour}
 	first := newOperationTestAgent(t, rt)
 	first.ConfigureDurability(local, "test")
-	if err := first.persistAllocation(&Allocation{
+	record := completeRecoveryTestAllocation(&Allocation{
 		ID: "task", AllocationID: "allocation", ContainerID: "task",
 		Spec:   &spec.TaskSpec{Name: "task", HealthCheck: check},
 		Status: "running", Health: "healthy",
-	}); err != nil {
+	})
+	rt.labels = recoveryTestLabels(record)
+	if err := first.persistAllocation(record); err != nil {
 		t.Fatal(err)
 	}
 	second := newOperationTestAgent(t, rt)
@@ -1968,13 +1994,15 @@ func TestRecoverPersistsProbeResultBeforeReturning(t *testing.T) {
 	}
 	first := newOperationTestAgent(t, rt)
 	first.ConfigureDurability(local, "test")
-	if err := first.persistAllocation(&Allocation{
+	record := completeRecoveryTestAllocation(&Allocation{
 		ID: "task", AllocationID: "allocation", ContainerID: "task",
 		Spec: &spec.TaskSpec{Name: "task", HealthCheck: &spec.HealthCheckSpec{
 			Type: "script", Command: []string{"true"}, Interval: time.Millisecond, Threshold: 1,
 		}},
 		Status: "running", Health: "healthy",
-	}); err != nil {
+	})
+	rt.labels = recoveryTestLabels(record)
+	if err := first.persistAllocation(record); err != nil {
 		t.Fatal(err)
 	}
 	if err := first.persistAllocation(&Allocation{
@@ -2055,12 +2083,14 @@ func TestRecoverRunningAllocationProbesContainerPort(t *testing.T) {
 			check := &spec.HealthCheckSpec{Type: checkType, Port: 8080, Path: "/health", Interval: 10 * time.Millisecond, Threshold: 1000}
 			first := newOperationTestAgent(t, rt)
 			first.ConfigureDurability(local, "test")
-			if err := first.persistAllocation(&Allocation{
+			record := completeRecoveryTestAllocation(&Allocation{
 				ID: "task", AllocationID: "allocation", ContainerID: "task",
 				Spec:   &spec.TaskSpec{Name: "task", HealthCheck: check},
 				Ports:  []*runtime.Port{{HostPort: 32080, ContainerPort: 8080}},
 				Status: "running", Health: "healthy",
-			}); err != nil {
+			})
+			rt.labels = recoveryTestLabels(record)
+			if err := first.persistAllocation(record); err != nil {
 				t.Fatal(err)
 			}
 			second := newOperationTestAgent(t, rt)
@@ -2098,12 +2128,13 @@ func TestRecoverStoppingAllocationDoesNotStartOrRestart(t *testing.T) {
 
 	first := newOperationTestAgent(t, rt)
 	first.ConfigureDurability(local, "test")
-	first.allocations["task"] = &Allocation{
+	first.allocations["task"] = completeRecoveryTestAllocation(&Allocation{
 		ID: "task", AllocationID: "allocation", ContainerID: "task",
 		Generation: 1, JobRevision: 1, ExecutionHash: "hash",
 		Spec:   &spec.TaskSpec{Name: "task", Image: "image"},
 		Status: "running", Health: "healthy",
-	}
+	})
+	rt.labels = recoveryTestLabels(first.allocations["task"])
 	first.reconciler.Track("task", false, nil)
 	if err := first.persistAllocation(first.allocations["task"]); err != nil {
 		t.Fatal(err)
@@ -2168,12 +2199,13 @@ func TestRestartExhaustionReportsFailedAndSurvivesAgentRestart(t *testing.T) {
 	policy := &spec.RestartPolicySpec{MaxRestarts: 0, Window: time.Minute}
 	first := newOperationTestAgent(t, rt)
 	first.ConfigureDurability(local, "test")
-	allocation := &Allocation{
+	allocation := completeRecoveryTestAllocation(&Allocation{
 		ID: "task", AllocationID: "allocation", ContainerID: "task",
 		Generation: 1, JobRevision: 1, ExecutionHash: "hash", Restart: policy,
 		Spec:   &spec.TaskSpec{Name: "task", Image: "image"},
 		Status: "running", Health: "healthy",
-	}
+	})
+	rt.labels = recoveryTestLabels(allocation)
 	first.allocations["task"] = allocation
 	if err := first.persistAllocation(allocation); err != nil {
 		t.Fatal(err)
@@ -2271,10 +2303,12 @@ func TestRecoverExhaustedAllocationWithoutSpecStaysFailed(t *testing.T) {
 	}
 	first := newOperationTestAgent(t, rt)
 	first.ConfigureDurability(local, "test")
-	if err := first.persistAllocation(&Allocation{
+	record := completeRecoveryTestAllocation(&Allocation{
 		ID: "task", AllocationID: "allocation", ContainerID: "task", Generation: 1,
 		Status: "failed", Health: "unhealthy", RestartExhausted: true,
-	}); err != nil {
+	})
+	rt.labels = recoveryTestLabels(record)
+	if err := first.persistAllocation(record); err != nil {
 		t.Fatal(err)
 	}
 	second := newOperationTestAgent(t, rt)
@@ -2305,12 +2339,14 @@ func TestRecoverDrainingExhaustedAllocationKeepsBudgetOnResume(t *testing.T) {
 	}
 	first := newOperationTestAgent(t, rt)
 	first.ConfigureDurability(local, "test")
-	if err := first.persistAllocation(&Allocation{
+	record := completeRecoveryTestAllocation(&Allocation{
 		ID: "task", AllocationID: "allocation", ContainerID: "task", Generation: 1,
 		Spec:   &spec.TaskSpec{Name: "task", Image: "image"},
 		Status: "running", Health: "healthy", Draining: true, DrainSequence: 1,
 		RestartAttempts: 3, RestartWindow: time.Now().Add(-time.Hour), RestartExhausted: true,
-	}); err != nil {
+	})
+	rt.labels = recoveryTestLabels(record)
+	if err := first.persistAllocation(record); err != nil {
 		t.Fatal(err)
 	}
 	second := newOperationTestAgent(t, rt)
