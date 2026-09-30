@@ -19,7 +19,7 @@ trellisctl jobs apply --file examples/web-service/trellis.yaml --wait
 trellisctl jobs status web-service
 ```
 
-The allocation view shows the selected node and reserved host port. From a trusted test network, open `http://NODE_ADDRESS:8080` or query `/health` to verify that the service is reachable. This example deliberately serves plaintext HTTP; do not expose it to an untrusted network without placing it behind TLS.
+The allocations listed by `jobs status` show the selected node and reserved host port. From a trusted test network, open `http://NODE_ADDRESS:8080` or query `/health` to verify that the service is reachable. This example deliberately serves plaintext HTTP; do not expose it to an untrusted network without placing it behind TLS.
 
 If the health check does not succeed, `jobs status` includes the failure details automatically; pair it with logs when needed:
 

@@ -7,7 +7,7 @@ task_groups:
       scope: namespace
       access: read
     tasks:
-      - name: dashboard
+      - name: web
         image: docker.io/library/nginx:1.27-alpine
         networking:
           mode: host
