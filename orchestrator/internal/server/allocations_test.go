@@ -239,7 +239,8 @@ func TestAllocationEndpointUsesObservedNetworkAddress(t *testing.T) {
 	if len(listed) != 1 || listed[0].Address != "10.86.213.2" || len(listed[0].Endpoints) != 1 || listed[0].Endpoints[0].Task != "app" {
 		t.Fatalf("allocation endpoint = %#v, want observed namespace task address", listed)
 	}
-	status, ok := s.GetJob("demo", "web")
+	status, err := s.GetJob("demo", "web")
+	ok := err == nil
 	if !ok || len(status.Allocations) != 1 || status.Allocations[0].Address != "10.86.213.2" || len(status.Allocations[0].Endpoints) != 1 {
 		t.Fatalf("job status endpoint = %#v, want observed namespace task endpoint", status)
 	}

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -344,5 +345,21 @@ func TestReconciliationSettingsEndpoint(t *testing.T) {
 	}
 	if got := control.ClusterSettings().Reconciliation.AllocationLossTimeout; got != 2*time.Minute {
 		t.Fatalf("allocation loss timeout = %s, want 2m", got)
+	}
+}
+
+// TestJobLimitsWireRoundTrip fails when spec.Limits gains a field that the
+// wire conversion would drop.
+func TestJobLimitsWireRoundTrip(t *testing.T) {
+	var limits spec.Limits
+	value := reflect.ValueOf(&limits).Elem()
+	for i := range value.NumField() {
+		value.Field(i).SetInt(int64(i + 1))
+	}
+	if got := JobLimitsFromAPI(JobLimitsAPI(limits)); got != limits {
+		t.Fatalf("round trip = %+v, want %+v", got, limits)
+	}
+	if fields := reflect.TypeFor[api.JobLimits]().NumField(); fields != value.NumField() {
+		t.Fatalf("api.JobLimits has %d fields, spec.Limits has %d", fields, value.NumField())
 	}
 }

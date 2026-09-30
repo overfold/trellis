@@ -261,23 +261,29 @@ func (c *Client) administratorChallenge(ctx context.Context, target string) (str
 // Stream sends a GET request and returns the response body for the caller
 // to read and close.
 func (c *Client) Stream(ctx context.Context, url string) (io.ReadCloser, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
-	if err != nil {
-		return nil, fmt.Errorf("constructing request %s: %w", url, err)
-	}
-	if err := c.authenticate(ctx, request, nil); err != nil {
-		return nil, err
-	}
-	response, err := c.HTTP.Do(request)
-	if err != nil {
-		return nil, fmt.Errorf("executing request %s: %w", url, err)
-	}
-	if checkStatusCode(response.StatusCode) {
-		defer func() { _ = response.Body.Close() }()
+	for attempt := 0; attempt < 2; attempt++ {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
+		if err != nil {
+			return nil, fmt.Errorf("constructing request %s: %w", url, err)
+		}
+		if err := c.authenticate(ctx, request, nil); err != nil {
+			return nil, err
+		}
+		response, err := c.HTTP.Do(request)
+		if err != nil {
+			return nil, fmt.Errorf("executing request %s: %w", url, err)
+		}
+		if !checkStatusCode(response.StatusCode) {
+			return response.Body, nil
+		}
 		body, _ := io.ReadAll(io.LimitReader(response.Body, MaxResponseBody))
+		_ = response.Body.Close()
+		if c.AdministratorKey != nil && attempt == 0 && response.Header.Get(adminsign.ChallengeStatusHeader) == adminsign.ChallengeInvalid {
+			continue
+		}
 		return nil, &HTTPError{Status: response.StatusCode, Body: body}
 	}
-	return response.Body, nil
+	return nil, fmt.Errorf("administrator challenge was rejected after retry")
 }
 
 func checkStatusCode(statusCode int) bool {

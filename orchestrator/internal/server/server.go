@@ -257,6 +257,9 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 		if record.Spec == nil {
 			return fmt.Errorf("validate job %q: job spec is missing", key)
 		}
+		if record.Incarnation == "" {
+			return fmt.Errorf("validate job %q: job incarnation is missing", key)
+		}
 		snapshot.Jobs[key] = value
 		restored[jobKey(record.Spec.Namespace, record.Spec.Name)] = &record
 	}
@@ -1761,20 +1764,34 @@ func (s *Server) ListJobs(namespace string) api.JobListResponse {
 	return result
 }
 
-// GetJob returns a job and its allocation state.
-func (s *Server) GetJob(namespace, name string) (*api.JobStatusResponse, bool) {
+// ErrJobNotFound indicates that a namespace has no job with the requested name.
+var ErrJobNotFound = errors.New("job not found")
+
+// GetJob returns a job, its canonical specification, and its allocation
+// state.
+func (s *Server) GetJob(namespace, name string) (*api.JobStatusResponse, error) {
+	r, jobSpec, ok := s.jobStatus(namespace, name)
+	if !ok {
+		return nil, ErrJobNotFound
+	}
+	// Job records are replaced, never mutated, so the spec is encoded
+	// without holding s.mu.
+	rawSpec, err := json.Marshal(jobSpec)
+	if err != nil {
+		return nil, fmt.Errorf("encode job spec: %w", err)
+	}
+	r.Spec = rawSpec
+	return r, nil
+}
+
+func (s *Server) jobStatus(namespace, name string) (*api.JobStatusResponse, *spec.JobSpec, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	job, ok := s.jobs[jobKey(namespace, name)]
 	if !ok {
-		return nil, false
+		return nil, nil, false
 	}
-	rawSpec, err := json.Marshal(job.Spec)
-	if err != nil {
-		s.log.Error("encode job spec", "namespace", namespace, "job", name, "error", err)
-		return nil, false
-	}
-	r := &api.JobStatusResponse{Name: name, Incarnation: job.Incarnation, Version: job.Version, Revision: job.Revision, Spec: rawSpec}
+	r := &api.JobStatusResponse{Name: name, Incarnation: job.Incarnation, Version: job.Version, Revision: job.Revision}
 	for _, g := range job.Spec.TaskGroups {
 		r.Desired += g.Count
 	}
@@ -1795,7 +1812,7 @@ func (s *Server) GetJob(namespace, name string) (*api.JobStatusResponse, bool) {
 		a.mu.Unlock()
 	}
 	r.ReplacementBackoff = s.replacementBackoffResponsesLocked(namespace, name)
-	return r, true
+	return r, job.Spec, true
 }
 
 // PlanJob returns the semantic plan for applying desired, a canonical job.

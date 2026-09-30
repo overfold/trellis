@@ -221,3 +221,22 @@ func TestStreamErrorsAreHTTPErrors(t *testing.T) {
 		t.Fatalf("ClusterEvents error = %v", err)
 	}
 }
+
+func TestEventsRejectsOversizedEvent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		line := "data: " + strings.Repeat("x", 64<<10) + "\n"
+		for range maxEventBytes/(64<<10) + 1 {
+			_, _ = io.WriteString(w, line)
+		}
+	}))
+	defer server.Close()
+
+	stream, err := mustNew(t, Config{Address: server.URL, Namespace: "default"}).Events(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stream.Close() }()
+	if _, err := stream.Next(); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("Next error = %v, want size limit", err)
+	}
+}

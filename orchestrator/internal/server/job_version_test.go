@@ -173,8 +173,8 @@ func TestRegisterJobScaleChangeAdvancesVersionAndHistory(t *testing.T) {
 			t.Fatalf("history[%d] = version %d revision %d count %d, want %+v", i, got.Version, got.Revision, gotSpec.TaskGroups[0].Count, want[i])
 		}
 	}
-	status, ok := s.GetJob("default", "web")
-	if !ok || status.Version != 3 || status.Revision != 2 || status.Incarnation != incarnation {
+	status, err := s.GetJob("default", "web")
+	if err != nil || status.Version != 3 || status.Revision != 2 || status.Incarnation != incarnation {
 		t.Fatalf("job status = %+v, want version 3 revision 2 in incarnation %s", status, incarnation)
 	}
 }

@@ -118,6 +118,8 @@ func (h *Handler) handleLogs(c *echo.Context) error {
 	defer func() { _ = logs.Close() }()
 	c.Response().Header().Set("Content-Type", "text/plain; charset=utf-8")
 	c.Response().WriteHeader(http.StatusOK)
+	// Send the headers now: a followed task may not log for a long time.
+	_ = http.NewResponseController(c.Response()).Flush()
 	_, err = io.Copy(c.Response(), logs)
 	return err
 }

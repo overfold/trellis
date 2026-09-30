@@ -71,7 +71,7 @@ func NewJobsApplyCmd() *cobra.Command {
 			if err := ensureActiveNamespace(job); err != nil {
 				return err
 			}
-			serverClient, err := jobClient(job.Namespace)
+			serverClient, err := apiClient(job.Namespace)
 			if err != nil {
 				return err
 			}
@@ -329,7 +329,7 @@ func ensureActiveNamespace(job *spec.JobSpec) error {
 // its own namespace; a cluster-scoped credential must name one.
 func namespaceClient(ctx context.Context) (*client.Client, error) {
 	if config.Namespace != "" {
-		return jobClient(config.Namespace)
+		return apiClient(config.Namespace)
 	}
 	serverClient, err := apiClient("")
 	if err != nil {
@@ -342,11 +342,7 @@ func namespaceClient(ctx context.Context) (*client.Client, error) {
 	if info.Scope != "namespace" || info.Namespace == "" {
 		return nil, fmt.Errorf("--namespace is required with a %s-scoped credential", info.Scope)
 	}
-	return jobClient(info.Namespace)
-}
-
-func jobClient(namespace string) (*client.Client, error) {
-	return apiClient(namespace)
+	return apiClient(info.Namespace)
 }
 
 // apiClient returns a client authenticated with the selected credential. The

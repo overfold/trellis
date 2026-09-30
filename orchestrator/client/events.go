@@ -65,10 +65,14 @@ func (s *EventStream) Next() (api.ClusterEvent, error) {
 			return event, nil
 		}
 		if payload, ok := bytes.CutPrefix(line, []byte("data:")); ok {
+			payload = bytes.TrimPrefix(payload, []byte(" "))
+			if len(data)+len(payload)+1 > maxEventBytes {
+				return api.ClusterEvent{}, fmt.Errorf("read events: event exceeds %d bytes", maxEventBytes)
+			}
 			if len(data) > 0 {
 				data = append(data, '\n')
 			}
-			data = append(data, bytes.TrimPrefix(payload, []byte(" "))...)
+			data = append(data, payload...)
 		}
 	}
 	if err := s.scanner.Err(); err != nil {

@@ -164,3 +164,28 @@ func waitForSubscriberCount(t *testing.T, bus *EventBus, want int) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+// TestEventStreamSendsHeadersBeforeTheFirstEvent keeps a quiet event stream
+// from looking like an unresponsive server to clients that bound the wait
+// for response headers.
+func TestEventStreamSendsHeadersBeforeTheFirstEvent(t *testing.T) {
+	s, _ := newTestServerWithAgent()
+	s.events = newEventBus()
+	server := httptest.NewServer(authenticatedHandler(s, auth.AccessNamespace, auth.AccessRead, "default"))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/v1/namespaces/default/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: 2 * time.Second}}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("event stream headers: %v", err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "text/event-stream" {
+		t.Fatalf("event stream response = %d %q", response.StatusCode, response.Header.Get("Content-Type"))
+	}
+}

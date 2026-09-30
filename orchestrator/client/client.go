@@ -40,6 +40,10 @@ type Client struct {
 	baseURL   string
 	namespace string
 	transport *transport.Client
+	// streams carries responses that stay open, such as followed logs and
+	// event streams; their headers may not arrive until the first data, so
+	// only the request context bounds the wait.
+	streams *transport.Client
 }
 
 // ErrNamespaceRequired reports a namespaced operation on a client without a
@@ -65,13 +69,14 @@ func New(config Config) (*Client, error) {
 		}
 		t.AdministratorKey = append(ed25519.PrivateKey(nil), config.AdministratorKey...)
 	}
-	return &Client{baseURL: baseURL, namespace: config.Namespace, transport: t}, nil
+	streams := &transport.Client{Token: t.Token, AdministratorKey: t.AdministratorKey, HTTP: transport.NewHTTPClient(config.TLSConfig, 0)}
+	return &Client{baseURL: baseURL, namespace: config.Namespace, transport: t, streams: streams}, nil
 }
 
 // WithNamespace returns a client that shares c's connection and credentials
 // and addresses namespace in namespaced operations.
 func (c *Client) WithNamespace(namespace string) *Client {
-	return &Client{baseURL: c.baseURL, namespace: namespace, transport: c.transport}
+	return &Client{baseURL: c.baseURL, namespace: namespace, transport: c.transport, streams: c.streams}
 }
 
 // Namespace returns the namespace addressed by namespaced operations.
@@ -126,6 +131,6 @@ func (c *Client) request(ctx context.Context, method, target string, requestData
 }
 
 func (c *Client) stream(ctx context.Context, target string) (io.ReadCloser, error) {
-	body, err := c.transport.Stream(ctx, target)
+	body, err := c.streams.Stream(ctx, target)
 	return body, publicError(err)
 }

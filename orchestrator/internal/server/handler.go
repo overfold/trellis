@@ -410,6 +410,8 @@ func (h *Handler) handleAllocationLogs(c *echo.Context) error {
 	defer func() { _ = logs.Close() }()
 	c.Response().Header().Set("Content-Type", "text/plain; charset=utf-8")
 	c.Response().WriteHeader(http.StatusOK)
+	// Send the headers now: a followed task may not log for a long time.
+	_ = http.NewResponseController(c.Response()).Flush()
 	_, err = io.Copy(c.Response(), logs)
 	return err
 }
@@ -543,9 +545,13 @@ func (h *Handler) handleGetJob(c *echo.Context) error {
 	if err != nil {
 		return err
 	}
-	status, ok := h.server.GetJob(ns, c.Param("name"))
-	if !ok {
+	status, err := h.server.GetJob(ns, c.Param("name"))
+	switch {
+	case errors.Is(err, ErrJobNotFound):
 		return echo.NewHTTPError(http.StatusNotFound, "job not found")
+	case err != nil:
+		h.server.log.Error("read job", "namespace", ns, "job", c.Param("name"), "error", err)
+		return echo.NewHTTPError(http.StatusInternalServerError, "unable to read job")
 	}
 	return c.JSON(http.StatusOK, status)
 }
@@ -989,6 +995,9 @@ func (h *Handler) streamEvents(c *echo.Context, ns string) error {
 
 	ctx := c.Request().Context()
 	rc := http.NewResponseController(c.Response())
+	// Send the headers now: a quiet namespace may have no event for a long
+	// time.
+	_ = rc.Flush()
 
 	for {
 		select {
