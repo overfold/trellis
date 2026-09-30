@@ -112,7 +112,7 @@ func membershipTestServer(joiner *fakeMembership, leader uuid.UUID, healthy ...u
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	s := &Server{joiner: joiner, nodeID: leader, now: func() time.Time { return now }, leaderSince: now.Add(-time.Hour), nodes: map[uuid.UUID]*Node{}, state: NewStateController(memoryStore{}, "test")}
 	for _, id := range healthy {
-		s.nodes[id] = &Node{ID: id, Status: NodeStatusHealthy, LastHeartbeat: now}
+		addTestNode(s, &Node{ID: id, Status: NodeStatusHealthy}, now)
 		s.RecordRaftProgress(id, joiner.AppliedIndex())
 	}
 	return s
@@ -212,7 +212,7 @@ func TestReconcileMembershipPromotesHealthyCaughtUpNodes(t *testing.T) {
 	joiner := newFakeMembership(fakeMember(leader, true), fakeMember(b, false), fakeMember(c, false), fakeMember(d, false))
 	s := membershipTestServer(joiner, leader, b, c)
 	// d heartbeats but trails the leader's log too far to vote.
-	s.nodes[d] = &Node{ID: d, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
+	addTestNode(s, &Node{ID: d, Status: NodeStatusHealthy}, s.now())
 	s.RecordRaftProgress(d, joiner.AppliedIndex()-raftCatchUpLag-1)
 
 	if err := s.ReconcileMembership(context.Background()); err != nil {
@@ -238,7 +238,7 @@ func TestReconcileMembershipIgnoresStaleProgressAndDrainingNodes(t *testing.T) {
 	joiner := newFakeMembership(fakeMember(leader, true), fakeMember(b, false), fakeMember(c, false))
 	s := membershipTestServer(joiner, leader, b, c)
 	s.nodes[b].Status = NodeStatusDraining
-	s.raftProgress[c] = raftProgress{applied: joiner.applied, leaderApplied: joiner.applied, at: s.now().Add(-recentHeartbeat - time.Second)}
+	s.liveness.recordRaftProgress(c, raftProgress{applied: joiner.applied, leaderApplied: joiner.applied, at: s.now().Add(-recentHeartbeat - time.Second)})
 	if err := s.ReconcileMembership(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +251,7 @@ func TestReconcileMembershipReplacesGoneVoter(t *testing.T) {
 	leader, b, c, d := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	joiner := newFakeMembership(fakeMember(leader, true), fakeMember(b, true), fakeMember(c, true), fakeMember(d, false))
 	s := membershipTestServer(joiner, leader, b, d)
-	s.nodes[c] = &Node{ID: c, Status: NodeStatusUnhealthy, LastHeartbeat: s.now().Add(-voterLossTimeout + time.Second)}
+	addTestNode(s, &Node{ID: c, Status: NodeStatusUnhealthy}, s.now().Add(-voterLossTimeout+time.Second))
 	if err := s.ReconcileMembership(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -259,7 +259,7 @@ func TestReconcileMembershipReplacesGoneVoter(t *testing.T) {
 		t.Fatalf("operations = %v before the voter loss timeout", got)
 	}
 
-	s.nodes[c].LastHeartbeat = s.now().Add(-voterLossTimeout)
+	setTestHeartbeat(s, c, s.now().Add(-voterLossTimeout))
 	if err := s.ReconcileMembership(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +276,7 @@ func TestReconcileMembershipWaitsForNewLeaderToObserveNodes(t *testing.T) {
 	joiner := newFakeMembership(fakeMember(leader, true), fakeMember(b, true), fakeMember(c, true), fakeMember(d, false))
 	s := membershipTestServer(joiner, leader, b, d)
 	// c's last heartbeat is old, but this leader was elected only recently.
-	s.nodes[c] = &Node{ID: c, Status: NodeStatusUnhealthy, LastHeartbeat: s.now().Add(-time.Hour)}
+	addTestNode(s, &Node{ID: c, Status: NodeStatusUnhealthy}, s.now().Add(-time.Hour))
 	s.leaderSince = s.now().Add(-time.Minute)
 	if err := s.ReconcileMembership(context.Background()); err != nil {
 		t.Fatal(err)
@@ -322,7 +322,7 @@ func TestRemoveMemberAllowsRemovingGoneVoter(t *testing.T) {
 	leader, b, c := uuid.New(), uuid.New(), uuid.New()
 	joiner := newFakeMembership(fakeMember(leader, true), fakeMember(b, true), fakeMember(c, true))
 	s := membershipTestServer(joiner, leader, b)
-	s.nodes[c] = &Node{ID: c, Status: NodeStatusUnhealthy, LastHeartbeat: s.now().Add(-time.Hour)}
+	addTestNode(s, &Node{ID: c, Status: NodeStatusUnhealthy}, s.now().Add(-time.Hour))
 	if err := s.RemoveMember(context.Background(), c.String()); err != nil {
 		t.Fatal(err)
 	}
@@ -336,9 +336,9 @@ func TestRemoveMemberRefusesQuorumLoss(t *testing.T) {
 	joiner := newFakeMembership(fakeMember(leader, true), fakeMember(b, true), fakeMember(c, true), fakeMember(d, true), fakeMember(e, true))
 	s := membershipTestServer(joiner, leader, b)
 	for _, id := range []uuid.UUID{c, d} {
-		s.nodes[id] = &Node{ID: id, Status: NodeStatusUnhealthy, LastHeartbeat: s.now().Add(-time.Minute)}
+		addTestNode(s, &Node{ID: id, Status: NodeStatusUnhealthy}, s.now().Add(-time.Minute))
 	}
-	s.nodes[e] = &Node{ID: e, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
+	addTestNode(s, &Node{ID: e, Status: NodeStatusHealthy}, s.now())
 	// Removing live e would leave leader and b as the only live voters of
 	// four, below the three needed to commit.
 	err := s.RemoveMember(context.Background(), e.String())
@@ -351,18 +351,18 @@ func TestRemoveMemberRefusesQuorumLoss(t *testing.T) {
 	// A removal refused for quorum must not leave a promotion behind.
 	f := uuid.New()
 	joiner.members = append(joiner.members, fakeMember(f, false))
-	s.nodes[f] = &Node{ID: f, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
+	addTestNode(s, &Node{ID: f, Status: NodeStatusHealthy}, s.now())
 	s.RecordRaftProgress(f, joiner.AppliedIndex())
-	s.nodes[e].LastHeartbeat = s.now().Add(-time.Minute)
-	s.nodes[b].LastHeartbeat = s.now().Add(-time.Minute)
+	setTestHeartbeat(s, e, s.now().Add(-time.Minute))
+	setTestHeartbeat(s, b, s.now().Add(-time.Minute))
 	if err := s.RemoveMember(context.Background(), leader.String()); !errors.Is(err, ErrMembershipUnsafe) {
 		t.Fatalf("RemoveMember error = %v, want ErrMembershipUnsafe", err)
 	}
 	if got := joiner.operations(); len(got) != 0 {
 		t.Fatalf("refused removal changed membership: %v", got)
 	}
-	s.nodes[e].LastHeartbeat = s.now()
-	s.nodes[b].LastHeartbeat = s.now()
+	setTestHeartbeat(s, e, s.now())
+	setTestHeartbeat(s, b, s.now())
 	// Removing an unreachable voter keeps three live voters of four.
 	if err := s.RemoveMember(context.Background(), c.String()); err != nil {
 		t.Fatal(err)

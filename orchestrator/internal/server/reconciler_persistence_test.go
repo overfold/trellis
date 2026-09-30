@@ -155,8 +155,8 @@ func TestReconcileCommitsVolumeRegistrationWithAllocation(t *testing.T) {
 	store := &failingBatchStore{memoryStore: memoryStore{}}
 	controller := NewStateController(store, "test")
 	s := NewServer(slog.Default(), nil, controller, store, "test", "")
-	node := &Node{ID: uuid.New(), Status: NodeStatusHealthy, LastHeartbeat: time.Now()}
-	s.nodes[node.ID] = node
+	node := &Node{ID: uuid.New(), Status: NodeStatusHealthy}
+	addTestNode(s, node, time.Now())
 	s.jobs[jobKey("acme", "database")] = &Job{
 		Spec: canonicalTestSpec(&spec.JobSpec{
 			Namespace: "acme",
@@ -216,8 +216,8 @@ func TestReconcileCommitsNetworkPortRegistrationWithAllocation(t *testing.T) {
 	s := NewServer(slog.Default(), nil, controller, store, "test", "")
 	s.wireGuardPortCount = 8
 	s.networkPorts = map[string]int{"existing": 7}
-	node := &Node{ID: uuid.New(), Status: NodeStatusHealthy, LastHeartbeat: time.Now()}
-	s.nodes[node.ID] = node
+	node := &Node{ID: uuid.New(), Status: NodeStatusHealthy}
+	addTestNode(s, node, time.Now())
 	s.jobs[jobKey("acme", "web")] = &Job{
 		Spec: canonicalTestSpec(&spec.JobSpec{
 			Namespace: "acme",
@@ -277,9 +277,10 @@ func TestReconcileAppliesVolumeClaimsAcrossTaskGroups(t *testing.T) {
 	agent := newTestAgent()
 	t.Cleanup(agent.server.Close)
 	s.client = newTestAgentClient()
-	a := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000001"), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: time.Now(), Labels: map[string]string{"zone": "a"}}
-	b := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000002"), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: time.Now(), Labels: map[string]string{"zone": "b"}}
-	s.nodes[a.ID], s.nodes[b.ID] = a, b
+	a := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000001"), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, Labels: map[string]string{"zone": "a"}}
+	b := &Node{ID: uuid.MustParse("00000000-0000-0000-0000-000000000002"), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, Labels: map[string]string{"zone": "b"}}
+	addTestNode(s, a, s.now())
+	addTestNode(s, b, s.now())
 	volume := []spec.VolumeSpec{{Name: "data", HostPath: "@/data", ContainerPath: "/data"}}
 	s.jobs[jobKey("acme", "database")] = &Job{
 		Spec: canonicalTestSpec(&spec.JobSpec{

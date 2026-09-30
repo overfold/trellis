@@ -32,6 +32,7 @@ type auditStore struct {
 	batchStarted chan struct{}
 	batchOnce    sync.Once
 	batchSizes   []int
+	batchKeys    [][]string
 }
 
 func (s *auditStore) Put(ctx context.Context, key string, value []byte) error {
@@ -59,6 +60,11 @@ func (s *auditStore) Put(ctx context.Context, key string, value []byte) error {
 func (s *auditStore) Batch(ctx context.Context, mutations []state.Mutation) error {
 	s.mu.Lock()
 	s.batchSizes = append(s.batchSizes, len(mutations))
+	keys := make([]string, len(mutations))
+	for i, mutation := range mutations {
+		keys[i] = mutation.Key
+	}
+	s.batchKeys = append(s.batchKeys, keys)
 	block, started := s.blockBatch, s.batchStarted
 	s.mu.Unlock()
 	if block != nil {
@@ -142,7 +148,8 @@ func TestHeartbeatBatchFailureLeavesMemoryAndDurableStateUnchanged(t *testing.T)
 	node := &Node{ID: uuid.New(), Host: "node-a", Status: NodeStatusHealthy, Version: "old"}
 	allocation := &Allocation{ID: "web-1", Node: node, Tasks: []spec.TaskSpec{{Name: "app"}}, Generation: 1, Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown}
 	store := &auditStore{memoryStore: memoryStore{}}
-	s := &Server{now: time.Now, state: NewStateController(store, "test"), nodes: map[uuid.UUID]*Node{node.ID: node}, allocations: []*Allocation{allocation}, catalog: newNopCatalog()}
+	s := &Server{now: time.Now, state: NewStateController(store, "test"), allocations: []*Allocation{allocation}, catalog: newNopCatalog()}
+	addTestNode(s, node, time.Time{})
 	if err := s.state.PutNode(context.Background(), node.ID.String(), nodeSummary(node)); err != nil {
 		t.Fatal(err)
 	}
@@ -153,8 +160,13 @@ func TestHeartbeatBatchFailureLeavesMemoryAndDurableStateUnchanged(t *testing.T)
 	store.failBatch = true
 	store.mu.Unlock()
 	actual := []api.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
-	if err := s.Heartbeat(context.Background(), node.ID, actual, "new", nil, nil, nodeResourceObservation{}); err == nil {
-		t.Fatal("heartbeat succeeded despite failed atomic write")
+	// The heartbeat is accepted and proves liveness even though persisting
+	// its observations fails; the next heartbeat reports them again.
+	if err := heartbeatAndApply(t, s, node.ID, actual, "new", nodeResourceObservation{}); err != nil {
+		t.Fatal(err)
+	}
+	if s.liveness.lastHeartbeat(node.ID).IsZero() {
+		t.Fatal("heartbeat with a failed observation commit did not stamp liveness")
 	}
 	if node.Version != "old" || allocation.Phase != lifecycle.PhaseStarting || allocation.Health != lifecycle.HealthUnknown {
 		t.Fatalf("memory advanced after failed heartbeat: node=%q phase=%s health=%s", node.Version, allocation.Phase, allocation.Health)
@@ -172,7 +184,8 @@ func TestUnchangedHeartbeatDoesNotWriteRaft(t *testing.T) {
 		Endpoints: []api.AllocationEndpoint{{Task: "app"}}}
 	store := &auditStore{memoryStore: memoryStore{}}
 	clock := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
-	s := &Server{now: func() time.Time { return clock }, state: NewStateController(store, "test"), nodes: map[uuid.UUID]*Node{node.ID: node}, allocations: []*Allocation{allocation}, catalog: newNopCatalog()}
+	s := &Server{now: func() time.Time { return clock }, state: NewStateController(store, "test"), allocations: []*Allocation{allocation}, catalog: newNopCatalog()}
+	addTestNode(s, node, clock)
 	status := []api.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
 
 	for i := 0; i < 3; i++ {
@@ -180,11 +193,11 @@ func TestUnchangedHeartbeatDoesNotWriteRaft(t *testing.T) {
 		usage, used := float64(i)/10, int64(i)<<20
 		metricsAt := clock
 		resources := nodeResourceObservation{CPUCapacity: 4000, CPUAllocatable: 4000, CPUUsage: &usage, MemoryUsed: &used, MetricsAt: &metricsAt}
-		if err := s.Heartbeat(context.Background(), node.ID, status, "test", nil, nil, resources); err != nil {
+		if err := heartbeatAndApply(t, s, node.ID, status, "test", resources); err != nil {
 			t.Fatal(err)
 		}
-		if !node.LastHeartbeat.Equal(clock) || node.MetricsAt == nil || !node.MetricsAt.Equal(clock) || len(node.observedAllocations) != 1 {
-			t.Fatalf("heartbeat %d observations not kept in memory: last=%s metrics=%v observed=%v", i, node.LastHeartbeat, node.MetricsAt, node.observedAllocations)
+		if heartbeat := s.liveness.lastHeartbeat(node.ID); !heartbeat.Equal(clock) || node.MetricsAt == nil || !node.MetricsAt.Equal(clock) || len(node.observedAllocations) != 1 {
+			t.Fatalf("heartbeat %d observations not kept in memory: last=%s metrics=%v observed=%v", i, heartbeat, node.MetricsAt, node.observedAllocations)
 		}
 	}
 	store.mu.Lock()
@@ -199,23 +212,24 @@ func TestHeartbeatPersistsOnlyDurableChanges(t *testing.T) {
 	allocation := &Allocation{ID: "web-1", Node: node, Tasks: []spec.TaskSpec{{Name: "app"}}, Generation: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy,
 		Endpoints: []api.AllocationEndpoint{{Task: "app"}}}
 	store := &auditStore{memoryStore: memoryStore{}}
-	s := &Server{now: time.Now, state: NewStateController(store, "test"), nodes: map[uuid.UUID]*Node{node.ID: node}, allocations: []*Allocation{allocation}, catalog: newNopCatalog()}
+	s := &Server{now: time.Now, state: NewStateController(store, "test"), allocations: []*Allocation{allocation}, catalog: newNopCatalog()}
+	addTestNode(s, node, time.Time{})
 	status := []api.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
 
 	// Liveness returning is an observation, not a durable fact.
-	if err := s.Heartbeat(context.Background(), node.ID, status, "old", nil, nil, nodeResourceObservation{}); err != nil {
+	if err := heartbeatAndApply(t, s, node.ID, status, "old", nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
 	}
-	if node.Status != NodeStatusHealthy {
-		t.Fatalf("node status = %s, want healthy", node.Status)
+	if nodes := s.ListNodes(); len(nodes) != 1 || nodes[0].Status != NodeStatusHealthy {
+		t.Fatalf("nodes = %#v, want the node healthy", nodes)
 	}
 	// A new agent version is a durable node fact.
-	if err := s.Heartbeat(context.Background(), node.ID, status, "new", nil, nil, nodeResourceObservation{}); err != nil {
+	if err := heartbeatAndApply(t, s, node.ID, status, "new", nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
 	}
 	// An allocation phase change is durable lifecycle state.
 	status[0].Phase, status[0].Health = lifecycle.PhaseFailed, lifecycle.HealthUnhealthy
-	if err := s.Heartbeat(context.Background(), node.ID, status, "new", nil, nil, nodeResourceObservation{}); err != nil {
+	if err := heartbeatAndApply(t, s, node.ID, status, "new", nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
 	}
 	store.mu.Lock()
@@ -240,7 +254,7 @@ func TestHeartbeatPersistsOnlyDurableChanges(t *testing.T) {
 func TestAllocationRecordStoresNodeIDWithoutObservations(t *testing.T) {
 	usage, used := 0.5, int64(1<<30)
 	metricsAt := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
-	node := &Node{ID: uuid.New(), Host: "node-a", Port: 8127, Status: NodeStatusHealthy, LastHeartbeat: metricsAt, CPUUsage: &usage, MemoryUsed: &used, MetricsAt: &metricsAt,
+	node := &Node{ID: uuid.New(), Host: "node-a", Port: 8127, Status: NodeStatusHealthy, CPUUsage: &usage, MemoryUsed: &used, MetricsAt: &metricsAt,
 		Labels: map[string]string{"zone": "a"}, Volumes: []string{"data"}, Version: "v1"}
 	allocation := &Allocation{ID: "web-1", Node: node, Generation: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
 	store := memoryStore{}
@@ -288,7 +302,7 @@ func TestAllocationRecordStoresNodeIDWithoutObservations(t *testing.T) {
 	if reloaded.Node == nil || reloaded.Node != s.nodes[node.ID] {
 		t.Fatalf("reloaded allocation node = %p, want canonical node %p", reloaded.Node, s.nodes[node.ID])
 	}
-	if reloaded.Node.Status != NodeStatusUnhealthy || !reloaded.Node.LastHeartbeat.IsZero() || reloaded.Node.MetricsAt != nil || reloaded.Node.Version != "v1" {
+	if reloaded.Node.Status != NodeStatusUnhealthy || !s.liveness.lastHeartbeat(node.ID).IsZero() || reloaded.Node.MetricsAt != nil || reloaded.Node.Version != "v1" {
 		t.Fatalf("reloaded node = %#v, want durable facts without observations", reloaded.Node)
 	}
 }
@@ -297,12 +311,14 @@ func TestHeartbeatDoesNotLockAllocationsAssignedToOtherNodes(t *testing.T) {
 	node, otherNode := &Node{ID: uuid.New(), Status: NodeStatusHealthy}, &Node{ID: uuid.New(), Status: NodeStatusHealthy}
 	assigned := &Allocation{ID: "assigned", Node: node, Generation: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
 	unrelated := &Allocation{ID: "unrelated", Node: otherNode, Generation: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
-	s := &Server{now: time.Now, state: NewStateController(memoryStore{}, "test"), nodes: map[uuid.UUID]*Node{node.ID: node, otherNode.ID: otherNode}, allocations: []*Allocation{assigned, unrelated}, catalog: newNopCatalog()}
+	s := &Server{now: time.Now, state: NewStateController(memoryStore{}, "test"), allocations: []*Allocation{assigned, unrelated}, catalog: newNopCatalog()}
+	addTestNode(s, node, time.Time{})
+	addTestNode(s, otherNode, time.Time{})
 	unrelated.mu.Lock()
 	defer unrelated.mu.Unlock()
 	done := make(chan error, 1)
 	go func() {
-		done <- s.Heartbeat(context.Background(), node.ID, nil, "test", nil, nil, nodeResourceObservation{})
+		done <- heartbeatAndApply(t, s, node.ID, nil, "test", nodeResourceObservation{})
 	}()
 	select {
 	case err := <-done:
@@ -407,7 +423,7 @@ func TestHeartbeatAndDrainSerializeDurableNodeSnapshots(t *testing.T) {
 	s := NewServer(slog.Default(), nil, NewStateController(store, "test"), store, "test", "")
 	nodeID := uuid.New()
 	node := &Node{ID: nodeID, Host: "node-a", Status: NodeStatusHealthy, Version: "old"}
-	s.nodes[nodeID] = node
+	addTestNode(s, node, time.Time{})
 	if err := s.state.PutNode(context.Background(), nodeID.String(), nodeSummary(node)); err != nil {
 		t.Fatal(err)
 	}
@@ -415,7 +431,7 @@ func TestHeartbeatAndDrainSerializeDurableNodeSnapshots(t *testing.T) {
 	store.batchStarted = make(chan struct{})
 	heartbeatDone := make(chan error, 1)
 	go func() {
-		heartbeatDone <- s.Heartbeat(context.Background(), nodeID, nil, "new", nil, nil, nodeResourceObservation{})
+		heartbeatDone <- heartbeatAndApply(t, s, nodeID, nil, "new", nodeResourceObservation{})
 	}()
 	<-store.batchStarted
 	drainDone := make(chan error, 1)

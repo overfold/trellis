@@ -16,13 +16,12 @@ func TestExecuteAcquiresServerLockBeforeAllocationLock(t *testing.T) {
 	defer agent.server.Close()
 
 	node := &Node{
-		ID:            uuid.New(),
-		Host:          agent.host,
-		Port:          agent.port,
-		Status:        NodeStatusHealthy,
-		LastHeartbeat: s.now(),
+		ID:     uuid.New(),
+		Host:   agent.host,
+		Port:   agent.port,
+		Status: NodeStatusHealthy,
 	}
-	s.nodes[node.ID] = node
+	addTestNode(s, node, s.now())
 
 	jobSpec := &spec.JobSpec{
 		Namespace: "default",

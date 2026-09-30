@@ -18,8 +18,8 @@ func TestDeleteAndRecreateJobDoesNotAdoptPreviousIncarnation(t *testing.T) {
 	t.Cleanup(agent.server.Close)
 	s.client = newTestAgentClient()
 	s.now = func() time.Time { return time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC) }
-	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
-	s.nodes[node.ID] = node
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
+	addTestNode(s, node, s.now())
 	ctx := context.Background()
 
 	if _, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v1", 1), nil); err != nil {
@@ -89,8 +89,8 @@ func TestConcurrentDeleteAndRecreateFencesOldAllocations(t *testing.T) {
 	agent := newTestAgent()
 	t.Cleanup(agent.server.Close)
 	s.client = newTestAgentClient()
-	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, LastHeartbeat: s.now()}
-	s.nodes[node.ID] = node
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
+	addTestNode(s, node, s.now())
 	ctx := context.Background()
 	if _, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v1", 1), nil); err != nil {
 		t.Fatal(err)

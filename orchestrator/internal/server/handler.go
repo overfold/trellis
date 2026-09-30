@@ -914,7 +914,7 @@ func (h *Handler) handleMetrics(c *echo.Context) error {
 	return nil
 }
 
-func (h *Handler) convertNode(node *Node) *api.NodeResponse {
+func (h *Handler) convertNode(node *NodeView) *api.NodeResponse {
 	var lastHeartbeat *time.Time
 	if !node.LastHeartbeat.IsZero() {
 		heartbeat := node.LastHeartbeat

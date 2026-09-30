@@ -42,8 +42,8 @@ func TestHeartbeatRejectsZeroPathID(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()
 	initialHeartbeat := time.Date(2026, 9, 30, 11, 0, 0, 0, time.UTC)
-	zeroNode := &Node{ID: uuid.Nil, LastHeartbeat: initialHeartbeat, Version: "before"}
-	s.nodes[uuid.Nil] = zeroNode
+	zeroNode := &Node{ID: uuid.Nil, Version: "before"}
+	addTestNode(s, zeroNode, initialHeartbeat)
 	body, err := json.Marshal(api.HeartbeatRequest{Version: "after"})
 	if err != nil {
 		t.Fatal(err)
@@ -59,7 +59,8 @@ func TestHeartbeatRejectsZeroPathID(t *testing.T) {
 	if recorder.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want %d; body: %s", recorder.Code, http.StatusForbidden, recorder.Body.String())
 	}
-	if zeroNode.Version != "before" || !zeroNode.LastHeartbeat.Equal(initialHeartbeat) {
-		t.Fatalf("rejected heartbeat updated zero-ID node: version=%q heartbeat=%s", zeroNode.Version, zeroNode.LastHeartbeat)
+	applyTestObservations(s)
+	if heartbeat := s.liveness.lastHeartbeat(uuid.Nil); zeroNode.Version != "before" || !heartbeat.Equal(initialHeartbeat) {
+		t.Fatalf("rejected heartbeat updated zero-ID node: version=%q heartbeat=%s", zeroNode.Version, heartbeat)
 	}
 }

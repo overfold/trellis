@@ -88,10 +88,9 @@ func TestHandleRaftMemberRemoveRefusesQuorumLoss(t *testing.T) {
 	leader, live, silent := uuid.New(), uuid.New(), uuid.New()
 	now := time.Now()
 	joiner := newFakeMembership(fakeMember(leader, true), fakeMember(live, true), fakeMember(silent, true))
-	control := &Server{joiner: joiner, nodeID: leader, now: func() time.Time { return now }, state: NewStateController(memoryStore{}, "test"), nodes: map[uuid.UUID]*Node{
-		live:   {ID: live, Status: NodeStatusHealthy, LastHeartbeat: now},
-		silent: {ID: silent, Status: NodeStatusUnhealthy, LastHeartbeat: now.Add(-time.Hour)},
-	}}
+	control := &Server{joiner: joiner, nodeID: leader, now: func() time.Time { return now }, state: NewStateController(memoryStore{}, "test")}
+	addTestNode(control, &Node{ID: live, Status: NodeStatusHealthy}, now)
+	addTestNode(control, &Node{ID: silent, Status: NodeStatusUnhealthy}, now.Add(-time.Hour))
 	e := echo.New()
 	NewHandler(control).Register(e)
 
