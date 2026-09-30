@@ -49,17 +49,19 @@ local node run file
 
 The selected context itself comes from `current_context`, then `TRELLIS_CONTEXT`, then the explicit `--context` flag.
 
+Job, exec, and secret commands act on one namespace. The effective namespace is `--namespace` (or `TRELLIS_NAMESPACE`, or the context's saved namespace). When none is set, a namespace-scoped credential selects its own namespace; a cluster-scoped credential must name one, and the command fails with `--namespace is required` rather than guessing. `jobs apply` uses the manifest's `namespace` and rejects a manifest whose namespace differs from an explicitly selected one.
+
 ## Discover known namespaces
 
 Namespaces are isolation and authorization boundaries, not lifecycle-managed objects. Trellis therefore does not require a separate create/delete step before applying a job to a namespace.
 
-To discover namespace names currently referenced by desired jobs and visible to the current credential:
+To discover namespace names that currently have desired jobs, secrets, or namespace-scoped credentials, as visible to the current credential:
 
 ```sh
 trellisctl namespaces list
 ```
 
-A namespace-scoped credential sees only its own namespace. A cluster-scoped credential sees the known desired-job namespaces across the cluster. Applying a job to a new valid namespace is still allowed; after the job exists, that namespace appears in discovery. Use `--output json` when automation needs the array directly.
+A namespace-scoped credential sees only its own namespace. A cluster-scoped credential sees every such namespace across the cluster. Applying a job to, storing a secret in, or minting a credential for a new valid namespace is still allowed; afterwards that namespace appears in discovery. Use `--output json` when automation needs the array directly.
 
 ## Apply manifest sources
 
@@ -102,7 +104,7 @@ Preview what would change compared with the current job:
 trellisctl jobs apply --dry-run --file trellis.yaml
 ```
 
-The CLI parses the human-authored YAML locally, converts it to canonical JSON, and, unless `--check` was requested, sends that model to the control plane. `--dry-run` calls `POST /v1/jobs/plan`, where Trellis validates the canonical model and computes the semantic plan against authoritative current state; `trellisctl` does not maintain a second planning implementation.
+The CLI parses the human-authored YAML locally, converts it to canonical JSON, and, unless `--check` was requested, sends that model to the control plane. `--dry-run` calls `POST /v1/namespaces/{namespace}/jobs/plan`, where Trellis validates the canonical model and computes the semantic plan against authoritative current state; `trellisctl` does not maintain a second planning implementation.
 
 The plan is semantic rather than a textual YAML diff. Task groups are identified by name, so merely reordering them does not look like a deployment. Ordered fields inside a group remain positional where order participates in Trellis semantics. Example output:
 

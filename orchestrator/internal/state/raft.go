@@ -6,12 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
 	"time"
 
-	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
 )
@@ -33,13 +33,15 @@ type RaftStore struct {
 // relative to their state prefixes so a backup can be restored into a freshly
 // bootstrapped cluster with a different name. Volume registrations preserve
 // locality metadata only; volume bytes remain external to the backup. Namespace
-// network port registrations preserve stable WireGuard pathway assignments.
+// network port and subnet registrations preserve stable WireGuard pathway
+// assignments.
 type DesiredSnapshot struct {
-	Jobs                     map[string][]byte `json:"jobs"`
-	JobRevisions             map[string][]byte `json:"job_revisions,omitempty"`
-	Secrets                  map[string][]byte `json:"secrets"`
-	VolumeRegistrations      map[string][]byte `json:"volume_registrations"`
-	NetworkPortRegistrations map[string][]byte `json:"network_port_registrations"`
+	Jobs                       map[string][]byte `json:"jobs"`
+	JobRevisions               map[string][]byte `json:"job_revisions,omitempty"`
+	Secrets                    map[string][]byte `json:"secrets"`
+	VolumeRegistrations        map[string][]byte `json:"volume_registrations"`
+	NetworkPortRegistrations   map[string][]byte `json:"network_port_registrations"`
+	NetworkSubnetRegistrations map[string][]byte `json:"network_subnet_registrations,omitempty"`
 }
 
 // BackupDesired takes a linearizable view of desired state. The barrier makes
@@ -102,6 +104,9 @@ type RaftConfig struct {
 	ServerID  string
 	Bootstrap bool
 	TLS       *tls.Config
+	// Logger receives Raft, transport, and snapshot-store diagnostics at Warn
+	// and above, rate limited. Nil uses slog.Default.
+	Logger *slog.Logger
 }
 
 type tlsStreamLayer struct {
@@ -170,7 +175,9 @@ func NewRaftStore(cfg RaftConfig) (*RaftStore, error) {
 		return nil, fmt.Errorf("create raft log store: %w", err)
 	}
 
-	snapshotStore, err := raft.NewFileSnapshotStore(raftDir, 2, io.Discard)
+	logger := newRaftLogger(cfg.Logger, "raft")
+
+	snapshotStore, err := raft.NewFileSnapshotStoreWithLogger(raftDir, 2, logger.Named("snapshot"))
 	if err != nil {
 		return nil, fmt.Errorf("create snapshot store: %w", err)
 	}
@@ -196,9 +203,18 @@ func NewRaftStore(cfg RaftConfig) (*RaftStore, error) {
 			return nil, fmt.Errorf("create TLS listener: %w", err)
 		}
 		stream := &tlsStreamLayer{Listener: ln, advertise: advAddr, tlsCfg: cfg.TLS}
-		transport = raft.NewNetworkTransport(stream, 3, 10*time.Second, io.Discard)
+		transport = raft.NewNetworkTransportWithConfig(&raft.NetworkTransportConfig{
+			Stream:  stream,
+			MaxPool: 3,
+			Timeout: 10 * time.Second,
+			Logger:  logger.Named("transport"),
+		})
 	} else {
-		t, err := raft.NewTCPTransport(cfg.BindAddr, advAddr, 3, 10*time.Second, io.Discard)
+		t, err := raft.NewTCPTransportWithConfig(cfg.BindAddr, advAddr, &raft.NetworkTransportConfig{
+			MaxPool: 3,
+			Timeout: 10 * time.Second,
+			Logger:  logger.Named("transport"),
+		})
 		if err != nil {
 			return nil, fmt.Errorf("create raft transport: %w", err)
 		}
@@ -207,11 +223,7 @@ func NewRaftStore(cfg RaftConfig) (*RaftStore, error) {
 
 	raftCfg := raft.DefaultConfig()
 	raftCfg.LocalID = raft.ServerID(cfg.ServerID)
-	raftCfg.Logger = hclog.New(&hclog.LoggerOptions{
-		Name:   "raft",
-		Level:  hclog.Warn,
-		Output: os.Stderr,
-	})
+	raftCfg.Logger = logger
 
 	r, err := raft.NewRaft(raftCfg, f, logStore, logStore, snapshotStore, transport)
 	if err != nil {

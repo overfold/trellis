@@ -17,8 +17,7 @@ import (
 
 func TestEventBusNamespaceSubscriptionSerializesOnlySelectedNamespace(t *testing.T) {
 	bus := newEventBus()
-	req := scopedRequest(t, http.MethodGet, "/v1/events", "", auth.AccessNamespace, auth.AccessRead, "alpha")
-	subscriber, ok := bus.subscribe(requestNamespace(echo.New().NewContext(req, httptest.NewRecorder())))
+	subscriber, ok := bus.subscribe("alpha")
 	if !ok {
 		t.Fatal("subscribe rejected")
 	}
@@ -51,8 +50,7 @@ func TestEventBusNamespaceSubscriptionSerializesOnlySelectedNamespace(t *testing
 
 func TestEventBusClusterSubscriptionReceivesAllNamespaces(t *testing.T) {
 	bus := newEventBus()
-	req := scopedRequest(t, http.MethodGet, "/v1/events", "", auth.AccessCluster, auth.AccessRead, "")
-	subscriber, ok := bus.subscribe(requestNamespace(echo.New().NewContext(req, httptest.NewRecorder())))
+	subscriber, ok := bus.subscribe("")
 	if !ok {
 		t.Fatal("subscribe rejected")
 	}
@@ -116,14 +114,15 @@ func TestEventHandlerRejectsOverloadAndReleasesCanceledSubscriber(t *testing.T) 
 	handler := NewHandler(&Server{events: bus})
 
 	ctx, cancel := context.WithCancel(t.Context())
+	ctx = context.WithValue(ctx, NamespaceContextKey, auth.EncodeScope(auth.AccessCluster, auth.AccessRead, ""))
 	req := httptest.NewRequest(http.MethodGet, "/v1/events", nil).WithContext(ctx)
 	c := echo.New().NewContext(req, httptest.NewRecorder())
 	done := make(chan error, 1)
-	go func() { done <- handler.handleEvents(c) }()
+	go func() { done <- handler.handleClusterEvents(c) }()
 	waitForSubscriberCount(t, bus, 1)
 
-	overload := echo.New().NewContext(httptest.NewRequest(http.MethodGet, "/v1/events", nil), httptest.NewRecorder())
-	err := handler.handleEvents(overload)
+	overload := echo.New().NewContext(scopedRequest(t, http.MethodGet, "/v1/events", "", auth.AccessCluster, auth.AccessRead, ""), httptest.NewRecorder())
+	err := handler.handleClusterEvents(overload)
 	var httpErr *echo.HTTPError
 	if !errors.As(err, &httpErr) || httpErr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("overload error = %v, want HTTP 503", err)

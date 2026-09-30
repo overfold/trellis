@@ -40,7 +40,6 @@ func newHTTPClientWithResponseHeaderTimeout(tlsConfig *tls.Config, responseHeade
 
 type client struct {
 	token            string
-	namespace        string
 	administratorKey ed25519.PrivateKey
 	client           *http.Client
 }
@@ -124,9 +123,6 @@ func (c *client) requestBody(ctx context.Context, method string, url string, req
 func (c *client) authenticate(ctx context.Context, request *http.Request, body []byte) error {
 	if c.token != "" {
 		request.Header.Set("Authorization", "Bearer "+c.token)
-	}
-	if c.namespace != "" {
-		request.Header.Set("X-Trellis-Namespace", c.namespace)
 	}
 	if c.administratorKey != nil {
 		challenge, err := c.administratorChallenge(ctx, request.URL.String())
@@ -245,9 +241,6 @@ func (c *client) stream(ctx context.Context, url string) (io.ReadCloser, error) 
 		return nil, fmt.Errorf("constructing request %s: %w", url, err)
 	}
 	request.Header.Set("Authorization", "Bearer "+c.token)
-	if c.namespace != "" {
-		request.Header.Set("X-Trellis-Namespace", c.namespace)
-	}
 	response, err := c.client.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("executing request %s: %w", url, err)

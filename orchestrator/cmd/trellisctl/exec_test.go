@@ -17,7 +17,7 @@ import (
 func newExecTestServer(t *testing.T, check func(api.ExecRequest), serve func(*execstream.Reader, *execstream.Writer)) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/v1/allocations/alloc-1/exec" || !execstream.IsUpgradeRequest(r) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/namespaces/default/allocations/alloc-1/exec" || !execstream.IsUpgradeRequest(r) {
 			http.Error(w, "unexpected request", http.StatusNotFound)
 			return
 		}

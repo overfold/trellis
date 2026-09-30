@@ -25,7 +25,7 @@ import (
 func serveExecTestStream(t *testing.T, check func(*http.Request), serve func(*execstream.Reader, *execstream.Writer)) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/v1/allocations/alloc-1/exec" || !execstream.IsUpgradeRequest(r) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/namespaces/default/allocations/alloc-1/exec" || !execstream.IsUpgradeRequest(r) {
 			http.Error(w, "unexpected request", http.StatusNotFound)
 			return
 		}
@@ -53,7 +53,7 @@ func TestServerClientExecStream(t *testing.T) {
 		if request.Task != "web" || strings.Join(request.Command, " ") != "/bin/sh -c cat" || !request.TTY || !request.Stdin || request.Term != "xterm-256color" || request.Cols != 120 || request.Rows != 32 {
 			t.Errorf("unexpected request: %#v", request)
 		}
-		if r.Header.Get("Authorization") != "Bearer token" || r.Header.Get("X-Trellis-Namespace") != "default" {
+		if r.Header.Get("Authorization") != "Bearer token" {
 			t.Errorf("request is not authenticated: %v", r.Header)
 		}
 	}, func(reader *execstream.Reader, writer *execstream.Writer) {

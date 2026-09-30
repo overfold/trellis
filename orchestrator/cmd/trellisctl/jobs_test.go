@@ -207,9 +207,9 @@ func TestJobStateSeparatesConvergingAndDegraded(t *testing.T) {
 func TestJobsResetBackoffCommand(t *testing.T) {
 	previousConfig := config
 	t.Cleanup(func() { config = previousConfig })
-	var method, path, namespace string
+	var method, path string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		method, path, namespace = r.Method, r.URL.Path, r.Header.Get("X-Trellis-Namespace")
+		method, path = r.Method, r.URL.Path
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
@@ -222,8 +222,8 @@ func TestJobsResetBackoffCommand(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	if method != http.MethodPost || path != "/v1/jobs/web/groups/api/replacement-backoff/reset" || namespace != "payments" {
-		t.Fatalf("request = %s %s namespace %q", method, path, namespace)
+	if method != http.MethodPost || path != "/v1/namespaces/payments/jobs/web/groups/api/replacement-backoff/reset" {
+		t.Fatalf("request = %s %s", method, path)
 	}
 	if got := stdout.String(); got != "Reset replacement backoff of task group api in job web.\n" {
 		t.Fatalf("output = %q", got)
@@ -252,11 +252,13 @@ func TestJobsApplySendsPlannedVersionAndReportsConflict(t *testing.T) {
 			var expected *int
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
-				case "/v1/jobs/plan":
+				case "/v1/namespaces/default/jobs/plan":
 					_ = json.NewEncoder(w).Encode(plan.Result{Action: "update", Namespace: "default", Job: "web", BaseVersion: 4, BaseRevision: 2, Changes: []plan.Change{{Operation: "change", Path: "task_groups[api].count", Before: 1, After: 3}}})
-				case "/v1/jobs":
+				case "/v1/namespaces/default/jobs":
 					var request api.JobRegistrationRequest
-					if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					decoder := json.NewDecoder(r.Body)
+					decoder.DisallowUnknownFields()
+					if err := decoder.Decode(&request); err != nil {
 						t.Error(err)
 					}
 					expected = request.ExpectedVersion
@@ -290,6 +292,57 @@ func TestJobsApplySendsPlannedVersionAndReportsConflict(t *testing.T) {
 			}
 			if got := stdout.String(); got != tc.wantOutput {
 				t.Fatalf("output = %q, want %q", got, tc.wantOutput)
+			}
+		})
+	}
+}
+
+func TestJobsListSelectsNamespaceFromCredential(t *testing.T) {
+	previousConfig := config
+	t.Cleanup(func() { config = previousConfig })
+
+	for _, tc := range []struct {
+		name      string
+		namespace string
+		whoami    string
+		wantPath  string
+		wantErr   string
+	}{
+		{name: "explicit namespace", namespace: "payments", wantPath: "/v1/namespaces/payments/jobs"},
+		{name: "namespace-scoped credential", whoami: `{"kind":"operator","scope":"namespace","access":"read","namespace":"team"}`, wantPath: "/v1/namespaces/team/jobs"},
+		{name: "cluster-scoped credential", whoami: `{"kind":"operator","scope":"cluster","access":"read"}`, wantErr: "--namespace is required with a cluster-scoped credential"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var paths []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				paths = append(paths, r.URL.Path)
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/v1/auth/whoami":
+					_, _ = w.Write([]byte(tc.whoami))
+				default:
+					_, _ = w.Write([]byte("[]"))
+				}
+			}))
+			defer server.Close()
+
+			config = CLIConfig{ServerAddr: server.URL, Namespace: tc.namespace}
+			cmd := NewJobsListCmd()
+			cmd.SetArgs(nil)
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&bytes.Buffer{})
+			err := cmd.Execute()
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(paths) == 0 || paths[len(paths)-1] != tc.wantPath {
+				t.Fatalf("requests = %v, want final %s", paths, tc.wantPath)
 			}
 		})
 	}

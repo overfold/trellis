@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -300,13 +299,39 @@ func (s *Server) reconcile(ctx context.Context, queue bool) (finished <-chan str
 			return
 		}
 	}
+	currentSubnets, err := s.state.listNetworkSubnetRegistrations(ctx)
+	if err != nil {
+		s.log.Error("load network subnet registrations", "error", err)
+		return
+	}
 	s.mu.Lock()
 	for _, node := range s.nodes {
 		if node.Status == NodeStatusHealthy && now.Sub(node.LastHeartbeat) > 3*heartbeatInterval {
 			node.Status = NodeStatusUnhealthy
 		}
 	}
-	input, originals, err := s.reconcilePlanInputLocked(now, volumeOwners, networkPorts)
+	// Subnets are planned under s.mu so every node the scheduler can place on
+	// is addressed. Only namespaces with a port slot and a subnet on every
+	// node accept new placements.
+	nodeIDs := make([]uuid.UUID, 0, len(s.nodes))
+	for nodeID := range s.nodes {
+		nodeIDs = append(nodeIDs, nodeID)
+	}
+	subnets, err := planNetworkSubnetRegistrations(s.networkPool, currentSubnets, networkNamespaces, nodeIDs)
+	if err != nil {
+		s.log.Error("prepare namespace network subnets", "error", err)
+		if !errors.Is(err, errNetworkSubnetExhausted) {
+			s.mu.Unlock()
+			return
+		}
+	}
+	networkReady := make(map[string]bool, len(subnets.Ready))
+	for namespace := range subnets.Ready {
+		if _, assigned := networkPorts[namespace]; assigned {
+			networkReady[namespace] = true
+		}
+	}
+	input, originals, err := s.reconcilePlanInputLocked(now, volumeOwners, networkReady)
 	if err != nil {
 		s.mu.Unlock()
 		s.log.Error("snapshot reconciliation state", "error", err)
@@ -320,6 +345,8 @@ func (s *Server) reconcile(ctx context.Context, queue bool) (finished <-chan str
 	}
 	plan.Commit.NetworkPortRegistrations = networkPortRegistrations
 	plan.Commit.DeleteNetworkPortNamespaces = deleteNetworkPortNamespaces
+	plan.Commit.NetworkSubnetRegistrations = subnets.Registrations
+	plan.Commit.DeleteNetworkSubnetRegistrations = subnets.Deletions
 	for _, diagnostic := range plan.Diagnostics {
 		s.log.Error(diagnostic.Message, diagnostic.Args...)
 	}
@@ -355,6 +382,7 @@ func (s *Server) reconcile(ctx context.Context, queue bool) (finished <-chan str
 	}
 	s.mu.Lock()
 	s.networkPorts = networkPorts
+	s.networkSubnets = subnets.Subnets
 	if !plan.empty() {
 		if len(plan.Pruned) > 0 {
 			removed := make(map[*Allocation]bool, len(plan.Pruned))
@@ -397,7 +425,14 @@ func (s *Server) reconcile(ctx context.Context, queue bool) (finished <-chan str
 	executableActions := make([]Action, 0, len(actions))
 	for i := range actions {
 		if actions[i].Type == ActionStart && tasksUseWireGuard(actions[i].Allocation.Tasks) {
-			if _, assigned := networkPorts[actions[i].Allocation.Namespace]; !assigned {
+			allocation := actions[i].Allocation
+			if _, assigned := networkPorts[allocation.Namespace]; !assigned {
+				continue
+			}
+			if allocation.Node == nil {
+				continue
+			}
+			if _, addressed := subnets.Subnets[networkSubnetKey{namespace: allocation.Namespace, node: allocation.Node.ID}]; !addressed {
 				continue
 			}
 		}
@@ -474,7 +509,7 @@ func (s *Server) abortReconcile(reason, message string, args ...any) {
 // from. It returns the input and a map from each allocation snapshot to the
 // stored allocation it copies. The caller must hold s.mu and keep holding it
 // while planning, because jobs, nodes, and backoffs are borrowed.
-func (s *Server) reconcilePlanInputLocked(now time.Time, volumeOwners map[string]uuid.UUID, networkPorts map[string]int) (*reconcilePlanInput, map[*Allocation]*Allocation, error) {
+func (s *Server) reconcilePlanInputLocked(now time.Time, volumeOwners map[string]uuid.UUID, networkReady map[string]bool) (*reconcilePlanInput, map[*Allocation]*Allocation, error) {
 	limits := s.jobLimits
 	if limits == (spec.Limits{}) {
 		limits = spec.DefaultLimits()
@@ -510,7 +545,7 @@ func (s *Server) reconcilePlanInputLocked(now time.Time, volumeOwners map[string
 		Allocations:           snapshots,
 		Backoffs:              s.replacementBackoffs,
 		VolumeOwners:          volumeOwners,
-		NetworkPorts:          networkPorts,
+		NetworkReady:          networkReady,
 		DeliveredResumes:      s.deliveredResumes(s.controlEpoch),
 	}, originals, nil
 }
@@ -1204,11 +1239,20 @@ func (s *Server) networkPlan(namespace string, target *Node) (*network.Plan, err
 	if err != nil {
 		return nil, fmt.Errorf("node %s WireGuard port range: %w", target.ID, err)
 	}
-	local := namespaceNodeSubnet(s.networkPool, namespace, target.ID)
-	plan := &network.Plan{CIDR: local.String(), Gateway: local.Addr().Next().String(), WireGuardAddress: wireGuardAddress(namespace, target.ID), ListenPort: listenPort}
-	seen := map[string]uuid.UUID{local.String(): target.ID}
+	index, ok := s.networkSubnets[networkSubnetKey{namespace: namespace, node: target.ID}]
+	if !ok {
+		return nil, fmt.Errorf("namespace %q has no network subnet registration on node %s", namespace, target.ID)
+	}
+	local := networkSubnet(s.networkPool, index)
+	plan := &network.Plan{CIDR: local.String(), Gateway: local.Addr().Next().String(), WireGuardAddress: networkLinkAddress(index), ListenPort: listenPort}
 	for _, node := range s.nodes {
 		if node.ID == target.ID || node.WireGuardPublicKey == "" || node.WireGuardEndpoint == "" {
+			continue
+		}
+		// A node without a registration for this namespace joined after the
+		// pool was exhausted; it cannot host the namespace, so it is no peer.
+		peerIndex, ok := s.networkSubnets[networkSubnetKey{namespace: namespace, node: node.ID}]
+		if !ok {
 			continue
 		}
 		if _, err := namespaceWireGuardPort(node.WireGuardPortBase, node.WireGuardPortCount, slot); err != nil {
@@ -1218,37 +1262,11 @@ func (s *Server) networkPlan(namespace string, target *Node) (*network.Plan, err
 		if err != nil {
 			return nil, fmt.Errorf("peer node %s WireGuard endpoint: %w", node.ID, err)
 		}
-		subnet := namespaceNodeSubnet(s.networkPool, namespace, node.ID)
-		if previous, ok := seen[subnet.String()]; ok && previous != node.ID {
-			return nil, fmt.Errorf("automatic network subnet collision between nodes %s and %s", previous, node.ID)
-		}
-		seen[subnet.String()] = node.ID
-		plan.Peers = append(plan.Peers, network.PeerPlan{PublicKey: node.WireGuardPublicKey, Endpoint: endpoint, AllowedIPs: []string{subnet.String()}})
+		plan.Peers = append(plan.Peers, network.PeerPlan{PublicKey: node.WireGuardPublicKey, Endpoint: endpoint, AllowedIPs: []string{networkSubnet(s.networkPool, peerIndex).String()}})
 	}
 	sort.Slice(plan.Peers, func(i, j int) bool {
 		return plan.Peers[i].PublicKey < plan.Peers[j].PublicKey
 	})
-	for _, job := range s.jobs {
-		if job.Spec.Namespace == namespace {
-			continue
-		}
-		usesWireGuard := false
-		for i := range job.Spec.TaskGroups {
-			if spec.GroupUsesWireGuard(&job.Spec.TaskGroups[i]) {
-				usesWireGuard = true
-				break
-			}
-		}
-		if !usesWireGuard {
-			continue
-		}
-		for _, node := range s.nodes {
-			other := namespaceNodeSubnet(s.networkPool, job.Spec.Namespace, node.ID)
-			if owner, exists := seen[other.String()]; exists {
-				return nil, fmt.Errorf("automatic network subnet %s for namespace %q conflicts with namespace %q on node %s", other, job.Spec.Namespace, namespace, owner)
-			}
-		}
-	}
 	return plan, nil
 }
 
@@ -1280,18 +1298,4 @@ func namespaceWireGuardEndpoint(endpoint string, slot int) (string, error) {
 		return "", fmt.Errorf("base port %d plus slot %d is outside valid UDP port range", base, slot)
 	}
 	return net.JoinHostPort(host, strconv.Itoa(port)), nil
-}
-
-func namespaceNodeSubnet(pool netip.Prefix, namespace string, node uuid.UUID) netip.Prefix {
-	h := sha256.Sum256(append([]byte(namespace+"\x00"), node[:]...))
-	base := binary.BigEndian.Uint32(pool.Addr().AsSlice())
-	available := uint32(1) << uint32(24-pool.Bits())
-	index := binary.BigEndian.Uint32(h[:4]) % available
-	b := base + index*256
-	return netip.PrefixFrom(netip.AddrFrom4([4]byte{byte(b >> 24), byte(b >> 16), byte(b >> 8), byte(b)}), 24)
-}
-
-func wireGuardAddress(namespace string, node uuid.UUID) string {
-	h := sha256.Sum256(append([]byte(namespace+"wg"), node[:]...))
-	return fmt.Sprintf("169.254.%d.%d/32", h[0], max(byte(1), h[1]))
 }

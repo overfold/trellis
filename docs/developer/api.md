@@ -1,6 +1,10 @@
 # HTTP API
 
-The control-plane API defaults to port 8128. Ordinary operator and workload callers send `Authorization: Bearer TOKEN`; cluster-scoped callers may additionally select a namespaced view with `X-Trellis-Namespace: NAME`. Administrator requests use the signing protocol below. JSON request bodies use `Content-Type: application/json`. Use TLS outside a local sandbox.
+The control-plane API defaults to port 8128. Ordinary operator and workload callers send `Authorization: Bearer TOKEN`. Administrator requests use the signing protocol below. Use TLS outside a local sandbox.
+
+Every namespaced resource names its namespace in the path: `/v1/namespaces/{namespace}/jobs`, `/allocations`, `/events`, and `/secrets`. There is no namespace header and no implicit default namespace. Listing across namespaces is a separate, explicit cluster-scoped request (`GET /v1/allocations`, `GET /v1/events`).
+
+JSON request bodies must be sent with `Content-Type: application/json` (otherwise `415`) and are decoded strictly, with the same rules as YAML manifests and the published schemas: a body must contain exactly one JSON value, and unknown fields, trailing data, and an empty body are rejected with `400` and a `message` naming the problem (for example `invalid request body: json: unknown field "imgae"`). Bodies are size-limited per route; an oversized body returns `413`. Job submissions and plans are limited to 4 MiB, heartbeats to 32 MiB, backup restores to 64 MiB, secret writes to 96 KiB, exec input to 128 KiB, and other requests to 64 KiB or 1 MiB.
 
 Trellis distinguishes three credential kinds:
 
@@ -10,7 +14,7 @@ Trellis distinguishes three credential kinds:
 
 Credential prefixes (`trls_op_`, `trls_wl_`) are descriptive only. The server authenticates the complete bearer value and uses its authoritative stored principal metadata for generated credentials. The separate managed-enrollment credential conventionally uses `trls_enroll_`.
 
-A task group requests workload access with an object such as `{"scope":"namespace","access":"read"}`. Namespace scope is restricted to the namespace containing the job. Cluster scope grants only the ordinary read/write API authority represented by the credential; it never turns into the administrator credential. Both scopes set `TRELLIS_NAMESPACE` to the job namespace as a default request scope.
+A task group requests workload access with an object such as `{"scope":"namespace","access":"read"}`. Namespace scope is restricted to the namespace containing the job. Cluster scope grants only the ordinary read/write API authority represented by the credential; it never turns into the administrator credential. Both scopes set `TRELLIS_NAMESPACE` to the job namespace, which clients use to build `/v1/namespaces/{namespace}/...` request paths.
 
 Each workload credential belongs to one allocation generation and carries a subject naming its namespace, job, and task group, which `GET /v1/auth/whoami` reports as `subject`. The leader mints it on the generation's first start and, like every generated credential, authenticates it by hash. Replicated state keeps only that hash and a copy sealed with the secrets encryption key, so start retries and leadership changes re-deliver the same token and the allocation execution hash stays stable. A server without a secrets key cannot start API-enabled allocations. Starting a new generation of the allocation, or with a different grant, replaces its credential and revokes the previous one. The leader's reconciliation revokes a workload credential once its allocation record is pruned, its job or task group is deleted, the job is recreated under the same name, or the task group's current `api_access` is removed or narrowed below the credential's scope or access. Widening `api_access` does not revoke existing credentials. A start for a generation older than the credential's recorded generation is rejected rather than revoking the newer credential, and a storage error while recovering a credential fails the start instead of rotating the token.
 
@@ -25,21 +29,27 @@ The API uses the same resource vocabulary as the [Trellis user model](../public/
 | `GET` | `/v1/auth/whoami` | Return the current credential kind, scope, access, namespace, and available provenance metadata. |
 | `GET` | `/v1/nodes` | List node capacity, discovered capabilities, status, and control-plane membership; requires cluster scope. |
 | `POST` / `DELETE` | `/v1/nodes/{id}/drain` | Drain or undrain; requires `cluster/write`. |
-| `GET`, `POST` | `/v1/jobs` | List jobs or submit `{"spec": JobSpec, "expected_version": N}`. |
-| `POST` | `/v1/jobs/plan` | Validate and calculate the authoritative semantic plan for a `JobSpec`. |
-| `GET`, `DELETE` | `/v1/jobs/{name}` | Read job state/API representation or delete the job. |
-| `GET` | `/v1/jobs/{name}/versions` | List the job's retained version history. |
-| `POST` | `/v1/jobs/{name}/groups/{group}/replacement-backoff/reset` | Clear a task group's replacement backoff; requires write access. |
 | `GET` | `/v1/namespaces` | Discover namespace names visible to the caller. |
-| `GET` | `/v1/allocations?label=key:value` | List/filter allocations. |
-| `GET` | `/v1/allocations/{id}/events` | Lifecycle event array. |
-| `GET` | `/v1/allocations/{id}/logs?task=NAME&tail=100&follow=true` | Plain-text logs for one task in an allocation. |
-| `GET` | `/v1/allocations/{id}/exec?command=...` | Upgrade to a bidirectional exec stream (`Upgrade: trellis-exec.v1`) that runs one command; requires write access. See [Exec streams](#exec-streams). |
-| `GET` | `/v1/allocations/{id}/metrics` | Current per-task CPU and memory usage. |
-| `GET` | `/v1/events` | Namespace-filtered or cluster-wide server-sent event stream. |
-| `PUT` | `/v1/namespaces/{ns}/secrets/{name}` | Set a secret; requires `cluster/write`. |
-| `GET` | `/v1/namespaces/{ns}/secrets[/{name}]` | List/get secret metadata only; requires cluster scope. |
-| `DELETE` | `/v1/namespaces/{ns}/secrets/{name}` | Delete a secret; requires `cluster/write`. |
+| `GET` | `/v1/allocations?label=key:value` | List/filter allocations across all namespaces; requires cluster scope. |
+| `GET` | `/v1/events` | Server-sent event stream across all namespaces; requires cluster scope. |
+| `GET`, `POST` | `/v1/namespaces/{ns}/jobs` | List jobs or submit `{"spec": JobSpec, "expected_version": N}`; submitting requires write access. |
+| `POST` | `/v1/namespaces/{ns}/jobs/plan` | Validate and calculate the authoritative semantic plan for a `JobSpec`. |
+| `GET`, `DELETE` | `/v1/namespaces/{ns}/jobs/{name}` | Read job state/API representation or delete the job; deleting requires write access. |
+| `POST` | `/v1/namespaces/{ns}/jobs/{name}/restart` | Restart the job's allocations; requires write access. |
+| `GET` | `/v1/namespaces/{ns}/jobs/{name}/versions` | List the job's retained version history. |
+| `POST` | `/v1/namespaces/{ns}/jobs/{name}/groups/{group}/replacement-backoff/reset` | Clear a task group's replacement backoff; requires write access. |
+| `GET` | `/v1/namespaces/{ns}/allocations?label=key:value` | List/filter the namespace's allocations. |
+| `DELETE` | `/v1/namespaces/{ns}/allocations/{id}` | Stop one allocation; requires write access. |
+| `GET` | `/v1/namespaces/{ns}/allocations/{id}/events` | Lifecycle event array. |
+| `GET` | `/v1/namespaces/{ns}/allocations/{id}/logs?task=NAME&tail=100&follow=true` | Plain-text logs for one task in an allocation. |
+| `GET` | `/v1/namespaces/{ns}/allocations/{id}/exec?command=...` | Upgrade to a bidirectional exec stream (`Upgrade: trellis-exec.v1`) that runs one command; requires write access. See [Exec streams](#exec-streams). |
+| `GET` | `/v1/namespaces/{ns}/allocations/{id}/metrics` | Current per-task CPU and memory usage. |
+| `GET` | `/v1/namespaces/{ns}/events` | Server-sent event stream for one namespace. |
+| `PUT` | `/v1/namespaces/{ns}/secrets/{name}` | Set a secret; requires write access. |
+| `GET` | `/v1/namespaces/{ns}/secrets[/{name}]` | List/get secret metadata only. |
+| `DELETE` | `/v1/namespaces/{ns}/secrets/{name}` | Delete a secret; requires write access. |
+
+Authorization of `/v1/namespaces/{ns}/...` routes is by path: a namespace-scoped credential may address only its own namespace and receives `403` for any other, while cluster-scoped credentials and the administrator may address every namespace. Access (`read` or `write`) is checked separately, as noted per route. A `{ns}` that is not a valid identifier returns `400`.
 
 `GET /v1/auth/whoami` is the capability/introspection primitive clients should use instead of probing protected endpoints. Typical generated-token response:
 
@@ -57,25 +67,25 @@ A workload credential additionally reports `"subject": {"namespace": "payments",
 
 An administrator credential reports `kind: "administrator"`, `scope: "cluster"`, and `access: "write"`, but callers must still treat `administrator` as more privileged than ordinary `cluster/write`: root-only endpoint checks use the credential kind/context, not merely those two effective fields.
 
-`GET /v1/namespaces` is discovery, not namespace lifecycle management. For cluster-scoped or administrator callers it returns the sorted unique namespace names currently referenced by desired jobs. A namespace-scoped caller receives only its own namespace. Applying a valid job to a previously unseen namespace does not require a separate namespace-creation call; after that desired job exists, the name becomes discoverable.
+`GET /v1/namespaces` is discovery, not namespace lifecycle management. For cluster-scoped or administrator callers it returns the sorted union of namespace names that currently have a desired job, a stored secret, or a namespace-scoped credential. A namespace-scoped caller receives only its own namespace. There is no namespace-creation call: minting a credential for, storing a secret in, or applying a job to a previously unseen namespace makes it discoverable.
 
 Node resource values use millicores for CPU and bytes for memory. In `GET /v1/nodes`, `cpu_capacity` and `memory_capacity` are whole-host capacity, while `cpu_allocatable` and `memory_allocatable` are the capacity available to the scheduler after the node's host reserve. The existing `cpu` and `memory` fields carry the same allocatable values. `last_heartbeat` is when the current leader last received a heartbeat from the node; heartbeat times are not replicated, so it is omitted until the node reports to a newly elected leader. `cpu_usage` is a whole-host ratio from 0 to 1; `memory_used`, `memory_available`, and `metrics_at` describe the same point-in-time host sample and are omitted until the agent can collect one. Scheduling uses allocatable capacity, never live utilization. `control_plane` is `voter` or `nonvoter` for a Raft member and omitted for a registered node that is no longer one.
 
-`GET /v1/jobs` and `GET /v1/jobs/{name}` include `replacement_backoff` for task groups whose failed allocations are being replaced with a delay. Each entry has `group`, `job_revision`, `failures` (consecutive failed allocations counted since the last reset), `last_failure_at`, `last_allocation_id`, the failed allocation's `reason` and `message`, and `next_replacement_at`, the earliest time a new allocation may be placed for the group. The field is omitted when no group has counted failures. The backoff delays only replacements of failed allocations; allocations lost with their node and a higher `count` are placed immediately. `POST /v1/jobs/{name}/groups/{group}/replacement-backoff/reset` clears a group's backoff so its failed allocations are replaced at once; it returns `204` (also when the group has no counted failures), `404` when the job or task group does not exist in the caller's namespace, and `403` without write access. The `GET /v1/events` stream emits `job.replacement_delayed` with `job`, `group`, `allocation_id`, `revision`, `failures`, and `next_replacement_at` whenever a failure is counted, and `job.replacement_backoff_reset` with `job`, `group`, and `revision` when a backoff is reset. `/metrics` exposes the same state as `trellis_replacement_backoff_failures` and `trellis_replacement_backoff_remaining_seconds`, labelled by `namespace`, `job`, and `group`. Only the five newest terminal allocations per task group are retained, so older `stopped`, `failed`, and `lost` allocations disappear from job status and allocation queries. If a node later reports a container for a pruned allocation, reconciliation treats it as an observed orphan and stops it.
+`GET /v1/namespaces/{ns}/jobs` and `GET /v1/namespaces/{ns}/jobs/{name}` include `replacement_backoff` for task groups whose failed allocations are being replaced with a delay. Each entry has `group`, `job_revision`, `failures` (consecutive failed allocations counted since the last reset), `last_failure_at`, `last_allocation_id`, the failed allocation's `reason` and `message`, and `next_replacement_at`, the earliest time a new allocation may be placed for the group. The field is omitted when no group has counted failures. The backoff delays only replacements of failed allocations; allocations lost with their node and a higher `count` are placed immediately. `POST /v1/namespaces/{ns}/jobs/{name}/groups/{group}/replacement-backoff/reset` clears a group's backoff so its failed allocations are replaced at once; it returns `204` (also when the group has no counted failures), `404` when the job or task group does not exist in the namespace, and `403` without write access. The event streams emits `job.replacement_delayed` with `job`, `group`, `allocation_id`, `revision`, `failures`, and `next_replacement_at` whenever a failure is counted, and `job.replacement_backoff_reset` with `job`, `group`, and `revision` when a backoff is reset. `/metrics` exposes the same state as `trellis_replacement_backoff_failures` and `trellis_replacement_backoff_remaining_seconds`, labelled by `namespace`, `job`, and `group`. Only the five newest terminal allocations per task group are retained, so older `stopped`, `failed`, and `lost` allocations disappear from job status and allocation queries. If a node later reports a container for a pruned allocation, reconciliation treats it as an observed orphan and stops it.
 
 When desired capacity cannot be placed, job status includes one `pending` allocation per unmet replica. Its existing allocation `reason` and `message` fields carry the current placement diagnostic: `no_healthy_nodes`, `constraint_mismatch`, `volume_owner_unavailable`, `missing_capability`, `host_port_conflict`, or `insufficient_capacity`. Reconciliation reuses these records rather than creating another pending allocation on every pass. It updates a record only when the blocking reason changes and places the same allocation, clearing the diagnostic, when a node becomes eligible. These are observations of scheduler filters, not new desired-state resources or scheduling policy.
 
-A job has two counters, both reported by `GET /v1/jobs` and `GET /v1/jobs/{name}`. `version` advances on every accepted change to the specification, including label, `count`, and update-policy changes. `revision` identifies execution content: it advances only when a task group's execution hash changes, and allocations carry it as `job_revision` for fencing and rolling updates. Submitting a specification identical to the current one changes neither and writes nothing.
+A job has two counters, both reported by `GET /v1/namespaces/{ns}/jobs` and `GET /v1/namespaces/{ns}/jobs/{name}`. `version` advances on every accepted change to the specification, including label, `count`, and update-policy changes. `revision` identifies execution content: it advances only when a task group's execution hash changes, and allocations carry it as `job_revision` for fencing and rolling updates. Submitting a specification identical to the current one changes neither and writes nothing.
 
-`POST /v1/jobs/plan` returns `base_version` and `base_revision` for an existing job. `POST /v1/jobs` accepts an optional `expected_version`: `0` requires that the job does not exist, `N` requires that it is currently at version `N`, and omitting it applies unconditionally. The leader checks the precondition and commits the change under the same serialized job-mutation lock, so of several concurrent applies against the same version exactly one succeeds; the others receive `409 Conflict` with a `message` naming the expected and current versions. A successful submit returns `202` with `{"namespace", "name", "version", "revision"}` describing the committed job, so clients need not re-read it. `trellisctl jobs apply` always sends the `base_version` of the plan they showed (or `0` for a create). Versions restart at 1 when a job is deleted and recreated, so the precondition cannot distinguish a recreated job that has reached the planned version from the job that was planned against. `job.registered` events on `GET /v1/events` fire for every apply that changes a job and carry its new `version` and `revision`.
+The job submitted to `POST /v1/namespaces/{ns}/jobs` or `.../jobs/plan` must name the path namespace in `spec.namespace`; a mismatch returns `400`. The plan returns `base_version` and `base_revision` for an existing job. Submission accepts an optional `expected_version`: `0` requires that the job does not exist, `N` requires that it is currently at version `N`, and omitting it applies unconditionally. The leader checks the precondition and commits the change under the same serialized job-mutation lock, so of several concurrent applies against the same version exactly one succeeds; the others receive `409 Conflict` with a `message` naming the expected and current versions. A successful submit returns `202` with `{"namespace", "name", "version", "revision"}` describing the committed job, so clients need not re-read it. `trellisctl jobs apply` always sends the `base_version` of the plan they showed (or `0` for a create). Versions restart at 1 when a job is deleted and recreated, so the precondition cannot distinguish a recreated job that has reached the planned version from the job that was planned against. `job.registered` events on the event streams fire for every apply that changes a job and carry its new `version` and `revision`.
 
-`GET /v1/jobs/{name}/versions` returns the retained history in ascending version order; each entry has `version`, the `revision` that version ran, the full canonical `spec`, and `created_at`. Trellis retains at most the 10 newest versions for each live job, and every apply that changes the specification compacts that job's history. A newly elected leader also compacts all histories and removes records orphaned by older job deletions. Deleting a job atomically deletes all of its history, so recreating the same name starts again at version 1 and revision 1. Backups use format version 4, whose job and history records carry versions; state written by builds before job versions is not migrated, so recreate such jobs (or the cluster) rather than upgrading in place.
+`GET /v1/namespaces/{ns}/jobs/{name}/versions` returns the retained history in ascending version order; each entry has `version`, the `revision` that version ran, the full canonical `spec`, and `created_at`. Trellis retains at most the 10 newest versions for each live job, and every apply that changes the specification compacts that job's history. A newly elected leader also compacts all histories and removes records orphaned by older job deletions. Deleting a job atomically deletes all of its history, so recreating the same name starts again at version 1 and revision 1. Backups use format version 4, whose job and history records carry versions; state written by builds before job versions is not migrated, so recreate such jobs (or the cluster) rather than upgrading in place.
 
 For allocation logs, `task` selects the task name from the allocation's task group. It may be omitted when the allocation has exactly one task; a multi-task allocation returns `400` until the caller selects one. The allocation ID is the Trellis allocation identity, not an agent/container runtime ID.
 
 ### Exec streams
 
-`GET /v1/allocations/{id}/exec` runs one command in an allocation task over a single long-lived, bidirectional stream. The request is an HTTP/1.1 upgrade: it carries `Connection: Upgrade` and `Upgrade: trellis-exec.v1` along with the usual credentials, and the server answers `101 Switching Protocols` once the command is admitted. HTTP/2 cannot upgrade connections, so clients must use HTTP/1.1 for this request. Followers proxy the upgrade to the leader like any other request.
+`GET /v1/namespaces/{ns}/allocations/{id}/exec` runs one command in an allocation task over a single long-lived, bidirectional stream. The request is an HTTP/1.1 upgrade: it carries `Connection: Upgrade` and `Upgrade: trellis-exec.v1` along with the usual credentials, and the server answers `101 Switching Protocols` once the command is admitted. HTTP/2 cannot upgrade connections, so clients must use HTTP/1.1 for this request. Followers proxy the upgrade to the leader like any other request.
 
 The query string describes the process:
 
@@ -113,8 +123,8 @@ Exec and allocation-metrics requests that fail before the upgrade return a JSON 
 | Status | Meaning |
 |---|---|
 | `400` | The request is invalid, is not an upgrade to `trellis-exec.v1`, or must name one task: the allocation has several tasks, or the named task is not in its task group. |
-| `403` | The credential lacks write access (exec only). |
-| `404` | The allocation is not placed in the caller's namespace. |
+| `403` | The credential is scoped to another namespace, or lacks write access (exec only). |
+| `404` | The allocation is not placed in the path namespace. |
 | `409` | The allocation exists but its node has no running target for the request, such as a task that has not started or has exited. It also covers conflicting execution records for the task on the node, and an agent already fenced by a newer leader. Retry after the allocation is running again. |
 | `429` | The node or allocation exec stream limit, or the leader's relay limit, has been reached. Close a stream or retry later. |
 | `502` | The node agent failed while it was handling the request. Details are logged by the control plane, not returned. |
@@ -123,13 +133,13 @@ Exec and allocation-metrics requests that fail before the upgrade return a JSON 
 
 Secret write body: `{"value_base64":"...","expected_version":1}`; omit `expected_version` for unconditional update. Decoded values may contain at most 65,536 bytes; an oversized request returns `413` before base64 decoding. Lists are JSON arrays. Non-2xx responses are errors; clients must tolerate reconciliation-driven changes between reads.
 
-A namespace credential is authorized only for its stored namespace regardless of the namespace header supplied by the caller. A cluster credential may deliberately select different namespaces but receives only the read/write authority encoded in its principal.
+Secrets follow the same namespace rule as jobs: a namespace-scoped credential with `write` access may set and delete secrets in its own namespace, and any credential that can address the namespace may list and describe secret metadata. Secrets are write-only for every caller, including cluster-scoped credentials and the administrator: no endpoint returns a stored value. Values reach a task only through leader-to-agent delivery for an allocation whose job references the secret, which a namespace writer can already arrange by applying a job, so a read-back API would add plaintext exposure without adding capability.
 
 The control plane admits 256 simultaneous `/v1/events` subscribers per
 process. Additional requests receive `503 Service Unavailable` and
 `Retry-After: 1` without allocating a stream buffer. Subscriber admission does
-not alter authorization: namespace-scoped streams continue to receive only
-events for their authenticated namespace. Clients should reconnect with
+not alter authorization: `GET /v1/namespaces/{ns}/events` receives only that
+namespace's events, and only `GET /v1/events` spans namespaces. Clients should reconnect with
 backoff after overload or a leader change.
 
 ## Cluster settings
@@ -155,7 +165,7 @@ Job limits and namespace-network settings are cluster-wide semantics, so they li
 }
 ```
 
-Memory values are byte counts. `PUT /v1/cluster/settings/job-limits` requires an administrator-signed request and replaces the complete `job_limits` object (unknown fields are rejected with `400`). It returns the updated settings, `422` when the limits are invalid (every value positive, defaults no larger than their maximums), and `409` when the new limits would stop admitting a job that is currently desired, naming the jobs; shrink or delete those jobs first. A job apply that races the change is checked against the limits current when it commits. The `network` settings are fixed when the cluster is created, because every namespace subnet and WireGuard port slot is derived from them; the leader rejects node registrations whose WireGuard port count differs from `wireguard_port_count`.
+Memory values are byte counts. `PUT /v1/cluster/settings/job-limits` requires an administrator-signed request and replaces the complete `job_limits` object (unknown fields are rejected with `400`). It returns the updated settings, `422` when the limits are invalid (every value positive, defaults no larger than their maximums), and `409` when the new limits would stop admitting a job that is currently desired, naming the jobs; shrink or delete those jobs first. A job apply that races the change is checked against the limits current when it commits. The `network` settings are fixed when the cluster is created, because every namespace subnet and WireGuard port slot is assigned from them; the leader rejects node registrations whose WireGuard port count differs from `wireguard_port_count`.
 
 ## Administrator, enrollment, and cluster-internal endpoints
 
@@ -179,8 +189,7 @@ esac
 printf '%s\n' "$TRELLIS_CA_CERT" > /tmp/trellis-ca.pem
 curl -fsS --connect-timeout 5 --max-time 15 --cacert /tmp/trellis-ca.pem \
   -H "Authorization: Bearer $TRELLIS_TOKEN" \
-  -H "X-Trellis-Namespace: $TRELLIS_NAMESPACE" \
-  "$api_url/v1/auth/whoami"
+  "$api_url/v1/namespaces/$TRELLIS_NAMESPACE/jobs"
 ```
 
 Never send a workload bearer credential over plaintext HTTP. See [`examples/api-access/`](../../examples/api-access/) for an in-allocation namespace-scoped helper with the same TLS and timeout behavior.

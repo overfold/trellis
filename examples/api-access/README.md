@@ -57,7 +57,7 @@ COPY --chmod=0755 list-jobs.sh /usr/local/bin/list-jobs
 ENTRYPOINT ["/usr/local/bin/list-jobs"]
 ```
 
-Build and push that image, then replace the manifest's image. The helper validates the injected address, token, and namespace, sends Bearer authentication and `X-Trellis-Namespace`, treats an address without an explicit scheme as HTTPS, refuses plaintext HTTP, applies connection and overall request deadlines, and uses `TRELLIS_CA_CERT` as a curl trust root when TLS is configured.
+Build and push that image, then replace the manifest's image. The helper validates the injected address, token, and namespace, sends Bearer authentication, addresses `/v1/namespaces/$TRELLIS_NAMESPACE/jobs`, treats an address without an explicit scheme as HTTPS, refuses plaintext HTTP, applies connection and overall request deadlines, and uses `TRELLIS_CA_CERT` as a curl trust root when TLS is configured.
 
 ## Deploy and verify
 
@@ -70,7 +70,7 @@ Use allocation logs to inspect the controller's non-sensitive result. Never prin
 
 ## Controller behavior
 
-API clients should set request deadlines, retry transient transport/5xx failures with backoff, and tolerate resources changing between reads. Prefer read-only discovery loops unless mutation is essential. A namespace-scoped token cannot be broadened by changing the namespace header; broader operations require the appropriate cluster-scoped credential.
+API clients should set request deadlines, retry transient transport/5xx failures with backoff, and tolerate resources changing between reads. Prefer read-only discovery loops unless mutation is essential. A namespace-scoped token cannot be broadened by addressing another namespace's path; such requests receive `403`, and broader operations require the appropriate cluster-scoped credential.
 
 For a long-running process, poll only as often as needed and preserve the last known-good generated configuration through temporary API outages. The reverse-proxy recipe in the public cookbook applies this exact namespace-controller pattern.
 

@@ -22,6 +22,9 @@ type BackupSnapshot struct {
 	Secrets                  map[string]json.RawMessage `json:"secrets"`
 	VolumeRegistrations      map[string]json.RawMessage `json:"volume_registrations"`
 	NetworkPortRegistrations map[string]json.RawMessage `json:"network_port_registrations"`
+	// NetworkSubnetRegistrations are keyed by node ID; a restore into a
+	// cluster without those nodes releases them on the first reconciliation.
+	NetworkSubnetRegistrations map[string]json.RawMessage `json:"network_subnet_registrations"`
 }
 
 // NodeStatusResponse describes the scheduling status of a node.

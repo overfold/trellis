@@ -188,6 +188,34 @@ func (s *Store) List(ctx context.Context, namespace string) ([]Metadata, error) 
 	return result, nil
 }
 
+// Namespaces returns the sorted unique namespaces that contain at least one
+// secret. Only record keys are inspected; no secret is decrypted.
+func (s *Store) Namespaces(ctx context.Context) ([]string, error) {
+	root := fmt.Sprintf("trellis/%s/secrets/", s.cluster)
+	values, err := s.state.List(ctx, root)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{})
+	for key := range values {
+		escaped, _, ok := strings.Cut(strings.TrimPrefix(key, root), "/")
+		if !ok {
+			continue
+		}
+		namespace, err := url.PathUnescape(escaped)
+		if err != nil {
+			return nil, fmt.Errorf("decode secret namespace: %w", err)
+		}
+		seen[namespace] = struct{}{}
+	}
+	result := make([]string, 0, len(seen))
+	for namespace := range seen {
+		result = append(result, namespace)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
 // Resolve decrypts a secret and returns its value and version.
 func (s *Store) Resolve(ctx context.Context, namespace, name string) ([]byte, uint64, error) {
 	rec, err := s.load(ctx, namespace, name)

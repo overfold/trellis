@@ -11,8 +11,7 @@ case "$TRELLIS_ADDR" in
 esac
 
 set -- --fail --silent --show-error --connect-timeout 5 --max-time 15 \
-  -H "Authorization: Bearer $TRELLIS_TOKEN" \
-  -H "X-Trellis-Namespace: $TRELLIS_NAMESPACE"
+  -H "Authorization: Bearer $TRELLIS_TOKEN"
 
 ca_file=
 if [ -n "${TRELLIS_CA_CERT:-}" ] && [ "${api_url#https://}" != "$api_url" ]; then
@@ -22,4 +21,4 @@ if [ -n "${TRELLIS_CA_CERT:-}" ] && [ "${api_url#https://}" != "$api_url" ]; the
   set -- "$@" --cacert "$ca_file"
 fi
 
-curl "$@" "$api_url/v1/allocations?label=service:patroni"
+curl "$@" "$api_url/v1/namespaces/$TRELLIS_NAMESPACE/allocations?label=service:patroni"

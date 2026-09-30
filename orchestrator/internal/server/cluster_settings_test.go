@@ -73,7 +73,7 @@ func TestMembersUseReplicatedClusterSettingsInsteadOfLocalConfiguration(t *testi
 	}
 
 	nodeID := uuid.New()
-	if a, b := namespaceNodeSubnet(first.networkPool, "acme", nodeID), namespaceNodeSubnet(second.networkPool, "acme", nodeID); a != b || !created.WireGuardPool.Contains(b.Addr()) {
+	if a, b := networkSubnet(first.networkPool, 5), networkSubnet(second.networkPool, 5); a != b || !created.WireGuardPool.Contains(b.Addr()) {
 		t.Fatalf("namespace subnets differ across leaders or leave the replicated pool: %s, %s", a, b)
 	}
 

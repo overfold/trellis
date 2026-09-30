@@ -70,7 +70,7 @@ func newExecRelayTest(t *testing.T, serve func(*execstream.Reader, *execstream.W
 
 func (test *execRelayTest) open(t *testing.T, request api.ExecRequest) *client.ExecStream {
 	t.Helper()
-	stream, err := client.NewServerClient("", test.leader.URL, nil).Exec(context.Background(), "alloc-1", request)
+	stream, err := client.NewNamespaceServerClient("", test.leader.URL, "team", nil).Exec(context.Background(), "alloc-1", request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +206,7 @@ func TestExecRelayRejectsServerFramesFromClient(t *testing.T) {
 	}
 	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-	if _, err := fmt.Fprintf(conn, "GET /v1/allocations/alloc-1/exec?command=sh HTTP/1.1\r\nHost: leader\r\nConnection: Upgrade\r\nUpgrade: %s\r\n\r\n", execstream.Protocol); err != nil {
+	if _, err := fmt.Fprintf(conn, "GET /v1/namespaces/team/allocations/alloc-1/exec?command=sh HTTP/1.1\r\nHost: leader\r\nConnection: Upgrade\r\nUpgrade: %s\r\n\r\n", execstream.Protocol); err != nil {
 		t.Fatal(err)
 	}
 	buffered := bufio.NewReader(conn)
@@ -234,12 +234,12 @@ func TestExecRequestRejections(t *testing.T) {
 		setup   func()
 		want    int
 	}{
-		{name: "read-only credential", path: "/v1/allocations/alloc-1/exec?command=sh", access: auth.AccessRead, upgrade: true, want: http.StatusForbidden},
-		{name: "not an upgrade", path: "/v1/allocations/alloc-1/exec?command=sh", access: auth.AccessWrite, want: http.StatusBadRequest},
-		{name: "missing command", path: "/v1/allocations/alloc-1/exec", access: auth.AccessWrite, upgrade: true, want: http.StatusBadRequest},
-		{name: "invalid term", path: "/v1/allocations/alloc-1/exec?command=sh&tty=true&term=x%3By", access: auth.AccessWrite, upgrade: true, want: http.StatusBadRequest},
-		{name: "relay limit", path: "/v1/allocations/alloc-1/exec?command=sh", access: auth.AccessWrite, upgrade: true, setup: func() { s.exec.active = execRelayLimit }, want: http.StatusTooManyRequests},
-		{name: "no leadership term", path: "/v1/allocations/alloc-1/exec?command=sh", access: auth.AccessWrite, upgrade: true, setup: func() { s.exec = execRelays{} }, want: http.StatusServiceUnavailable},
+		{name: "read-only credential", path: "/v1/namespaces/team/allocations/alloc-1/exec?command=sh", access: auth.AccessRead, upgrade: true, want: http.StatusForbidden},
+		{name: "not an upgrade", path: "/v1/namespaces/team/allocations/alloc-1/exec?command=sh", access: auth.AccessWrite, want: http.StatusBadRequest},
+		{name: "missing command", path: "/v1/namespaces/team/allocations/alloc-1/exec", access: auth.AccessWrite, upgrade: true, want: http.StatusBadRequest},
+		{name: "invalid term", path: "/v1/namespaces/team/allocations/alloc-1/exec?command=sh&tty=true&term=x%3By", access: auth.AccessWrite, upgrade: true, want: http.StatusBadRequest},
+		{name: "relay limit", path: "/v1/namespaces/team/allocations/alloc-1/exec?command=sh", access: auth.AccessWrite, upgrade: true, setup: func() { s.exec.active = execRelayLimit }, want: http.StatusTooManyRequests},
+		{name: "no leadership term", path: "/v1/namespaces/team/allocations/alloc-1/exec?command=sh", access: auth.AccessWrite, upgrade: true, setup: func() { s.exec = execRelays{} }, want: http.StatusServiceUnavailable},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

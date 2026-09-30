@@ -59,11 +59,10 @@ func NewExecCmd() *cobra.Command {
 				request.Cols, request.Rows = terminal.cols, terminal.rows
 			}
 
-			tlsCfg, err := buildCLITLSConfig()
+			serverClient, err := namespaceClient(cmd.Context())
 			if err != nil {
 				return err
 			}
-			serverClient := client.NewNamespaceServerClient(config.ClusterToken, config.ServerAddr, config.Namespace, tlsCfg)
 			return runExec(cmd, serverClient, args[0], request, terminal)
 		},
 	}

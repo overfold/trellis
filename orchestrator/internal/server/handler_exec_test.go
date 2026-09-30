@@ -73,8 +73,8 @@ type execErrorRoute struct {
 }
 
 var execErrorRoutes = []execErrorRoute{
-	{name: "exec", method: http.MethodGet, path: "/v1/allocations/alloc-1/exec?command=true", agentNotFound: http.StatusConflict},
-	{name: "metrics", method: http.MethodGet, path: "/v1/allocations/alloc-1/metrics", agentNotFound: http.StatusConflict},
+	{name: "exec", method: http.MethodGet, path: "/v1/namespaces/team/allocations/alloc-1/exec?command=true", agentNotFound: http.StatusConflict},
+	{name: "metrics", method: http.MethodGet, path: "/v1/namespaces/team/allocations/alloc-1/metrics", agentNotFound: http.StatusConflict},
 }
 
 func serveExecRequest(t *testing.T, e *echo.Echo, route execErrorRoute, path string) *httptest.ResponseRecorder {
@@ -146,7 +146,7 @@ func TestAgentExecNoRunningTargetNamesAllocationAndTask(t *testing.T) {
 		t.Fatalf("status = %d, want 409; body: %s", rec.Code, rec.Body.String())
 	}
 	route := execErrorRoute{method: http.MethodGet}
-	rec = serveExecRequest(t, e, route, "/v1/allocations/alloc-1/exec?task=web&command=true")
+	rec = serveExecRequest(t, e, route, "/v1/namespaces/team/allocations/alloc-1/exec?task=web&command=true")
 	if got, want := errorMessage(t, rec), `allocation alloc-1 task "web" is not running`; rec.Code != http.StatusConflict || got != want {
 		t.Fatalf("status = %d, message = %q; want 409 %q", rec.Code, got, want)
 	}
@@ -184,7 +184,7 @@ func TestExecControlPlaneLookupErrors(t *testing.T) {
 		})
 	}
 	t.Run("exec/unknown task", func(t *testing.T) {
-		rec := serveExecRequest(t, e, execErrorRoutes[0], "/v1/allocations/alloc-1/exec?task=db&command=true")
+		rec := serveExecRequest(t, e, execErrorRoutes[0], "/v1/namespaces/team/allocations/alloc-1/exec?task=db&command=true")
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400; body: %s", rec.Code, rec.Body.String())
 		}

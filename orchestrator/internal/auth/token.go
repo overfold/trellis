@@ -180,6 +180,31 @@ func (m *TokenManager) ValidateToken(ctx context.Context, rawToken string) (*Pri
 	return &principal, nil
 }
 
+// CredentialNamespaces returns the sorted unique namespaces named by stored
+// namespace-scoped credentials.
+func (m *TokenManager) CredentialNamespaces(ctx context.Context) ([]string, error) {
+	values, err := m.store.List(ctx, m.tokenKey(""))
+	if err != nil {
+		return nil, fmt.Errorf("list credentials: %w", err)
+	}
+	seen := make(map[string]struct{})
+	for _, data := range values {
+		var principal Principal
+		if err := json.Unmarshal(data, &principal); err != nil {
+			return nil, fmt.Errorf("unmarshal principal: %w", err)
+		}
+		if principal.Scope == AccessNamespace && principal.Namespace != "" {
+			seen[principal.Namespace] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(seen))
+	for namespace := range seen {
+		result = append(result, namespace)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
 // Sealer encrypts persisted workload credentials so replicated state never
 // contains a usable bearer token.
 type Sealer interface {
