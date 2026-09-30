@@ -32,7 +32,7 @@ An allocation can therefore be `running` and `unhealthy`. Lifecycle and health a
 
 ## Scheduling
 
-The scheduler considers only healthy, non-draining nodes. It filters on `os`, `arch`, custom label constraints, registered volume locality, CPU millicores, and memory bytes. It then uses deterministic best-fit placement with replica spreading as a tie-breaker. Resource values of zero on a node mean capacity is not enforced for that dimension.
+The scheduler considers only healthy, non-draining nodes. It filters on `os`, `arch`, custom label constraints, registered volume locality, CPU millicores, and memory bytes. Among the remaining nodes it places each replica on the node with the fewest replicas of the same task group, counting replicas already placed there (draining replicas that are being replaced do not count). Among nodes with equally few replicas it prefers the one that would be most utilized after placement (best fit), and any remaining tie goes to the lowest node ID, so the same inputs always produce the same placements. Spreading is soft: when constraints, volumes, host ports, or capacity leave only some nodes eligible, replicas share those nodes. Resource values of zero on a node mean capacity is not enforced for that dimension.
 
 ## Reconciliation and failure handling
 
