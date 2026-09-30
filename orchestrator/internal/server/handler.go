@@ -82,9 +82,17 @@ func requireRoot(c *echo.Context, message string) error {
 	return nil
 }
 
-func requireNode(c *echo.Context, expected uuid.UUID, message string) error {
+func authenticatedNodeID(c *echo.Context, message string) (uuid.UUID, error) {
 	id, ok := c.Request().Context().Value(NodeContextKey).(uuid.UUID)
-	if !ok || id == uuid.Nil || (expected != uuid.Nil && id != expected) {
+	if !ok || id == uuid.Nil {
+		return uuid.Nil, echo.NewHTTPError(http.StatusForbidden, message)
+	}
+	return id, nil
+}
+
+func requireExactNode(c *echo.Context, expected uuid.UUID, message string) error {
+	id, err := authenticatedNodeID(c, message)
+	if err != nil || expected == uuid.Nil || id != expected {
 		return echo.NewHTTPError(http.StatusForbidden, message)
 	}
 	return nil
@@ -466,7 +474,7 @@ func (h *Handler) handleRegisterNode(c *echo.Context) error {
 	if err := c.Bind(&request); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 	}
-	if err := requireNode(c, request.ID, "node registration identity does not match certificate"); err != nil {
+	if err := requireExactNode(c, request.ID, "node registration identity does not match certificate"); err != nil {
 		return err
 	}
 	cpuCapacity, memoryCapacity := request.CPUCapacity, request.MemoryCapacity
@@ -501,7 +509,7 @@ func (h *Handler) handleHeartbeat(c *echo.Context) error {
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
-	if err := requireNode(c, id, "heartbeat identity does not match certificate"); err != nil {
+	if err := requireExactNode(c, id, "heartbeat identity does not match certificate"); err != nil {
 		return err
 	}
 	c.Request().Body = http.MaxBytesReader(c.Response(), c.Request().Body, maxHeartbeatBodyBytes)
@@ -627,10 +635,10 @@ func (h *Handler) handleListAllocations(c *echo.Context) error {
 }
 
 func (h *Handler) handleListDiscovery(c *echo.Context) error {
-	if err := requireNode(c, uuid.Nil, "internal discovery requires an authenticated node"); err != nil {
+	nodeID, err := authenticatedNodeID(c, "internal discovery requires an authenticated node")
+	if err != nil {
 		return err
 	}
-	nodeID := c.Request().Context().Value(NodeContextKey).(uuid.UUID)
 	var filter *catalog.ListFilter
 	job, label := c.QueryParam("job"), c.QueryParam("label")
 	if job != "" || label != "" {
