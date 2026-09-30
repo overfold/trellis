@@ -98,9 +98,6 @@ func Validate(job *JobSpec) error {
 			add(groupPath+".runtime", "unsupported", fmt.Sprintf("unsupported runtime %q", group.Runtime))
 		}
 		if group.APIAccess != nil {
-			if !group.APIAccess.Scope.Valid() {
-				add(groupPath+".api_access.scope", "unsupported", "must be namespace or cluster")
-			}
 			if !group.APIAccess.Access.Valid() {
 				add(groupPath+".api_access.access", "unsupported", "must be read or write")
 			}

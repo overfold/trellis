@@ -28,7 +28,7 @@ type schema = map[string]any
 var requiredFields = map[reflect.Type][]string{
 	reflect.TypeOf(spec.JobSpec{}):           {"name", "namespace", "task_groups"},
 	reflect.TypeOf(spec.TaskGroupSpec{}):     {"name", "count", "tasks"},
-	reflect.TypeOf(spec.APIAccessSpec{}):     {"scope", "access"},
+	reflect.TypeOf(spec.APIAccessSpec{}):     {"access"},
 	reflect.TypeOf(spec.ConstraintSpec{}):    {"attribute", "value"},
 	reflect.TypeOf(spec.RestartPolicySpec{}): {"window"},
 	reflect.TypeOf(spec.TaskSpec{}):          {"name", "image"},
@@ -41,7 +41,6 @@ var requiredFields = map[reflect.Type][]string{
 var enumValues = map[reflect.Type][]string{
 	reflect.TypeOf(spec.UpdateStrategy("")):  {"", "recreate", "rolling"},
 	reflect.TypeOf(spec.Runtime("")):         {"", "runc", "runsc"},
-	reflect.TypeOf(spec.APIAccessScope("")):  {"namespace", "cluster"},
 	reflect.TypeOf(spec.APIAccessLevel("")):  {"read", "write"},
 	reflect.TypeOf(spec.TaskNetworkMode("")): {"", "isolated", "host", "namespace"},
 	reflect.TypeOf(spec.HealthCheckType("")): {"http", "tcp", "script"},
@@ -308,7 +307,6 @@ func describeAuthoringFields(root schema) {
 	describeDef(root, "TaskGroupSpec", "restart", "Retry policy for task failures inside an allocation. Omit for 3 restarts within 10m; Trellis stores the resolved policy.")
 	describeDef(root, "TaskGroupSpec", "update", "How allocations from an older job revision are replaced. Omit for recreate; Trellis stores the resolved policy.")
 
-	describeDef(root, "APIAccessSpec", "scope", "Where the injected workload credential may operate: only this namespace or the whole cluster.")
 	describeDef(root, "APIAccessSpec", "access", "Whether the injected credential is read-only or may perform ordinary writes within its scope.")
 	describeDef(root, "ConstraintSpec", "attribute", "Node attribute or label key to match, such as arch, os, or a custom label.")
 	describeDef(root, "ConstraintSpec", "value", "Exact value the selected node must report for this attribute.")

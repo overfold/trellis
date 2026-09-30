@@ -35,35 +35,23 @@ const (
 // Valid reports whether r is a supported runtime.
 func (r Runtime) Valid() bool { return r == RuntimeDefault || r == RuntimeRunc || r == RuntimeRunsc }
 
-// APIAccessScope controls where an injected control-plane credential may operate.
-type APIAccessScope string
-
-const (
-	// APIAccessNamespace restricts the credential to the job's namespace.
-	APIAccessNamespace APIAccessScope = "namespace"
-	// APIAccessCluster allows the credential to operate across the cluster.
-	APIAccessCluster APIAccessScope = "cluster"
-)
-
-// Valid reports whether s is a supported API access scope.
-func (s APIAccessScope) Valid() bool { return s == APIAccessNamespace || s == APIAccessCluster }
-
 // APIAccessLevel controls whether an injected control-plane credential may mutate state.
 type APIAccessLevel string
 
 const (
 	// APIAccessRead grants observation-only API access.
 	APIAccessRead APIAccessLevel = "read"
-	// APIAccessWrite grants ordinary mutation API access within the credential scope.
+	// APIAccessWrite grants ordinary cluster-wide mutation API access.
 	APIAccessWrite APIAccessLevel = "write"
 )
 
 // Valid reports whether a is a supported API access level.
 func (a APIAccessLevel) Valid() bool { return a == APIAccessRead || a == APIAccessWrite }
 
-// APIAccessSpec configures the scoped credential injected into a task group.
+// APIAccessSpec configures the cluster-wide credential injected into a task
+// group. Every workload credential is cluster-scoped; only its access level is
+// configurable.
 type APIAccessSpec struct {
-	Scope  APIAccessScope `yaml:"scope" json:"scope"`
 	Access APIAccessLevel `yaml:"access" json:"access"`
 }
 
