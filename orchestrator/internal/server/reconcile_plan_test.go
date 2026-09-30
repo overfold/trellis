@@ -48,7 +48,7 @@ func planTestInput(jobs map[string]*Job, nodes []*Node, allocations ...*Allocati
 		Allocations:           allocations,
 		Backoffs:              map[string]*ReplacementBackoff{},
 		VolumeOwners:          map[string]uuid.UUID{},
-		NetworkPorts:          map[string]int{},
+		NetworkReady:          map[string]bool{},
 		NewAllocationSuffix: func() string {
 			suffix++
 			return fmt.Sprintf("%08d", suffix)

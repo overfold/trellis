@@ -174,7 +174,7 @@ func TestWireGuardAttachBuildsIsolatedNamespace(t *testing.T) {
 		t.Fatalf("unexpected attachment: %#v", a)
 	}
 	joined := strings.Join(runner.commands, "\n")
-	for _, want := range []string{"type wireguard", "wg set", "ip netns add alloc-1", "netns alloc-1", "iptables -I FORWARD 1 -j TRELLIS-FORWARD", "ip addr replace 198.18.0.53/32 dev lo", "iptables -C INPUT -i tb"} {
+	for _, want := range []string{"type wireguard", "wg set", "ip netns add alloc-1", "netns alloc-1", "iptables -I FORWARD 1 -j TRELLIS-FORWARD", "ip addr replace 198.18.0.53/32 dev lo", "iptables -I INPUT 1 -j TRELLIS-INPUT", "iptables -C TRELLIS-INPUT -i tb"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("commands do not contain %q:\n%s", want, joined)
 		}
@@ -193,7 +193,7 @@ func TestNamespaceFirewallAcceptsDNSOnlyFromNamespaceCIDR(t *testing.T) {
 
 	commands := strings.Join(runner.commands, "\n")
 	for _, protocol := range []string{"udp", "tcp"} {
-		valid := "iptables -C INPUT -i tb-acme -s 10.42.1.0/24 -d 198.18.0.53 -p " + protocol + " --dport 53 -j ACCEPT"
+		valid := "iptables -C TRELLIS-INPUT -i tb-acme -s 10.42.1.0/24 -d 198.18.0.53 -p " + protocol + " --dport 53 -j ACCEPT"
 		if !strings.Contains(commands, valid) {
 			t.Errorf("namespace-source DNS traffic is not accepted for %s:\n%s", protocol, commands)
 		}
@@ -210,30 +210,13 @@ func TestNamespaceFirewallAcceptsDNSOnlyFromNamespaceCIDR(t *testing.T) {
 			t.Errorf("Trellis forwarding isolation does not contain %q:\n%s", want, commands)
 		}
 	}
-	if strings.Contains(commands, "iptables -A FORWARD") {
-		t.Errorf("isolation rule was appended to shared FORWARD chain:\n%s", commands)
-	}
-	if want := "iptables -C INPUT -i tb-acme -s 10.42.1.0/24 -d 10.42.1.1 -p tcp --dport 8128 -j ACCEPT"; !strings.Contains(commands, want) {
-		t.Errorf("namespace-source API traffic is not accepted:\n%s", commands)
-	}
-}
-
-func TestNamespaceFirewallRemovesLegacyUnrestrictedDNSRules(t *testing.T) {
-	runner := &recordingRunner{}
-	manager := NewWireGuardManager(t.TempDir())
-	manager.run = runner
-	manager.dnsAddress = WorkloadDNSAddress
-
-	if err := manager.reconcileFirewall(context.Background(), "tb-acme", "tw-acme", "10.42.1.0/24", "10.42.1.1", 0); err != nil {
-		t.Fatal(err)
-	}
-
-	commands := strings.Join(runner.commands, "\n")
-	for _, protocol := range []string{"udp", "tcp"} {
-		want := "iptables -D INPUT -i tb-acme -d 198.18.0.53 -p " + protocol + " --dport 53 -j ACCEPT"
-		if !strings.Contains(commands, want) {
-			t.Errorf("legacy %s DNS rule is not removed during reconciliation:\n%s", protocol, commands)
+	for _, shared := range []string{"iptables -A FORWARD", "iptables -I FORWARD -", "iptables -A INPUT", "iptables -I INPUT -"} {
+		if strings.Contains(commands, shared) {
+			t.Errorf("isolation rule was added to a shared built-in chain:\n%s", commands)
 		}
+	}
+	if want := "iptables -C TRELLIS-INPUT -i tb-acme -s 10.42.1.0/24 -d 10.42.1.1 -p tcp --dport 8128 -j ACCEPT"; !strings.Contains(commands, want) {
+		t.Errorf("namespace-source API traffic is not accepted:\n%s", commands)
 	}
 }
 
@@ -355,6 +338,9 @@ func TestWireGuardDetachRemovesNamespacePathAfterLastAllocation(t *testing.T) {
 		"iptables -D TRELLIS-FORWARD",
 		"iptables -D FORWARD -j TRELLIS-FORWARD",
 		"iptables -X TRELLIS-FORWARD",
+		"iptables -D TRELLIS-INPUT -i " + second.Bridge + " -j DROP",
+		"iptables -D INPUT -j TRELLIS-INPUT",
+		"iptables -X TRELLIS-INPUT",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("last detach did not tear down %q:\n%s", want, joined)
@@ -392,8 +378,9 @@ func TestWireGuardDetachKeepsSharedFirewallChainForOtherNamespace(t *testing.T) 
 		t.Fatal(err)
 	}
 	joined := strings.Join(runner.commands, "\n")
-	if strings.Contains(joined, "iptables -D FORWARD -j TRELLIS-FORWARD") || strings.Contains(joined, "iptables -X TRELLIS-FORWARD") {
-		t.Fatalf("shared forwarding chain removed while another namespace used it:\n%s", joined)
+	if strings.Contains(joined, "iptables -D FORWARD -j TRELLIS-FORWARD") || strings.Contains(joined, "iptables -X TRELLIS-FORWARD") ||
+		strings.Contains(joined, "iptables -D INPUT -j TRELLIS-INPUT") || strings.Contains(joined, "iptables -X TRELLIS-INPUT") {
+		t.Fatalf("shared firewall chains removed while another namespace used it:\n%s", joined)
 	}
 
 	runner.commands = nil
@@ -401,8 +388,9 @@ func TestWireGuardDetachKeepsSharedFirewallChainForOtherNamespace(t *testing.T) 
 		t.Fatal(err)
 	}
 	joined = strings.Join(runner.commands, "\n")
-	if !strings.Contains(joined, "iptables -D FORWARD -j TRELLIS-FORWARD") || !strings.Contains(joined, "iptables -X TRELLIS-FORWARD") {
-		t.Fatalf("shared forwarding chain survived final namespace detach:\n%s", joined)
+	if !strings.Contains(joined, "iptables -D FORWARD -j TRELLIS-FORWARD") || !strings.Contains(joined, "iptables -X TRELLIS-FORWARD") ||
+		!strings.Contains(joined, "iptables -D INPUT -j TRELLIS-INPUT") || !strings.Contains(joined, "iptables -X TRELLIS-INPUT") {
+		t.Fatalf("shared firewall chains survived final namespace detach:\n%s", joined)
 	}
 }
 
@@ -467,8 +455,9 @@ func TestWireGuardDetachPreservesLeaseAndConvergesAfterCleanupFailure(t *testing
 					"TRELLIS-FORWARD -i " + attachment.Bridge + " ! -s 10.42.1.0/24 -j DROP":                          true,
 					"TRELLIS-FORWARD -i " + attachment.Bridge + " ! -o " + attachment.WireGuardInterface + " -j DROP": true,
 					"TRELLIS-FORWARD -o " + attachment.Bridge + " ! -i " + attachment.WireGuardInterface + " -j DROP": true,
-					"FORWARD -j TRELLIS-FORWARD":                 true,
-					"INPUT -i " + attachment.Bridge + " -j DROP": true,
+					"FORWARD -j TRELLIS-FORWARD":                         true,
+					"TRELLIS-INPUT -i " + attachment.Bridge + " -j DROP": true,
+					"INPUT -j TRELLIS-INPUT":                             true,
 				},
 				failCommand: tt.failCommand(attachment),
 			}

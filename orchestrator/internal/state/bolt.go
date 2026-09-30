@@ -180,12 +180,13 @@ func (b *BoltStore) DesiredSnapshot(cluster string) (*DesiredSnapshot, error) {
 			cluster = append([]byte(nil), value...)
 		}
 		result = &DesiredSnapshot{
-			Cluster:                  cluster,
-			Jobs:                     relativeEntries(listBucket(bucket, prefix+"jobs/"), prefix+"jobs/"),
-			JobRevisions:             relativeEntries(listBucket(bucket, prefix+"job-revisions/"), prefix+"job-revisions/"),
-			Secrets:                  relativeEntries(listBucket(bucket, prefix+"secrets/"), prefix+"secrets/"),
-			VolumeRegistrations:      relativeEntries(listBucket(bucket, prefix+"volume-registrations/"), prefix+"volume-registrations/"),
-			NetworkPortRegistrations: relativeEntries(listBucket(bucket, prefix+"network-port-registrations/"), prefix+"network-port-registrations/"),
+			Cluster:                    cluster,
+			Jobs:                       relativeEntries(listBucket(bucket, prefix+"jobs/"), prefix+"jobs/"),
+			JobRevisions:               relativeEntries(listBucket(bucket, prefix+"job-revisions/"), prefix+"job-revisions/"),
+			Secrets:                    relativeEntries(listBucket(bucket, prefix+"secrets/"), prefix+"secrets/"),
+			VolumeRegistrations:        relativeEntries(listBucket(bucket, prefix+"volume-registrations/"), prefix+"volume-registrations/"),
+			NetworkPortRegistrations:   relativeEntries(listBucket(bucket, prefix+"network-port-registrations/"), prefix+"network-port-registrations/"),
+			NetworkSubnetRegistrations: relativeEntries(listBucket(bucket, prefix+"network-subnet-registrations/"), prefix+"network-subnet-registrations/"),
 		}
 		return nil
 	})
@@ -339,11 +340,12 @@ func (b *BoltStore) RestoreDesired(cluster string, snapshot *DesiredSnapshot) er
 		secretsPrefix := []byte(fmt.Sprintf("trellis/%s/secrets/", cluster))
 		volumesPrefix := []byte(fmt.Sprintf("trellis/%s/volume-registrations/", cluster))
 		networkPortsPrefix := []byte(fmt.Sprintf("trellis/%s/network-port-registrations/", cluster))
+		networkSubnetsPrefix := []byte(fmt.Sprintf("trellis/%s/network-subnet-registrations/", cluster))
 		allocationsPrefix := []byte(fmt.Sprintf("trellis/%s/allocations/", cluster))
-		for _, prefix := range [][]byte{jobsPrefix, revisionsPrefix, secretsPrefix, volumesPrefix, networkPortsPrefix, allocationsPrefix} {
+		for _, prefix := range [][]byte{jobsPrefix, revisionsPrefix, secretsPrefix, volumesPrefix, networkPortsPrefix, networkSubnetsPrefix, allocationsPrefix} {
 			key, _ := bucket.Cursor().Seek(prefix)
 			if key != nil && len(key) >= len(prefix) && string(key[:len(prefix)]) == string(prefix) {
-				return fmt.Errorf("restore requires a fresh cluster with no jobs, secrets, volume registrations, network port registrations, or allocations")
+				return fmt.Errorf("restore requires a fresh cluster with no jobs, secrets, volume registrations, network port or subnet registrations, or allocations")
 			}
 		}
 		if len(snapshot.Cluster) > 0 {
@@ -388,6 +390,14 @@ func (b *BoltStore) RestoreDesired(cluster string, snapshot *DesiredSnapshot) er
 				return err
 			}
 		}
+		for key, value := range snapshot.NetworkSubnetRegistrations {
+			if key == "" {
+				return fmt.Errorf("backup contains an empty network subnet registration key")
+			}
+			if err := bucket.Put(append(append([]byte(nil), networkSubnetsPrefix...), key...), value); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 }
@@ -414,6 +424,12 @@ type volumeRegistration struct {
 type networkPortRegistration struct {
 	Namespace string `json:"namespace"`
 	Slot      int    `json:"slot"`
+}
+
+type networkSubnetRegistration struct {
+	Namespace string    `json:"namespace"`
+	NodeID    uuid.UUID `json:"node_id"`
+	Index     int       `json:"index"`
 }
 
 type secretRecord struct {
@@ -483,6 +499,17 @@ func ValidateDesiredSnapshot(snapshot *DesiredSnapshot, additionalJobValidation 
 		if key == "" || json.Unmarshal(raw, &record) != nil || record.Namespace == "" || record.Slot < 0 || key != url.QueryEscape(record.Namespace) {
 			return fmt.Errorf("invalid network port registration %q", key)
 		}
+	}
+	subnetIndexes := make(map[int]string, len(snapshot.NetworkSubnetRegistrations))
+	for key, raw := range snapshot.NetworkSubnetRegistrations {
+		var record networkSubnetRegistration
+		if key == "" || json.Unmarshal(raw, &record) != nil || record.Namespace == "" || record.NodeID == uuid.Nil || record.Index < 0 || key != url.QueryEscape(record.Namespace)+"/"+record.NodeID.String() {
+			return fmt.Errorf("invalid network subnet registration %q", key)
+		}
+		if previous, exists := subnetIndexes[record.Index]; exists {
+			return fmt.Errorf("network subnet registrations %q and %q share index %d", previous, key, record.Index)
+		}
+		subnetIndexes[record.Index] = key
 	}
 	for key, raw := range snapshot.Secrets {
 		var record secretRecord

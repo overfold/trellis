@@ -53,7 +53,10 @@ func (execRunner) Run(ctx context.Context, name string, args ...string) error {
 // WorkloadDNSAddress is the reserved node-local resolver address injected into workloads.
 const WorkloadDNSAddress = "198.18.0.53"
 
-const forwardChain = "TRELLIS-FORWARD"
+const (
+	forwardChain = "TRELLIS-FORWARD"
+	inputChain   = "TRELLIS-INPUT"
+)
 
 // WireGuardManager manages allocation networking with WireGuard.
 type WireGuardManager struct {
@@ -485,93 +488,71 @@ func (m *WireGuardManager) reconcileFirewall(ctx context.Context, bridge, wg, ci
 		return fmt.Errorf("namespace firewall gateway %q must be within %s", gateway, prefix)
 	}
 	cidr = prefix.String()
-	if err := m.ensureForwardChain(ctx); err != nil {
+	if err := m.ensureJumpChain(ctx, "FORWARD", forwardChain); err != nil {
+		return err
+	}
+	if err := m.ensureJumpChain(ctx, "INPUT", inputChain); err != nil {
 		return err
 	}
 	// Reject packets that claim to come from outside this node's namespace
 	// subnet before they can reach WireGuard or a host-local service.
-	sourceDrop := []string{forwardChain, "-i", bridge, "!", "-s", cidr, "-j", "DROP"}
-	if m.run.Run(ctx, "iptables", append([]string{"-C"}, sourceDrop...)...) != nil {
-		if err := m.run.Run(ctx, "iptables", append([]string{"-A"}, sourceDrop...)...); err != nil {
-			return err
-		}
-	}
-	if m.run.Run(ctx, "iptables", "-C", forwardChain, "-i", bridge, "!", "-o", wg, "-j", "DROP") != nil {
-		if err := m.run.Run(ctx, "iptables", "-A", forwardChain, "-i", bridge, "!", "-o", wg, "-j", "DROP"); err != nil {
-			return err
-		}
-	}
-	if m.run.Run(ctx, "iptables", "-C", forwardChain, "-o", bridge, "!", "-i", wg, "-j", "DROP") != nil {
-		if err := m.run.Run(ctx, "iptables", "-A", forwardChain, "-o", bridge, "!", "-i", wg, "-j", "DROP"); err != nil {
-			return err
-		}
-	}
-	for _, legacy := range [][]string{
-		{"FORWARD", "-i", bridge, "!", "-s", cidr, "-j", "DROP"},
-		{"FORWARD", "-i", bridge, "!", "-o", wg, "-j", "DROP"},
-		{"FORWARD", "-o", bridge, "!", "-i", wg, "-j", "DROP"},
+	for _, rule := range [][]string{
+		{forwardChain, "-i", bridge, "!", "-s", cidr, "-j", "DROP"},
+		{forwardChain, "-i", bridge, "!", "-o", wg, "-j", "DROP"},
+		{forwardChain, "-o", bridge, "!", "-i", wg, "-j", "DROP"},
 	} {
-		if m.run.Run(ctx, "iptables", append([]string{"-C"}, legacy...)...) == nil {
-			if err := m.run.Run(ctx, "iptables", append([]string{"-D"}, legacy...)...); err != nil {
-				return err
-			}
+		if err := m.ensureFirewallRule(ctx, "-A", rule...); err != nil {
+			return err
 		}
 	}
+	// Host-bound traffic from the bridge is filtered in the Trellis-owned
+	// input chain, which INPUT jumps to first, so an earlier host ACCEPT
+	// rule cannot bypass the per-bridge DROP. Accepts are inserted at the
+	// head of the chain and the DROP is appended, keeping every bridge's
+	// accepts ahead of its DROP.
 	if m.dnsAddress != "" {
 		for _, protocol := range []string{"udp", "tcp"} {
-			// Remove the old source-unrestricted rule during upgrades before
-			// installing the namespace-scoped replacement.
-			legacy := []string{"INPUT", "-i", bridge, "-d", m.dnsAddress, "-p", protocol, "--dport", "53", "-j", "ACCEPT"}
-			if m.run.Run(ctx, "iptables", append([]string{"-C"}, legacy...)...) == nil {
-				if err := m.run.Run(ctx, "iptables", append([]string{"-D"}, legacy...)...); err != nil {
-					return err
-				}
-			}
-			args := []string{"INPUT", "-i", bridge, "-s", cidr, "-d", m.dnsAddress, "-p", protocol, "--dport", "53", "-j", "ACCEPT"}
-			if m.run.Run(ctx, "iptables", append([]string{"-C"}, args...)...) != nil {
-				if err := m.run.Run(ctx, "iptables", append([]string{"-I"}, args...)...); err != nil {
-					return err
-				}
+			rule := []string{inputChain, "-i", bridge, "-s", cidr, "-d", m.dnsAddress, "-p", protocol, "--dport", "53", "-j", "ACCEPT"}
+			if err := m.ensureFirewallRule(ctx, "-I", rule...); err != nil {
+				return err
 			}
 		}
 	}
 	if apiPort > 0 {
-		legacy := []string{"INPUT", "-i", bridge, "-d", gateway, "-p", "tcp", "--dport", fmt.Sprint(apiPort), "-j", "ACCEPT"}
-		if m.run.Run(ctx, "iptables", append([]string{"-C"}, legacy...)...) == nil {
-			if err := m.run.Run(ctx, "iptables", append([]string{"-D"}, legacy...)...); err != nil {
-				return err
-			}
-		}
-		args := []string{"INPUT", "-i", bridge, "-s", cidr, "-d", gateway, "-p", "tcp", "--dport", fmt.Sprint(apiPort), "-j", "ACCEPT"}
-		if m.run.Run(ctx, "iptables", append([]string{"-C"}, args...)...) != nil {
-			if err := m.run.Run(ctx, "iptables", append([]string{"-I"}, args...)...); err != nil {
-				return err
-			}
-		}
-	}
-	_ = m.run.Run(ctx, "iptables", "-D", "INPUT", "-i", bridge, "!", "-d", gateway, "-j", "DROP")
-	if m.run.Run(ctx, "iptables", "-C", "INPUT", "-i", bridge, "-j", "DROP") != nil {
-		if err := m.run.Run(ctx, "iptables", "-A", "INPUT", "-i", bridge, "-j", "DROP"); err != nil {
+		rule := []string{inputChain, "-i", bridge, "-s", cidr, "-d", gateway, "-p", "tcp", "--dport", fmt.Sprint(apiPort), "-j", "ACCEPT"}
+		if err := m.ensureFirewallRule(ctx, "-I", rule...); err != nil {
 			return err
 		}
 	}
-	return nil
+	return m.ensureFirewallRule(ctx, "-A", inputChain, "-i", bridge, "-j", "DROP")
 }
 
-func (m *WireGuardManager) ensureForwardChain(ctx context.Context) error {
-	if m.run.Run(ctx, "iptables", "-L", forwardChain, "-n") != nil {
-		if err := m.run.Run(ctx, "iptables", "-N", forwardChain); err != nil {
-			return fmt.Errorf("create Trellis forwarding chain: %w", err)
+// ensureFirewallRule adds rule with the given insertion flag (-A or -I) when
+// an identical rule is not already present.
+func (m *WireGuardManager) ensureFirewallRule(ctx context.Context, flag string, rule ...string) error {
+	if m.run.Run(ctx, "iptables", append([]string{"-C"}, rule...)...) == nil {
+		return nil
+	}
+	return m.run.Run(ctx, "iptables", append([]string{flag}, rule...)...)
+}
+
+// ensureJumpChain creates a Trellis-owned chain and makes it the first rule of
+// a built-in chain, so host rules that accept traffic earlier cannot bypass
+// Trellis isolation.
+func (m *WireGuardManager) ensureJumpChain(ctx context.Context, parent, chain string) error {
+	if m.run.Run(ctx, "iptables", "-L", chain, "-n") != nil {
+		if err := m.run.Run(ctx, "iptables", "-N", chain); err != nil {
+			return fmt.Errorf("create Trellis %s chain: %w", parent, err)
 		}
 	}
-	jump := []string{"FORWARD", "-j", forwardChain}
+	jump := []string{parent, "-j", chain}
 	if m.run.Run(ctx, "iptables", append([]string{"-C"}, jump...)...) == nil {
 		if err := m.run.Run(ctx, "iptables", append([]string{"-D"}, jump...)...); err != nil {
-			return fmt.Errorf("reposition Trellis forwarding chain: %w", err)
+			return fmt.Errorf("reposition Trellis %s chain: %w", parent, err)
 		}
 	}
-	if err := m.run.Run(ctx, "iptables", "-I", "FORWARD", "1", "-j", forwardChain); err != nil {
-		return fmt.Errorf("install Trellis forwarding chain: %w", err)
+	if err := m.run.Run(ctx, "iptables", "-I", parent, "1", "-j", chain); err != nil {
+		return fmt.Errorf("install Trellis %s chain: %w", parent, err)
 	}
 	return nil
 }

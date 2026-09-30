@@ -256,13 +256,17 @@ func TestReconcileCommitsNetworkPortRegistrationWithAllocation(t *testing.T) {
 	if len(store.batches) != 1 {
 		t.Fatalf("batch count = %d, want 1", len(store.batches))
 	}
-	var allocationMutation, networkPortMutation bool
+	var allocationMutation, networkPortMutation, networkSubnetMutation bool
 	for _, mutation := range store.batches[0] {
 		allocationMutation = allocationMutation || strings.Contains(mutation.Key, "/allocations/")
 		networkPortMutation = networkPortMutation || strings.Contains(mutation.Key, "/network-port-registrations/")
+		networkSubnetMutation = networkSubnetMutation || strings.Contains(mutation.Key, "/network-subnet-registrations/")
 	}
-	if !allocationMutation || !networkPortMutation {
-		t.Fatalf("reconciliation batch = %#v, want allocation and network port registration", store.batches[0])
+	if !allocationMutation || !networkPortMutation || !networkSubnetMutation {
+		t.Fatalf("reconciliation batch = %#v, want allocation and network port and subnet registrations", store.batches[0])
+	}
+	if len(s.networkSubnets) != 0 {
+		t.Fatalf("in-memory network subnets after failed commit = %v, want unchanged", s.networkSubnets)
 	}
 }
 

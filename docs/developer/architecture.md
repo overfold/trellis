@@ -25,4 +25,3 @@ Desired state is durable. Observations—heartbeats, runtime status, logs, much 
 - `internal/health` and `internal/lifecycle`: health probes and state-machine vocabulary/events.
 - `internal/secrets` and `internal/auth`: envelope-style encrypted secret records and bearer token scopes.
 - `internal/api` / `internal/client`: shared wire types and HTTP clients.
-- `ui`: Next.js server proxy and React administration interface.

@@ -49,8 +49,8 @@ Usage:
 
 The upgrade stages and verifies the release first. On multi-node clusters it
 then drains this node, waits for its allocations to move, updates the binaries
-and systemd unit, verifies the daemon, refreshes an installer-managed dashboard,
-and undrains the node. A failed daemon upgrade rolls back automatically.
+and systemd unit, verifies the daemon, and undrains the node. A failed daemon
+upgrade rolls back automatically.
 EOF_USAGE
 }
 [ "${1:-}" != "-h" ] && [ "${1:-}" != "--help" ] || { usage; exit 0; }
@@ -76,7 +76,6 @@ fi
 ui_section "Plan"
 ui_detail "Version  ${current_version:-unknown} → ${RELEASE_TAG}"
 ui_detail "Safety   stage → drain → swap → verify → undrain"
-if [ "$DASHBOARD_INSTALLED" = true ]; then ui_detail "Dashboard  refresh to ${RELEASE_TAG}"; fi
 
 WORK_TMP="$(mktemp -d)"
 ui_section "Stage"
@@ -162,15 +161,6 @@ if [ "$was_running" = true ]; then
 else
     ROLLBACK_NEEDED=false
     ui_detail "Service was stopped before the upgrade; leaving it stopped."
-fi
-
-if [ "$DASHBOARD_INSTALLED" = true ] && [ "$was_running" = true ]; then
-    ui_section "Dashboard"
-    if deploy_dashboard "$WORK_TMP" "$RELEASE_TAG" "${DASHBOARD_NAMESPACE:-default}" "${DASHBOARD_ACCESS_STATE:-read}"; then
-        ui_step "Dashboard refreshed to ${RELEASE_TAG}"
-    else
-        ui_warn "Core upgrade succeeded, but the dashboard could not be refreshed. Reapply it after checking cluster health."
-    fi
 fi
 
 if [ "$drained" = true ]; then

@@ -33,7 +33,7 @@ var (
 // creates the cluster supplies them once, and job limits and reconciliation
 // settings change afterwards only through administrator-authorized updates.
 // Network settings are fixed at creation because every namespace subnet and
-// WireGuard port slot is derived from them.
+// WireGuard port slot is assigned from them.
 type ClusterSettings struct {
 	JobLimits          spec.Limits            `json:"job_limits"`
 	Reconciliation     ReconciliationSettings `json:"reconciliation"`

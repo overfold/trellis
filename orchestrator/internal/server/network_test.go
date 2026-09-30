@@ -17,27 +17,16 @@ import (
 	"github.com/overfold/trellis/internal/spec"
 )
 
-func TestNamespaceNodeSubnetIsStableAndNamespaceScoped(t *testing.T) {
-	pool := netip.MustParsePrefix("10.64.0.0/10")
-	node := uuid.MustParse("11111111-1111-1111-1111-111111111111")
-	first := namespaceNodeSubnet(pool, "acme", node)
-	if first != namespaceNodeSubnet(pool, "acme", node) {
-		t.Fatal("subnet allocation is not stable")
-	}
-	if !pool.Contains(first.Addr()) || first.Bits() != 24 {
-		t.Fatalf("subnet %s is outside pool %s", first, pool)
-	}
-	if first == namespaceNodeSubnet(pool, "globex", node) {
-		t.Fatal("different namespaces received the same deterministic subnet")
-	}
-}
-
 func TestNetworkPlanUsesRegisteredPeerIdentity(t *testing.T) {
 	targetID, peerID := uuid.New(), uuid.New()
 	s := &Server{
 		networkPool:  netip.MustParsePrefix("10.64.0.0/10"),
 		networkPorts: map[string]int{"acme": 3},
-		nodes:        map[uuid.UUID]*Node{},
+		networkSubnets: map[networkSubnetKey]int{
+			{namespace: "acme", node: targetID}: 0,
+			{namespace: "acme", node: peerID}:   1,
+		},
+		nodes: map[uuid.UUID]*Node{},
 	}
 	target := &Node{ID: targetID, WireGuardPortBase: 51820, WireGuardPortCount: 256}
 	s.nodes[targetID] = target
@@ -63,7 +52,11 @@ func TestNetworkPlanUsesDifferentPortsForDifferentNamespaces(t *testing.T) {
 	s := &Server{
 		networkPool:  netip.MustParsePrefix("10.64.0.0/10"),
 		networkPorts: map[string]int{"acme": 3, "globex": 11},
-		nodes:        map[uuid.UUID]*Node{nodeID: node},
+		networkSubnets: map[networkSubnetKey]int{
+			{namespace: "acme", node: nodeID}:   0,
+			{namespace: "globex", node: nodeID}: 1,
+		},
+		nodes: map[uuid.UUID]*Node{nodeID: node},
 	}
 	acme, err := s.networkPlan("acme", node)
 	if err != nil {
@@ -85,6 +78,7 @@ func TestStartExecutionHashIgnoresNetworkPeerChanges(t *testing.T) {
 	s.networkPorts = map[string]int{"default": 0}
 	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, WireGuardPortBase: 51820, WireGuardPortCount: 256}
 	s.nodes[node.ID] = node
+	s.networkSubnets = map[networkSubnetKey]int{{namespace: "default", node: node.ID}: 0}
 	task := spec.TaskSpec{Name: "app", Image: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard}}
 	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Tasks: []spec.TaskSpec{task}}}}), Revision: 1}
 	alloc := &Allocation{ID: "allocation", Namespace: "default", JobName: "web", TaskGroupName: "app", Tasks: []spec.TaskSpec{task}, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhasePlaced}
@@ -94,6 +88,7 @@ func TestStartExecutionHashIgnoresNetworkPeerChanges(t *testing.T) {
 	}
 	peerID := uuid.New()
 	s.nodes[peerID] = &Node{ID: peerID, WireGuardPublicKey: "peer-key", WireGuardEndpoint: "peer:51820", WireGuardPortBase: 51820, WireGuardPortCount: 256}
+	s.networkSubnets[networkSubnetKey{namespace: "default", node: peerID}] = 1
 	if err := s.Execute(context.Background(), start); err != nil {
 		t.Fatal(err)
 	}
@@ -158,6 +153,7 @@ func TestStartExecutionHashChangesWithNetworkPool(t *testing.T) {
 	s.networkPorts = map[string]int{"default": 0}
 	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, WireGuardPortBase: 51820, WireGuardPortCount: 256}
 	s.nodes[node.ID] = node
+	s.networkSubnets = map[networkSubnetKey]int{{namespace: "default", node: node.ID}: 0}
 	task := spec.TaskSpec{Name: "app", Image: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard}}
 	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Tasks: []spec.TaskSpec{task}}}}), Revision: 1}
 	alloc := &Allocation{ID: "allocation", Namespace: "default", JobName: "web", TaskGroupName: "app", Tasks: []spec.TaskSpec{task}, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhasePlaced}

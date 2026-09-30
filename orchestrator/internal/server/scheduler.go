@@ -23,6 +23,7 @@ type PlacementIntent struct {
 	// Allocations contains every allocation occupying node resources or ports.
 	Allocations []*Allocation
 	// DesiredAllocations contains allocations counted for replica spreading.
+	// Only placed, non-draining allocations of the intent's task group count.
 	DesiredAllocations   []*Allocation
 	Tasks                []spec.TaskSpec
 	Constraints          []spec.ConstraintSpec
@@ -81,7 +82,9 @@ func schedule(intent *PlacementIntent) ([]Placement, *placementDiagnostic) {
 	usedMemoryOverflow := make(map[uuid.UUID]bool)
 	usedPorts := make(map[uuid.UUID]map[int]bool)
 	for _, alloc := range intent.DesiredAllocations {
-		if alloc.Node != nil && alloc.Namespace == intent.Namespace && alloc.JobName == intent.JobName && alloc.TaskGroupName == intent.TaskGroupName {
+		// A draining replica is being replaced, so it does not hold a spread
+		// slot; its resources and ports still count through Allocations.
+		if alloc.Node != nil && !alloc.Draining && alloc.Namespace == intent.Namespace && alloc.JobName == intent.JobName && alloc.TaskGroupName == intent.TaskGroupName {
 			replicaCounts[alloc.Node.ID]++
 		}
 	}
@@ -161,13 +164,19 @@ func schedule(intent *PlacementIntent) ([]Placement, *placementDiagnostic) {
 			}
 			better := target == nil
 			if target != nil {
-				// Best fit compares normalized utilization rather than adding
-				// incomparable CPU and byte units. Replica count is a soft
-				// anti-affinity tiebreaker after the best-fit score.
-				utilization := placementUtilization(node, usedCPU[node.ID], reqCPU, usedMemory[node.ID], reqMemory)
-				targetUtilization := placementUtilization(target, usedCPU[target.ID], reqCPU, usedMemory[target.ID], reqMemory)
-				better = utilization > targetUtilization ||
-					utilization == targetUtilization && replicaCounts[node.ID] < replicaCounts[target.ID]
+				// Spreading replicas of the group across eligible nodes comes
+				// first. Among nodes with equally few replicas, best fit
+				// compares normalized utilization rather than adding
+				// incomparable CPU and byte units. Nodes are visited in ID
+				// order and only a strictly better node replaces the target,
+				// so the lowest node ID wins any remaining tie.
+				if replicaCounts[node.ID] != replicaCounts[target.ID] {
+					better = replicaCounts[node.ID] < replicaCounts[target.ID]
+				} else {
+					utilization := placementUtilization(node, usedCPU[node.ID], reqCPU, usedMemory[node.ID], reqMemory)
+					targetUtilization := placementUtilization(target, usedCPU[target.ID], reqCPU, usedMemory[target.ID], reqMemory)
+					better = utilization > targetUtilization
+				}
 			}
 			if better {
 				target = node

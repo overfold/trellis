@@ -1,6 +1,6 @@
 # Trellis examples
 
-The examples form a learning path, not a flat catalog. Start with one conceptually small workload and add operational concerns only after the preceding behavior is familiar. Every `trellis.yaml` uses the same YAML job-manifest schema accepted by the CLI and dashboard, and every manifest is parsed and validated by the test suite.
+The examples form a learning path, not a flat catalog. Start with one conceptually small workload and add operational concerns only after the preceding behavior is familiar. Every `trellis.yaml` uses the same YAML job-manifest schema accepted by the CLI, and every manifest is parsed and validated by the test suite.
 
 Complete [Getting Started](../docs/public/getting-started.md) first, or follow the expanded [learning path](../docs/public/learning-path.md). Commands below assume `trellisctl` is connected to the manifest's namespace.
 

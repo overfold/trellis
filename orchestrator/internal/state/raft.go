@@ -33,18 +33,19 @@ type RaftStore struct {
 // relative to their state prefixes so a backup can be restored into a freshly
 // bootstrapped cluster with a different name. Volume registrations preserve
 // locality metadata only; volume bytes remain external to the backup. Namespace
-// network port registrations preserve stable WireGuard pathway assignments.
-// Cluster is the replicated cluster record, which carries the cluster
-// settings. A backup reads it from the same view as the desired state; a
-// restore installs it in the same transaction, so settings and the jobs they
-// admit are never restored separately.
+// network port and subnet registrations preserve stable WireGuard pathway
+// assignments. Cluster is the replicated cluster record, which carries the
+// cluster settings. A backup reads it from the same view as the desired
+// state; a restore installs it in the same transaction, so settings and the
+// jobs they admit are never restored separately.
 type DesiredSnapshot struct {
-	Cluster                  []byte            `json:"cluster,omitempty"`
-	Jobs                     map[string][]byte `json:"jobs"`
-	JobRevisions             map[string][]byte `json:"job_revisions,omitempty"`
-	Secrets                  map[string][]byte `json:"secrets"`
-	VolumeRegistrations      map[string][]byte `json:"volume_registrations"`
-	NetworkPortRegistrations map[string][]byte `json:"network_port_registrations"`
+	Cluster                    []byte            `json:"cluster,omitempty"`
+	Jobs                       map[string][]byte `json:"jobs"`
+	JobRevisions               map[string][]byte `json:"job_revisions,omitempty"`
+	Secrets                    map[string][]byte `json:"secrets"`
+	VolumeRegistrations        map[string][]byte `json:"volume_registrations"`
+	NetworkPortRegistrations   map[string][]byte `json:"network_port_registrations"`
+	NetworkSubnetRegistrations map[string][]byte `json:"network_subnet_registrations,omitempty"`
 }
 
 // BackupDesired takes a linearizable view of desired state. The barrier makes

@@ -32,7 +32,9 @@ type reconcilePlanInput struct {
 	Allocations  []*Allocation
 	Backoffs     map[string]*ReplacementBackoff
 	VolumeOwners map[string]uuid.UUID
-	NetworkPorts map[string]int
+	// NetworkReady holds namespaces with a WireGuard port slot and a subnet
+	// on every node; only they accept new namespace-networked placements.
+	NetworkReady map[string]bool
 	// DeliveredResumes holds the drain sequence of the latest resume each
 	// allocation generation acknowledged in the current control epoch.
 	DeliveredResumes map[resumeDeliveryKey]uint64
@@ -469,7 +471,7 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 				markUpdated(allocation)
 			}
 			if spec.GroupUsesWireGuard(&group) {
-				if _, assigned := in.NetworkPorts[namespace]; !assigned {
+				if !in.NetworkReady[namespace] {
 					continue
 				}
 			}

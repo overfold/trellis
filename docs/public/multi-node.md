@@ -14,7 +14,7 @@ Every machine runs the same `trellis` daemon. There are no separate server and w
 
 Trellis chooses the voters itself. A node always joins as a non-voter, and the leader promotes healthy nodes that have caught up with the replicated state until the cluster has the right number of voters. `trellisctl nodes list` shows each node's role in the **Control plane** column.
 
-Any node accepts control-plane requests. Followers proxy ordinary operator and administrator requests to the current leader, so `trellisctl` contexts, the dashboard, and in-cluster `TRELLIS_ADDR` clients can point at any reachable node and do not need reconfiguring when leadership moves. Certificate-authenticated node requests are redirected instead, preserving the caller's node certificate end to end. `trellisctl` also retries administrator-signed requests automatically if leadership changes mid-request.
+Any node accepts control-plane requests. Followers proxy ordinary operator and administrator requests to the current leader, so `trellisctl` contexts and in-cluster `TRELLIS_ADDR` clients can point at any reachable node and do not need reconfiguring when leadership moves. Certificate-authenticated node requests are redirected instead, preserving the caller's node certificate end to end. `trellisctl` also retries administrator-signed requests automatically if leadership changes mid-request.
 
 ## Choose a cluster size
 
@@ -50,7 +50,7 @@ Before joining nodes, make sure they can reach each other:
 
 Node and Raft transports use mutually authenticated TLS. Each node's `agent_advertise`, `server_advertise`, and `raft_advertise` addresses must be routable from the other nodes; wildcard bind addresses are not valid advertised addresses. The installer auto-detects a private address and accepts `--advertise HOST` when peers cannot reach the detected one.
 
-Namespace networking gives each namespace one stable UDP port from the cluster's WireGuard range: `wireguard_port` (default `51820`) plus the cluster's `wireguard_port_count` (default `256`). Allow that range between every node that may run namespace-networked tasks. `wireguard_endpoint` sets the externally reachable host or base `host:port` other nodes use; Trellis applies each namespace's port offset to that base.
+Namespace networking gives each namespace one stable UDP port from the cluster's WireGuard range: `wireguard_port` (default `51820`) plus the cluster's `wireguard_port_count` (default `256`). Allow that range between every node that may run namespace-networked tasks. `wireguard_pool` (default `10.64.0.0/10`) supplies a `/24` for each namespace on each node; the default pool addresses 16384 namespace-node pairs, and when it is full new placements for another namespace wait instead of reusing an address. `wireguard_endpoint` sets the externally reachable host or base `host:port` other nodes use; Trellis applies each namespace's port offset to that base.
 
 **Cluster settings** are replicated with the rest of the cluster state, so any node can become leader without changing them. The first node's `job_limits`, `wireguard_pool`, and `wireguard_port_count` (or the matching flags) initialize them when it creates the cluster; after that, node configuration no longer changes them, on the first node or any other. Reconciliation settings, such as the allocation loss timeout, start at their defaults and have no node configuration. Inspect them with `trellisctl cluster settings`, change job limits with `trellisctl cluster set-job-limits`, and change reconciliation settings with `trellisctl cluster set-reconciliation` ([CLI](cli.md#inspect-and-change-cluster-settings)). The pool and port count are fixed for the life of the cluster. A node started with different values behaves as follows:
 
@@ -99,7 +99,7 @@ curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/setup
 
 Normal installer-created clusters derive the secrets key ID from the shared key, so no additional argument is needed. If the existing cluster explicitly sets `secrets_key_id` in its node configuration, pass that same value with `--secrets-key-id ID` (or `TRELLIS_SECRETS_KEY_ID`) on the joining node.
 
-The installer shows the complete plan before making changes; choose **Customize** to change it interactively. Namespace networking and gVisor/runsc are installed by default on joining nodes, as on the first node; `--without-networking` and `--without-gvisor` are the automation opt-outs. The dashboard remains opt-in through **Customize**, `--with-dashboard`, or `--dashboard-write`. Delete the temporary transferred copies after setup succeeds.
+The installer shows the complete plan before making changes; choose **Customize** to change it interactively. Namespace networking and gVisor/runsc are installed by default on joining nodes, as on the first node; `--without-networking` and `--without-gvisor` are the automation opt-outs. Delete the temporary transferred copies after setup succeeds.
 
 After the daemon starts, verify membership from any operator context:
 

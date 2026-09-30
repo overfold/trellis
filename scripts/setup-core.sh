@@ -49,8 +49,6 @@ Options:
   --secrets-key-id ID           Existing cluster key ID when it was explicitly configured
   --with-networking             Install WireGuard dependencies for namespace networking
   --with-gvisor                 Install gVisor/runsc
-  --with-dashboard              Deploy the read-only Trellis dashboard
-  --dashboard-write             Give the dashboard cluster/write access (implies --with-dashboard)
   -y, --yes                     Apply the displayed plan without confirmation
   -h, --help                    Show this help
 
@@ -69,8 +67,6 @@ join_secrets_file=""
 join_secrets_key_id="${TRELLIS_SECRETS_KEY_ID:-}"
 with_networking=false
 with_gvisor=false
-with_dashboard=false
-dashboard_access="read"
 assume_yes=false
 administrator_private_key="${TRELLIS_ADMINISTRATOR_KEY:-}"
 
@@ -84,8 +80,6 @@ while [ "$#" -gt 0 ]; do
         --secrets-key-id) [ "$#" -ge 2 ] || ui_die "--secrets-key-id requires a value"; join_secrets_key_id="$2"; shift 2 ;;
         --with-networking) with_networking=true; shift ;;
         --with-gvisor) with_gvisor=true; shift ;;
-        --with-dashboard) with_dashboard=true; shift ;;
-        --dashboard-write) with_dashboard=true; dashboard_access="write"; shift ;;
         -y|--yes) assume_yes=true; shift ;;
         -h|--help) usage; exit 0 ;;
         *) ui_die "Unknown option: $1" ;;
@@ -100,10 +94,6 @@ load_install_state
 # may add capabilities, but rerunning the installer never silently removes them.
 [ "$NETWORKING_ENABLED" != true ] || with_networking=true
 [ "$GVISOR_ENABLED" != true ] || with_gvisor=true
-if [ "$DASHBOARD_INSTALLED" = true ]; then
-    with_dashboard=true
-    [ "$DASHBOARD_ACCESS_STATE" != write ] || dashboard_access=write
-fi
 
 # Recognize complete installs that predate the install-state file without claiming
 # ownership of packages that Trellis cannot prove it installed.
@@ -112,7 +102,7 @@ if [ ! -f "$STATE_FILE" ] && [ -x "${INSTALL_DIR}/trellis" ] && [ -f "$CONFIG_FI
     STATE_VERSION="$("${INSTALL_DIR}/trellis" --version 2>/dev/null | awk '{print $NF}' || true)"
     CONTAINERD_OWNED=false; CONTAINERD_CONFIG_OWNED=false; DOCKER_REPO_OWNED=false; DOCKER_KEY_OWNED=false
     RUNSC_OWNED=false; GVISOR_REPO_OWNED=false; GVISOR_KEY_OWNED=false; GVISOR_CONFIG_OWNED=false; WIREGUARD_OWNED=false
-    NETWORKING_ENABLED=false; GVISOR_ENABLED=false; DASHBOARD_INSTALLED=false; DASHBOARD_NAMESPACE=default; DASHBOARD_ACCESS_STATE=read
+    NETWORKING_ENABLED=false; GVISOR_ENABLED=false
     write_install_state
 fi
 
@@ -173,7 +163,6 @@ ui_detail "Cluster       ${cluster_action}"
 ui_detail "containerd    ${containerd_action}"
 ui_detail "Networking    $([ "$with_networking" = true ] && printf 'enabled' || printf 'disabled')"
 ui_detail "gVisor        $([ "$with_gvisor" = true ] && printf 'enabled' || printf 'disabled')"
-ui_detail "Dashboard     $([ "$with_dashboard" = true ] && printf '%s' "$dashboard_access" || printf 'not installed')"
 
 if [ "$assume_yes" != true ]; then
     printf '\n%sApply this plan? [Y/n] %s' "$BOLD" "$RESET"
@@ -184,7 +173,6 @@ STARTED=true
 
 STATE_COMPLETE=false
 STATE_VERSION="$RELEASE_TAG"
-DASHBOARD_NAMESPACE="${DASHBOARD_NAMESPACE:-default}"
 write_install_state
 
 ui_section "Host"
@@ -319,21 +307,6 @@ else
         if [ "$operator_user" != "root" ]; then chown -R "${operator_user}:${operator_group}" "${operator_config_home}/trellis"; fi
         unset operator_token
         ui_step "Saved local cluster/write context for ${operator_user}"
-    fi
-fi
-if [ "$with_dashboard" = true ]; then
-    [ -n "${administrator_private_key:-}" ] || ui_die "Dashboard deployment requires an operator-side administrator key and is not performed while joining a node."
-    ui_section "Dashboard"
-    dashboard_operator_token="$(TRELLIS_ADMINISTRATOR_KEY="$administrator_private_key" local_ctl "$WORK_TMP" credentials create --scope cluster --access write)"
-    TRELLIS_TOKEN="$dashboard_operator_token" deploy_dashboard "$WORK_TMP" "$RELEASE_TAG" default "$dashboard_access"
-    unset dashboard_operator_token
-    DASHBOARD_INSTALLED=true
-    DASHBOARD_NAMESPACE=default
-    DASHBOARD_ACCESS_STATE="$dashboard_access"
-    write_install_state
-    ui_step "Dashboard deployed on port 3000"
-    if [ "$dashboard_access" = write ]; then
-        ui_warn "The dashboard has cluster/write access. Put port 3000 behind your own HTTPS and identity-aware proxy."
     fi
 fi
 unset administrator_private_key administrator_public_key admin_public_key_config enrollment_token

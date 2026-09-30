@@ -79,6 +79,7 @@ type Server struct {
 	allocationsByNode  map[uuid.UUID][]*Allocation
 	networkPool        netip.Prefix
 	networkPorts       map[string]int
+	networkSubnets     map[networkSubnetKey]int
 	wireGuardPortCount int
 	tokenManager       *auth.TokenManager
 	catalog            *catalog.ServiceCatalog
@@ -169,15 +170,16 @@ func (s *Server) Backup(_ context.Context) (*api.BackupSnapshot, error) {
 		return nil, fmt.Errorf("backup: replicated cluster settings: %w", err)
 	}
 	result := &api.BackupSnapshot{
-		FormatVersion:            api.BackupFormatVersion,
-		TrellisVersion:           version.Current(),
-		CreatedAt:                s.now().UTC(),
-		ClusterSettings:          cluster.Settings.API(),
-		Jobs:                     make(map[string]json.RawMessage, len(snapshot.Jobs)),
-		JobRevisions:             make(map[string]json.RawMessage, len(snapshot.JobRevisions)),
-		Secrets:                  make(map[string]json.RawMessage, len(snapshot.Secrets)),
-		VolumeRegistrations:      make(map[string]json.RawMessage, len(snapshot.VolumeRegistrations)),
-		NetworkPortRegistrations: make(map[string]json.RawMessage, len(snapshot.NetworkPortRegistrations)),
+		FormatVersion:              api.BackupFormatVersion,
+		TrellisVersion:             version.Current(),
+		CreatedAt:                  s.now().UTC(),
+		ClusterSettings:            cluster.Settings.API(),
+		Jobs:                       make(map[string]json.RawMessage, len(snapshot.Jobs)),
+		JobRevisions:               make(map[string]json.RawMessage, len(snapshot.JobRevisions)),
+		Secrets:                    make(map[string]json.RawMessage, len(snapshot.Secrets)),
+		VolumeRegistrations:        make(map[string]json.RawMessage, len(snapshot.VolumeRegistrations)),
+		NetworkPortRegistrations:   make(map[string]json.RawMessage, len(snapshot.NetworkPortRegistrations)),
+		NetworkSubnetRegistrations: make(map[string]json.RawMessage, len(snapshot.NetworkSubnetRegistrations)),
 	}
 	for key, value := range snapshot.Jobs {
 		result.Jobs[key] = json.RawMessage(value)
@@ -193,6 +195,9 @@ func (s *Server) Backup(_ context.Context) (*api.BackupSnapshot, error) {
 	}
 	for key, value := range snapshot.NetworkPortRegistrations {
 		result.NetworkPortRegistrations[key] = json.RawMessage(value)
+	}
+	for key, value := range snapshot.NetworkSubnetRegistrations {
+		result.NetworkSubnetRegistrations[key] = json.RawMessage(value)
 	}
 	return result, nil
 }
@@ -232,11 +237,12 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 		return fmt.Errorf("backup network settings (wireguard_pool %s, wireguard_port_count %d) differ from this cluster's (wireguard_pool %s, wireguard_port_count %d); restore into a new cluster created with the backup's values", settings.WireGuardPool, settings.WireGuardPortCount, pool, portCount)
 	}
 	snapshot := &state.DesiredSnapshot{
-		Jobs:                     make(map[string][]byte, len(backup.Jobs)),
-		JobRevisions:             make(map[string][]byte, len(backup.JobRevisions)),
-		Secrets:                  make(map[string][]byte, len(backup.Secrets)),
-		VolumeRegistrations:      make(map[string][]byte, len(backup.VolumeRegistrations)),
-		NetworkPortRegistrations: make(map[string][]byte, len(backup.NetworkPortRegistrations)),
+		Jobs:                       make(map[string][]byte, len(backup.Jobs)),
+		JobRevisions:               make(map[string][]byte, len(backup.JobRevisions)),
+		Secrets:                    make(map[string][]byte, len(backup.Secrets)),
+		VolumeRegistrations:        make(map[string][]byte, len(backup.VolumeRegistrations)),
+		NetworkPortRegistrations:   make(map[string][]byte, len(backup.NetworkPortRegistrations)),
+		NetworkSubnetRegistrations: make(map[string][]byte, len(backup.NetworkSubnetRegistrations)),
 	}
 	restored := make(map[string]*Job, len(backup.Jobs))
 	for key, value := range backup.Jobs {
@@ -285,6 +291,12 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 			return fmt.Errorf("network port registration %q contains invalid JSON", key)
 		}
 		snapshot.NetworkPortRegistrations[key] = value
+	}
+	for key, value := range backup.NetworkSubnetRegistrations {
+		if !json.Valid(value) {
+			return fmt.Errorf("network subnet registration %q contains invalid JSON", key)
+		}
+		snapshot.NetworkSubnetRegistrations[key] = value
 	}
 	// Validate the complete backup before dropping excess or orphaned
 	// revisions so malformed records cannot hide outside the retained window.
@@ -704,6 +716,7 @@ func NewServer(log *slog.Logger, storage *storage.LocalStorage, state *StateCont
 		jobs:               make(map[string]*Job),
 		networkPool:        settings.WireGuardPool,
 		networkPorts:       make(map[string]int),
+		networkSubnets:     make(map[networkSubnetKey]int),
 		wireGuardPortCount: settings.WireGuardPortCount,
 		networkPlans:       make(map[networkPlanKey]*networkPlanState),
 		networkPlanWorkers: make(map[uuid.UUID]uint64),

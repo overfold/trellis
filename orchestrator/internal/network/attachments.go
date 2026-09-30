@@ -316,70 +316,36 @@ func (m *WireGuardManager) removeNamespacePathLocked(ctx context.Context, a Atta
 	if address, err := netip.ParsePrefix(a.Address); err == nil {
 		cidr = address.Masked().String()
 	}
+	rules := make([][]string, 0, 7)
 	if cidr != "" {
-		if err := m.deleteFirewallRule(ctx, forwardChain, "-i", bridge, "!", "-s", cidr, "-j", "DROP"); err != nil {
-			return err
-		}
-		if err := m.deleteFirewallRule(ctx, "FORWARD", "-i", bridge, "!", "-s", cidr, "-j", "DROP"); err != nil {
-			return err
-		}
+		rules = append(rules, []string{forwardChain, "-i", bridge, "!", "-s", cidr, "-j", "DROP"})
 	}
-	if err := m.deleteFirewallRule(ctx, forwardChain, "-i", bridge, "!", "-o", wg, "-j", "DROP"); err != nil {
-		return err
-	}
-	if err := m.deleteFirewallRule(ctx, forwardChain, "-o", bridge, "!", "-i", wg, "-j", "DROP"); err != nil {
-		return err
-	}
-	for _, legacy := range [][]string{
-		{"FORWARD", "-i", bridge, "!", "-o", wg, "-j", "DROP"},
-		{"FORWARD", "-o", bridge, "!", "-i", wg, "-j", "DROP"},
-	} {
-		if err := m.deleteFirewallRule(ctx, legacy...); err != nil {
-			return err
-		}
-	}
-	if m.dnsAddress != "" {
+	rules = append(rules,
+		[]string{forwardChain, "-i", bridge, "!", "-o", wg, "-j", "DROP"},
+		[]string{forwardChain, "-o", bridge, "!", "-i", wg, "-j", "DROP"},
+	)
+	if cidr != "" && m.dnsAddress != "" {
 		for _, protocol := range []string{"udp", "tcp"} {
-			if cidr != "" {
-				if err := m.deleteFirewallRule(ctx, "INPUT", "-i", bridge, "-s", cidr, "-d", m.dnsAddress, "-p", protocol, "--dport", "53", "-j", "ACCEPT"); err != nil {
-					return err
-				}
-			}
-			if err := m.deleteFirewallRule(ctx, "INPUT", "-i", bridge, "-d", m.dnsAddress, "-p", protocol, "--dport", "53", "-j", "ACCEPT"); err != nil {
-				return err
-			}
+			rules = append(rules, []string{inputChain, "-i", bridge, "-s", cidr, "-d", m.dnsAddress, "-p", protocol, "--dport", "53", "-j", "ACCEPT"})
 		}
 	}
-	if a.APIPort > 0 {
-		if cidr != "" {
-			if err := m.deleteFirewallRule(ctx, "INPUT", "-i", bridge, "-s", cidr, "-d", a.Gateway, "-p", "tcp", "--dport", fmt.Sprint(a.APIPort), "-j", "ACCEPT"); err != nil {
-				return err
-			}
-		}
-		if err := m.deleteFirewallRule(ctx, "INPUT", "-i", bridge, "-d", a.Gateway, "-p", "tcp", "--dport", fmt.Sprint(a.APIPort), "-j", "ACCEPT"); err != nil {
+	if cidr != "" && a.APIPort > 0 {
+		rules = append(rules, []string{inputChain, "-i", bridge, "-s", cidr, "-d", a.Gateway, "-p", "tcp", "--dport", fmt.Sprint(a.APIPort), "-j", "ACCEPT"})
+	}
+	rules = append(rules, []string{inputChain, "-i", bridge, "-j", "DROP"})
+	for _, rule := range rules {
+		if err := m.deleteFirewallRule(ctx, rule...); err != nil {
 			return err
 		}
-	}
-	if err := m.deleteFirewallRule(ctx, "INPUT", "-i", bridge, "-j", "DROP"); err != nil {
-		return err
 	}
 	otherPath, err := m.hasOtherNamespacePath(a.Namespace, a.Network)
 	if err != nil {
 		return err
 	}
 	if !otherPath {
-		if err := m.deleteFirewallRule(ctx, "FORWARD", "-j", forwardChain); err != nil {
-			return err
-		}
-		if err := m.run.Run(ctx, "iptables", "-X", forwardChain); err != nil {
-			inspectErr := m.run.Run(ctx, "iptables", "-L", forwardChain, "-n")
-			absent := explicitAbsence(err, "No chain/target/match by that name") ||
-				explicitAbsence(inspectErr, "No chain/target/match by that name")
-			if ctx.Err() != nil || !absent {
-				if inspectErr != nil {
-					return fmt.Errorf("delete Trellis forwarding chain: %w (verify absence: %v)", err, inspectErr)
-				}
-				return fmt.Errorf("delete Trellis forwarding chain: %w", err)
+		for _, jump := range [][2]string{{"FORWARD", forwardChain}, {"INPUT", inputChain}} {
+			if err := m.removeJumpChain(ctx, jump[0], jump[1]); err != nil {
+				return err
 			}
 		}
 	}
@@ -446,6 +412,37 @@ func (m *WireGuardManager) deleteLink(ctx context.Context, name, resource string
 			return fmt.Errorf("delete %s %s: %w (verify absence: %v)", resource, name, err, inspectErr)
 		}
 		return fmt.Errorf("delete %s %s: %w", resource, name, err)
+	}
+	return nil
+}
+
+// removeJumpChain removes a built-in chain's jump to a Trellis-owned chain
+// and then the chain itself; every step tolerates prior removal. It runs only
+// after the last namespace path on the node is gone, so the chain is flushed
+// first in case a rule from an earlier plan (such as a changed API port) was
+// left behind.
+func (m *WireGuardManager) removeJumpChain(ctx context.Context, parent, chain string) error {
+	if err := m.deleteFirewallRule(ctx, parent, "-j", chain); err != nil {
+		return err
+	}
+	if err := m.run.Run(ctx, "iptables", "-F", chain); err != nil {
+		inspectErr := m.run.Run(ctx, "iptables", "-L", chain, "-n")
+		absent := explicitAbsence(err, "No chain/target/match by that name") ||
+			explicitAbsence(inspectErr, "No chain/target/match by that name")
+		if ctx.Err() != nil || !absent {
+			return fmt.Errorf("flush Trellis %s chain: %w", parent, err)
+		}
+	}
+	if err := m.run.Run(ctx, "iptables", "-X", chain); err != nil {
+		inspectErr := m.run.Run(ctx, "iptables", "-L", chain, "-n")
+		absent := explicitAbsence(err, "No chain/target/match by that name") ||
+			explicitAbsence(inspectErr, "No chain/target/match by that name")
+		if ctx.Err() != nil || !absent {
+			if inspectErr != nil {
+				return fmt.Errorf("delete Trellis %s chain: %w (verify absence: %v)", parent, err, inspectErr)
+			}
+			return fmt.Errorf("delete Trellis %s chain: %w", parent, err)
+		}
 	}
 	return nil
 }
