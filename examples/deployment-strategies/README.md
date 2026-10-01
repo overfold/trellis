@@ -60,7 +60,7 @@ Weights apply to individual discovered allocations. Four stable replicas at weig
 - Pin production images to immutable digests; mutable tags make rollback ambiguous.
 - Use a readiness check that proves the process can serve real requests, not merely that its port opened.
 - Budget node/port capacity for every allocation that must coexist during a release.
-- Keep the proxy's discovery token private and namespace scoped.
+- Keep the proxy's cluster-scoped discovery token private; enforce any namespace selection in trusted controller configuration, not through token authorization.
 - Monitor desired, running, and healthy counts throughout a release.
 - Make database and message-format changes compatible across every version that may run simultaneously.
 

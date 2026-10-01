@@ -32,7 +32,7 @@ func TestListNamespacesReturnsSortedUniqueDesiredNamespaces(t *testing.T) {
 	}
 }
 
-func TestListNamespacesIncludesSecretAndCredentialNamespaces(t *testing.T) {
+func TestListNamespacesIncludesSecretNamespaces(t *testing.T) {
 	s, _ := newAPIAccessServer(t)
 	s.jobs = namespaceTestServer().jobs
 	ctx := t.Context()
@@ -42,42 +42,31 @@ func TestListNamespacesIncludesSecretAndCredentialNamespaces(t *testing.T) {
 	if _, err := s.SetSecret(ctx, "alpha", "shared", []byte("value"), nil); err != nil {
 		t.Fatal(err)
 	}
-	for _, principal := range []auth.Principal{
-		{Kind: auth.CredentialOperator, Scope: auth.AccessNamespace, Access: auth.AccessRead, Namespace: "team"},
-		{Kind: auth.CredentialOperator, Scope: auth.AccessCluster, Access: auth.AccessWrite},
-	} {
-		if _, err := s.tokenManager.CreateToken(ctx, principal); err != nil {
-			t.Fatal(err)
-		}
-	}
-
 	got, err := s.ListNamespaces(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := api.NamespaceListResponse{"alpha", "team", "vault", "zeta"}
+	want := api.NamespaceListResponse{"alpha", "vault", "zeta"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("namespaces = %#v, want %#v", got, want)
 	}
 }
 
-func TestNamespaceDiscoveryRespectsCredentialScope(t *testing.T) {
+func TestNamespaceDiscoveryRequiresClusterScope(t *testing.T) {
 	e := echo.New()
 	NewHandler(namespaceTestServer()).Register(e)
 
 	tests := []struct {
-		name      string
-		scope     auth.AccessScope
-		namespace string
-		want      api.NamespaceListResponse
+		name  string
+		scope auth.AccessScope
+		want  api.NamespaceListResponse
 	}{
 		{name: "cluster", scope: auth.AccessCluster, want: api.NamespaceListResponse{"alpha", "zeta"}},
-		{name: "namespace", scope: auth.AccessNamespace, namespace: "private", want: api.NamespaceListResponse{"private"}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := scopedRequest(t, http.MethodGet, "/v1/namespaces", "", tt.scope, auth.AccessRead, tt.namespace)
+			req := scopedRequest(t, http.MethodGet, "/v1/namespaces", "", tt.scope, auth.AccessRead)
 			rec := httptest.NewRecorder()
 			e.ServeHTTP(rec, req)
 			if rec.Code != http.StatusOK {

@@ -39,14 +39,12 @@ func (r Runtime) Valid() bool { return r == RuntimeDefault || r == RuntimeRunc |
 type APIAccessScope string
 
 const (
-	// APIAccessNamespace restricts the credential to the job's namespace.
-	APIAccessNamespace APIAccessScope = "namespace"
 	// APIAccessCluster allows the credential to operate across the cluster.
 	APIAccessCluster APIAccessScope = "cluster"
 )
 
 // Valid reports whether s is a supported API access scope.
-func (s APIAccessScope) Valid() bool { return s == APIAccessNamespace || s == APIAccessCluster }
+func (s APIAccessScope) Valid() bool { return s == APIAccessCluster }
 
 // APIAccessLevel controls whether an injected control-plane credential may mutate state.
 type APIAccessLevel string

@@ -324,25 +324,12 @@ func ensureActiveNamespace(job *spec.JobSpec) error {
 	return fmt.Errorf("manifest namespace %q does not match %s namespace %q; change the manifest or select the intended namespace", job.Namespace, source, config.Namespace)
 }
 
-// namespaceClient returns a client for the selected namespace. Without
-// --namespace or a context namespace, a namespace-scoped credential selects
-// its own namespace; a cluster-scoped credential must name one.
-func namespaceClient(ctx context.Context) (*client.Client, error) {
+// namespaceClient returns a client for the explicitly selected namespace.
+func namespaceClient(_ context.Context) (*client.Client, error) {
 	if config.Namespace != "" {
 		return apiClient(config.Namespace)
 	}
-	serverClient, err := apiClient("")
-	if err != nil {
-		return nil, err
-	}
-	info, err := serverClient.CredentialInfo(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("select namespace: %w", err)
-	}
-	if info.Scope != "namespace" || info.Namespace == "" {
-		return nil, fmt.Errorf("--namespace is required with a %s-scoped credential", info.Scope)
-	}
-	return apiClient(info.Namespace)
+	return nil, fmt.Errorf("--namespace is required for namespace-scoped commands")
 }
 
 // apiClient returns a client authenticated with the selected credential. The

@@ -12,9 +12,8 @@
           "type": "string"
         },
         "scope": {
-          "description": "Where the injected workload credential may operate: only this namespace or the whole cluster.",
+          "description": "The cluster scope of the injected workload credential.",
           "enum": [
-            "namespace",
             "cluster"
           ],
           "type": "string"

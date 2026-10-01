@@ -4,7 +4,7 @@ task_groups:
   - name: observer
     count: 1
     api_access:
-      scope: namespace
+      scope: cluster
       access: read
     tasks:
       - name: web

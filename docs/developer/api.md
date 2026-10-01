@@ -9,12 +9,12 @@ JSON request bodies must be sent with `Content-Type: application/json` (otherwis
 Trellis distinguishes three credential kinds:
 
 - `administrator` — the root request context granted after verification of an operator-held Ed25519 key;
-- `operator` — an explicitly minted API credential with `namespace` or `cluster` scope and `read` or `write` access;
+- `operator` — an explicitly minted API credential with `cluster` scope and `read` or `write` access;
 - `workload` — a scoped credential injected through task-group `api_access`.
 
 Credential prefixes (`trls_op_`, `trls_wl_`) are descriptive only. The server authenticates the complete bearer value and uses its authoritative stored principal metadata for generated credentials. An operator credential may carry an expiry chosen at creation; from that instant it no longer authenticates. Node join tokens (`trls_join_<id>.<secret>`) are not API credentials: they are accepted only by managed enrollment.
 
-A task group requests workload access with an object such as `{"scope":"namespace","access":"read"}`. Namespace scope is restricted to the namespace containing the job. Cluster scope grants only the ordinary read/write API authority represented by the credential; it never turns into the administrator credential. Both scopes set `TRELLIS_NAMESPACE` to the job namespace, which clients use to build `/v1/namespaces/{namespace}/...` request paths.
+A task group requests workload access with an object such as `{"scope":"cluster","access":"read"}`. Workload credentials, like operator credentials, allow only explicit `cluster` scope and `read` or `write` access. Cluster scope grants only the ordinary API authority represented by the credential; it never turns into the administrator credential. Trellis sets `TRELLIS_NAMESPACE` to the job namespace so clients can conveniently build `/v1/namespaces/{namespace}/...` request paths, but this value is not an authorization boundary.
 
 Each workload credential belongs to one allocation generation and carries a subject naming its namespace, job, and task group, which `GET /v1/auth/whoami` reports as `subject`. The leader mints it on the generation's first start and, like every generated credential, authenticates it by hash. Replicated state keeps only that hash and a copy sealed with the secrets encryption key, so start retries and leadership changes re-deliver the same token and the allocation execution hash stays stable. A server without a secrets key cannot start API-enabled allocations. Starting a new generation of the allocation, or with a different grant, replaces its credential and revokes the previous one. The leader's reconciliation revokes a workload credential once its allocation record is pruned, its job or task group is deleted, the job is recreated under the same name, or the task group's current `api_access` is removed or narrowed below the credential's scope or access. Widening `api_access` does not revoke existing credentials. A start for a generation older than the credential's recorded generation is rejected rather than revoking the newer credential, and a storage error while recovering a credential fails the start instead of rotating the token.
 
@@ -26,7 +26,7 @@ The API uses the same resource vocabulary as the [Trellis user model](../public/
 |---|---|---|
 | `GET` | `/metrics` | Prometheus metrics of the leader; requires cluster scope. |
 | `POST` | `/v1/auth/administrator/challenge` | Issue a short-lived one-time administrator signing challenge. |
-| `GET` | `/v1/auth/whoami` | Return the current credential kind, scope, access, namespace, and available provenance metadata. |
+| `GET` | `/v1/auth/whoami` | Return the current credential kind, scope, access, and available provenance metadata. |
 | `GET` | `/v1/nodes` | List node capacity, discovered capabilities, status, and control-plane membership; requires cluster scope. |
 | `POST` / `DELETE` | `/v1/nodes/{id}/drain` | Drain or undrain; requires `cluster/write`. |
 | `GET` | `/v1/namespaces` | Discover namespace names visible to the caller. |
@@ -49,16 +49,15 @@ The API uses the same resource vocabulary as the [Trellis user model](../public/
 | `GET` | `/v1/namespaces/{ns}/secrets[/{name}]` | List/get secret metadata only. |
 | `DELETE` | `/v1/namespaces/{ns}/secrets/{name}` | Delete a secret; requires write access. |
 
-Authorization of `/v1/namespaces/{ns}/...` routes is by path: a namespace-scoped credential may address only its own namespace and receives `403` for any other, while cluster-scoped credentials and the administrator may address every namespace. Access (`read` or `write`) is checked separately, as noted per route. A `{ns}` that is not a valid identifier returns `400`.
+Authorization of `/v1/namespaces/{ns}/...` routes checks cluster scope and access (`read` or `write`) separately, as noted per route. Operator and workload API credentials may address every namespace; the path selects the resource namespace rather than narrowing credential authority. A `{ns}` that is not a valid identifier returns `400`.
 
 `GET /v1/auth/whoami` is the capability/introspection primitive clients should use instead of probing protected endpoints. Typical generated-token response:
 
 ```json
 {
   "kind": "operator",
-  "scope": "namespace",
+  "scope": "cluster",
   "access": "write",
-  "namespace": "payments",
   "created_at": "2026-09-02T20:00:00Z"
 }
 ```
@@ -67,7 +66,7 @@ A workload credential additionally reports `"subject": {"namespace": "payments",
 
 An administrator credential reports `kind: "administrator"`, `scope: "cluster"`, and `access: "write"`, but callers must still treat `administrator` as more privileged than ordinary `cluster/write`: root-only endpoint checks use the credential kind/context, not merely those two effective fields.
 
-`GET /v1/namespaces` is discovery, not namespace lifecycle management. For cluster-scoped or administrator callers it returns the sorted union of namespace names that currently have a desired job, a stored secret, or a namespace-scoped credential. A namespace-scoped caller receives only its own namespace. There is no namespace-creation call: minting a credential for, storing a secret in, or applying a job to a previously unseen namespace makes it discoverable.
+`GET /v1/namespaces` is discovery, not namespace lifecycle management. It returns the sorted union of namespace names that currently have a desired job or a stored secret. Credentials do not create discoverable namespaces. There is no namespace-creation call: storing a secret in or applying a job to a previously unseen namespace makes it discoverable.
 
 Node resource values use millicores for CPU and bytes for memory. In `GET /v1/nodes`, `cpu_capacity` and `memory_capacity` are whole-host capacity, while `cpu_allocatable` and `memory_allocatable` are the capacity available to the scheduler after the node's host reserve. The existing `cpu` and `memory` fields carry the same allocatable values. `last_heartbeat` is when the current leader last received a heartbeat from the node; heartbeat times are not replicated, so it is omitted until the node reports to a newly elected leader. `cpu_usage` is a whole-host ratio from 0 to 1; `memory_used`, `memory_available`, and `metrics_at` describe the same point-in-time host sample and are omitted until the agent can collect one. Scheduling uses allocatable capacity, never live utilization. `control_plane` is `voter` or `nonvoter` for a Raft member and omitted for a registered node that is no longer one.
 
@@ -130,7 +129,7 @@ Exec and allocation-metrics requests that fail before the upgrade return a JSON 
 | Status | Meaning |
 |---|---|
 | `400` | The request is invalid, is not a WebSocket request for subprotocol `trellis.exec.v1`, or must name one task: the allocation has several tasks, or the named task is not in its task group. |
-| `403` | The credential is scoped to another namespace, or lacks write access (exec only). |
+| `403` | The credential lacks write access (exec only). |
 | `404` | The allocation is not placed in the path namespace. |
 | `409` | The allocation exists but its node has no running target for the request, such as a task that has not started or has exited. It also covers conflicting execution records for the task on the node, and an agent already fenced by a newer leader. Retry after the allocation is running again. |
 | `429` | The node or allocation exec stream limit, or the leader's relay limit, has been reached. Close a stream or retry later. |
@@ -140,7 +139,7 @@ Exec and allocation-metrics requests that fail before the upgrade return a JSON 
 
 Secret write body: `{"value_base64":"...","expected_version":1}`; omit `expected_version` for unconditional update. Decoded values may contain at most 65,536 bytes; an oversized request returns `413` before base64 decoding. Lists are JSON arrays. Non-2xx responses are errors; clients must tolerate reconciliation-driven changes between reads.
 
-Secrets follow the same namespace rule as jobs: a namespace-scoped credential with `write` access may set and delete secrets in its own namespace, and any credential that can address the namespace may list and describe secret metadata. Secrets are write-only for every caller, including cluster-scoped credentials and the administrator: no endpoint returns a stored value. Values reach a task only through leader-to-agent delivery for an allocation whose job references the secret, which a namespace writer can already arrange by applying a job, so a read-back API would add plaintext exposure without adding capability.
+Secrets follow the same path-routing rule as jobs: a cluster credential with `write` access may set and delete secrets in any namespace, and one with read access may list and describe secret metadata. Secrets are write-only for every caller, including the administrator: no endpoint returns a stored value. Values reach a task only through leader-to-agent delivery for an allocation whose job references the secret, so a read-back API would add plaintext exposure without adding capability.
 
 The control plane admits 256 simultaneous `/v1/events` subscribers per
 process. Additional requests receive `503 Service Unavailable` and
@@ -185,7 +184,7 @@ Memory values are byte counts. `PUT /v1/cluster/settings/job-limits` requires an
 
 `POST /v1/credentials`, `GET /v1/credentials`, `DELETE /v1/credentials/{id}`, `POST /v1/nodes/join-tokens`, `GET /v1/nodes/join-tokens`, `DELETE /v1/nodes/join-tokens/{id}`, `PUT /v1/cluster/settings/job-limits`, `PUT /v1/cluster/settings/reconciliation`, `GET /v1/backup`, `POST /v1/backup/restore`, `DELETE /v1/raft/members/{id}`, and `POST /v1/raft/leadership-transfer` require an administrator-signed request. The operator keeps the Ed25519 private key; replicated cluster state contains only its PKIX public key.
 
-`POST /v1/credentials` takes `scope`, `access`, `namespace` (namespace scope only), and optional `ttl_seconds`; a positive value makes the credential expire that many seconds after creation, and zero or absence means no expiry. It returns `201` with the `token`, shown only in this response, and the credential's metadata: `id`, `scope`, `access`, `namespace`, `created_at`, and `expires_at` when set. `GET /v1/credentials` lists that metadata for every operator credential, expired ones included, ordered by creation time; it never returns a token. The `id` is the first 16 hexadecimal digits of the SHA-256 hash under which the token is stored. `DELETE /v1/credentials/{id}` revokes an operator credential and returns `204`, or `404` when no operator credential has that ID. Workload credentials are neither listed nor revocable through these endpoints. `GET /v1/auth/whoami` also reports `expires_at` for an expiring credential.
+`POST /v1/credentials` takes `scope` (which must be `cluster`), `access` (`read` or `write`), and optional `ttl_seconds`; a positive value makes the credential expire that many seconds after creation, and zero or absence means no expiry. It returns `201` with the `token`, shown only in this response, and the credential's metadata: `id`, `scope`, `access`, `created_at`, and `expires_at` when set. There is no top-level namespace in the request or response. Existing namespace-scoped tokens are rejected when used; they are not promoted to cluster authority. `GET /v1/credentials` lists metadata for every operator credential, expired ones included, ordered by creation time; it never returns a token, and its table representation has no Namespace column. The `id` is the first 16 hexadecimal digits of the SHA-256 hash under which the token is stored. `DELETE /v1/credentials/{id}` revokes an operator credential and returns `204`, or `404` when no operator credential has that ID. Workload credentials are neither listed nor revocable through these endpoints. `GET /v1/auth/whoami` also reports `expires_at` for an expiring credential and has no top-level namespace; a workload subject still contains its job namespace, job, and task group.
 
 `POST /v1/nodes/join-tokens` takes optional `ttl_seconds` (default 3600, between 1 and 604800) and `max_uses` (0, the default, for unlimited uses until expiry, up to 10000) and returns `201` with the `token`, shown only in this response, and its metadata: `id`, `created_at`, `expires_at`, `max_uses`, and `uses`. Replicated state stores only the token's SHA-256 hash; creating a token also prunes expired token records. `GET /v1/nodes/join-tokens` lists unexpired tokens' metadata. `DELETE /v1/nodes/join-tokens/{id}` revokes a token (`204`, or `404` when no unexpired token has that ID); nodes already enrolled with it are unaffected.
 
@@ -222,4 +221,4 @@ curl -fsS --connect-timeout 5 --max-time 15 --cacert /tmp/trellis-ca.pem \
   "$api_url/v1/namespaces/$TRELLIS_NAMESPACE/jobs"
 ```
 
-Never send a workload bearer credential over plaintext HTTP. See [`examples/api-access/`](../../examples/api-access/) for an in-allocation namespace-scoped helper with the same TLS and timeout behavior.
+Never send a workload bearer credential over plaintext HTTP. See [`examples/api-access/`](../../examples/api-access/) for an in-allocation cluster-scoped helper with the same TLS and timeout behavior and an explicit discussion of its security impact.

@@ -4,7 +4,7 @@ Trellis namespaces separate workload-facing resources, but Trellis does not incl
 
 ## The trust model
 
-A namespace is Trellis's tenant, authorization, discovery, and workload-isolation boundary. Jobs, allocations, namespace-scoped credentials, service discovery, namespace networks, secret references, and volume identities are all resolved within that boundary.
+A namespace separates Trellis resources, service discovery, namespace networks, secret references, and volume identities. It is not an API authorization boundary: operator and workload API credentials are cluster-scoped and may address every namespace.
 
 That boundary does not make every valid job manifest safe to accept from an untrusted tenant. The job API performs canonical validation and authorization, including preventing a caller from delegating API authority it does not have. It does not apply an operator-defined policy to fields such as networking mode or volume paths.
 
@@ -12,15 +12,14 @@ There are therefore two different access models:
 
 | Access model | Trust assumption |
 | --- | --- |
-| Direct `trellisctl` or API access that can submit job manifests | The submitter is an operator trusted with every manifest capability their credential allows them to request. Namespace scope limits which Trellis resources they can address; it is not a manifest sandbox. |
-| A product frontend for untrusted tenants | The frontend owns the tenant-facing schema and admission rules, emits only an approved subset of the canonical job model, and keeps its Trellis credentials on the trusted backend. Tenants do not receive a direct write credential. |
+| Direct `trellisctl` or API access that can submit job manifests | The submitter is an operator trusted with cluster-wide API access and every manifest capability their access level allows them to request. |
+| A product frontend for untrusted tenants | The trusted backend owns tenant authorization, the tenant-facing schema, and admission rules, emits only an approved subset of the canonical job model, and keeps cluster credentials out of browsers and tenant workloads. |
 
 ## What namespaces isolate
 
 Within Trellis, a namespace provides these boundaries:
 
-- **Authorization:** a namespace-scoped credential remains bound to its stored namespace regardless of request headers. It can read or write only the ordinary API resources allowed by its access level in that namespace.
-- **Jobs and allocations:** names, desired state, runtime queries, logs, exec targets, and events are selected within the authorized namespace.
+- **Jobs and allocations:** names, desired state, runtime queries, logs, exec targets, and events are selected by namespace paths. Cluster credentials can select any namespace.
 - **Discovery and networking:** nodes receive catalog entries only for namespaces with active allocations assigned to them. For `networking.mode: namespace`, the resolver derives the caller namespace from its network source address and returns only matching `group.job.namespace.trellis` records. Each namespace joins its own private bridge and WireGuard path with a durably assigned, non-overlapping subnet on every node. Its forwarding and host-bound isolation run before shared host `FORWARD` and `INPUT` rules, so host firewall accepts cannot bypass them.
 - **Volume identity and managed paths:** volume registrations are keyed by `(namespace, name)`. A `host_path` beginning with `@/` resolves below the namespace's Trellis-managed volume root.
 - **Secrets:** secret records and job references are namespace-scoped. A job can receive only secrets from its own namespace, and APIs return metadata rather than plaintext after a secret is stored. Secrets are not separately ACLed per job: a manifest submitter is trusted to reference any secret name in that namespace.
@@ -48,7 +47,7 @@ At minimum, enforce the following rules:
 - **Reject absolute `host_path` values.** They mount an operator-prepared node path verbatim and deliberately bypass filesystem-level namespace separation. Permit only `@/` paths, optionally with a frontend-assigned prefix or a smaller storage abstraction.
 - **Reject host networking.** `networking.mode: host` joins the node network namespace and exposes the node's network surface, including every other tenant's namespace network on that node; see [Networking](#networking). Permit `namespace` where connectivity is needed, and `none` where no network is needed. Constrain published node ports (`host_port`) to a range or assignment the frontend owns, since they are a shared node resource.
 - **Decide on egress.** Namespace-networked tasks can reach anything the node can, including cloud instance metadata endpoints and the node's private network. Block what tenants must not reach with host or network firewalling outside Trellis, or select `none` for workloads that need no network.
-- **Do not grant cluster API access.** Reject `api_access.scope: cluster`. For the safest general tenant profile, reject `api_access` entirely: a write credential, including `namespace/write`, lets its holder submit manifests directly and bypass the frontend's policy. If a product deliberately offers namespace API access, constrain it to the minimum access level, place it only in reviewed controller task groups, and treat every task in that group as holding the credential. Each API-enabled allocation receives its own credential, bound to its job and task group; deleting the job, or removing or narrowing `api_access`, revokes it.
+- **Do not grant workload API access.** Reject `api_access` for untrusted tenants because every injected credential has cluster scope. A write credential lets its holder submit manifests directly and bypass the frontend's policy; even read access exposes resources across tenants. If a product deliberately runs an API-enabled controller, use only reviewed images in a trusted task group and treat every task in that group as holding cluster authority. Each API-enabled allocation receives its own credential, bound to its job and task group; deleting the job or removing or narrowing `api_access` revokes it.
 - **Constrain images and runtime.** Apply the product's registry, digest, provenance, and update rules. Prefer `runtime: runsc` on nodes that support it for additional syscall isolation; it is defense in depth, not a replacement for manifest admission.
 - **Enforce resources and scale.** Require CPU and memory values, bound replica counts and aggregate requests, and enforce per-tenant quotas and rate limits in the frontend. Trellis schedules declared resources but does not provide namespace quotas or protect against deliberate under-declaration.
 - **Constrain the remaining model.** Allowlist fields rather than trying to denylist future capabilities. Authorize secret references against the tenant's own secret inventory, and bound environment and label data, health-check commands, volume counts and sizes through the storage layer, and any exec or log operations the product exposes.
@@ -57,9 +56,9 @@ Run canonical Trellis validation and planning after frontend admission, but befo
 
 ### Credentials and secrets
 
-Keep Trellis operator credentials in the frontend backend. Use separate least-privilege credentials for distinct backend responsibilities where practical, and never place a cluster credential in tenant browser code or an untrusted workload.
+Keep Trellis operator credentials in a trusted frontend backend. Use separate read and write credentials for distinct backend responsibilities where practical, and never place one in tenant browser code or an untrusted workload.
 
-Namespace-scoped operator credentials are useful for backend job, allocation, and secret operations because the control plane enforces their namespace: every namespaced request names its namespace in the path, and a namespace-scoped credential receives `403` for any namespace other than its own. A frontend that offers tenant secret management can therefore hold one `namespace/write` credential per tenant namespace instead of a cluster credential; `namespace/read` may list and describe secret metadata but not set or delete secrets. It should still accept secret plaintext only over a protected connection, avoid logging it, and return only Trellis's secret metadata after storage. Trellis never returns a stored secret value to any API caller.
+All operator credentials are cluster-scoped. A frontend must authenticate the tenant, derive the allowed namespace from its own durable ownership data, reject tenant-supplied namespace selection, and enforce that decision before every Trellis request. Browser controls are not sufficient. A frontend that offers tenant secret management should accept plaintext only over a protected connection, avoid logging it, and return only Trellis's secret metadata after storage. Trellis never returns a stored secret value to any API caller, but its cluster credential does not prevent the backend from addressing another tenant's namespace.
 
 A manifest may reference a secret name, and the allocation receives the value from the job's own namespace. Direct manifest access therefore grants the practical ability to consume any known secret in that namespace. A tenant frontend must authorize each reference and should keep different tenants in different namespaces. Prefer file delivery over environment delivery when the application supports it. Tenant separation does not protect a secret from other processes deliberately placed together in the same task group or from a compromised container that receives it.
 
@@ -89,6 +88,6 @@ Use this as a conservative starting point for untrusted tenants:
 7. Mediate secrets, logs, metrics, and any exec capability on the backend with tenant authorization on every request.
 8. Revalidate the complete canonical job against the allowlist whenever it is created or updated, then use Trellis plan and apply.
 
-This profile is an operator policy implemented outside the Trellis core. A frontend may deliberately broaden it for a trusted tenant or controller, but each exception should be treated as granting the corresponding host or API capability, not as ordinary namespace access.
+This profile is an operator policy implemented outside the Trellis core. A frontend may deliberately broaden it for a trusted tenant or controller, but API access always grants cluster-wide read or write capability, not namespace access.
 
 [Documentation index](../README.md) · [User model](user-model.md) · [Job manifest reference](job-specification.md) · [Operations](operations.md)

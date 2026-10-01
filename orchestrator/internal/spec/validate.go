@@ -99,7 +99,7 @@ func Validate(job *JobSpec) error {
 		}
 		if group.APIAccess != nil {
 			if !group.APIAccess.Scope.Valid() {
-				add(groupPath+".api_access.scope", "unsupported", "must be namespace or cluster")
+				add(groupPath+".api_access.scope", "unsupported", "must be cluster")
 			}
 			if !group.APIAccess.Access.Valid() {
 				add(groupPath+".api_access.access", "unsupported", "must be read or write")

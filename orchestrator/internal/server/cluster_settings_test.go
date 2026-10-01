@@ -233,23 +233,23 @@ func TestClusterSettingsEndpointsAuthorization(t *testing.T) {
 		return req.WithContext(context.WithValue(req.Context(), AdminContextKey, true))
 	}
 
-	if rec := serve(scopedRequest(t, http.MethodGet, "/v1/cluster/settings", "", auth.AccessCluster, auth.AccessRead, "")); rec.Code != http.StatusOK {
+	if rec := serve(scopedRequest(t, http.MethodGet, "/v1/cluster/settings", "", auth.AccessCluster, auth.AccessRead)); rec.Code != http.StatusOK {
 		t.Fatalf("cluster/read settings status = %d: %s", rec.Code, rec.Body.String())
 	}
-	if rec := serve(scopedRequest(t, http.MethodGet, "/v1/cluster/settings", "", auth.AccessNamespace, auth.AccessWrite, "team")); rec.Code != http.StatusForbidden {
-		t.Fatalf("namespace credential settings status = %d, want 403", rec.Code)
+	if rec := serve(scopedRequest(t, http.MethodGet, "/v1/cluster/settings", "", auth.AccessCluster, auth.AccessWrite)); rec.Code != http.StatusOK {
+		t.Fatalf("cluster/write settings status = %d, want 200", rec.Code)
 	}
 	body := `{"max_replicas_per_task_group":900,"max_task_groups_per_job":64,"max_tasks_per_task_group":32,"max_desired_allocations":1000,"max_desired_allocations_per_namespace":10000,"default_task_cpu":100,"default_task_memory":134217728,"max_task_cpu":1000000,"max_task_memory":1099511627776}`
-	if rec := serve(scopedRequest(t, http.MethodPut, "/v1/cluster/settings/job-limits", body, auth.AccessCluster, auth.AccessWrite, "")); rec.Code != http.StatusForbidden {
+	if rec := serve(scopedRequest(t, http.MethodPut, "/v1/cluster/settings/job-limits", body, auth.AccessCluster, auth.AccessWrite)); rec.Code != http.StatusForbidden {
 		t.Fatalf("cluster/write job limits status = %d, want 403", rec.Code)
 	}
-	if rec := serve(admin(scopedRequest(t, http.MethodPut, "/v1/cluster/settings/job-limits", `{"max_replicas_per_task_group":900,"unknown":1}`, "", "", ""))); rec.Code != http.StatusBadRequest {
+	if rec := serve(admin(scopedRequest(t, http.MethodPut, "/v1/cluster/settings/job-limits", `{"max_replicas_per_task_group":900,"unknown":1}`, "", ""))); rec.Code != http.StatusBadRequest {
 		t.Fatalf("unknown field status = %d, want 400", rec.Code)
 	}
-	if rec := serve(admin(scopedRequest(t, http.MethodPut, "/v1/cluster/settings/job-limits", `{"max_replicas_per_task_group":900}`, "", "", ""))); rec.Code != http.StatusUnprocessableEntity {
+	if rec := serve(admin(scopedRequest(t, http.MethodPut, "/v1/cluster/settings/job-limits", `{"max_replicas_per_task_group":900}`, "", ""))); rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("incomplete limits status = %d, want 422", rec.Code)
 	}
-	if rec := serve(admin(scopedRequest(t, http.MethodPut, "/v1/cluster/settings/job-limits", body, "", "", ""))); rec.Code != http.StatusOK {
+	if rec := serve(admin(scopedRequest(t, http.MethodPut, "/v1/cluster/settings/job-limits", body, "", ""))); rec.Code != http.StatusOK {
 		t.Fatalf("administrator job limits status = %d: %s", rec.Code, rec.Body.String())
 	}
 	if got := control.ClusterSettings().JobLimits.MaxReplicasPerTaskGroup; got != 900 {
@@ -320,16 +320,16 @@ func TestReconciliationSettingsEndpoint(t *testing.T) {
 	}
 	const path = "/v1/cluster/settings/reconciliation"
 	body := `{"allocation_loss_timeout":120000000000,"replacement_backoff_base":10000000000,"replacement_backoff_max":300000000000,"replacement_stable_after":600000000000,"terminal_allocation_retention":8}`
-	if rec := serve(scopedRequest(t, http.MethodPut, path, body, auth.AccessCluster, auth.AccessWrite, "")); rec.Code != http.StatusForbidden {
+	if rec := serve(scopedRequest(t, http.MethodPut, path, body, auth.AccessCluster, auth.AccessWrite)); rec.Code != http.StatusForbidden {
 		t.Fatalf("cluster/write status = %d, want 403", rec.Code)
 	}
-	if rec := serve(admin(scopedRequest(t, http.MethodPut, path, `{"allocation_loss_timeout":120000000000,"unknown":1}`, "", "", ""))); rec.Code != http.StatusBadRequest {
+	if rec := serve(admin(scopedRequest(t, http.MethodPut, path, `{"allocation_loss_timeout":120000000000,"unknown":1}`, "", ""))); rec.Code != http.StatusBadRequest {
 		t.Fatalf("unknown field status = %d, want 400", rec.Code)
 	}
-	if rec := serve(admin(scopedRequest(t, http.MethodPut, path, `{"allocation_loss_timeout":120000000000}`, "", "", ""))); rec.Code != http.StatusUnprocessableEntity {
+	if rec := serve(admin(scopedRequest(t, http.MethodPut, path, `{"allocation_loss_timeout":120000000000}`, "", ""))); rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("incomplete settings status = %d, want 422", rec.Code)
 	}
-	rec := serve(admin(scopedRequest(t, http.MethodPut, path, body, "", "", "")))
+	rec := serve(admin(scopedRequest(t, http.MethodPut, path, body, "", "")))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("administrator status = %d: %s", rec.Code, rec.Body.String())
 	}

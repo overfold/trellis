@@ -229,7 +229,7 @@ func TestRegisterJobHandlerReportsVersionConflict(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	e.ServeHTTP(rec, scopedRequest(t, http.MethodPost, "/v1/namespaces/default/jobs", body("app:v1", 0), auth.AccessNamespace, auth.AccessWrite, "default"))
+	e.ServeHTTP(rec, scopedRequest(t, http.MethodPost, "/v1/namespaces/default/jobs", body("app:v1", 0), auth.AccessCluster, auth.AccessWrite))
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("create status = %d, body: %s", rec.Code, rec.Body.String())
 	}
@@ -242,7 +242,7 @@ func TestRegisterJobHandlerReportsVersionConflict(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
-	e.ServeHTTP(rec, scopedRequest(t, http.MethodPost, "/v1/namespaces/default/jobs", body("app:v2", 0), auth.AccessNamespace, auth.AccessWrite, "default"))
+	e.ServeHTTP(rec, scopedRequest(t, http.MethodPost, "/v1/namespaces/default/jobs", body("app:v2", 0), auth.AccessCluster, auth.AccessWrite))
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("conflicting create status = %d, want 409; body: %s", rec.Code, rec.Body.String())
 	}
@@ -254,7 +254,7 @@ func TestRegisterJobHandlerReportsVersionConflict(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
-	e.ServeHTTP(rec, scopedRequest(t, http.MethodPost, "/v1/namespaces/default/jobs/plan", body("app:v2", 0), auth.AccessNamespace, auth.AccessWrite, "default"))
+	e.ServeHTTP(rec, scopedRequest(t, http.MethodPost, "/v1/namespaces/default/jobs/plan", body("app:v2", 0), auth.AccessCluster, auth.AccessWrite))
 	var planned api.JobPlanResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &planned); err != nil || planned.BaseVersion != 1 || planned.BaseRevision != 1 || planned.BaseIncarnation != created.Incarnation {
 		t.Fatalf("plan = %s, want base version and revision 1 in the created incarnation", rec.Body.String())
@@ -311,7 +311,7 @@ func TestRegisterJobHandlerPreconditions(t *testing.T) {
 	const jobJSON = `{"name":"web","namespace":"default","task_groups":[{"name":"api","count":1,"tasks":[{"name":"server","image":"app:v1"}]}]}`
 	send := func(method, path, body string) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
-		e.ServeHTTP(rec, scopedRequest(t, method, path, body, auth.AccessNamespace, auth.AccessWrite, "default"))
+		e.ServeHTTP(rec, scopedRequest(t, method, path, body, auth.AccessCluster, auth.AccessWrite))
 		return rec
 	}
 	if rec := send(http.MethodPost, "/v1/namespaces/default/jobs", `{"spec":`+jobJSON+`}`); rec.Code != http.StatusAccepted {

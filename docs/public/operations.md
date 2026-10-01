@@ -160,7 +160,7 @@ To grow the cluster beyond one node, see [Multi-node clusters](multi-node.md). I
 
 ## Manage operator credentials
 
-The installer creates one normal `cluster/write` credential for the installing user, but operators often need narrower or shorter-lived credentials for another human, a read-only observer, or automation. `trellisctl credentials create`, `list`, and `revoke` are the explicit administrative workflow for that.
+The installer creates one normal `cluster/write` credential for the installing user, but operators often need read-only or shorter-lived credentials for another human, an observer, or automation. All operator API credentials are cluster-scoped. `trellisctl credentials create`, `list`, and `revoke` are the explicit administrative workflow for that.
 
 Credential minting requires the **administrator private key** held by the operator. Supply a PKCS#8 PEM file, or place unpadded base64 PKCS#8 DER in `TRELLIS_ADMINISTRATOR_KEY`; Trellis nodes do not store it:
 
@@ -168,10 +168,9 @@ Credential minting requires the **administrator private key** held by the operat
 # Read-only cluster observer
 trellisctl --administrator-key ./trellis-administrator.pem credentials create --scope cluster --access read
 
-# Writer restricted to one namespace, expiring after 30 days
+# Cluster writer expiring after 30 days
 trellisctl --administrator-key ./trellis-administrator.pem credentials create \
-  --scope namespace \
-  --namespace-scope staging \
+  --scope cluster \
   --access write \
   --ttl 720h
 ```
@@ -187,7 +186,7 @@ trellisctl --administrator-key ./trellis-administrator.pem credentials create --
 To save a generated credential as an ordinary user context without leaving it in command history:
 
 ```sh
-TOKEN="$(trellisctl --administrator-key ./trellis-administrator.pem credentials create --scope namespace --namespace-scope staging --access write)"
+TOKEN="$(trellisctl --administrator-key ./trellis-administrator.pem credentials create --scope cluster --access write)"
 trellisctl --token "$TOKEN" --namespace staging context save staging --use
 unset TOKEN
 ```
@@ -199,7 +198,7 @@ trellisctl --administrator-key ./trellis-administrator.pem credentials list
 trellisctl --administrator-key ./trellis-administrator.pem credentials revoke 3f9c2a7d41b0e865
 ```
 
-`credentials list` shows each operator credential's ID, scope, access, namespace, creation time, and expiry, including expired credentials, but never a token. `credentials revoke ID` rejects the credential on its next use. Workload credentials injected through `api_access` are managed with their allocations and are neither listed nor revocable here.
+`credentials create` retains `--scope cluster` and no longer accepts `--namespace-scope`. `credentials list` shows each operator credential's ID, scope, access, creation time, and expiry, including expired credentials, but never a token; there is no Namespace column. Existing namespace-scoped tokens are rejected rather than promoted. `credentials revoke ID` rejects the credential on its next use. Workload credentials injected through `api_access` are managed with their allocations and are neither listed nor revocable here.
 
 `trellisctl` fetches the signing challenge and signs the request automatically. Join tokens and ordinary `cluster/write` bearer credentials cannot manage credentials, change Raft membership, or perform backup/restore.
 
@@ -305,7 +304,7 @@ trellisctl --namespace default secrets describe db-password
 trellisctl --namespace default secrets delete db-password
 ```
 
-Use `--expected-version N` for compare-and-swap (`0` means create only). Values are capped at 65,536 bytes. Secrets are namespace-scoped: a `namespace/write` credential may set and delete secrets in its own namespace, a `namespace/read` credential may list and describe their metadata, and cluster-scoped credentials may do the same in any namespace. No credential can read a stored value back. Rotation affects newly started allocations, so apply a workload revision or replace the consuming allocations afterward.
+Use `--expected-version N` for compare-and-swap (`0` means create only). Values are capped at 65,536 bytes. Secrets are namespace-scoped resources, but cluster-scoped credentials may address any namespace: `write` may set and delete secrets, while `read` may list and describe their metadata. No credential can read a stored value back. Rotation affects newly started allocations, so apply a workload revision or replace the consuming allocations afterward.
 
 Allocation secret files are held on a verified tmpfs rather than a durable node filesystem. Linux can swap tmpfs pages, so disable swap or configure encrypted swap when secrets must also be protected from offline swap inspection. Environment delivery does not persist plaintext in containerd's OCI metadata, but the running application necessarily receives the value in its process environment; use file delivery when the application supports it. Trellis sets mounted secret ownership to the numeric UID/GID resolved from the image configuration, preserving owner-only access for non-root images.
 
@@ -330,7 +329,7 @@ scrape_configs:
       - targets: ["control.example:8128"]
 ```
 
-A scrape without a credential receives `401`, and one with a namespace-scoped credential receives `403`. `GET /v1/auth/whoami` reports the kind, scope, and access of the bearer credential making the request. Job status and allocation events explain lifecycle transitions; logs proxy per-task allocation logs. Monitor leader availability, unhealthy/draining nodes, desired-versus-running/healthy counts, reconciliation latency, retries, task groups in replacement backoff (`trellis_replacement_backoff_failures`), and disk capacity for Raft, containerd, and volumes.
+A scrape without a credential receives `401`. `GET /v1/auth/whoami` reports the kind, scope, and access of the bearer credential making the request; it has no top-level namespace. Job status and allocation events explain lifecycle transitions; logs proxy per-task allocation logs. Monitor leader availability, unhealthy/draining nodes, desired-versus-running/healthy counts, reconciliation latency, retries, task groups in replacement backoff (`trellis_replacement_backoff_failures`), and disk capacity for Raft, containerd, and volumes.
 
 For normal workload diagnosis, start and usually finish with `jobs status`. `ready`, `converging`, and `degraded` summarize desired-versus-observed state without collapsing allocation lifecycle and health, and non-ready status output includes the allocations that need attention with reason/message, retry timing, and attempt count. Use `jobs status NAME --history` when you need the recorded lifecycle transitions, and `jobs logs NAME` for task output.
 

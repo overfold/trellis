@@ -23,8 +23,6 @@ import (
 type AccessScope string
 
 const (
-	// AccessNamespace restricts a generated credential to one namespace.
-	AccessNamespace AccessScope = "namespace"
 	// AccessCluster permits cluster-wide operations allowed by the access level.
 	AccessCluster AccessScope = "cluster"
 )
@@ -63,7 +61,6 @@ type Principal struct {
 	Kind      CredentialKind     `json:"kind"`
 	Scope     AccessScope        `json:"scope"`
 	Access    AccessLevel        `json:"access"`
-	Namespace string             `json:"namespace,omitempty"`
 	Subject   *CredentialSubject `json:"subject,omitempty"`
 	CreatedAt time.Time          `json:"created_at,omitempty"`
 	// ExpiresAt is when an operator credential stops authenticating. The zero
@@ -81,17 +78,11 @@ func (p Principal) Validate() error {
 	if p.Kind != CredentialOperator && p.Kind != CredentialWorkload {
 		return fmt.Errorf("invalid credential kind %q", p.Kind)
 	}
-	if p.Scope != AccessNamespace && p.Scope != AccessCluster {
+	if p.Scope != AccessCluster {
 		return fmt.Errorf("invalid credential scope %q", p.Scope)
 	}
 	if p.Access != AccessRead && p.Access != AccessWrite {
 		return fmt.Errorf("invalid credential access %q", p.Access)
-	}
-	if p.Scope == AccessNamespace && p.Namespace == "" {
-		return fmt.Errorf("namespace credential requires a namespace")
-	}
-	if p.Scope == AccessCluster && p.Namespace != "" {
-		return fmt.Errorf("cluster credential must not include a namespace")
 	}
 	if p.Kind == CredentialWorkload && !p.ExpiresAt.IsZero() {
 		return fmt.Errorf("workload credential must not include an expiry")
@@ -108,9 +99,6 @@ func (p Principal) Validate() error {
 		}
 		if p.Kind != CredentialWorkload {
 			return fmt.Errorf("only workload credentials may include a workload subject")
-		}
-		if p.Scope == AccessNamespace && p.Namespace != p.Subject.Namespace {
-			return fmt.Errorf("workload credential namespace must match its subject")
 		}
 	}
 	return nil
@@ -259,9 +247,6 @@ func (m *TokenManager) CreateToken(ctx context.Context, principal Principal) (st
 }
 
 func (m *TokenManager) prepareToken(principal Principal) (string, string, []byte, error) {
-	if principal.Scope == AccessCluster {
-		principal.Namespace = ""
-	}
 	if principal.CreatedAt.IsZero() {
 		principal.CreatedAt = m.now().UTC()
 	}
@@ -309,32 +294,6 @@ func (m *TokenManager) ValidateToken(ctx context.Context, rawToken string) (*Pri
 	return &principal, nil
 }
 
-// CredentialNamespaces returns the sorted unique namespaces named by stored,
-// unexpired namespace-scoped credentials.
-func (m *TokenManager) CredentialNamespaces(ctx context.Context) ([]string, error) {
-	values, err := m.store.List(ctx, m.tokenKey(""))
-	if err != nil {
-		return nil, fmt.Errorf("list credentials: %w", err)
-	}
-	seen := make(map[string]struct{})
-	for _, data := range values {
-		var principal Principal
-		if err := json.Unmarshal(data, &principal); err != nil {
-			return nil, fmt.Errorf("unmarshal principal: %w", err)
-		}
-		expired := !principal.ExpiresAt.IsZero() && !m.now().Before(principal.ExpiresAt)
-		if principal.Scope == AccessNamespace && principal.Namespace != "" && !expired {
-			seen[principal.Namespace] = struct{}{}
-		}
-	}
-	result := make([]string, 0, len(seen))
-	for namespace := range seen {
-		result = append(result, namespace)
-	}
-	sort.Strings(result)
-	return result, nil
-}
-
 // Sealer encrypts persisted workload credentials so replicated state never
 // contains a usable bearer token.
 type Sealer interface {
@@ -369,7 +328,7 @@ func (m *TokenManager) workloadTokenAAD(allocationID string, generation uint64, 
 }
 
 func samePrincipalGrant(a, b Principal) bool {
-	if a.Kind != b.Kind || a.Scope != b.Scope || a.Access != b.Access || a.Namespace != b.Namespace {
+	if a.Kind != b.Kind || a.Scope != b.Scope || a.Access != b.Access {
 		return false
 	}
 	if a.Subject == nil || b.Subject == nil {
@@ -391,9 +350,6 @@ func (m *TokenManager) WorkloadToken(ctx context.Context, sealer Sealer, allocat
 		return "", fmt.Errorf("workload credential requires an allocation identity and generation")
 	}
 	principal.Kind = CredentialWorkload
-	if principal.Scope == AccessCluster {
-		principal.Namespace = ""
-	}
 	principal.CreatedAt = time.Time{}
 	if err := principal.Validate(); err != nil {
 		return "", err

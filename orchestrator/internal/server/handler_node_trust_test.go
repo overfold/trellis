@@ -38,7 +38,7 @@ func serveAs(e *echo.Echo, method, path string, body any, admin bool) *httptest.
 	if admin {
 		req = req.WithContext(context.WithValue(req.Context(), AdminContextKey, true))
 	} else {
-		req = req.WithContext(context.WithValue(req.Context(), NamespaceContextKey, auth.EncodeScope(auth.AccessCluster, auth.AccessWrite, "")))
+		req = req.WithContext(context.WithValue(req.Context(), NamespaceContextKey, auth.EncodeScope(auth.AccessCluster, auth.AccessWrite)))
 	}
 	rec := httptest.NewRecorder()
 	e.ServeHTTP(rec, req)

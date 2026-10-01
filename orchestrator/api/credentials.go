@@ -8,7 +8,6 @@ import "time"
 type CredentialCreateRequest struct {
 	Scope      string `json:"scope"`
 	Access     string `json:"access"`
-	Namespace  string `json:"namespace,omitempty"`
 	TTLSeconds int64  `json:"ttl_seconds,omitempty"`
 }
 
@@ -25,7 +24,6 @@ type CredentialResponse struct {
 	ID        string     `json:"id"`
 	Scope     string     `json:"scope"`
 	Access    string     `json:"access"`
-	Namespace string     `json:"namespace,omitempty"`
 	CreatedAt time.Time  `json:"created_at"`
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
@@ -46,7 +44,6 @@ type CredentialInfoResponse struct {
 	Kind      string                     `json:"kind"`
 	Scope     string                     `json:"scope"`
 	Access    string                     `json:"access"`
-	Namespace string                     `json:"namespace,omitempty"`
 	Subject   *CredentialSubjectResponse `json:"subject,omitempty"`
 	CreatedAt *time.Time                 `json:"created_at,omitempty"`
 	ExpiresAt *time.Time                 `json:"expires_at,omitempty"`

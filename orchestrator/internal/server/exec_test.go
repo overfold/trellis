@@ -59,7 +59,7 @@ func newExecRelayTest(t *testing.T, serve func(*execstream.Reader, *execstream.W
 	test.cancel = cancel
 	e.Pre(func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c *echo.Context) error {
-			ctx := context.WithValue(c.Request().Context(), NamespaceContextKey, auth.EncodeScope(auth.AccessNamespace, auth.AccessWrite, "team"))
+			ctx := context.WithValue(c.Request().Context(), NamespaceContextKey, auth.EncodeScope(auth.AccessCluster, auth.AccessWrite))
 			c.SetRequest(c.Request().WithContext(ctx))
 			return next(c)
 		}
@@ -244,7 +244,7 @@ func TestExecRequestRejections(t *testing.T) {
 			if tt.setup != nil {
 				tt.setup()
 			}
-			request := scopedRequest(t, http.MethodGet, tt.path, "", auth.AccessNamespace, tt.access, "team")
+			request := scopedRequest(t, http.MethodGet, tt.path, "", auth.AccessCluster, tt.access)
 			if tt.upgrade {
 				execwebsocket.SetRequestHeaders(request)
 			}

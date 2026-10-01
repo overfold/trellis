@@ -23,9 +23,9 @@ func TestMetricsRequireClusterScopedCredential(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	tokens := auth.NewTokenManager(store, "test")
-	token := func(scope auth.AccessScope, access auth.AccessLevel, namespace string) string {
+	token := func(scope auth.AccessScope, access auth.AccessLevel) string {
 		t.Helper()
-		value, err := tokens.CreateToken(t.Context(), auth.Principal{Kind: auth.CredentialOperator, Scope: scope, Access: access, Namespace: namespace})
+		value, err := tokens.CreateToken(t.Context(), auth.Principal{Kind: auth.CredentialOperator, Scope: scope, Access: access})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -43,10 +43,8 @@ func TestMetricsRequireClusterScopedCredential(t *testing.T) {
 	}{
 		{name: "anonymous", status: http.StatusUnauthorized},
 		{name: "unknown token", token: "trls_unknown", status: http.StatusUnauthorized},
-		{name: "namespace read", token: token(auth.AccessNamespace, auth.AccessRead, "team"), status: http.StatusForbidden},
-		{name: "namespace write", token: token(auth.AccessNamespace, auth.AccessWrite, "team"), status: http.StatusForbidden},
-		{name: "cluster read", token: token(auth.AccessCluster, auth.AccessRead, ""), status: http.StatusOK},
-		{name: "cluster write", token: token(auth.AccessCluster, auth.AccessWrite, ""), status: http.StatusOK},
+		{name: "cluster read", token: token(auth.AccessCluster, auth.AccessRead), status: http.StatusOK},
+		{name: "cluster write", token: token(auth.AccessCluster, auth.AccessWrite), status: http.StatusOK},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			request := httptest.NewRequest(http.MethodGet, "/metrics", nil)

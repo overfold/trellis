@@ -41,7 +41,7 @@ func TestParseYAMLRejectsUnknownFields(t *testing.T) {
 func TestValidateAcceptsExtensions(t *testing.T) {
 	job := validJob()
 	group := &job.TaskGroups[0]
-	group.APIAccess = &APIAccessSpec{Scope: APIAccessNamespace, Access: APIAccessRead}
+	group.APIAccess = &APIAccessSpec{Scope: APIAccessCluster, Access: APIAccessRead}
 	group.Labels = map[string]string{"trellis.expose": "true", "trellis/domain": "example.com"}
 	group.Constraints = []ConstraintSpec{{Attribute: "arch", Value: "amd64"}}
 	group.Count = 2
@@ -77,7 +77,7 @@ func TestValidateRejectsInvalidJobs(t *testing.T) {
 		{"invalid label", func(j *JobSpec) { j.TaskGroups[0].Labels = map[string]string{"123bad": "v"} }},
 		{"invalid api scope", func(j *JobSpec) { j.TaskGroups[0].APIAccess = &APIAccessSpec{Scope: "other", Access: APIAccessRead} }},
 		{"invalid api access", func(j *JobSpec) {
-			j.TaskGroups[0].APIAccess = &APIAccessSpec{Scope: APIAccessNamespace, Access: "admin"}
+			j.TaskGroups[0].APIAccess = &APIAccessSpec{Scope: APIAccessCluster, Access: "admin"}
 		}},
 	}
 	for _, test := range tests {

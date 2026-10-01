@@ -9,9 +9,9 @@ import (
 )
 
 // ListNamespaces returns the sorted union of namespaces referenced by desired
-// jobs, stored secrets, and namespace-scoped credentials. Namespaces are not
+// jobs and stored secrets. Namespaces are not
 // lifecycle-managed resources: a namespace exists while something is stored in
-// it, so an operator may mint a credential for, store a secret in, or apply a
+// it, so an operator may store a secret in or apply a
 // job to a new namespace at any time, after which it is discoverable here.
 func (s *Server) ListNamespaces(ctx context.Context) (api.NamespaceListResponse, error) {
 	s.mu.RLock()
@@ -32,16 +32,6 @@ func (s *Server) ListNamespaces(ctx context.Context) (api.NamespaceListResponse,
 			seen[namespace] = struct{}{}
 		}
 	}
-	if s.tokenManager != nil {
-		namespaces, err := s.tokenManager.CredentialNamespaces(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("list credential namespaces: %w", err)
-		}
-		for _, namespace := range namespaces {
-			seen[namespace] = struct{}{}
-		}
-	}
-
 	result := make(api.NamespaceListResponse, 0, len(seen))
 	for namespace := range seen {
 		result = append(result, namespace)

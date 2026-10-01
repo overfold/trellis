@@ -1144,7 +1144,7 @@ func leaderAuthMiddleware(administrator *auth.AdministratorAuthenticator, admini
 			if key != "" && tokenManager != nil {
 				principal, err := tokenManager.ValidateToken(c.Request().Context(), key)
 				if err == nil && principal != nil {
-					ctx := context.WithValue(c.Request().Context(), server.NamespaceContextKey, auth.EncodeScope(principal.Scope, principal.Access, principal.Namespace))
+					ctx := context.WithValue(c.Request().Context(), server.NamespaceContextKey, auth.EncodeScope(principal.Scope, principal.Access))
 					ctx = context.WithValue(ctx, server.PrincipalContextKey, *principal)
 					c.SetRequest(c.Request().WithContext(ctx))
 					return next(c)

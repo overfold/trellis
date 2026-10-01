@@ -25,11 +25,10 @@ func (s *Server) apiAccessToken(ctx context.Context, access *spec.APIAccessSpec,
 	}
 
 	principal := auth.Principal{
-		Kind:      auth.CredentialWorkload,
-		Scope:     auth.AccessScope(access.Scope),
-		Access:    auth.AccessLevel(access.Access),
-		Namespace: request.Namespace,
-		Subject:   &auth.CredentialSubject{Namespace: request.Namespace, Job: request.JobName, TaskGroup: request.GroupName},
+		Kind:    auth.CredentialWorkload,
+		Scope:   auth.AccessScope(access.Scope),
+		Access:  auth.AccessLevel(access.Access),
+		Subject: &auth.CredentialSubject{Namespace: request.Namespace, Job: request.JobName, TaskGroup: request.GroupName},
 	}
 	token, err := s.tokenManager.WorkloadToken(ctx, s.secrets, request.AllocationID, request.Generation, principal)
 	if err != nil {
@@ -46,10 +45,8 @@ type workloadGrant struct {
 // grantWithin reports whether a credential's scope and access are no broader
 // than the task group's current api_access.
 func grantWithin(principal auth.Principal, access *spec.APIAccessSpec) bool {
-	if principal.Scope == auth.AccessCluster && access.Scope != spec.APIAccessCluster {
-		return false
-	}
-	return principal.Access != auth.AccessWrite || access.Access == spec.APIAccessWrite
+	return principal.Scope == auth.AccessCluster && access.Scope == spec.APIAccessCluster &&
+		(principal.Access != auth.AccessWrite || access.Access == spec.APIAccessWrite)
 }
 
 // revokeStaleWorkloadCredentials revokes workload credentials whose

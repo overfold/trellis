@@ -30,7 +30,7 @@ These examples teach reusable primitives. Apply one only after reading its READM
 
 | Example | Composes | Why it is advanced |
 | --- | --- | --- |
-| [`api-access/`](api-access/) | Namespace-scoped API access and a controller loop. | The whole task group receives a credential and must be trusted. |
+| [`api-access/`](api-access/) | Cluster-scoped read API access and a controller loop. | The whole task group receives cluster-wide visibility and must be trusted. |
 | [`deployment-strategies/`](deployment-strategies/) | Rolling, blue/green, and weighted canary releases. | Blue/green and canary routing require an external proxy/controller, enough nodes for fixed listeners, and release observability. |
 | [`wordpress/`](wordpress/) | Multiple tasks, host networking, secrets, host volumes, health checks, and restart policy. | It is a coupled development stack, not a production topology. |
 | [`patroni/`](patroni/) | Namespace networking, optional runsc sandboxing, discovery, secrets, local volumes, and recreate replacement. | It is an architecture skeleton that still requires a real DCS, routing, fencing, backups, and failure testing. |

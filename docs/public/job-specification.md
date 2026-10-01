@@ -20,7 +20,7 @@ task_groups:
     count: 2
     runtime: runc
     api_access:
-      scope: namespace
+      scope: cluster
       access: read
     labels:
       route: web
@@ -127,31 +127,29 @@ Label keys and constraint attributes must begin with a letter, may contain lette
 
 ```yaml
 api_access:
-  scope: namespace
+  scope: cluster
   access: read
 ```
 
-`scope` is `namespace` or `cluster`. `access` is `read` or `write`; write includes read capability.
+`scope` must be explicitly `cluster`. `access` is `read` or `write`; write includes read capability.
 
-- `namespace/read` is appropriate for discovery, observers, and namespace-local read-only controllers. It may list jobs, allocations, and secret metadata in the job's namespace.
-- `namespace/write` is appropriate for trusted controllers that deliberately mutate jobs or secrets in their own namespace.
 - `cluster/read` can inspect cluster-scoped state.
 - `cluster/write` is the normal high-privilege operator/controller credential for cluster-wide mutations.
 - omitted means no API credential is injected.
 
-A job may never delegate more authority than the credential submitting it. Namespace-scoped callers cannot request cluster-scoped workload credentials, and read-only callers cannot request write credentials. Planning enforces the same ceiling as apply so a preview cannot advertise a deployment the caller is not authorized to create.
+A job may never delegate more authority than the credential submitting it: read-only callers cannot request write credentials. Planning enforces the same ceiling as apply so a preview cannot advertise a deployment the caller is not authorized to create.
 
 The administrator signing key is intentionally separate. Trellis never injects it into workloads. Operations such as Raft administration, backup/restore, and minting ordinary operator credentials remain administrator operations rather than abilities granted by `cluster/write`. Node registration and heartbeats use certificate-bound node identity, while managed enrollment uses short-lived administrator-minted join tokens.
 
 Generated credentials carry an authoritative server-side kind (`operator` or `workload`) in addition to scope/access. `GET /v1/auth/whoami` reports the kind and effective authorization of the credential making the request; the administrator credential reports itself explicitly as `administrator`.
 
-API-enabled allocations require the servers to be configured with the secrets encryption key (`secrets_key`, which the installer creates). Each allocation receives its own credential, bound to its job and task group and stable across start retries of the same allocation generation; a new generation receives a new credential and the previous one is revoked. Trellis revokes the credential when the allocation record is pruned, when the job or task group is deleted, or when the task group's `api_access` is removed or narrowed (from `cluster` to `namespace` scope, or from `write` to `read`). Narrowing takes effect immediately, including for allocations of the previous revision that are still running during a rollout. Widening `api_access` leaves existing credentials in place; replacement allocations receive the wider grant.
+API-enabled allocations require the servers to be configured with the secrets encryption key (`secrets_key`, which the installer creates). Each allocation receives its own credential, bound to its job and task group and stable across start retries of the same allocation generation; a new generation receives a new credential and the previous one is revoked. Trellis revokes the credential when the allocation record is pruned, when the job or task group is deleted, or when the task group's `api_access` is removed or narrowed from `write` to `read`. Narrowing takes effect immediately, including for allocations of the previous revision that are still running during a rollout. Widening access leaves existing credentials in place; replacement allocations receive the wider grant.
 
-Enabled API access injects `TRELLIS_ADDR`, `TRELLIS_TOKEN`, and `TRELLIS_NAMESPACE`; when TLS is configured, `TRELLIS_CA_CERT` contains the cluster CA PEM. `TRELLIS_NAMESPACE` is initialized to the job namespace even for cluster-scoped credentials.
+Enabled API access injects `TRELLIS_ADDR`, `TRELLIS_TOKEN`, and `TRELLIS_NAMESPACE`; when TLS is configured, `TRELLIS_CA_CERT` contains the cluster CA PEM. `TRELLIS_NAMESPACE` is initialized to the job namespace solely as a routing convenience. It does not limit the cluster-scoped credential's authority.
 
 `TRELLIS_ADDR` is a Trellis-owned workload endpoint, currently exposed as the TLS name `trellis` on the control-plane port. Trellis maps that name to the node-local control plane for host-networked tasks and to the namespace gateway for namespace-networked tasks; the local listener proxies requests to the current leader. API-enabled tasks must therefore use `namespace` (the default) or `host` networking. `mode: none` is rejected because it intentionally has no route to the control plane.
 
-`api_access` is a task-group privilege boundary: every task in the group can read the credential. Do not colocate untrusted sidecars with an API-enabled controller. Request the narrowest scope and access level the workload needs.
+`api_access` is a task-group privilege boundary: every task in the group can read a cluster-wide credential. Do not colocate untrusted sidecars with an API-enabled controller, and omit API access unless that authority is required. Request read rather than write when possible.
 
 When `restart` is omitted, Trellis stores a policy of three restarts per ten-minute window. An explicit `restart.max_restarts` is zero or greater and `restart.window` is a positive Go-style duration such as `5m`. The agent restarts a stopped task in place while the budget allows. Restarts are counted in fixed windows of `restart.window`, and the count resets when a window elapses. The count belongs to the allocation: control-plane start retries and agent restarts keep it and never grant a fresh budget, while a replacement allocation starts with its own. Once a task stops after the allowed restarts in the current window are used up, the allocation becomes `failed` with reason `restart_budget_exhausted` and is not restarted again, even after the window elapses. The failed allocation record and its event history remain for operator diagnosis; to keep the group at `count`, the control plane schedules a new allocation in its place.
 
@@ -239,7 +237,7 @@ An absolute `host_path` such as `/srv/postgres` is used verbatim and must alread
 
 Trellis mounts every volume `nosuid` and `nodev`: setuid bits and device nodes in the backing directory have no effect inside any container that mounts it, and tasks cannot create device nodes. Files in volumes remain executable. The flags do not rewrite stored files, so host users with access to an absolute `host_path` should treat its contents as untrusted.
 
-Namespace authorization does not prevent a manifest submitter from requesting an absolute path. A frontend serving untrusted tenants must reject this form; see [Multitenancy and trust boundaries](multitenancy.md).
+Namespace resource routing does not prevent a manifest submitter from requesting an absolute path. A frontend serving untrusted tenants must reject this form; see [Multitenancy and trust boundaries](multitenancy.md).
 
 Changing `host_path` does not change the volume identity or move it to another node. A later revision may point the same name at another path on its registered node, but Trellis does not copy or migrate the bytes; preparing the new backing data is the operator's responsibility.
 

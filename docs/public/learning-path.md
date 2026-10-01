@@ -14,7 +14,7 @@ Complete [Getting Started](getting-started.md) first. It establishes the only go
 | 6. Persistence | Namespace-scoped volume identities, `@/` paths, explicit host paths, locality, and backup responsibility | [`examples/volumes`](../../examples/volumes/) |
 | 7. Colocated tasks | Sidecars and the consequences of shared placement/scaling/lifecycle | [`examples/sidecar`](../../examples/sidecar/) |
 | 8. Namespace networking | Namespace, none, and host networking; service discovery | [`examples/namespace-networking`](../../examples/namespace-networking/) |
-| 9. In-cluster automation | Namespace/cluster scope and read/write API access | [`examples/api-access`](../../examples/api-access/) |
+| 9. In-cluster automation | Cluster-scoped read/write API access and its trust implications | [`examples/api-access`](../../examples/api-access/) |
 | 10. Release architecture | Rolling, blue/green, and weighted canary composition | [`examples/deployment-strategies`](../../examples/deployment-strategies/) |
 | 11. Stateful compositions | Coupled development stacks, local-volume caveats, application-native HA | [`examples/wordpress`](../../examples/wordpress/), then [`examples/patroni`](../../examples/patroni/) |
 
@@ -141,23 +141,23 @@ Treat discovery as runtime endpoint information, not application consensus. Appl
 
 ## 9. In-cluster API access
 
-API access has two dimensions: **scope** (`namespace` or `cluster`) and **access** (`read` or `write`). Prefer the narrowest pair that works.
+API access requires explicit **scope** `cluster` and **access** `read` or `write`. Prefer read access and omit API access entirely when it is not required.
 
 A typical observer uses:
 
 ```yaml
 api_access:
-  scope: namespace
+  scope: cluster
   access: read
 ```
 
-Trellis gives every task in the group a bearer credential restricted to the job's own namespace, plus the API address, job namespace, and cluster CA when configured. The namespace cannot be redirected to another tenant.
+Trellis gives every task in the group a cluster-wide bearer credential, plus the API address, job namespace, and cluster CA when configured. The injected job namespace is a routing convenience, not authorization; the token can address every namespace.
 
-Use `namespace/write` only for a namespace-local controller that actually mutates desired state. Use `cluster/read` for a trusted cluster-wide observer. Use `cluster/write` only for an operator workload that needs ordinary cluster mutations.
+Use `cluster/read` only for a trusted cluster-wide observer. Use `cluster/write` only for an operator workload that needs ordinary cluster mutations.
 
 The administrator signing key is separate and more privileged. It is used for backup/restore, Raft administration, and minting scoped credentials, and Trellis never injects it into workloads. Node registration and heartbeats instead use certificate-bound node identity; managed enrollment uses short-lived join tokens that the administrator mints.
 
-Every task in an API-enabled group can read the injected token, so do not add untrusted sidecars. The [`api-access`](../../examples/api-access/) example intentionally uses `namespace/read` and explains TLS verification, authenticated requests, last-known-good behavior, and token hygiene.
+Every task in an API-enabled group can read the injected token, so do not add untrusted sidecars. The [`api-access`](../../examples/api-access/) example intentionally uses `cluster/read` and explains the resulting cluster-wide visibility, TLS verification, authenticated requests, last-known-good behavior, and token hygiene.
 
 ## 10. Release patterns
 

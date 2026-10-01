@@ -12,30 +12,37 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/auth"
 )
 
-func scopedRequest(t *testing.T, method, target, body string, scope auth.AccessScope, access auth.AccessLevel, namespace string) *http.Request {
+func scopedRequest(t *testing.T, method, target, body string, scope auth.AccessScope, access auth.AccessLevel) *http.Request {
 	t.Helper()
 	req := httptest.NewRequest(method, target, bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
-	ctx := context.WithValue(req.Context(), NamespaceContextKey, auth.EncodeScope(scope, access, namespace))
+	ctx := context.WithValue(req.Context(), NamespaceContextKey, auth.EncodeScope(scope, access))
 	return req.WithContext(ctx)
+}
+
+func TestCredentialCreationRejectsNamespaceScope(t *testing.T) {
+	e := echo.New()
+	NewHandler(&Server{}).Register(e)
+	req := httptest.NewRequest(http.MethodPost, "/v1/credentials", strings.NewReader(`{"scope":"namespace","access":"read"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(context.WithValue(req.Context(), AdminContextKey, true))
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "scope must be cluster") {
+		t.Fatalf("status = %d, body: %s; want 400 rejecting namespace scope", rec.Code, rec.Body.String())
+	}
 }
 
 func TestPlanRejectsAPIAccessAboveCallerAuthority(t *testing.T) {
 	clusterWrite := `{"spec":{"name":"demo","namespace":"team","task_groups":[{"name":"web","count":1,"api_access":{"scope":"cluster","access":"write"},"tasks":[{"name":"app","image":"example.invalid/app:1","networking":{"mode":"host"}}]}]}}`
-	namespaceWrite := `{"spec":{"name":"demo","namespace":"team","task_groups":[{"name":"web","count":1,"api_access":{"scope":"namespace","access":"write"},"tasks":[{"name":"app","image":"example.invalid/app:1","networking":{"mode":"host"}}]}]}}`
-
 	tests := []struct {
-		name      string
-		scope     auth.AccessScope
-		access    auth.AccessLevel
-		namespace string
-		body      string
-		want      int
+		name   string
+		scope  auth.AccessScope
+		access auth.AccessLevel
+		body   string
+		want   int
 	}{
-		{name: "namespace write cannot delegate cluster write", scope: auth.AccessNamespace, access: auth.AccessWrite, namespace: "team", body: clusterWrite, want: http.StatusForbidden},
 		{name: "cluster read cannot delegate cluster write", scope: auth.AccessCluster, access: auth.AccessRead, body: clusterWrite, want: http.StatusForbidden},
-		{name: "namespace read cannot delegate namespace write", scope: auth.AccessNamespace, access: auth.AccessRead, namespace: "team", body: namespaceWrite, want: http.StatusForbidden},
-		{name: "namespace write may delegate namespace write", scope: auth.AccessNamespace, access: auth.AccessWrite, namespace: "team", body: namespaceWrite, want: http.StatusOK},
 		{name: "cluster write may delegate cluster write", scope: auth.AccessCluster, access: auth.AccessWrite, body: clusterWrite, want: http.StatusOK},
 	}
 
@@ -45,7 +52,7 @@ func TestPlanRejectsAPIAccessAboveCallerAuthority(t *testing.T) {
 			e := echo.New()
 			NewHandler(control).Register(e)
 
-			req := scopedRequest(t, http.MethodPost, "/v1/namespaces/team/jobs/plan", tt.body, tt.scope, tt.access, tt.namespace)
+			req := scopedRequest(t, http.MethodPost, "/v1/namespaces/team/jobs/plan", tt.body, tt.scope, tt.access)
 			rec := httptest.NewRecorder()
 			e.ServeHTTP(rec, req)
 
@@ -56,31 +63,14 @@ func TestPlanRejectsAPIAccessAboveCallerAuthority(t *testing.T) {
 	}
 }
 
-func TestApplyRejectsAPIAccessAboveCallerAuthority(t *testing.T) {
-	body := `{"spec":{"name":"demo","namespace":"team","task_groups":[{"name":"web","count":1,"api_access":{"scope":"cluster","access":"write"},"tasks":[{"name":"app","image":"example.invalid/app:1","networking":{"mode":"host"}}]}]}}`
-	control := &Server{}
-	e := echo.New()
-	NewHandler(control).Register(e)
-
-	req := scopedRequest(t, http.MethodPost, "/v1/namespaces/team/jobs", body, auth.AccessNamespace, auth.AccessWrite, "team")
-	rec := httptest.NewRecorder()
-	e.ServeHTTP(rec, req)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusForbidden, rec.Body.String())
-	}
-}
-
 func TestNamespacedRoutesAuthorizeThePathNamespace(t *testing.T) {
 	type principal struct {
-		scope     auth.AccessScope
-		access    auth.AccessLevel
-		namespace string
+		scope  auth.AccessScope
+		access auth.AccessLevel
 	}
 	var (
-		teamRead     = principal{auth.AccessNamespace, auth.AccessRead, "team"}
-		teamWrite    = principal{auth.AccessNamespace, auth.AccessWrite, "team"}
-		clusterRead  = principal{auth.AccessCluster, auth.AccessRead, ""}
-		clusterWrite = principal{auth.AccessCluster, auth.AccessWrite, ""}
+		clusterRead  = principal{auth.AccessCluster, auth.AccessRead}
+		clusterWrite = principal{auth.AccessCluster, auth.AccessWrite}
 		anonymous    = principal{}
 	)
 	const secret = `{"value_base64":"dGVzdA=="}`
@@ -92,38 +82,31 @@ func TestNamespacedRoutesAuthorizeThePathNamespace(t *testing.T) {
 		body   string
 		want   int
 	}{
-		// Reads of the caller's own namespace succeed; another namespace is 403.
-		{"namespace read lists own jobs", teamRead, http.MethodGet, "/v1/namespaces/team/jobs", "", http.StatusOK},
-		{"namespace read lists own allocations", teamRead, http.MethodGet, "/v1/namespaces/team/allocations", "", http.StatusOK},
-		{"namespace read cannot list other jobs", teamRead, http.MethodGet, "/v1/namespaces/other/jobs", "", http.StatusForbidden},
-		{"namespace read cannot read other job", teamRead, http.MethodGet, "/v1/namespaces/other/jobs/web", "", http.StatusForbidden},
-		{"namespace read cannot list other allocations", teamRead, http.MethodGet, "/v1/namespaces/other/allocations", "", http.StatusForbidden},
-		{"namespace read cannot stream other events", teamRead, http.MethodGet, "/v1/namespaces/other/events", "", http.StatusForbidden},
-		{"namespace write cannot delete other job", teamWrite, http.MethodDelete, "/v1/namespaces/other/jobs/web", "", http.StatusForbidden},
-		{"namespace write cannot stop other allocation", teamWrite, http.MethodDelete, "/v1/namespaces/other/allocations/a", "", http.StatusForbidden},
-		{"namespace read cannot delete own job", teamRead, http.MethodDelete, "/v1/namespaces/team/jobs/web", "", http.StatusForbidden},
+		// Cluster credentials may route to any explicit namespace.
+		{"cluster read lists jobs", clusterRead, http.MethodGet, "/v1/namespaces/team/jobs", "", http.StatusOK},
+		{"cluster read lists allocations", clusterRead, http.MethodGet, "/v1/namespaces/team/allocations", "", http.StatusOK},
+		{"cluster read missing job", clusterRead, http.MethodGet, "/v1/namespaces/other/jobs/web", "", http.StatusNotFound},
+		{"cluster read lists other allocations", clusterRead, http.MethodGet, "/v1/namespaces/other/allocations", "", http.StatusOK},
+		{"cluster write missing job", clusterWrite, http.MethodDelete, "/v1/namespaces/other/jobs/web", "", http.StatusNotFound},
+		{"cluster write missing allocation", clusterWrite, http.MethodDelete, "/v1/namespaces/other/allocations/a", "", http.StatusNotFound},
+		{"cluster read cannot delete job", clusterRead, http.MethodDelete, "/v1/namespaces/team/jobs/web", "", http.StatusForbidden},
 		{"invalid namespace", clusterRead, http.MethodGet, "/v1/namespaces/-bad/jobs", "", http.StatusBadRequest},
 		{"unauthenticated namespaced read", anonymous, http.MethodGet, "/v1/namespaces/team/jobs", "", http.StatusForbidden},
 		{"cluster read lists any namespace", clusterRead, http.MethodGet, "/v1/namespaces/other/jobs", "", http.StatusOK},
 
 		// Cross-namespace listing is explicit and cluster-scoped.
 		{"cluster read lists all allocations", clusterRead, http.MethodGet, "/v1/allocations", "", http.StatusOK},
-		{"namespace read cannot list all allocations", teamRead, http.MethodGet, "/v1/allocations", "", http.StatusForbidden},
-		{"namespace write cannot stream all events", teamWrite, http.MethodGet, "/v1/events", "", http.StatusForbidden},
 		{"unauthenticated cannot list all allocations", anonymous, http.MethodGet, "/v1/allocations", "", http.StatusForbidden},
 
-		// Secrets: namespace read sees metadata, namespace write manages
-		// secrets, and neither reaches another namespace.
-		{"namespace read lists own secrets", teamRead, http.MethodGet, "/v1/namespaces/team/secrets", "", http.StatusOK},
-		{"namespace read describes own secret", teamRead, http.MethodGet, "/v1/namespaces/team/secrets/existing", "", http.StatusOK},
-		{"namespace read cannot set own secret", teamRead, http.MethodPut, "/v1/namespaces/team/secrets/new", secret, http.StatusForbidden},
-		{"namespace read cannot delete own secret", teamRead, http.MethodDelete, "/v1/namespaces/team/secrets/existing", "", http.StatusForbidden},
-		{"namespace read cannot list other secrets", teamRead, http.MethodGet, "/v1/namespaces/other/secrets", "", http.StatusForbidden},
-		{"namespace write sets own secret", teamWrite, http.MethodPut, "/v1/namespaces/team/secrets/new", secret, http.StatusOK},
-		{"namespace write deletes own secret", teamWrite, http.MethodDelete, "/v1/namespaces/team/secrets/existing", "", http.StatusNoContent},
-		{"namespace write cannot set other secret", teamWrite, http.MethodPut, "/v1/namespaces/other/secrets/new", secret, http.StatusForbidden},
-		{"namespace write cannot delete other secret", teamWrite, http.MethodDelete, "/v1/namespaces/other/secrets/existing", "", http.StatusForbidden},
-		{"namespace write cannot describe other secret", teamWrite, http.MethodGet, "/v1/namespaces/other/secrets/existing", "", http.StatusForbidden},
+		// Read access sees secret metadata; write access manages secrets.
+		{"cluster read lists secrets", clusterRead, http.MethodGet, "/v1/namespaces/team/secrets", "", http.StatusOK},
+		{"cluster read describes secret", clusterRead, http.MethodGet, "/v1/namespaces/team/secrets/existing", "", http.StatusOK},
+		{"cluster read cannot delete secret", clusterRead, http.MethodDelete, "/v1/namespaces/team/secrets/existing", "", http.StatusForbidden},
+		{"cluster read lists other secrets", clusterRead, http.MethodGet, "/v1/namespaces/other/secrets", "", http.StatusOK},
+		{"cluster write sets secret", clusterWrite, http.MethodPut, "/v1/namespaces/team/secrets/new", secret, http.StatusOK},
+		{"cluster write deletes secret", clusterWrite, http.MethodDelete, "/v1/namespaces/team/secrets/existing", "", http.StatusNoContent},
+		{"cluster write deletes other secret", clusterWrite, http.MethodDelete, "/v1/namespaces/other/secrets/existing", "", http.StatusNoContent},
+		{"cluster write describes other secret", clusterWrite, http.MethodGet, "/v1/namespaces/other/secrets/existing", "", http.StatusOK},
 		{"cluster read describes any secret", clusterRead, http.MethodGet, "/v1/namespaces/other/secrets/existing", "", http.StatusOK},
 		{"cluster read cannot set secret", clusterRead, http.MethodPut, "/v1/namespaces/team/secrets/new", secret, http.StatusForbidden},
 		{"cluster write sets any secret", clusterWrite, http.MethodPut, "/v1/namespaces/other/secrets/new", secret, http.StatusOK},
@@ -140,7 +123,7 @@ func TestNamespacedRoutesAuthorizeThePathNamespace(t *testing.T) {
 			req := httptest.NewRequest(tt.method, tt.path, bytes.NewBufferString(tt.body))
 			req.Header.Set("Content-Type", "application/json")
 			if tt.caller != anonymous {
-				req = scopedRequest(t, tt.method, tt.path, tt.body, tt.caller.scope, tt.caller.access, tt.caller.namespace)
+				req = scopedRequest(t, tt.method, tt.path, tt.body, tt.caller.scope, tt.caller.access)
 			}
 			rec := httptest.NewRecorder()
 			e.ServeHTTP(rec, req)
@@ -158,7 +141,7 @@ func TestJobSubmissionRejectsNamespaceMismatch(t *testing.T) {
 			e := echo.New()
 			NewHandler(&Server{jobs: make(map[string]*Job)}).Register(e)
 			rec := httptest.NewRecorder()
-			e.ServeHTTP(rec, scopedRequest(t, http.MethodPost, path, body, auth.AccessCluster, auth.AccessWrite, ""))
+			e.ServeHTTP(rec, scopedRequest(t, http.MethodPost, path, body, auth.AccessCluster, auth.AccessWrite))
 			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `spec.namespace \"other\" does not match request namespace \"team\"`) {
 				t.Fatalf("status = %d, want 400 naming both namespaces; body: %s", rec.Code, rec.Body.String())
 			}

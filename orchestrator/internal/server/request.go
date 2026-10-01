@@ -115,25 +115,17 @@ func jsonTypeName(t reflect.Type) string {
 	}
 }
 
-// namespaceParam validates the {namespace} path parameter and authorizes the
-// caller for it. Cluster-scoped and administrator callers may address any
-// namespace; a namespace-scoped credential may address only its own.
+// namespaceParam validates the {namespace} path parameter and authorizes the caller.
 func namespaceParam(c *echo.Context) (string, error) {
 	namespace := c.Param("namespace")
 	if !spec.ValidIdentifier(namespace) {
 		return "", echo.NewHTTPError(http.StatusBadRequest, "invalid namespace")
 	}
 	authz := authorization(c)
-	switch {
-	case authz.root || authz.scope == auth.AccessCluster:
+	if authz.root || authz.scope == auth.AccessCluster {
 		return namespace, nil
-	case authz.scope == auth.AccessNamespace && authz.namespace == namespace:
-		return namespace, nil
-	case authz.scope == auth.AccessNamespace:
-		return "", echo.NewHTTPError(http.StatusForbidden, fmt.Sprintf("credential is scoped to namespace %q", authz.namespace))
-	default:
-		return "", echo.NewHTTPError(http.StatusForbidden, "namespaced resources require an authenticated scoped credential")
 	}
+	return "", echo.NewHTTPError(http.StatusForbidden, "namespaced resources require an authenticated scoped credential")
 }
 
 // namespaceWrite authorizes a mutation of the {namespace} path parameter.

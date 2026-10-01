@@ -74,7 +74,7 @@ func (m *memStore) Batch(_ context.Context, mutations []state.Mutation) error {
 func TestTokenRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	mgr := NewTokenManager(newMemStore(), "test")
-	principal := Principal{Kind: CredentialOperator, Scope: AccessNamespace, Access: AccessRead, Namespace: "acme"}
+	principal := Principal{Kind: CredentialOperator, Scope: AccessCluster, Access: AccessRead}
 
 	token, err := mgr.CreateToken(ctx, principal)
 	if err != nil {
@@ -87,7 +87,7 @@ func TestTokenRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if saved == nil || saved.Kind != CredentialOperator || saved.Scope != AccessNamespace || saved.Access != AccessRead || saved.Namespace != "acme" || saved.CreatedAt.IsZero() {
+	if saved == nil || saved.Kind != CredentialOperator || saved.Scope != AccessCluster || saved.Access != AccessRead || saved.CreatedAt.IsZero() {
 		t.Fatalf("unexpected principal: %#v", saved)
 	}
 
@@ -110,7 +110,7 @@ func testSealer(t *testing.T, store state.Store) Sealer {
 }
 
 func workloadPrincipal(scope AccessScope, access AccessLevel) Principal {
-	return Principal{Kind: CredentialWorkload, Scope: scope, Access: access, Namespace: "acme", Subject: &CredentialSubject{Namespace: "acme", Job: "api", TaskGroup: "web"}}
+	return Principal{Kind: CredentialWorkload, Scope: scope, Access: access, Subject: &CredentialSubject{Namespace: "acme", Job: "api", TaskGroup: "web"}}
 }
 
 func TestWorkloadTokenStableAndSealed(t *testing.T) {
@@ -119,11 +119,11 @@ func TestWorkloadTokenStableAndSealed(t *testing.T) {
 	mgr := NewTokenManager(store, "test")
 	sealer := testSealer(t, store)
 
-	token1, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(AccessNamespace, AccessRead))
+	token1, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(AccessCluster, AccessRead))
 	if err != nil {
 		t.Fatal(err)
 	}
-	token2, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(AccessNamespace, AccessRead))
+	token2, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(AccessCluster, AccessRead))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,14 +145,14 @@ func TestWorkloadTokenStableAndSealed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if saved == nil || saved.Kind != CredentialWorkload || saved.Scope != AccessNamespace || saved.Access != AccessRead || saved.Namespace != "acme" {
+	if saved == nil || saved.Kind != CredentialWorkload || saved.Scope != AccessCluster || saved.Access != AccessRead {
 		t.Fatalf("unexpected workload principal: %#v", saved)
 	}
 	if saved.Subject == nil || *saved.Subject != (CredentialSubject{Namespace: "acme", Job: "api", TaskGroup: "web"}) {
 		t.Fatalf("workload principal subject = %#v", saved.Subject)
 	}
 
-	other, err := mgr.WorkloadToken(ctx, sealer, "alloc-2", 1, workloadPrincipal(AccessNamespace, AccessRead))
+	other, err := mgr.WorkloadToken(ctx, sealer, "alloc-2", 1, workloadPrincipal(AccessCluster, AccessRead))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ func TestWorkloadTokenRotatesAndRevokesPrevious(t *testing.T) {
 	mgr := NewTokenManager(store, "test")
 	sealer := testSealer(t, store)
 
-	first, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(AccessNamespace, AccessRead))
+	first, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(AccessCluster, AccessRead))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,8 +175,8 @@ func TestWorkloadTokenRotatesAndRevokesPrevious(t *testing.T) {
 		generation uint64
 		principal  Principal
 	}{
-		"generation": {generation: 2, principal: workloadPrincipal(AccessNamespace, AccessRead)},
-		"grant":      {generation: 2, principal: workloadPrincipal(AccessNamespace, AccessWrite)},
+		"generation": {generation: 2, principal: workloadPrincipal(AccessCluster, AccessRead)},
+		"grant":      {generation: 2, principal: workloadPrincipal(AccessCluster, AccessWrite)},
 	} {
 		second, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", next.generation, next.principal)
 		if err != nil {
@@ -197,11 +197,11 @@ func TestWorkloadTokenRejectsSupersededGeneration(t *testing.T) {
 	store := newMemStore()
 	mgr := NewTokenManager(store, "test")
 	sealer := testSealer(t, store)
-	current, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 2, workloadPrincipal(AccessNamespace, AccessRead))
+	current, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 2, workloadPrincipal(AccessCluster, AccessRead))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(AccessNamespace, AccessRead)); err == nil {
+	if _, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(AccessCluster, AccessRead)); err == nil {
 		t.Fatal("stale generation minted a workload token")
 	}
 	if saved, _ := mgr.ValidateToken(ctx, current); saved == nil {
@@ -214,12 +214,12 @@ func TestWorkloadTokenLookupFailureDoesNotRotate(t *testing.T) {
 	store := &failingGetStore{memStore: newMemStore()}
 	mgr := NewTokenManager(store, "test")
 	sealer := testSealer(t, store.memStore)
-	first, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(AccessNamespace, AccessRead))
+	first, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(AccessCluster, AccessRead))
 	if err != nil {
 		t.Fatal(err)
 	}
 	store.failPrefix = "trellis/test/tokens/"
-	if _, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(AccessNamespace, AccessRead)); err == nil {
+	if _, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(AccessCluster, AccessRead)); err == nil {
 		t.Fatal("transient token lookup failure was not returned")
 	}
 	store.failPrefix = ""
@@ -245,7 +245,7 @@ func TestWorkloadTokenReplacesUnrecoverableCredential(t *testing.T) {
 	store := newMemStore()
 	mgr := NewTokenManager(store, "test")
 
-	first, err := mgr.WorkloadToken(ctx, testSealer(t, store), "alloc-1", 1, workloadPrincipal(AccessNamespace, AccessRead))
+	first, err := mgr.WorkloadToken(ctx, testSealer(t, store), "alloc-1", 1, workloadPrincipal(AccessCluster, AccessRead))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +253,7 @@ func TestWorkloadTokenReplacesUnrecoverableCredential(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := mgr.WorkloadToken(ctx, rotated, "alloc-1", 1, workloadPrincipal(AccessNamespace, AccessRead))
+	second, err := mgr.WorkloadToken(ctx, rotated, "alloc-1", 1, workloadPrincipal(AccessCluster, AccessRead))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,15 +269,15 @@ func TestWorkloadTokenRequiresSealerAndSubject(t *testing.T) {
 	ctx := context.Background()
 	store := newMemStore()
 	mgr := NewTokenManager(store, "test")
-	if _, err := mgr.WorkloadToken(ctx, nil, "alloc-1", 1, workloadPrincipal(AccessNamespace, AccessRead)); err == nil {
+	if _, err := mgr.WorkloadToken(ctx, nil, "alloc-1", 1, workloadPrincipal(AccessCluster, AccessRead)); err == nil {
 		t.Fatalf("workload token issued without a sealer")
 	}
-	principal := workloadPrincipal(AccessNamespace, AccessRead)
+	principal := workloadPrincipal(AccessCluster, AccessRead)
 	principal.Subject = nil
 	if _, err := mgr.WorkloadToken(ctx, testSealer(t, store), "alloc-1", 1, principal); err == nil {
 		t.Fatalf("workload token issued without a subject")
 	}
-	if _, err := mgr.WorkloadToken(ctx, testSealer(t, store), "alloc-1", 0, workloadPrincipal(AccessNamespace, AccessRead)); err == nil {
+	if _, err := mgr.WorkloadToken(ctx, testSealer(t, store), "alloc-1", 0, workloadPrincipal(AccessCluster, AccessRead)); err == nil {
 		t.Fatalf("workload token issued without a generation")
 	}
 	if len(store.values) != 0 {
@@ -300,7 +300,7 @@ func TestWorkloadTokenConcurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			token, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(AccessNamespace, AccessWrite))
+			token, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(AccessCluster, AccessWrite))
 			tokens <- token
 			errs <- err
 		}()
@@ -338,7 +338,7 @@ func TestWorkloadTokenBatchFailureLeavesNoCredential(t *testing.T) {
 	store.batchError = errors.New("injected batch failure")
 	mgr := NewTokenManager(store, "test")
 
-	if _, err := mgr.WorkloadToken(ctx, testSealer(t, store), "alloc-1", 1, workloadPrincipal(AccessNamespace, AccessRead)); err == nil || !strings.Contains(err.Error(), "injected batch failure") {
+	if _, err := mgr.WorkloadToken(ctx, testSealer(t, store), "alloc-1", 1, workloadPrincipal(AccessCluster, AccessRead)); err == nil || !strings.Contains(err.Error(), "injected batch failure") {
 		t.Fatalf("WorkloadToken error = %v, want injected failure", err)
 	}
 	store.mu.Lock()
@@ -356,7 +356,7 @@ func TestRevokeWorkloadCredentials(t *testing.T) {
 	store := newMemStore()
 	mgr := NewTokenManager(store, "test")
 	sealer := testSealer(t, store)
-	kept, err := mgr.WorkloadToken(ctx, sealer, "alloc-keep", 1, workloadPrincipal(AccessNamespace, AccessRead))
+	kept, err := mgr.WorkloadToken(ctx, sealer, "alloc-keep", 1, workloadPrincipal(AccessCluster, AccessRead))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -390,14 +390,30 @@ func TestRevokeWorkloadCredentials(t *testing.T) {
 
 func TestPrincipalValidation(t *testing.T) {
 	for _, principal := range []Principal{
-		{Kind: CredentialOperator, Scope: AccessNamespace, Access: AccessRead},
-		{Kind: CredentialOperator, Scope: AccessCluster, Access: AccessWrite, Namespace: "acme"},
-		{Kind: CredentialOperator, Scope: AccessNamespace, Access: AccessRead, Namespace: "acme", Subject: &CredentialSubject{Namespace: "acme", Job: "api", TaskGroup: "web"}},
-		{Kind: CredentialWorkload, Scope: AccessNamespace, Access: AccessRead, Namespace: "acme"},
-		{Kind: CredentialWorkload, Scope: AccessNamespace, Access: AccessRead, Namespace: "other", Subject: &CredentialSubject{Namespace: "acme", Job: "api", TaskGroup: "web"}},
+		{Kind: CredentialOperator, Scope: "namespace", Access: AccessRead},
+		{Kind: CredentialOperator, Scope: AccessCluster, Access: AccessRead, Subject: &CredentialSubject{Namespace: "acme", Job: "api", TaskGroup: "web"}},
+		{Kind: CredentialWorkload, Scope: AccessCluster, Access: AccessRead},
+		workloadPrincipal("namespace", AccessRead),
 	} {
 		if err := principal.Validate(); err == nil {
 			t.Fatalf("expected principal to be invalid: %#v", principal)
+		}
+	}
+}
+
+func TestValidateTokenRejectsPersistedNamespacePrincipal(t *testing.T) {
+	store := newMemStore()
+	mgr := NewTokenManager(store, "test")
+	token := "trls_op_persisted-namespace"
+	digest := sha256.Sum256([]byte(token))
+	key := mgr.tokenKey(hex.EncodeToString(digest[:]))
+	for _, data := range []string{
+		`{"kind":"operator","scope":"namespace","access":"read","namespace":"team"}`,
+		`{"kind":"workload","scope":"namespace","access":"write","namespace":"team","subject":{"namespace":"team","job":"api","task_group":"web"}}`,
+	} {
+		store.values[key] = []byte(data)
+		if principal, err := mgr.ValidateToken(t.Context(), token); err == nil || principal != nil {
+			t.Fatalf("persisted namespace principal = %#v, %v; want rejection", principal, err)
 		}
 	}
 }
@@ -424,7 +440,7 @@ func TestOperatorCredentialExpires(t *testing.T) {
 }
 
 func TestWorkloadCredentialCannotExpire(t *testing.T) {
-	principal := workloadPrincipal(AccessNamespace, AccessRead)
+	principal := workloadPrincipal(AccessCluster, AccessRead)
 	principal.ExpiresAt = time.Now()
 	if err := principal.Validate(); err == nil {
 		t.Fatal("workload credential with an expiry validated")
@@ -439,11 +455,11 @@ func TestListAndRevokeOperatorCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, secondCredential, err := mgr.CreateOperatorToken(ctx, Principal{Scope: AccessNamespace, Access: AccessRead, Namespace: "acme"})
+	second, secondCredential, err := mgr.CreateOperatorToken(ctx, Principal{Scope: AccessCluster, Access: AccessRead})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mgr.WorkloadToken(ctx, testSealer(t, store), "alloc-1", 1, workloadPrincipal(AccessNamespace, AccessRead)); err != nil {
+	if _, err := mgr.WorkloadToken(ctx, testSealer(t, store), "alloc-1", 1, workloadPrincipal(AccessCluster, AccessRead)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -485,7 +501,7 @@ func TestRevokeOperatorCredentialIgnoresWorkloadCredentials(t *testing.T) {
 	ctx := context.Background()
 	store := newMemStore()
 	mgr := NewTokenManager(store, "test")
-	token, err := mgr.WorkloadToken(ctx, testSealer(t, store), "alloc-1", 1, workloadPrincipal(AccessNamespace, AccessRead))
+	token, err := mgr.WorkloadToken(ctx, testSealer(t, store), "alloc-1", 1, workloadPrincipal(AccessCluster, AccessRead))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -495,22 +511,5 @@ func TestRevokeOperatorCredentialIgnoresWorkloadCredentials(t *testing.T) {
 	}
 	if principal, _ := mgr.ValidateToken(ctx, token); principal == nil {
 		t.Fatal("operator revocation removed a workload credential")
-	}
-}
-
-func TestCredentialNamespacesIgnoreExpiredCredentials(t *testing.T) {
-	ctx := context.Background()
-	now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
-	mgr := NewTokenManager(newMemStore(), "test")
-	mgr.SetClock(func() time.Time { return now })
-	if _, _, err := mgr.CreateOperatorToken(ctx, Principal{Scope: AccessNamespace, Access: AccessRead, Namespace: "tmp", ExpiresAt: now.Add(time.Hour)}); err != nil {
-		t.Fatal(err)
-	}
-	if got, _ := mgr.CredentialNamespaces(ctx); len(got) != 1 || got[0] != "tmp" {
-		t.Fatalf("namespaces = %v, want [tmp]", got)
-	}
-	now = now.Add(time.Hour)
-	if got, _ := mgr.CredentialNamespaces(ctx); len(got) != 0 {
-		t.Fatalf("namespaces after expiry = %v, want none", got)
 	}
 }

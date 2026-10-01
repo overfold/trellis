@@ -50,4 +50,4 @@ Read these after the public model unless you are working on Trellis itself:
 - Example READMEs state their level and prerequisites; advanced patterns must not masquerade as turnkey beginner workloads.
 - Internal Raft, RPC, and storage mechanics belong in developer documentation or explicitly advanced operator sections.
 
-> Security note: use TLS, protect cluster and namespace tokens, bind administrative endpoints to a trusted network, and keep the secrets encryption key outside the data directory.
+> Security note: use TLS, protect cluster-scoped operator and workload tokens, bind administrative endpoints to a trusted network, and keep the secrets encryption key outside the data directory. Namespaces do not restrict API credential authority.

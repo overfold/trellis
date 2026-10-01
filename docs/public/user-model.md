@@ -6,7 +6,7 @@ Trellis has several interfaces — YAML manifests, the `trellisctl` CLI, and the
 
 A Trellis deployment is a **cluster**. A cluster contains one or more **nodes** and workloads organized into **namespaces**.
 
-A namespace is the tenant and security boundary for workload-facing resources. It is not a separately lifecycle-managed object: users do not create or delete namespaces before using them. Applying a job names its namespace, and Trellis can discover namespace names that currently have desired jobs, secrets, or namespace-scoped credentials. Inside a namespace, users define **jobs**. A job is desired state: it says what should be running, not what happens to be running at this instant. Namespace scope does not filter valid manifest capabilities; operators accepting manifests from untrusted tenants must provide that admission layer in a frontend. See [Multitenancy and trust boundaries](multitenancy.md).
+A namespace is a resource, networking, and discovery boundary for workload-facing resources, but API credentials are cluster-wide. It is not a separately lifecycle-managed object: users do not create or delete namespaces before using them. Applying a job names its namespace, and Trellis can discover namespace names that currently have desired jobs or secrets. Inside a namespace, users define **jobs**. A job is desired state: it says what should be running, not what happens to be running at this instant. Operators accepting requests from untrusted tenants must enforce tenant authorization and manifest admission in a trusted frontend. See [Multitenancy and trust boundaries](multitenancy.md).
 
 A job contains one or more **task groups**. A task group is the unit Trellis places, scales, restarts, and updates together. A task group contains one or more **tasks**, where each task describes a container and selects its own network attachment.
 
@@ -30,7 +30,7 @@ cluster
 | --- | --- |
 | **Cluster** | One Trellis deployment operated as a unit. |
 | **Node** | A machine running `trellis` and participating in the cluster. |
-| **Namespace** | Tenant, authorization, discovery, and workload-isolation boundary for Trellis-owned resources; named by jobs rather than managed through create/delete lifecycle. |
+| **Namespace** | Resource, network, and discovery boundary for Trellis-owned workloads; named by jobs rather than managed through create/delete lifecycle. API credential authorization remains cluster-wide. |
 | **Job** | Named desired workload in a namespace. |
 | **Job manifest** | The YAML document humans author and apply to create or update a job. |
 | **Version** | The job specification produced by an accepted apply. Every change advances it, including scaling and label changes. |

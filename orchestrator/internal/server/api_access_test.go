@@ -68,7 +68,7 @@ func TestAPIAccessTokenClusterRead(t *testing.T) {
 	if err != nil || stored == nil {
 		t.Fatalf("validate generated token: %v", err)
 	}
-	if stored.Kind != auth.CredentialWorkload || stored.Scope != auth.AccessCluster || stored.Access != auth.AccessRead || stored.Namespace != "" {
+	if stored.Kind != auth.CredentialWorkload || stored.Scope != auth.AccessCluster || stored.Access != auth.AccessRead {
 		t.Fatalf("unexpected generated principal: %#v", stored)
 	}
 	if stored.Subject == nil || *stored.Subject != (auth.CredentialSubject{Namespace: "default", Job: "web", TaskGroup: "app"}) {
@@ -78,7 +78,7 @@ func TestAPIAccessTokenClusterRead(t *testing.T) {
 
 func TestAPIAccessTokenRequiresSecretsKey(t *testing.T) {
 	s := &Server{tokenManager: auth.NewTokenManager(apiAccessStore{}, "test")}
-	requested := &spec.APIAccessSpec{Scope: spec.APIAccessNamespace, Access: spec.APIAccessRead}
+	requested := &spec.APIAccessSpec{Scope: spec.APIAccessCluster, Access: spec.APIAccessRead}
 	request := &nodeapi.AllocationRequest{AllocationID: "alloc-1", Generation: 1, Namespace: "default", JobName: "web", GroupName: "app"}
 	if _, err := s.apiAccessToken(context.Background(), requested, request); err == nil || !strings.Contains(err.Error(), "secrets encryption key") {
 		t.Fatalf("api access without secrets key error = %v", err)
@@ -95,7 +95,7 @@ func TestStartRetryRedeliversWorkloadTokenWithStableExecutionHash(t *testing.T) 
 	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
 	s.nodes[node.ID] = node
 	task := spec.TaskSpec{Name: "app", Image: "app"}
-	group := spec.TaskGroupSpec{Name: "app", APIAccess: &spec.APIAccessSpec{Scope: spec.APIAccessNamespace, Access: spec.APIAccessWrite}, Tasks: []spec.TaskSpec{task}}
+	group := spec.TaskGroupSpec{Name: "app", APIAccess: &spec.APIAccessSpec{Scope: spec.APIAccessCluster, Access: spec.APIAccessWrite}, Tasks: []spec.TaskSpec{task}}
 	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{group}}), Revision: 1}
 	alloc := &Allocation{ID: "allocation", Namespace: "default", JobName: "web", TaskGroupName: "app", Tasks: []spec.TaskSpec{task}, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhasePlaced}
 	start := &Action{Type: ActionStart, Allocation: alloc}
@@ -142,7 +142,7 @@ func TestStartRetryRedeliversWorkloadTokenWithStableExecutionHash(t *testing.T) 
 func TestRevokeStaleWorkloadCredentials(t *testing.T) {
 	s, _ := newAPIAccessServer(t)
 	ctx := context.Background()
-	access := &spec.APIAccessSpec{Scope: spec.APIAccessNamespace, Access: spec.APIAccessRead}
+	access := &spec.APIAccessSpec{Scope: spec.APIAccessCluster, Access: spec.APIAccessRead}
 	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", APIAccess: access}}})}
 	issue := func(id string) string {
 		t.Helper()

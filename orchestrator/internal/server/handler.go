@@ -39,7 +39,7 @@ const (
 
 type contextKey string
 
-// NamespaceContextKey stores the authenticated namespace or encoded scoped authorization in a request context.
+// NamespaceContextKey stores encoded API authorization in a request context.
 const NamespaceContextKey contextKey = "trellis-namespace"
 
 // AdminContextKey stores cluster-administrator status in a request context.
@@ -53,10 +53,9 @@ const NodeContextKey contextKey = "trellis-node"
 const JoinTokenContextKey contextKey = "trellis-join-token"
 
 type requestAuthorization struct {
-	root      bool
-	scope     auth.AccessScope
-	access    auth.AccessLevel
-	namespace string
+	root   bool
+	scope  auth.AccessScope
+	access auth.AccessLevel
 }
 
 func authorization(c *echo.Context) requestAuthorization {
@@ -64,8 +63,8 @@ func authorization(c *echo.Context) requestAuthorization {
 		return requestAuthorization{root: true, scope: auth.AccessCluster, access: auth.AccessWrite}
 	}
 	value, _ := c.Request().Context().Value(NamespaceContextKey).(string)
-	if scope, access, namespace, ok := auth.DecodeScope(value); ok {
-		return requestAuthorization{scope: scope, access: access, namespace: namespace}
+	if scope, access, ok := auth.DecodeScope(value); ok {
+		return requestAuthorization{scope: scope, access: access}
 	}
 	return requestAuthorization{}
 }
@@ -122,16 +121,13 @@ func requireAPIAccessDelegation(c *echo.Context, job *spec.JobSpec) error {
 	if authz.root {
 		return nil
 	}
-	if authz.scope != auth.AccessCluster && authz.scope != auth.AccessNamespace {
+	if authz.scope != auth.AccessCluster {
 		return echo.NewHTTPError(http.StatusForbidden, "API access delegation requires an authenticated scoped credential")
 	}
 	for i := range job.TaskGroups {
 		requested := job.TaskGroups[i].APIAccess
 		if requested == nil {
 			continue
-		}
-		if authz.scope == auth.AccessNamespace && auth.AccessScope(requested.Scope) == auth.AccessCluster {
-			return echo.NewHTTPError(http.StatusForbidden, "job api_access exceeds caller scope")
 		}
 		if authz.access == auth.AccessRead && auth.AccessLevel(requested.Access) == auth.AccessWrite {
 			return echo.NewHTTPError(http.StatusForbidden, "job api_access exceeds caller access")
@@ -205,23 +201,16 @@ func (h *Handler) handleCreateCredential(c *echo.Context) error {
 	}
 	scope := auth.AccessScope(request.Scope)
 	access := auth.AccessLevel(request.Access)
-	if scope != auth.AccessNamespace && scope != auth.AccessCluster {
-		return echo.NewHTTPError(http.StatusBadRequest, "scope must be namespace or cluster")
+	if scope != auth.AccessCluster {
+		return echo.NewHTTPError(http.StatusBadRequest, "scope must be cluster")
 	}
 	if access != auth.AccessRead && access != auth.AccessWrite {
 		return echo.NewHTTPError(http.StatusBadRequest, "access must be read or write")
 	}
-	if scope == auth.AccessNamespace {
-		if !spec.ValidIdentifier(request.Namespace) {
-			return echo.NewHTTPError(http.StatusBadRequest, "namespace scope requires a valid namespace")
-		}
-	} else if request.Namespace != "" {
-		return echo.NewHTTPError(http.StatusBadRequest, "cluster scope must not include a namespace")
-	}
 	if request.TTLSeconds < 0 || request.TTLSeconds > maxTTLSeconds {
 		return echo.NewHTTPError(http.StatusBadRequest, "ttl_seconds must be between 0 and "+strconv.FormatInt(maxTTLSeconds, 10))
 	}
-	token, credential, err := h.server.CreateCredential(c.Request().Context(), scope, access, request.Namespace, time.Duration(request.TTLSeconds)*time.Second)
+	token, credential, err := h.server.CreateCredential(c.Request().Context(), scope, access, time.Duration(request.TTLSeconds)*time.Second)
 	if errors.Is(err, ErrInvalidCredentialRequest) {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
@@ -240,7 +229,6 @@ func credentialResponse(credential auth.OperatorCredential) api.CredentialRespon
 		ID:        credential.ID,
 		Scope:     string(credential.Principal.Scope),
 		Access:    string(credential.Principal.Access),
-		Namespace: credential.Principal.Namespace,
 		CreatedAt: credential.Principal.CreatedAt,
 	}
 	if !credential.Principal.ExpiresAt.IsZero() {

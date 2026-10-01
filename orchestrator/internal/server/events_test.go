@@ -114,14 +114,14 @@ func TestEventHandlerRejectsOverloadAndReleasesCanceledSubscriber(t *testing.T) 
 	handler := NewHandler(&Server{events: bus})
 
 	ctx, cancel := context.WithCancel(t.Context())
-	ctx = context.WithValue(ctx, NamespaceContextKey, auth.EncodeScope(auth.AccessCluster, auth.AccessRead, ""))
+	ctx = context.WithValue(ctx, NamespaceContextKey, auth.EncodeScope(auth.AccessCluster, auth.AccessRead))
 	req := httptest.NewRequest(http.MethodGet, "/v1/events", nil).WithContext(ctx)
 	c := echo.New().NewContext(req, httptest.NewRecorder())
 	done := make(chan error, 1)
 	go func() { done <- handler.handleClusterEvents(c) }()
 	waitForSubscriberCount(t, bus, 1)
 
-	overload := echo.New().NewContext(scopedRequest(t, http.MethodGet, "/v1/events", "", auth.AccessCluster, auth.AccessRead, ""), httptest.NewRecorder())
+	overload := echo.New().NewContext(scopedRequest(t, http.MethodGet, "/v1/events", "", auth.AccessCluster, auth.AccessRead), httptest.NewRecorder())
 	err := handler.handleClusterEvents(overload)
 	var httpErr *echo.HTTPError
 	if !errors.As(err, &httpErr) || httpErr.Code != http.StatusServiceUnavailable {
@@ -171,7 +171,7 @@ func waitForSubscriberCount(t *testing.T, bus *EventBus, want int) {
 func TestEventStreamSendsHeadersBeforeTheFirstEvent(t *testing.T) {
 	s, _ := newTestServerWithAgent()
 	s.events = newEventBus()
-	server := httptest.NewServer(authenticatedHandler(s, auth.AccessNamespace, auth.AccessRead, "default"))
+	server := httptest.NewServer(authenticatedHandler(s, auth.AccessCluster, auth.AccessRead))
 	defer server.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

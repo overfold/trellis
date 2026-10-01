@@ -76,11 +76,19 @@ func TestDecodeJSONRejectsLooseRequests(t *testing.T) {
 
 func TestDecodeJSONAcceptsOneValueWithWhitespace(t *testing.T) {
 	var request api.CredentialCreateRequest
-	if err := decodeRequest(t, "application/json; charset=utf-8", " {\"scope\":\"namespace\",\"access\":\"read\",\"namespace\":\"team\"}\n\n", maxSmallRequestBytes, &request); err != nil {
+	if err := decodeRequest(t, "application/json; charset=utf-8", " {\"scope\":\"cluster\",\"access\":\"read\"}\n\n", maxSmallRequestBytes, &request); err != nil {
 		t.Fatal(err)
 	}
-	if request.Scope != "namespace" || request.Namespace != "team" {
+	if request.Scope != "cluster" {
 		t.Fatalf("request = %#v", request)
+	}
+}
+
+func TestCredentialRequestRejectsNamespaceMetadata(t *testing.T) {
+	var request api.CredentialCreateRequest
+	err := decodeRequest(t, "application/json", `{"scope":"cluster","access":"read","namespace":"team"}`, maxSmallRequestBytes, &request)
+	if err == nil || !strings.Contains(err.Error(), `unknown field "namespace"`) {
+		t.Fatalf("error = %v, want unknown namespace field", err)
 	}
 }
 
@@ -112,7 +120,7 @@ func TestJobRoutesRejectUnknownFields(t *testing.T) {
 	} {
 		for _, path := range []string{"/v1/namespaces/team/jobs/plan", "/v1/namespaces/team/jobs"} {
 			rec := httptest.NewRecorder()
-			e.ServeHTTP(rec, scopedRequest(t, http.MethodPost, path, body, auth.AccessNamespace, auth.AccessWrite, "team"))
+			e.ServeHTTP(rec, scopedRequest(t, http.MethodPost, path, body, auth.AccessCluster, auth.AccessWrite))
 			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "unknown field") {
 				t.Fatalf("POST %s status = %d, want 400 unknown field; body: %s", path, rec.Code, rec.Body.String())
 			}
@@ -135,7 +143,7 @@ func TestFirstPartyRequestsDecodeStrictly(t *testing.T) {
 		{name: "registration", body: nodeapi.NodeRegistrationRequest{ID: uuid.New(), Host: "node", Port: 8127, Labels: map[string]string{"zone": "a"}}, dst: &nodeapi.NodeRegistrationRequest{}},
 		{name: "enrollment", body: nodeapi.NodeEnrollmentRequest{ServerAdvertise: "a:8128", AgentAdvertise: "a:8127", RaftAdvertise: "a:8129"}, dst: &nodeapi.NodeEnrollmentRequest{}},
 		{name: "raft join", body: nodeapi.RaftJoinRequest{ServerAddress: "a:8128", RaftAddress: "a:8129"}, dst: &nodeapi.RaftJoinRequest{}},
-		{name: "credential", body: api.CredentialCreateRequest{Scope: "namespace", Access: "read", Namespace: "team"}, dst: &api.CredentialCreateRequest{}},
+		{name: "credential", body: api.CredentialCreateRequest{Scope: "cluster", Access: "read"}, dst: &api.CredentialCreateRequest{}},
 		{name: "job limits", body: JobLimitsAPI(spec.DefaultLimits()), dst: &api.JobLimits{}},
 		{name: "backup", body: api.BackupSnapshot{}, dst: &api.BackupSnapshot{}},
 	}

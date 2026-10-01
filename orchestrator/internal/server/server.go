@@ -1970,7 +1970,7 @@ func (s *Server) refreshCatalogAllocations(allocations []*Allocation) {
 	s.catalog.ReplaceInstances(ids, replacements)
 }
 
-// TokenManager returns the namespace token manager.
+// TokenManager returns the API token manager.
 func (s *Server) TokenManager() *auth.TokenManager {
 	return s.tokenManager
 }

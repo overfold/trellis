@@ -296,32 +296,25 @@ func TestJobsApplySendsPlannedVersionAndReportsConflict(t *testing.T) {
 	}
 }
 
-func TestJobsListSelectsNamespaceFromCredential(t *testing.T) {
+func TestJobsListRequiresExplicitNamespace(t *testing.T) {
 	previousConfig := config
 	t.Cleanup(func() { config = previousConfig })
 
 	for _, tc := range []struct {
 		name      string
 		namespace string
-		whoami    string
 		wantPath  string
 		wantErr   string
 	}{
 		{name: "explicit namespace", namespace: "payments", wantPath: "/v1/namespaces/payments/jobs"},
-		{name: "namespace-scoped credential", whoami: `{"kind":"operator","scope":"namespace","access":"read","namespace":"team"}`, wantPath: "/v1/namespaces/team/jobs"},
-		{name: "cluster-scoped credential", whoami: `{"kind":"operator","scope":"cluster","access":"read"}`, wantErr: "--namespace is required with a cluster-scoped credential"},
+		{name: "missing namespace", wantErr: "--namespace is required for namespace-scoped commands"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var paths []string
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				paths = append(paths, r.URL.Path)
 				w.Header().Set("Content-Type", "application/json")
-				switch r.URL.Path {
-				case "/v1/auth/whoami":
-					_, _ = w.Write([]byte(tc.whoami))
-				default:
-					_, _ = w.Write([]byte("[]"))
-				}
+				_, _ = w.Write([]byte("[]"))
 			}))
 			defer server.Close()
 
