@@ -14,7 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"github.com/overfold/trellis/orchestrator/internal/auth"
-	"github.com/overfold/trellis/orchestrator/internal/execstream"
+	"github.com/overfold/trellis/orchestrator/internal/execwebsocket"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
@@ -81,7 +81,7 @@ func serveExecRequest(t *testing.T, e *echo.Echo, route execErrorRoute, path str
 	t.Helper()
 	rec := httptest.NewRecorder()
 	request := scopedRequest(t, route.method, path, route.body, auth.AccessNamespace, auth.AccessWrite, "team")
-	execstream.SetUpgradeHeaders(request)
+	execwebsocket.SetRequestHeaders(request)
 	e.ServeHTTP(rec, request)
 	return rec
 }

@@ -20,7 +20,7 @@ const (
 	maxCommandArgs       = 1024
 )
 
-// EncodeRequest returns the query string of an exec upgrade request.
+// EncodeRequest returns the query string of an exec stream request.
 func EncodeRequest(request api.ExecRequest) url.Values {
 	query := url.Values{}
 	if request.Task != "" {
@@ -47,7 +47,7 @@ func EncodeRequest(request api.ExecRequest) url.Values {
 	return query
 }
 
-// DecodeRequest parses and validates the query string of an exec upgrade
+// DecodeRequest parses and validates the query string of an exec stream
 // request, defaulting the size of a terminal.
 func DecodeRequest(query url.Values) (api.ExecRequest, error) {
 	var request api.ExecRequest

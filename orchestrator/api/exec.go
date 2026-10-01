@@ -1,7 +1,7 @@
 package api
 
 // ExecRequest starts an exec stream in an allocation task. It is carried in
-// the query string of the upgrade request rather than in a JSON body.
+// the query string of the WebSocket request rather than in a JSON body.
 type ExecRequest struct {
 	// Task selects the task; it may be empty when the allocation has one task.
 	Task string

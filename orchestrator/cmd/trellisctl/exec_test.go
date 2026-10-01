@@ -10,14 +10,15 @@ import (
 
 	"github.com/overfold/trellis/orchestrator/api"
 	"github.com/overfold/trellis/orchestrator/internal/execstream"
+	"github.com/overfold/trellis/orchestrator/internal/execwebsocket"
 )
 
-// newExecTestServer accepts one exec stream, checks its request, and hands
-// the stream to serve.
+// newExecTestServer accepts one exec WebSocket, checks its request, and hands
+// its adapted frame stream to serve.
 func newExecTestServer(t *testing.T, check func(api.ExecRequest), serve func(*execstream.Reader, *execstream.Writer)) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/v1/namespaces/default/allocations/alloc-1/exec" || !execstream.IsUpgradeRequest(r) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/namespaces/default/allocations/alloc-1/exec" || !execwebsocket.IsRequest(r) {
 			http.Error(w, "unexpected request", http.StatusNotFound)
 			return
 		}
@@ -26,7 +27,7 @@ func newExecTestServer(t *testing.T, check func(api.ExecRequest), serve func(*ex
 			t.Errorf("decode request: %v", err)
 		}
 		check(request)
-		conn, err := execstream.Accept(w)
+		conn, err := execwebsocket.Accept(w, r)
 		if err != nil {
 			t.Errorf("accept: %v", err)
 			return

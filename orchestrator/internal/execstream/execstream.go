@@ -1,6 +1,7 @@
-// Package execstream implements the framed exec protocol that trellisctl,
-// the control-plane leader, and node agents speak over an HTTP/1.1
-// connection upgraded to Protocol.
+// Package execstream implements the internal framed exec protocol that the
+// control-plane leader and node agents speak over an HTTP/1.1 connection
+// upgraded to Protocol. The public operator API adapts these frames to
+// WebSocket messages rather than exposing this stream representation.
 //
 // Every frame is a one-byte type, a four-byte big-endian payload length, and
 // at most MaxPayload payload bytes. Data frames carry raw bytes; control

@@ -18,6 +18,7 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/auth"
 	"github.com/overfold/trellis/orchestrator/internal/catalog"
 	"github.com/overfold/trellis/orchestrator/internal/execstream"
+	"github.com/overfold/trellis/orchestrator/internal/execwebsocket"
 	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	secretstore "github.com/overfold/trellis/orchestrator/internal/secrets"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
@@ -1007,16 +1008,16 @@ func (h *Handler) handleStopAllocation(c *echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
-// handleExec opens an exec stream. Request, authorization, lookup, and
+// handleExec opens an exec WebSocket. Request, authorization, lookup, and
 // admission errors are ordinary HTTP responses; once the connection is
-// upgraded the leader relays frames between the client and the agent.
+// upgraded the leader translates WebSocket messages to the agent stream.
 func (h *Handler) handleExec(c *echo.Context) error {
 	ns, err := namespaceWrite(c, "exec requires write authorization")
 	if err != nil {
 		return err
 	}
-	if !execstream.IsUpgradeRequest(c.Request()) {
-		return echo.NewHTTPError(http.StatusBadRequest, "exec requires an HTTP/1.1 upgrade to "+execstream.Protocol)
+	if !execwebsocket.IsRequest(c.Request()) {
+		return echo.NewHTTPError(http.StatusBadRequest, "exec requires a WebSocket using subprotocol "+execwebsocket.Protocol)
 	}
 	request, err := execstream.DecodeRequest(c.QueryParams())
 	if err != nil {
@@ -1033,9 +1034,9 @@ func (h *Handler) handleExec(c *echo.Context) error {
 		return h.agentRequestError(err, noRunningTaskMessage(c.Param("id"), request.Task))
 	}
 	defer stream.Close()
-	conn, err := execstream.Accept(c.Response())
+	conn, err := execwebsocket.Accept(c.Response(), c.Request())
 	if err != nil {
-		h.server.log.Warn("accept exec stream", "allocation", c.Param("id"), "error", err)
+		h.server.log.Warn("accept exec WebSocket", "allocation", c.Param("id"), "error", err)
 		return nil
 	}
 	stream.Relay(conn)

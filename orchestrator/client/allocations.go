@@ -135,7 +135,7 @@ func (c *Client) Exec(ctx context.Context, id string, request api.ExecRequest) (
 	if err != nil {
 		return nil, fmt.Errorf("exec allocation: %w", err)
 	}
-	conn, err := c.transport.Upgrade(ctx, path)
+	conn, err := c.transport.ExecWebSocket(ctx, path)
 	if err != nil {
 		return nil, fmt.Errorf("exec allocation: %w", publicError(err))
 	}

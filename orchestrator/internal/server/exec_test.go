@@ -1,24 +1,23 @@
 package server
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/labstack/echo/v5"
 	"github.com/overfold/trellis/orchestrator/api"
 	"github.com/overfold/trellis/orchestrator/client"
 	"github.com/overfold/trellis/orchestrator/internal/auth"
 	"github.com/overfold/trellis/orchestrator/internal/execstream"
+	"github.com/overfold/trellis/orchestrator/internal/execwebsocket"
 	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 )
 
@@ -206,26 +205,19 @@ func TestExecRelayRejectsServerFramesFromClient(t *testing.T) {
 	test := newExecRelayTest(t, func(reader *execstream.Reader, _ *execstream.Writer) {
 		drainUntilClosed(reader, agentClosed)
 	})
-	conn, err := net.Dial("tcp", test.leader.Listener.Addr().String())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, test.leader.URL+"/v1/namespaces/team/allocations/alloc-1/exec?command=sh", &websocket.DialOptions{Subprotocols: []string{execwebsocket.Protocol}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = conn.Close() }()
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-	if _, err := fmt.Fprintf(conn, "GET /v1/namespaces/team/allocations/alloc-1/exec?command=sh HTTP/1.1\r\nHost: leader\r\nConnection: Upgrade\r\nUpgrade: %s\r\n\r\n", execstream.Protocol); err != nil {
+	defer func() { _ = conn.CloseNow() }()
+	if err := conn.Write(ctx, websocket.MessageBinary, []byte{byte(execstream.FrameExit), '{', '}'}); err != nil {
 		t.Fatal(err)
 	}
-	buffered := bufio.NewReader(conn)
-	response, err := http.ReadResponse(buffered, nil)
-	if err != nil || response.StatusCode != http.StatusSwitchingProtocols {
-		t.Fatalf("upgrade = %v, %v", response, err)
-	}
-	if err := execstream.NewWriter(conn, 0).WriteData(execstream.FrameExit, []byte("{}")); err != nil {
-		t.Fatal(err)
-	}
-	frame, err := execstream.NewReader(buffered).Next()
-	if err != nil || frame.Type != execstream.FrameError || !strings.Contains(string(frame.Payload), "unexpected frame type") {
-		t.Fatalf("frame = %d %q, %v; want error", frame.Type, frame.Payload, err)
+	messageType, message, err := conn.Read(ctx)
+	if err != nil || messageType != websocket.MessageBinary || len(message) == 0 || execstream.FrameType(message[0]) != execstream.FrameError || !strings.Contains(string(message[1:]), "unexpected frame type") {
+		t.Fatalf("message = %d %q, %v; want error", messageType, message, err)
 	}
 	waitClosed(t, agentClosed, "agent stream")
 }
@@ -254,7 +246,7 @@ func TestExecRequestRejections(t *testing.T) {
 			}
 			request := scopedRequest(t, http.MethodGet, tt.path, "", auth.AccessNamespace, tt.access, "team")
 			if tt.upgrade {
-				execstream.SetUpgradeHeaders(request)
+				execwebsocket.SetRequestHeaders(request)
 			}
 			rec := httptest.NewRecorder()
 			e.ServeHTTP(rec, request)

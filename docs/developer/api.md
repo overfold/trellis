@@ -42,7 +42,7 @@ The API uses the same resource vocabulary as the [Trellis user model](../public/
 | `DELETE` | `/v1/namespaces/{ns}/allocations/{id}` | Stop one allocation; requires write access. |
 | `GET` | `/v1/namespaces/{ns}/allocations/{id}/events` | Lifecycle event array. |
 | `GET` | `/v1/namespaces/{ns}/allocations/{id}/logs?task=NAME&tail=100&follow=true` | Plain-text logs for one task in an allocation. |
-| `GET` | `/v1/namespaces/{ns}/allocations/{id}/exec?command=...` | Upgrade to a bidirectional exec stream (`Upgrade: trellis-exec.v1`) that runs one command; requires write access. See [Exec streams](#exec-streams). |
+| `GET` | `/v1/namespaces/{ns}/allocations/{id}/exec?command=...` | Upgrade to a bidirectional WebSocket (`trellis.exec.v1`) that runs one command; requires write access. See [Exec streams](#exec-streams). |
 | `GET` | `/v1/namespaces/{ns}/allocations/{id}/metrics` | Current per-task CPU and memory usage. |
 | `GET` | `/v1/namespaces/{ns}/events` | Server-sent event stream for one namespace. |
 | `PUT` | `/v1/namespaces/{ns}/secrets/{name}` | Set a secret; requires write access. |
@@ -92,7 +92,7 @@ For allocation logs, `task` selects the task name from the allocation's task gro
 
 ### Exec streams
 
-`GET /v1/namespaces/{ns}/allocations/{id}/exec` runs one command in an allocation task over a single long-lived, bidirectional stream. The request is an HTTP/1.1 upgrade: it carries `Connection: Upgrade` and `Upgrade: trellis-exec.v1` along with the usual credentials, and the server answers `101 Switching Protocols` once the command is admitted. HTTP/2 cannot upgrade connections, so clients must use HTTP/1.1 for this request. Followers proxy the upgrade to the leader like any other request.
+`GET /v1/namespaces/{ns}/allocations/{id}/exec` runs one command in an allocation task over a single long-lived, bidirectional WebSocket. The opening handshake uses the standard RFC 6455 upgrade with WebSocket subprotocol `trellis.exec.v1` and the usual credentials, and the server answers `101 Switching Protocols` once the command is admitted. Clients using the HTTP/1.1 WebSocket handshake send `Connection: Upgrade`, `Upgrade: websocket`, and `Sec-WebSocket-Protocol: trellis.exec.v1`. Followers proxy the WebSocket to the leader like any other request.
 
 The query string describes the process:
 
@@ -107,7 +107,7 @@ The query string describes the process:
 
 `term`, `cols`, and `rows` require `tty=true`. The command runs with the selected task container's OCI process context: environment variables, user, working directory, and security confinement are inherited from the task. `TERM` is the only override. Exec addresses only the current generation's running tasks, as do allocation metrics.
 
-After the upgrade, both directions carry frames: a one-byte type, a four-byte big-endian payload length, and a payload of at most 32 KiB. Data frames carry raw bytes; control frames carry JSON.
+After the upgrade, both directions send binary WebSocket messages. Each message is exactly one exec event: a one-byte type followed by a payload of at most 32 KiB. The WebSocket message boundary supplies the payload length. Data messages carry raw bytes after the type byte; control messages carry JSON. Text messages, empty messages, oversized payloads, and unknown or wrong-direction types are invalid.
 
 | Type | Name | Direction | Payload |
 |---|---|---|---|
@@ -129,7 +129,7 @@ Exec and allocation-metrics requests that fail before the upgrade return a JSON 
 
 | Status | Meaning |
 |---|---|
-| `400` | The request is invalid, is not an upgrade to `trellis-exec.v1`, or must name one task: the allocation has several tasks, or the named task is not in its task group. |
+| `400` | The request is invalid, is not a WebSocket request for subprotocol `trellis.exec.v1`, or must name one task: the allocation has several tasks, or the named task is not in its task group. |
 | `403` | The credential is scoped to another namespace, or lacks write access (exec only). |
 | `404` | The allocation is not placed in the path namespace. |
 | `409` | The allocation exists but its node has no running target for the request, such as a task that has not started or has exited. It also covers conflicting execution records for the task on the node, and an agent already fenced by a newer leader. Retry after the allocation is running again. |

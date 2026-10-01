@@ -17,21 +17,22 @@ import (
 	"github.com/overfold/trellis/orchestrator/api"
 	"github.com/overfold/trellis/orchestrator/internal/adminsign"
 	"github.com/overfold/trellis/orchestrator/internal/execstream"
+	"github.com/overfold/trellis/orchestrator/internal/execwebsocket"
 )
 
-// serveExecTestStream answers exec upgrade requests by accepting them and
-// handing the stream to serve.
+// serveExecTestStream answers exec WebSocket requests and hands the adapted
+// frame stream to serve.
 func serveExecTestStream(t *testing.T, check func(*http.Request), serve func(*execstream.Reader, *execstream.Writer)) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/v1/namespaces/default/allocations/alloc-1/exec" || !execstream.IsUpgradeRequest(r) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/namespaces/default/allocations/alloc-1/exec" || !execwebsocket.IsRequest(r) {
 			http.Error(w, "unexpected request", http.StatusNotFound)
 			return
 		}
 		if check != nil {
 			check(r)
 		}
-		conn, err := execstream.Accept(w)
+		conn, err := execwebsocket.Accept(w, r)
 		if err != nil {
 			t.Errorf("accept: %v", err)
 			return
@@ -167,7 +168,7 @@ func TestClientExecSignsAdministratorUpgrade(t *testing.T) {
 			http.Error(w, "bad signature", http.StatusUnauthorized)
 			return
 		}
-		conn, err := execstream.Accept(w)
+		conn, err := execwebsocket.Accept(w, r)
 		if err != nil {
 			return
 		}

@@ -3,6 +3,7 @@ module github.com/overfold/trellis
 go 1.26.4
 
 require (
+	github.com/coder/websocket v1.8.15
 	github.com/containerd/containerd/v2 v2.3.2
 	github.com/containerd/errdefs v1.0.0
 	github.com/go-viper/mapstructure/v2 v2.5.0

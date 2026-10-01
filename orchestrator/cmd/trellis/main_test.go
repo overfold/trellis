@@ -25,6 +25,7 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/auth"
 	"github.com/overfold/trellis/orchestrator/internal/election"
 	"github.com/overfold/trellis/orchestrator/internal/execstream"
+	"github.com/overfold/trellis/orchestrator/internal/execwebsocket"
 	"github.com/overfold/trellis/orchestrator/internal/server"
 	"github.com/overfold/trellis/orchestrator/internal/storage"
 	"github.com/overfold/trellis/orchestrator/internal/tlsutil"
@@ -317,15 +318,15 @@ func TestControlPlaneFollowerProxiesToLeader(t *testing.T) {
 	}
 }
 
-// A follower forwards an exec upgrade to the leader and then carries the
-// switched stream in both directions.
+// A follower forwards an exec WebSocket to the leader and then carries its
+// messages in both directions.
 func TestControlPlaneFollowerProxiesExecStream(t *testing.T) {
 	leader := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !execstream.IsUpgradeRequest(r) || r.Header.Get("Authorization") != "Bearer operator-token" {
+		if !execwebsocket.IsRequest(r) || r.Header.Get("Authorization") != "Bearer operator-token" {
 			http.Error(w, "unexpected request", http.StatusBadRequest)
 			return
 		}
-		conn, err := execstream.Accept(w)
+		conn, err := execwebsocket.Accept(w, r)
 		if err != nil {
 			t.Errorf("accept: %v", err)
 			return

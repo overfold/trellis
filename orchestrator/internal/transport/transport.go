@@ -18,9 +18,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/overfold/trellis/orchestrator/api"
 	"github.com/overfold/trellis/orchestrator/internal/adminsign"
 	"github.com/overfold/trellis/orchestrator/internal/execstream"
+	"github.com/overfold/trellis/orchestrator/internal/execwebsocket"
 )
 
 // MaxResponseBody bounds a buffered response body.
@@ -195,6 +197,47 @@ func (c *Client) Upgrade(ctx context.Context, target string) (io.ReadWriteCloser
 			return nil, fmt.Errorf("server did not switch to %s (status %d)", execstream.Protocol, response.StatusCode)
 		}
 		return nil, &HTTPError{Status: response.StatusCode, Body: body}
+	}
+	return nil, fmt.Errorf("administrator challenge was rejected after retry")
+}
+
+// ExecWebSocket opens an authenticated public exec WebSocket. The stream is
+// closed when ctx ends.
+func (c *Client) ExecWebSocket(ctx context.Context, target string) (io.ReadWriteCloser, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, http.NoBody)
+		if err != nil {
+			return nil, fmt.Errorf("constructing request %s: %w", target, err)
+		}
+		if err := c.authenticate(ctx, request, nil); err != nil {
+			return nil, err
+		}
+		conn, response, err := websocket.Dial(ctx, target, &websocket.DialOptions{
+			HTTPClient:   c.HTTP,
+			HTTPHeader:   request.Header,
+			Subprotocols: []string{execwebsocket.Protocol},
+		})
+		if err == nil {
+			stream, streamErr := execwebsocket.New(conn)
+			if streamErr != nil {
+				return nil, streamErr
+			}
+			return closeWithContext(ctx, stream), nil
+		}
+		if response == nil {
+			return nil, fmt.Errorf("opening exec WebSocket %s: %w", target, err)
+		}
+		body, readErr := io.ReadAll(io.LimitReader(response.Body, MaxResponseBody))
+		if readErr != nil {
+			return nil, fmt.Errorf("read response body: %w", readErr)
+		}
+		if c.AdministratorKey != nil && attempt == 0 && response.Header.Get(adminsign.ChallengeStatusHeader) == adminsign.ChallengeInvalid {
+			continue
+		}
+		if response.StatusCode != http.StatusSwitchingProtocols {
+			return nil, &HTTPError{Status: response.StatusCode, Body: body}
+		}
+		return nil, fmt.Errorf("opening exec WebSocket: %w", err)
 	}
 	return nil, fmt.Errorf("administrator challenge was rejected after retry")
 }

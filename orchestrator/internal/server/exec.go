@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"sync"
 	"time"
 
@@ -120,7 +119,7 @@ type relayResult struct {
 // either side disconnects, or the leadership term ends. Each direction
 // holds one frame at a time, so a slow reader stalls its writer instead of
 // growing a buffer. The client connection is closed on return.
-func (e *ExecStream) Relay(client net.Conn) {
+func (e *ExecStream) Relay(client io.ReadWriteCloser) {
 	defer func() { _ = client.Close() }()
 	clientWriter := execstream.NewWriter(client, execRelayWriteTimeout)
 	agentWriter := execstream.NewWriter(e.agent, 0)
