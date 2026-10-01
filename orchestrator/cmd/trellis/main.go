@@ -250,7 +250,10 @@ func run(parent context.Context, cfg *config) error {
 	}); writeErr != nil {
 		log.Warn("could not write local connection file", "path", runFile, "error", writeErr)
 	} else {
-		defer func() { _ = os.Remove(runFile) }()
+		defer func() {
+			_ = os.Remove(runFile)
+			_ = os.Remove(localconfig.DefaultCAPath)
+		}()
 	}
 
 	peerTLS, err := tlsutil.PeerTLSConfig(tlsMaterials)

@@ -272,6 +272,8 @@ curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/unins
 
 It removes only dependencies/repositories recorded as introduced by Trellis; older installations without ownership records are handled conservatively and shared host packages are left alone. The user's `trellisctl` contexts are also kept because they describe cluster connections, not ownership of this machine. On a live multi-node cluster the script first hands the node's work and membership to the rest of the cluster; see [Multi-node clusters](multi-node.md#maintain-a-multi-node-cluster).
 
+Installing a new cluster on this machine replaces the invoking user's `local` context with a freshly minted operator token and a live CA-file reference to `/run/trellis/ca.crt`; unrelated contexts are preserved. Resuming an existing installation or joining a cluster keeps an existing `local` context. File-backed local trust follows the running daemon, but old bearer tokens and administrator keys do not gain access to a replacement cluster. Embedded remote contexts remain pinned to their saved CA; see [CA sources](cli.md#named-cluster-contexts).
+
 Instead of throwing away the encryption key while retaining encrypted state, normal uninstall archives the complete recoverable set—node data, `/etc/trellis` configuration and the configured secrets key, plus installer state—under a timestamped `/var/lib/trellis/recovery/` directory.
 
 For deliberate permanent destruction, use:

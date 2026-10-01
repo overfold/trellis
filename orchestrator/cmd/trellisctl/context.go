@@ -67,7 +67,7 @@ func newContextListCmd() *cobra.Command {
 					ns = "(cluster)"
 				}
 				tlsState := "no"
-				if ctx.CACert != "" || ctx.Cert != "" || ctx.Key != "" {
+				if ctx.CACert != "" || ctx.CACertFile != "" || ctx.Cert != "" || ctx.Key != "" {
 					tlsState = "yes"
 				}
 				if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", current, name, ctx.ServerAddr, ns, tlsState); err != nil {
@@ -127,7 +127,13 @@ func newContextShowCmd() *cobra.Command {
 			if ns == "" {
 				ns = "(cluster)"
 			}
-			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Name: %s\nAddress: %s\nNamespace: %s\nToken: %s\nCA: %s\nClient certificate: %s\n", name, ctx.ServerAddr, ns, configured(ctx.ClusterToken), configured(ctx.CACert), configured(ctx.Cert))
+			ca := "not configured"
+			if ctx.CACertFile != "" {
+				ca = "file: " + ctx.CACertFile
+			} else if ctx.CACert != "" {
+				ca = "embedded"
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Name: %s\nAddress: %s\nNamespace: %s\nToken: %s\nCA: %s\nClient certificate: %s\n", name, ctx.ServerAddr, ns, configured(ctx.ClusterToken), ca, configured(ctx.Cert))
 			return err
 		},
 	}
@@ -139,7 +145,7 @@ func newContextSaveCmd() *cobra.Command {
 		Use:   "save NAME",
 		Args:  cobra.ExactArgs(1),
 		Short: "Save the effective connection as a named context",
-		Long:  "Save the currently effective address, token, namespace, and TLS configuration. Combine this with global flags for first-time setup, for example:\n\n  trellis --server-addr cluster.example:8128 --cluster-token TOKEN --namespace default context save production --use",
+		Long:  "Save the currently effective address, token, namespace, and TLS configuration. A CA supplied with --ca-cert is saved as an absolute file path; an inline CA is embedded. Combine this with global flags for first-time setup, for example:\n\n  trellisctl --server-addr cluster.example:8128 --token TOKEN --namespace default --ca-cert ./cluster-ca.pem context save production --use",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
 			if err := validateContextName(name); err != nil {
@@ -262,18 +268,24 @@ func validateContextName(name string) error {
 
 func effectiveContextFileConfig() (contextFileConfig, error) {
 	caPEM := config.CACertPEM
+	caFile := ""
 	if config.CACert != "" {
-		data, err := os.ReadFile(config.CACert)
-		if err != nil {
+		if _, err := os.ReadFile(config.CACert); err != nil {
 			return contextFileConfig{}, fmt.Errorf("read CA cert: %w", err)
 		}
-		caPEM = string(data)
+		var err error
+		caFile, err = filepath.Abs(config.CACert)
+		if err != nil {
+			return contextFileConfig{}, fmt.Errorf("resolve CA cert path: %w", err)
+		}
+		caPEM = ""
 	}
 	return contextFileConfig{
 		ServerAddr:   config.ServerAddr,
 		ClusterToken: config.ClusterToken,
 		Namespace:    config.Namespace,
 		CACert:       caPEM,
+		CACertFile:   caFile,
 		Cert:         config.Cert,
 		Key:          config.Key,
 	}, nil
@@ -298,6 +310,11 @@ func readUserConfig(path string) (fileConfig, error) {
 	var file fileConfig
 	if err := yaml.Unmarshal(content, &file); err != nil {
 		return fileConfig{}, fmt.Errorf("parse config file %s: %w", path, err)
+	}
+	for name, ctx := range file.Contexts {
+		if ctx.CACert != "" && ctx.CACertFile != "" {
+			return fileConfig{}, fmt.Errorf("context %q in %s must use only one of ca_cert and ca_cert_file", name, path)
+		}
 	}
 	return file, nil
 }

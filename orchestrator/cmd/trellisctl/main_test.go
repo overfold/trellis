@@ -11,8 +11,127 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
+	"github.com/overfold/trellis/orchestrator/internal/tlsutil"
 	"github.com/spf13/cobra"
 )
+
+func TestContextCAFileTracksReplacement(t *testing.T) {
+	previousConfig := config
+	t.Cleanup(func() { config = previousConfig })
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	caPath := filepath.Join(dir, "ca.crt")
+	oldCA, _, err := tlsutil.GenerateCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	newCA, newKey, err := tlsutil.GenerateCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM, _, err := tlsutil.GenerateNodeCert(newCA, newKey, uuid.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, _ := pem.Decode(certPEM)
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(caPath, oldCA, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	config = CLIConfig{CACert: "ca.crt", CACertPEM: "must not embed this", ServerAddr: "localhost:8128", ClusterToken: "new-token"}
+	ctx, err := effectiveContextFileConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ctx.CACertFile != caPath || ctx.CACert != "" {
+		t.Fatalf("saved CA file = %q, inline = %q", ctx.CACertFile, ctx.CACert)
+	}
+	if err := writeUserConfig(path, fileConfig{CurrentContext: "local", Contexts: map[string]contextFileConfig{
+		"local": ctx, "remote": {CACert: string(oldCA), ClusterToken: "remote-token"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TRELLIS_CONFIG", path)
+	config = CLIConfig{}
+	if err := loadConfig(testRootCommand()); err != nil {
+		t.Fatal(err)
+	}
+	verify := func() error {
+		tlsConfig, err := buildCLITLSConfig()
+		if err != nil {
+			return err
+		}
+		_, err = cert.Verify(x509.VerifyOptions{Roots: tlsConfig.RootCAs, DNSName: tlsConfig.ServerName})
+		return err
+	}
+	if err := verify(); err == nil || !strings.Contains(err.Error(), "ECDSA verification failure") {
+		t.Fatalf("old CA should reject replacement certificate: %v", err)
+	}
+	if err := os.WriteFile(caPath, newCA, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := verify(); err != nil {
+		t.Fatalf("live CA file did not trust replacement: %v", err)
+	}
+	loaded, err := readUserConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Contexts["remote"].CACert != string(oldCA) || loaded.Contexts["remote"].ClusterToken != "remote-token" {
+		t.Fatal("unrelated remote context changed")
+	}
+	if err := os.Remove(caPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := buildCLITLSConfig(); err == nil || !strings.Contains(err.Error(), "read CA cert") {
+		t.Fatalf("missing CA file must fail, not fall back: %v", err)
+	}
+}
+
+func TestContextCASources(t *testing.T) {
+	previousConfig := config
+	t.Cleanup(func() { config = previousConfig })
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := writeUserConfig(path, fileConfig{CurrentContext: "local", Contexts: map[string]contextFileConfig{
+		"local": {CACertFile: "ca.crt"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TRELLIS_CONFIG", path)
+	config = CLIConfig{}
+	if err := loadConfig(testRootCommand()); err != nil {
+		t.Fatal(err)
+	}
+	if config.CACert != filepath.Join(dir, "ca.crt") {
+		t.Fatalf("relative CA file not resolved against config directory: %q", config.CACert)
+	}
+	t.Setenv("TRELLIS_CA_CERT", "environment-ca")
+	config = CLIConfig{}
+	if err := loadConfig(testRootCommand()); err != nil {
+		t.Fatal(err)
+	}
+	if config.CACert != "" || config.CACertPEM != "environment-ca" {
+		t.Fatal("inline environment CA did not override file source")
+	}
+	ctx, err := effectiveContextFileConfig()
+	if err != nil || ctx.CACert != "environment-ca" || ctx.CACertFile != "" {
+		t.Fatalf("inline CA was not embedded: %#v, %v", ctx, err)
+	}
+	if err := writeUserConfig(path, fileConfig{Contexts: map[string]contextFileConfig{
+		"ambiguous": {CACert: "inline-ca", CACertFile: "ca.crt"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readUserConfig(path); err == nil || !strings.Contains(err.Error(), "only one of ca_cert and ca_cert_file") {
+		t.Fatalf("ambiguous CA sources were not rejected: %v", err)
+	}
+}
 
 func TestLoadConfigPreservesTLSFlags(t *testing.T) {
 	previousConfig := config

@@ -4,7 +4,7 @@ The `trellisctl` CLI is the first-party operator interface to the [Trellis user 
 
 ## Named cluster contexts
 
-A **context** stores the connection information needed to operate one cluster/namespace: API address, bearer token, namespace, CA certificate, and optional client certificate/key paths.
+A **context** stores the connection information needed to operate one cluster/namespace: API address, bearer token, namespace, an embedded CA certificate or CA file path, and optional client certificate/key paths.
 
 Administrator private keys are deliberately not stored in named contexts. Root-only commands accept a PKCS#8 Ed25519 key through `--administrator-key PATH` or unpadded base64 PKCS#8 DER through `TRELLIS_ADMINISTRATOR_KEY`; `trellisctl` performs challenge acquisition, request signing, and leader-change retry automatically.
 
@@ -36,7 +36,19 @@ trellisctl --context production jobs list   # one command only
 trellisctl context delete old-cluster
 ```
 
-`context show` never prints the stored token. The user config is written with mode `0600` because saved contexts can contain credentials.
+`context show` never prints the stored token and identifies the CA as embedded or file-backed. The user config is written with mode `0600` because saved contexts can contain credentials.
+
+Saving with `--ca-cert PATH` stores an absolute `ca_cert_file` path, not a copy of the certificate. Each command reads that file anew: replacing it changes which CA the context trusts, and a missing or unreadable file is an error, not a reason to fall back to another CA. Hand-authored relative `ca_cert_file` paths are resolved relative to the user config file. Keep the file in a stable location controlled by a trusted operator.
+
+For a self-contained, portable remote context, embed the CA instead:
+
+```sh
+TRELLIS_CA_CERT="$(cat ./cluster-ca.pem)" \
+  trellisctl --server-addr trellis.example:8128 --namespace production \
+  context save production --use
+```
+
+The config uses `ca_cert` for inline PEM and `ca_cert_file` for a path; a context must not set both. The installer-created `local` context uses `/run/trellis/ca.crt`, the public CA published by the running daemon. This context intentionally follows the cluster on this machine, including a replacement cluster after reinstall. It is not a portable cluster identity pin; use an embedded CA for that purpose. Changing the CA source does not refresh the context's bearer token.
 
 Effective connection precedence is:
 

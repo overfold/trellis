@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/overfold/trellis/orchestrator/client"
 	"github.com/overfold/trellis/orchestrator/internal/localconfig"
@@ -39,6 +40,7 @@ type contextFileConfig struct {
 	ClusterToken string `yaml:"token,omitempty"`
 	Namespace    string `yaml:"namespace,omitempty"`
 	CACert       string `yaml:"ca_cert,omitempty"`
+	CACertFile   string `yaml:"ca_cert_file,omitempty"`
 	Cert         string `yaml:"cert,omitempty"`
 	Key          string `yaml:"key,omitempty"`
 }
@@ -192,7 +194,10 @@ func loadConfig(cmd *cobra.Command) error {
 			merged.ServerAddr = ctx.ServerAddr
 			merged.ClusterToken = ctx.ClusterToken
 			merged.Namespace = ctx.Namespace
-			merged.CACert = ""
+			merged.CACert = ctx.CACertFile
+			if merged.CACert != "" && !filepath.IsAbs(merged.CACert) {
+				merged.CACert = filepath.Join(filepath.Dir(cfgPath), merged.CACert)
+			}
 			merged.CACertPEM = ctx.CACert
 			merged.Cert = ctx.Cert
 			merged.Key = ctx.Key

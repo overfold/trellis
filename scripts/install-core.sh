@@ -296,23 +296,31 @@ else
     [ -n "$operator_home" ] || ui_die "Could not determine home directory for ${operator_user}."
 fi
 operator_config="${operator_home}/.config/trellis/config.yaml"
-if [ -f "$operator_config" ] && grep -q '^  local:' "$operator_config" 2>/dev/null; then
+if { [ "$existing_config" = true ] || [ -n "$join_addr" ]; } && \
+   [ -f "$operator_config" ] && grep -q '^  local:' "$operator_config" 2>/dev/null; then
     ui_step "Existing local trellisctl context kept for ${operator_user}"
 else
     if [ -z "${administrator_private_key:-}" ]; then
         ui_detail "No administrator credential was copied to this joining node; configure trellisctl from an operator workstation."
     else
+        if [ -f "$operator_config" ] && grep -q '^  local:' "$operator_config" 2>/dev/null; then
+            ui_detail "Replacing the local context's trust and operator credential for this new cluster; other contexts are kept."
+        fi
         operator_token=""
         for _ in $(seq 1 30); do
-            operator_token="$(TRELLIS_ADMINISTRATOR_KEY="$administrator_private_key" local_ctl "$WORK_TMP" credentials create --scope cluster --access write --output table 2>/dev/null || true)"
+            operator_token="$(TRELLIS_ADMINISTRATOR_KEY="$administrator_private_key" local_ctl "$WORK_TMP" \
+                --context= --server-addr https://127.0.0.1:8128 --ca-cert "${RUN_DIR}/ca.crt" --cert= --key= \
+                credentials create --scope cluster --access write --output table 2>/dev/null || true)"
             [ -n "$operator_token" ] && break
             sleep 1
         done
         [ -n "$operator_token" ] || ui_die "Trellis is running, but an operator credential could not be created."
         operator_config_home="${operator_home}/.config"
         install -d -m 0700 -o "$operator_user" -g "$operator_group" "$operator_config_home"
-        HOME="$operator_home" XDG_CONFIG_HOME="$operator_config_home" \
-            "${INSTALL_DIR}/trellisctl" --token "$operator_token" --namespace default context save local --use >/dev/null
+        HOME="$operator_home" XDG_CONFIG_HOME="$operator_config_home" TRELLIS_CONFIG="$operator_config" \
+            "${INSTALL_DIR}/trellisctl" --context= --server-addr https://127.0.0.1:8128 \
+            --ca-cert "${RUN_DIR}/ca.crt" --cert= --key= --token "$operator_token" --namespace default \
+            context save local --use >/dev/null
         if [ "$operator_user" != "root" ]; then chown -R "${operator_user}:${operator_group}" "${operator_config_home}/trellis"; fi
         unset operator_token
         ui_step "Saved local cluster/write context for ${operator_user}"

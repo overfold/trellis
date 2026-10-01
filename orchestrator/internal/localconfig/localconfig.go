@@ -16,6 +16,10 @@ import (
 // is running and cleaned up on reboot.
 const DefaultPath = "/run/trellis/local.yaml"
 
+// DefaultCAPath exposes only the running node's public CA, readable by local
+// operators without granting access to private node configuration.
+const DefaultCAPath = "/run/trellis/ca.crt"
+
 // Config is the connection information the CLI needs to reach a cluster.
 type Config struct {
 	ServerAddr   string `yaml:"server_addr"`
@@ -23,10 +27,20 @@ type Config struct {
 	CACert       string `yaml:"ca_cert,omitempty"` // inline PEM
 }
 
-// Write atomically writes cfg to path, creating parent directories as needed.
+// Write atomically writes cfg to path and its public CA to ca.crt beside it,
+// creating parent directories as needed.
 func Write(path string, cfg *Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create dir: %w", err)
+	}
+	caPath := filepath.Join(filepath.Dir(path), "ca.crt")
+	caTmp := caPath + ".tmp"
+	if err := os.WriteFile(caTmp, []byte(cfg.CACert), 0o644); err != nil {
+		return fmt.Errorf("write public CA: %w", err)
+	}
+	if err := os.Rename(caTmp, caPath); err != nil {
+		_ = os.Remove(caTmp)
+		return fmt.Errorf("install public CA: %w", err)
 	}
 	data, err := yaml.Marshal(cfg)
 	if err != nil {

@@ -24,7 +24,7 @@ trellisctl context current
 trellisctl nodes list
 ```
 
-`trellis`, `trellisctl`, and the internal `trellis-health-probe` helper are installed in `/usr/local/bin`. The daemon mounts the helper read-only into managed tasks for HTTP and TCP health checks; it is not an operator CLI. The daemon keeps its configuration and secrets key root-readable under `/etc/trellis`, but never the administrator private key; your user context contains the scoped operator token plus the cluster CA. Adding nodes later uses short-lived join tokens that the administrator mints on demand; see [Multi-node clusters](multi-node.md#add-a-node).
+`trellis`, `trellisctl`, and the internal `trellis-health-probe` helper are installed in `/usr/local/bin`. The daemon mounts the helper read-only into managed tasks for HTTP and TCP health checks; it is not an operator CLI. The daemon keeps its configuration and secrets key root-readable under `/etc/trellis`, but never the administrator private key; your user context contains the scoped operator token and a path to `/run/trellis/ca.crt`, the running daemon's publicly readable CA. Adding nodes later uses short-lived join tokens that the administrator mints on demand; see [Multi-node clusters](multi-node.md#add-a-node).
 
 ## 2. Create the first manifest
 

@@ -31,6 +31,8 @@ Normal builds reject `--runtime injected`.
 
 Tests beside each package document state-machine invariants, Raft persistence, scheduler behavior, network planning, durability, update regressions, and security validation.
 
+From the repository root, `bash scripts/install-core_test.sh` exercises the installer's operator-access phase for first installs, replacement clusters, resumes, and joins. It uses the real CLI for context saving and mocks credential creation and host ownership operations; it does not install packages or start services.
+
 ## Three-node Vagrant demo
 
 [`orchestrator/Vagrantfile`](../../orchestrator/Vagrantfile) provides a real three-node local demo cluster for development and for the multi-node public learning-path examples. It uses Vagrant's provider-independent private-network abstraction and guest mDNS rather than hostmanager or provider-specific addressing. With a compatible Vagrant provider configured:
