@@ -7,7 +7,7 @@ This is the shortest complete Trellis journey: install one node, use the CLI as 
 You need a Debian or Ubuntu x86-64 machine with `sudo`. The installer can install containerd when it is missing.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/setup.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/install.sh | sudo bash
 ```
 
 The default plan is the feature-complete beginner path: create a new single-node cluster, auto-detect a reachable node address, and install the namespace-networking dependencies (WireGuard, iproute2, and iptables, which every node needs) and gVisor/runsc. The plan is shown before anything changes. Press Enter to install it, or choose **Customize** to change the cluster mode, address, or gVisor. You do not need to discover command-line flags just to make a different first-install choice.

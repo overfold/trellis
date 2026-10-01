@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared lifecycle helpers for Trellis setup, upgrade, and uninstall.
+# Shared lifecycle helpers for Trellis install, upgrade, and uninstall.
 # This file is sourced by the entrypoint scripts; it is not meant to be run directly.
 
 REPO="${REPO:-overfold/trellis}"

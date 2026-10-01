@@ -12,7 +12,7 @@ usage() {
     cat <<'HELP'
 Install a Trellis node.
 
-Usage: setup.sh [options]
+Usage: install.sh [options]
 
 Options:
   --advertise HOST              Address peers and workloads can use to reach this node
@@ -26,7 +26,7 @@ Options:
   -y, --yes                     Use the resulting plan without the interactive planner
   -h, --help                    Show this help
 
-Interactive setup shows the complete plan first. Press Enter to install it, or
+Interactive installation shows the complete plan first. Press Enter to install it, or
 choose Customize to change cluster mode, address, or gVisor. Every node gets
 WireGuard namespace networking.
 Flags provide the same choices for automation.
@@ -46,17 +46,17 @@ resolve_engine() {
     local script_dir
     TMP="$(mktemp -d)"
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)"
-    if [ -n "$script_dir" ] && [ -f "$script_dir/setup-core.sh" ] && [ -f "$script_dir/common.sh" ]; then
-        cp "$script_dir/setup-core.sh" "$TMP/setup-core.sh"
+    if [ -n "$script_dir" ] && [ -f "$script_dir/install-core.sh" ] && [ -f "$script_dir/common.sh" ]; then
+        cp "$script_dir/install-core.sh" "$TMP/install-core.sh"
         cp "$script_dir/common.sh" "$TMP/common-real.sh"
     else
         command -v curl >/dev/null 2>&1 || { echo "error: curl is required" >&2; exit 1; }
-        curl -fsSL "$RAW_BASE/setup-core.sh" -o "$TMP/setup-core.sh"
+        curl -fsSL "$RAW_BASE/install-core.sh" -o "$TMP/install-core.sh"
         curl -fsSL "$RAW_BASE/common.sh" -o "$TMP/common-real.sh"
     fi
     cat >"$TMP/common.sh" <<'SHIM'
 source "$(dirname "${BASH_SOURCE[0]}")/common-real.sh"
-if [ "${TRELLIS_SETUP_PLAN_CONFIRMED:-}" = 1 ]; then
+if [ "${TRELLIS_INSTALL_PLAN_CONFIRMED:-}" = 1 ]; then
     _trellis_hide_details=false
     ui_title() { :; }
     ui_section() {
@@ -98,7 +98,7 @@ if [ "$GVISOR_ENABLED" = true ]; then gvisor=true; fi
 # Complete installs should retain the engine's fast already-installed path.
 if { [ "$STATE_COMPLETE" = true ] && [ -x "$INSTALL_DIR/trellis" ] && [ -f "$CONFIG_FILE" ]; } || \
    { [ ! -f "$STATE_FILE" ] && [ -x "$INSTALL_DIR/trellis" ] && [ -f "$CONFIG_FILE" ] && [ -f "$SERVICE_FILE" ]; }; then
-    bash "$TMP/setup-core.sh" --yes
+    bash "$TMP/install-core.sh" --yes
     exit $?
 fi
 
@@ -128,7 +128,7 @@ show_plan() {
 customize() {
     local choice value
     while true; do
-        printf '\n'; ui_section "Customize setup"
+        printf '\n'; ui_section "Customize installation"
         ui_detail "1. Cluster              $(cluster_label)"
         ui_detail "2. Node address         $advertise"
         ui_detail "3. Runtime sandbox      $([ "$gvisor" = true ] && printf 'gVisor installed' || printf 'gVisor not installed')"
@@ -137,7 +137,7 @@ customize() {
         case "$choice" in
             "") return ;;
             1)
-                [ "$existing_config" = false ] || { ui_warn "Cluster mode is fixed while resuming setup."; continue; }
+                [ "$existing_config" = false ] || { ui_warn "Cluster mode is fixed while resuming installation."; continue; }
                 printf 'New cluster [1] or join existing [2] [1]: '; read -r value </dev/tty
                 if [ "${value:-1}" = 2 ]; then
                     printf 'Existing node (HOST:8128): '; read -r join </dev/tty
@@ -145,7 +145,7 @@ customize() {
                 else join=""; fi
                 ;;
             2)
-                [ "$existing_config" = false ] || { ui_warn "Node address is fixed while resuming setup."; continue; }
+                [ "$existing_config" = false ] || { ui_warn "Node address is fixed while resuming installation."; continue; }
                 printf 'Node address [%s]: ' "$advertise"; read -r value </dev/tty; [ -z "$value" ] || advertise="$value"
                 ;;
             3) [ "$GVISOR_ENABLED" != true ] || { ui_warn "gVisor was already installed and will be kept."; continue; }; [ "$gvisor" = true ] && gvisor=false || gvisor=true ;;
@@ -156,7 +156,7 @@ customize() {
 
 confirmed=false
 if [ "$assume_yes" = false ]; then
-    ui_title "setup"
+    ui_title "install"
     while true; do
         show_plan
         printf '\n%sInstall%s [Enter]   %sCustomize%s [c]   Cancel [q]: ' "$BOLD" "$RESET" "$BOLD" "$RESET"
@@ -179,7 +179,7 @@ args=(--yes --advertise "$advertise")
 [ "$gvisor" = true ] && args+=(--with-gvisor)
 
 if [ "$confirmed" = true ]; then
-    TRELLIS_SETUP_PLAN_CONFIRMED=1 bash "$TMP/setup-core.sh" "${args[@]}"
+    TRELLIS_INSTALL_PLAN_CONFIRMED=1 bash "$TMP/install-core.sh" "${args[@]}"
 else
-    bash "$TMP/setup-core.sh" "${args[@]}"
+    bash "$TMP/install-core.sh" "${args[@]}"
 fi

@@ -94,7 +94,7 @@ sudo install -m 600 /etc/trellis/secrets.key /root/trellis-secrets.key
 Transfer those files and the join token to the new machine over a secure channel, then run:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/setup.sh | \
+curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/install.sh | \
   sudo bash -s -- \
     --join node-a:8128 \
     --join-token-file /root/trellis-join-token \

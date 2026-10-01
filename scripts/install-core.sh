@@ -12,7 +12,7 @@ cleanup() {
     [ -z "$COMMON_TMP" ] || rm -rf "$COMMON_TMP"
     if [ "$rc" -ne 0 ] && [ "$STARTED" = true ]; then
         printf '\n'
-        ui_warn "Setup did not finish. The completed steps were kept; rerun the same command to resume."
+        ui_warn "Installation did not finish. The completed steps were kept; rerun the same command to resume."
     fi
 }
 trap cleanup EXIT
@@ -38,7 +38,7 @@ usage() {
 Install a Trellis node.
 
 Usage:
-  setup.sh [options]
+  install.sh [options]
 
 Options:
   --advertise HOST              Address peers and workloads can use to reach this node
@@ -87,7 +87,7 @@ require_root_linux_amd64
 require_commands curl tar systemctl openssl awk grep install mktemp
 load_install_state
 
-# An interrupted setup keeps the features it already installed. Explicit flags
+# An interrupted installation keeps the features it already installed. Explicit flags
 # may add capabilities, but rerunning the installer never silently removes them.
 [ "$GVISOR_ENABLED" != true ] || with_gvisor=true
 
@@ -103,7 +103,7 @@ if [ ! -f "$STATE_FILE" ] && [ -x "${INSTALL_DIR}/trellis" ] && [ -f "$CONFIG_FI
 fi
 
 if [ "$STATE_COMPLETE" = true ] && [ -x "${INSTALL_DIR}/trellis" ] && [ -f "$CONFIG_FILE" ]; then
-    ui_title "setup"
+    ui_title "install"
     ui_step "Trellis ${STATE_VERSION:-unknown} is already installed"
     ui_detail "Upgrade: curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/upgrade.sh | sudo bash"
     exit 0
@@ -150,9 +150,9 @@ elif [ -n "$join_addr" ]; then
     cluster_action="join ${join_addr}"
 fi
 
-ui_title "setup"
+ui_title "install"
 if [ "$resuming" = true ]; then
-    ui_warn "A previous setup appears incomplete. Trellis will reuse completed state and continue."
+    ui_warn "A previous installation appears incomplete. Trellis will reuse completed state and continue."
     printf '\n'
 fi
 ui_section "Plan"
@@ -261,7 +261,7 @@ EOF_CONFIG
         ui_warn "Save this base64 PKCS#8 administrator private key in an operator password manager; Trellis does not retain it: ${administrator_private_key}"
     fi
 else
-    [ -f "$SECRETS_KEY_FILE" ] || ui_die "${CONFIG_FILE} exists but ${SECRETS_KEY_FILE} is missing; restore the matching key and rerun setup."
+    [ -f "$SECRETS_KEY_FILE" ] || ui_die "${CONFIG_FILE} exists but ${SECRETS_KEY_FILE} is missing; restore the matching key and rerun install."
     chmod 600 "$CONFIG_FILE" "$SECRETS_KEY_FILE"
     ui_step "Reusing existing node configuration"
 fi
