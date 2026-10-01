@@ -28,7 +28,7 @@ usage() {
 Remove Trellis from this node.
 
 Usage:
-  uninstall.sh [--purge] [-y|--yes]
+  uninstall.sh [--force] [--purge] [-y|--yes]
 
 By default, Trellis gracefully removes this machine from a multi-node cluster
 and archives its config, secrets key, and local state together under
@@ -36,6 +36,8 @@ and archives its config, secrets key, and local state together under
 active installation.
 
 Options:
+  --force       Skip cluster operations; stop local workloads without evacuation
+                Membership is left unchanged; data is still archived unless --purge
   --purge       Permanently delete Trellis config, keys, data, and recovery archives
   -y, --yes     Skip the single confirmation prompt
   -h, --help    Show this help
@@ -43,9 +45,11 @@ EOF_USAGE
 }
 
 purge=false
+force=false
 assume_yes=false
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --force) force=true; shift ;;
         --purge) purge=true; shift ;;
         -y|--yes) assume_yes=true; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -64,7 +68,11 @@ load_node_config_paths
 
 ui_title "uninstall"
 ui_section "Plan"
-ui_detail "Cluster   drain and remove this node when other members exist"
+if [ "$force" = true ]; then
+    ui_warn "Cluster   --force skips draining and membership removal; local workloads will stop without evacuation and cluster quorum may be affected"
+else
+    ui_detail "Cluster   drain and remove this node when other members exist"
+fi
 ui_detail "Software  remove Trellis binaries, service, runtime files, and only dependencies recorded as Trellis-owned"
 ui_detail "CLI       keep user trellisctl contexts (they belong to the cluster, not this machine)"
 if [ "$purge" = true ]; then
@@ -92,10 +100,16 @@ node_id=""
 was_running=false
 systemctl is-active --quiet trellis 2>/dev/null && was_running=true
 
-if [ "$was_running" = true ] && [ -x "${INSTALL_DIR}/trellisctl" ] && [ -n "$node_id" ]; then
+if [ "$force" = true ]; then
+    ui_section "Cluster"
+    ui_warn "Skipping cluster operations because --force was specified. Cluster membership is unchanged."
+    if [ -n "$node_id" ]; then
+        ui_detail "Afterward, remove node ${node_id} from a healthy operator context if other cluster members remain."
+    fi
+elif [ "$was_running" = true ] && [ -x "${INSTALL_DIR}/trellisctl" ] && [ -n "$node_id" ]; then
     ui_section "Cluster"
     if ! node_json="$(local_ctl "$WORK_TMP" nodes list --output json 2>/dev/null)"; then
-        ui_die "Could not inspect cluster membership. Nothing local has been deleted."
+        ui_die "Could not inspect cluster membership. Nothing local has been deleted. To uninstall without draining or changing membership, rerun with --force."
     fi
     node_count="$(printf '%s' "$node_json" | grep -c '"id"' || true)"
     if [ "${node_count:-0}" -gt 1 ]; then
@@ -103,7 +117,7 @@ if [ "$was_running" = true ] && [ -x "${INSTALL_DIR}/trellisctl" ] && [ -n "$nod
         ui_step "Drain started"
         if ! wait_for_local_allocations_to_stop; then
             local_ctl "$WORK_TMP" nodes undrain "$node_id" >/dev/null 2>&1 || true
-            ui_die "Timed out waiting for allocations to move. The node was undrained and uninstall stopped before deleting anything."
+            ui_die "Timed out waiting for allocations to move. The node was undrained and uninstall stopped before deleting anything. To uninstall without evacuation, rerun with --force."
         fi
         ui_step "Allocations moved to healthy replacements"
         local_ctl "$WORK_TMP" nodes transfer-leadership >/dev/null 2>&1 || true
@@ -115,7 +129,7 @@ if [ "$was_running" = true ] && [ -x "${INSTALL_DIR}/trellisctl" ] && [ -n "$nod
             fi
             sleep 1
         done
-        [ "$removed" = true ] || ui_die "Could not remove the node from cluster membership. Nothing local has been deleted."
+        [ "$removed" = true ] || ui_die "Could not remove the node from cluster membership. Nothing local has been deleted. To uninstall without changing membership, rerun with --force."
         ui_step "Removed node from cluster membership"
     else
         ui_detail "Single-node cluster; there is no remaining member to remove this node from."

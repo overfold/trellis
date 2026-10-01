@@ -276,6 +276,15 @@ Installing a new cluster on this machine replaces the invoking user's `local` co
 
 Instead of throwing away the encryption key while retaining encrypted state, normal uninstall archives the complete recoverable set—node data, `/etc/trellis` configuration and the configured secrets key, plus installer state—under a timestamped `/var/lib/trellis/recovery/` directory.
 
+If a broken installation cannot inspect or update cluster membership, use `--force` to skip cluster operations and remove the local installation:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/uninstall.sh | \
+  sudo bash -s -- --force
+```
+
+This stops local workloads without draining or waiting for healthy replacements, and leaves cluster membership unchanged. Removing a voting node can affect quorum. If other members remain, remove the node from a healthy operator context afterward; the script prints its node ID when available. `--force` still archives recoverable state and does not skip confirmation. Combine it with `--purge` only when permanent data deletion is intended.
+
 For deliberate permanent destruction, use:
 
 ```sh
