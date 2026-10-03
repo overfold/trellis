@@ -15,7 +15,7 @@ func TestAdministratorChallengeIssuanceRemainsAvailableAtCapacity(t *testing.T) 
 	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 	authenticator.now = func() time.Time { return now }
 	oldest := ""
-	for i := 0; i < maxAdministratorChallenges; i++ {
+	for i := range maxAdministratorChallenges {
 		challenge, _, err := authenticator.Issue(7)
 		if err != nil {
 			t.Fatalf("fill challenge %d: %v", i, err)

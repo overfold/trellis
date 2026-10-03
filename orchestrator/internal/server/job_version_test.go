@@ -47,11 +47,9 @@ func TestRegisterJobConcurrentAppliesAtSameVersionConflict(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make([]error, appliers)
 	for i := range appliers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_, errs[i] = s.RegisterJob(ctx, "default", versionTestSpec(fmt.Sprintf("app:v%d", i+2), 1), expectVersion(1, incarnation))
-		}()
+		})
 	}
 	wg.Wait()
 

@@ -93,7 +93,7 @@ func matchRule(t *testing.T, rule string, p packet) (string, bool) {
 			}
 			matched = p.dport == port
 		case "--ctstate":
-			for _, state := range strings.Split(value, ",") {
+			for state := range strings.SplitSeq(value, ",") {
 				matched = matched || slices.Contains(p.states, state)
 			}
 		case "-m", "--dst-type":

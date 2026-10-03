@@ -190,7 +190,7 @@ func TestReconcileRecreateStopsOldAllocations(t *testing.T) {
 	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(jobSpec), Revision: 1, ContentHashes: hashes}
 
 	now := s.now()
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		a := &Allocation{
 			ID:        "alloc-" + string(rune('a'+i)),
 			Namespace: "default", JobName: "web", TaskGroupName: "api",
@@ -241,7 +241,7 @@ func TestReconcileRollingDrainsOldAllocations(t *testing.T) {
 	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(jobSpec), Revision: 1, ContentHashes: hashes}
 
 	now := s.now()
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		a := &Allocation{
 			ID:        "alloc-" + string(rune('a'+i)),
 			Namespace: "default", JobName: "web", TaskGroupName: "api",

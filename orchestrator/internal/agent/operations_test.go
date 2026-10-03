@@ -517,8 +517,7 @@ func TestRunAllocationRegistersHealthAfterStoringRunningAllocation(t *testing.T)
 		probed:            make(chan struct{}, 1),
 	}
 	agent := newOperationTestAgent(t, rt)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	agent.health.SetContext(ctx)
 	callbackDone := make(chan struct{})
 	agent.health.Subscriber = &healthCallbackRecorder{agent: agent, done: callbackDone}
@@ -1982,8 +1981,7 @@ func TestRecoverRunningAllocationResetsHealthUntilProbe(t *testing.T) {
 	}
 	second := newOperationTestAgent(t, rt)
 	second.ConfigureDurability(local, "test")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	second.health.SetContext(ctx)
 	persistTestRecoveryEpoch(t, local)
 	if err := second.recover(ctx); err != nil {
@@ -2033,8 +2031,7 @@ func TestRecoverPersistsProbeResultBeforeReturning(t *testing.T) {
 	second := newOperationTestAgent(t, rt)
 	second.ConfigureDurability(local, "test")
 	second.health.Subscriber = second
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	second.health.SetContext(ctx)
 	detach := &blockingRecoveryDetach{entered: make(chan struct{}), release: make(chan struct{})}
 	second.SetNetworkManager(detach)
@@ -2113,8 +2110,7 @@ func TestRecoverRunningAllocationProbesContainerPort(t *testing.T) {
 			}
 			second := newOperationTestAgent(t, rt)
 			second.ConfigureDurability(local, "test")
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+			ctx := t.Context()
 			second.health.SetContext(ctx)
 			persistTestRecoveryEpoch(t, local)
 			if err := second.recover(ctx); err != nil {
@@ -2253,7 +2249,7 @@ func TestRestartExhaustionReportsFailedAndSurvivesAgentRestart(t *testing.T) {
 	if err := local.Delete(allocationRecordKey("task")); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if err := first.reconciler.Reconcile(context.Background(), "task"); err != nil {
 			t.Fatalf("reconcile %d: %v", i, err)
 		}

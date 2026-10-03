@@ -411,12 +411,12 @@ func TestUDPSlowUpstreamIsConcurrentBoundedAndRecovers(t *testing.T) {
 		defer func(client *net.UDPConn) { _ = client.Close() }(clients[i])
 	}
 	query := buildQuery("example.com.")
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if _, err := clients[i].Write(query); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		select {
 		case <-received:
 		case <-time.After(time.Second):
@@ -440,7 +440,7 @@ func TestUDPSlowUpstreamIsConcurrentBoundedAndRecovers(t *testing.T) {
 	}
 
 	releaseUpstream()
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if err := clients[i].SetReadDeadline(time.Now().Add(time.Second)); err != nil {
 			t.Fatal(err)
 		}

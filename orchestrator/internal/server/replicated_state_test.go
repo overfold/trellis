@@ -189,7 +189,7 @@ func TestUnchangedHeartbeatDoesNotWriteRaft(t *testing.T) {
 	addTestNode(s, node, clock)
 	status := []nodeapi.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		clock = clock.Add(heartbeatInterval)
 		usage, used := float64(i)/10, int64(i)<<20
 		metricsAt := clock

@@ -85,7 +85,7 @@ func (s *Store) prefix(namespace string) string {
 func (s *Store) key(namespace, name string) string { return s.prefix(namespace) + url.PathEscape(name) }
 
 func aad(namespace, name, recordID string, version uint64) []byte {
-	return []byte(fmt.Sprintf("trellis-secret\x00%s\x00%s\x00%s\x00%d", namespace, name, recordID, version))
+	return fmt.Appendf(nil, "trellis-secret\x00%s\x00%s\x00%s\x00%d", namespace, name, recordID, version)
 }
 
 // Set creates or updates a secret with an optional version precondition.

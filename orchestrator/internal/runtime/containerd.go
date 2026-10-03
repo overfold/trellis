@@ -909,14 +909,14 @@ func writeDNSConfig(path string, servers []string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return fmt.Errorf("create DNS config directory: %w", err)
 	}
-	var content string
+	var content strings.Builder
 	for _, server := range servers {
 		if _, err := netip.ParseAddr(server); err != nil {
 			return fmt.Errorf("DNS server %q must be an IP address without a port", server)
 		}
-		content += "nameserver " + server + "\n"
+		content.WriteString("nameserver " + server + "\n")
 	}
-	return writeRuntimeFile(path, content)
+	return writeRuntimeFile(path, content.String())
 }
 
 func writeHostsConfig(path string, hosts map[string]string) error {
@@ -928,11 +928,12 @@ func writeHostsConfig(path string, hosts map[string]string) error {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	content := "127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n"
+	var content strings.Builder
+	content.WriteString("127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n")
 	for _, name := range names {
-		content += hosts[name] + " " + name + "\n"
+		content.WriteString(hosts[name] + " " + name + "\n")
 	}
-	return writeRuntimeFile(path, content)
+	return writeRuntimeFile(path, content.String())
 }
 
 func writeRuntimeFile(path, content string) error {

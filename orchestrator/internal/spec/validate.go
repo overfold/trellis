@@ -244,8 +244,8 @@ func Validate(job *JobSpec) error {
 				} else if volume.ContainerPath == "/" || volume.ContainerPath == "/run" || volume.ContainerPath == "/run/trellis" || strings.HasPrefix(volume.ContainerPath, "/run/trellis/") {
 					add(path+".container_path", "reserved", "volume path must not contain or use the reserved /run/trellis path")
 				}
-				if strings.HasPrefix(volume.HostPath, "@/") {
-					rel := strings.TrimPrefix(volume.HostPath, "@/")
+				if after, ok := strings.CutPrefix(volume.HostPath, "@/"); ok {
+					rel := after
 					if rel == "" || filepath.IsAbs(rel) || filepath.Clean(rel) != rel || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 						add(path+".host_path", "invalid", "@/ host path must contain a clean relative path")
 					}

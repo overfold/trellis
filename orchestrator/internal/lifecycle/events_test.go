@@ -35,7 +35,7 @@ func TestRingBufferWraps(t *testing.T) {
 	now := time.Now()
 	// Write more than EventRingSize entries.
 	total := EventRingSize + 10
-	for i := 0; i < total; i++ {
+	for i := range total {
 		r.Append(Event{Phase: PhaseRunning, Reason: string(rune('a' + i%26)), At: now.Add(time.Duration(i) * time.Second)})
 	}
 	entries := r.Entries()

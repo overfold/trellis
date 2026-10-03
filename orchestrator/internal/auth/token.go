@@ -62,7 +62,7 @@ type Principal struct {
 	Scope     AccessScope        `json:"scope"`
 	Access    AccessLevel        `json:"access"`
 	Subject   *CredentialSubject `json:"subject,omitempty"`
-	CreatedAt time.Time          `json:"created_at,omitempty"`
+	CreatedAt time.Time          `json:"created_at"`
 	// ExpiresAt is when an operator credential stops authenticating. The zero
 	// time means the credential does not expire.
 	ExpiresAt time.Time `json:"expires_at,omitzero"`
@@ -324,7 +324,7 @@ func (m *TokenManager) workloadCredentialKey(allocationID string) string {
 }
 
 func (m *TokenManager) workloadTokenAAD(allocationID string, generation uint64, tokenHash string) []byte {
-	return []byte(fmt.Sprintf("trellis-workload-token\x00%s\x00%s\x00%d\x00%s", m.cluster, allocationID, generation, tokenHash))
+	return fmt.Appendf(nil, "trellis-workload-token\x00%s\x00%s\x00%d\x00%s", m.cluster, allocationID, generation, tokenHash)
 }
 
 func samePrincipalGrant(a, b Principal) bool {

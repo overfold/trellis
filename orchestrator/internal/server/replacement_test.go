@@ -233,7 +233,7 @@ func TestPlanTerminalPruningKeepsNewestAndSkipsCurrentUpdates(t *testing.T) {
 	stale := &Node{ID: uuid.New(), Status: NodeStatusHealthy, observedAt: now.Add(-time.Hour)}
 
 	var allocations []*Allocation
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		allocation := failedAllocation(fmt.Sprintf("f%02d", i), 1, now.Add(time.Duration(i)*time.Second))
 		allocation.Node = &Node{ID: node.ID}
 		allocations = append(allocations, allocation)
@@ -491,7 +491,7 @@ func TestReconcilePrunesTerminalAllocationRecords(t *testing.T) {
 	s, node, clock := newBackoffReconcileServer(t, store)
 	ctx := context.Background()
 	var ids []string
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		allocation := failedAllocation(fmt.Sprintf("f%d", i), 1, clock.now.Add(time.Duration(i-10)*time.Second))
 		allocation.Phase = lifecycle.PhaseStopped
 		allocation.Node = node

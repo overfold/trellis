@@ -38,7 +38,9 @@ From the repository root, `bash scripts/install-core_test.sh` exercises the inst
 Run `golangci-lint run` from `orchestrator/` using the version pinned in CI.
 The configuration includes the `integration` build tag and checks error wrapping,
 JSON tags and encoding errors, enum coverage, context-aware networking, HTTP body
-closure, security findings, and lightweight regression guards.
+closure, security findings, and lightweight regression guards. `modernize` keeps
+code using current Go language and standard-library idioms; review automatic
+fixes for behavior changes, especially JSON omission and test cleanup timing.
 
 Persisted records, internal wire types, and execution-hash inputs need explicit
 JSON tags. When tagging an existing field, preserve its current JSON name and

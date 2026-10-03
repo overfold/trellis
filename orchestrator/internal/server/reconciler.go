@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"sort"
 	"strconv"
@@ -68,7 +69,7 @@ func networkPlanOperationTimeout(plan *network.Plan, attempt int) time.Duration 
 		}
 	}
 	const maxDuration = time.Duration(1<<63 - 1)
-	for i := 0; i < attempt; i++ {
+	for range attempt {
 		if timeout > maxDuration/2 {
 			return maxDuration
 		}
@@ -83,7 +84,7 @@ func retryDelay(id string, attempt int) time.Duration {
 	}
 	shift := min(attempt-1, 6)
 	base := time.Second * time.Duration(1<<shift)
-	h := sha256.Sum256([]byte(fmt.Sprintf("%s:%d", id, attempt)))
+	h := sha256.Sum256(fmt.Appendf(nil, "%s:%d", id, attempt))
 	return base + time.Duration(binary.BigEndian.Uint16(h[:2])%500)*time.Millisecond
 }
 
@@ -328,9 +329,7 @@ func (s *Server) reconcile(ctx context.Context, queue bool) (finished <-chan str
 		s.rebuildAllocationNodeIndexLocked()
 		if len(plan.Commit.Backoffs) > 0 || len(plan.Commit.DeleteBackoffs) > 0 {
 			backoffs := make(map[string]*ReplacementBackoff, len(s.replacementBackoffs)+len(plan.Commit.Backoffs))
-			for key, backoff := range s.replacementBackoffs {
-				backoffs[key] = backoff
-			}
+			maps.Copy(backoffs, s.replacementBackoffs)
 			for _, backoff := range plan.Commit.Backoffs {
 				backoffs[backoff.key()] = backoff
 			}

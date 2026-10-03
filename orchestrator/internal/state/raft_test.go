@@ -357,8 +357,8 @@ func TestRaftStore_Snapshot(t *testing.T) {
 	waitLeader(t, store)
 	ctx := context.Background()
 
-	for i := 0; i < 20; i++ {
-		if err := store.Put(ctx, fmt.Sprintf("key-%d", i), []byte(fmt.Sprintf("val-%d", i))); err != nil {
+	for i := range 20 {
+		if err := store.Put(ctx, fmt.Sprintf("key-%d", i), fmt.Appendf(nil, "val-%d", i)); err != nil {
 			t.Fatal(err)
 		}
 	}

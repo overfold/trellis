@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -14,6 +15,34 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/secrets"
 	"github.com/overfold/trellis/orchestrator/internal/state"
 )
+
+func TestPrincipalCreatedAtJSON(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		at   time.Time
+		want string
+	}{
+		{"zero", time.Time{}, `"0001-01-01T00:00:00Z"`},
+		{"nonzero", time.Date(2026, 10, 3, 12, 34, 56, 0, time.UTC), `"2026-10-03T12:34:56Z"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := json.Marshal(Principal{CreatedAt: tc.at})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &fields); err != nil {
+				t.Fatal(err)
+			}
+			if got := string(fields["created_at"]); got != tc.want {
+				t.Fatalf("created_at = %s, want %s", got, tc.want)
+			}
+			if _, exists := fields["expires_at"]; exists {
+				t.Fatal("zero expires_at must be omitted")
+			}
+		})
+	}
+}
 
 type memStore struct {
 	mu         sync.Mutex
@@ -296,14 +325,12 @@ func TestWorkloadTokenConcurrent(t *testing.T) {
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 	for range callers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			token, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(AccessCluster, AccessWrite))
 			tokens <- token
 			errs <- err
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()

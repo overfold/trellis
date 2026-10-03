@@ -33,6 +33,7 @@ linters:
     - mirror
     - canonicalheader
     - nolintlint
+    - modernize
   settings:
     exhaustive:
       default-signifies-exhaustive: true

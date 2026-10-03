@@ -186,12 +186,10 @@ func (r *Resolver) serveUDP(ctx context.Context, conn *net.UDPConn) error {
 		packet := append([]byte(nil), buf[:n]...)
 		select {
 		case r.udpSlots <- struct{}{}:
-			workers.Add(1)
-			go func() {
-				defer workers.Done()
+			workers.Go(func() {
 				defer func() { <-r.udpSlots }()
 				r.writeUDPResponse(ctx, conn, remote, r.handleQueryNetworkContext(ctx, packet, "udp", remote))
-			}()
+			})
 		default:
 			r.writeUDPResponse(ctx, conn, remote, buildErrorResponse(packet, 2))
 		}
@@ -220,12 +218,10 @@ func (r *Resolver) serveTCP(ctx context.Context, listener *net.TCPListener) erro
 		}
 		select {
 		case r.tcpSlots <- struct{}{}:
-			connections.Add(1)
-			go func() {
-				defer connections.Done()
+			connections.Go(func() {
 				defer func() { <-r.tcpSlots }()
 				r.serveTCPConnection(ctx, conn)
-			}()
+			})
 		default:
 			_ = conn.Close()
 		}
@@ -539,7 +535,7 @@ func buildResponse(id uint16, name string, qtype, qclass uint16, ips []net.IP) [
 func encodeName(name string) []byte {
 	name = strings.TrimSuffix(name, ".")
 	var buf []byte
-	for _, label := range strings.Split(name, ".") {
+	for label := range strings.SplitSeq(name, ".") {
 		if len(label) > 63 {
 			return nil
 		}

@@ -105,7 +105,7 @@ func (c *Client) Request(ctx context.Context, method string, url string, request
 // returning.
 func (c *Client) RequestBody(ctx context.Context, method string, url string, requestBodyBytes []byte, responseData any) error {
 	defer clear(requestBodyBytes)
-	for attempt := 0; attempt < 2; attempt++ {
+	for attempt := range 2 {
 		request, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(requestBodyBytes))
 		if err != nil {
 			return fmt.Errorf("constructing request %s: %w", url, err)
@@ -164,7 +164,7 @@ func (c *Client) authenticate(ctx context.Context, request *http.Request, body [
 // Upgrade sends a GET request that the server switches to the exec stream
 // protocol and returns the stream. The stream is closed when ctx ends.
 func (c *Client) Upgrade(ctx context.Context, target string) (io.ReadWriteCloser, error) {
-	for attempt := 0; attempt < 2; attempt++ {
+	for attempt := range 2 {
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, http.NoBody)
 		if err != nil {
 			return nil, fmt.Errorf("constructing request %s: %w", target, err)
@@ -204,7 +204,7 @@ func (c *Client) Upgrade(ctx context.Context, target string) (io.ReadWriteCloser
 // ExecWebSocket opens an authenticated public exec WebSocket. The stream is
 // closed when ctx ends.
 func (c *Client) ExecWebSocket(ctx context.Context, target string) (io.ReadWriteCloser, error) {
-	for attempt := 0; attempt < 2; attempt++ {
+	for attempt := range 2 {
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, http.NoBody)
 		if err != nil {
 			return nil, fmt.Errorf("constructing request %s: %w", target, err)
@@ -307,7 +307,7 @@ func (c *Client) administratorChallenge(ctx context.Context, target string) (str
 // Stream sends a GET request and returns the response body for the caller
 // to read and close.
 func (c *Client) Stream(ctx context.Context, url string) (io.ReadCloser, error) {
-	for attempt := 0; attempt < 2; attempt++ {
+	for attempt := range 2 {
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 		if err != nil {
 			return nil, fmt.Errorf("constructing request %s: %w", url, err)

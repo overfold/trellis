@@ -28,7 +28,7 @@ func freePort(t *testing.T) int {
 
 type noopFSM struct{}
 
-func (noopFSM) Apply(*raft.Log) interface{}         { return nil }
+func (noopFSM) Apply(*raft.Log) any                 { return nil }
 func (noopFSM) Snapshot() (raft.FSMSnapshot, error) { return noopSnap{}, nil }
 func (noopFSM) Restore(rc io.ReadCloser) error      { return rc.Close() }
 

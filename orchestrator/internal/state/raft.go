@@ -414,7 +414,7 @@ type fsmCommand struct {
 	Mutations []Mutation       `json:"mutations,omitempty"`
 }
 
-func (f *fsm) Apply(log *raft.Log) interface{} {
+func (f *fsm) Apply(log *raft.Log) any {
 	var cmd fsmCommand
 	if err := json.Unmarshal(log.Data, &cmd); err != nil {
 		return err

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -773,9 +774,7 @@ func (a *Agent) retryRecovery(ctx context.Context) bool {
 	a.queueSupersededStops()
 	a.mu.RLock()
 	superseded := make(map[string]string, len(a.supersededStops))
-	for id, allocationID := range a.supersededStops {
-		superseded[id] = allocationID
-	}
+	maps.Copy(superseded, a.supersededStops)
 	a.mu.RUnlock()
 	for id, allocationID := range superseded {
 		a.stopSuperseded(ctx, id, allocationID)
@@ -1638,9 +1637,7 @@ func (a *Agent) launchTask(ctx context.Context, launch *taskLaunch) error {
 		}
 	}
 	env := make(map[string]string, len(ts.Env)+len(task.EnvOverrides))
-	for k, v := range ts.Env {
-		env[k] = v
-	}
+	maps.Copy(env, ts.Env)
 	taskSecrets := task.Secrets
 	for k, v := range task.EnvOverrides {
 		if k == "TRELLIS_TOKEN" {

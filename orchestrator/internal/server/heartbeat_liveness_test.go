@@ -230,7 +230,7 @@ func TestInvalidHeartbeatDoesNotStampLiveness(t *testing.T) {
 func TestObservationQueueCoalescesPerNodeAndOrdersByNode(t *testing.T) {
 	var queue observationQueue
 	a, b := uuid.MustParse("00000000-0000-0000-0000-000000000001"), uuid.MustParse("00000000-0000-0000-0000-000000000002")
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		for _, id := range []uuid.UUID{b, a} {
 			superseded := queue.submit(&nodeObservation{node: id, version: fmt.Sprint(i)})
 			if superseded != (i > 0) {
@@ -259,7 +259,7 @@ func TestObservationCommitsAreOrderedAndBounded(t *testing.T) {
 	for i := range nodes {
 		nodes[i] = &Node{ID: uuid.UUID{byte(3 - i)}, Version: "old"}
 		addTestNode(s, nodes[i], time.Time{})
-		for j := 0; j < perNode; j++ {
+		for j := range perNode {
 			s.allocations = append(s.allocations, &Allocation{ID: fmt.Sprintf("n%d-%03d", i, perNode-j), Node: nodes[i], Tasks: []spec.TaskSpec{{Name: "app"}},
 				Generation: 1, Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown})
 		}

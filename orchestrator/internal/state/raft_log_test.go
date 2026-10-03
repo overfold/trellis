@@ -159,7 +159,7 @@ func (b *syncBuffer) records(t *testing.T) []map[string]any {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	var out []map[string]any
-	for _, line := range strings.Split(strings.TrimSpace(b.buf.String()), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(b.buf.String()), "\n") {
 		if line == "" {
 			continue
 		}

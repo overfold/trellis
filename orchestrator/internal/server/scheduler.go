@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"fmt"
+	"maps"
 	"math"
 	"slices"
 	"sort"
@@ -71,9 +72,7 @@ func schedule(intent *PlacementIntent) ([]Placement, *placementDiagnostic) {
 		return bytes.Compare(a.ID[:], b.ID[:])
 	})
 	volumeOwners := make(map[string]uuid.UUID, len(intent.VolumeOwners))
-	for key, owner := range intent.VolumeOwners {
-		volumeOwners[key] = owner
-	}
+	maps.Copy(volumeOwners, intent.VolumeOwners)
 
 	replicaCounts := make(map[uuid.UUID]int)
 	usedCPU := make(map[uuid.UUID]int)

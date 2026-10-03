@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"time"
@@ -334,9 +335,7 @@ func (s *Server) ResetReplacementBackoff(ctx context.Context, namespace, job, gr
 	}
 	s.mu.Lock()
 	backoffs := make(map[string]*ReplacementBackoff, len(s.replacementBackoffs))
-	for k, backoff := range s.replacementBackoffs {
-		backoffs[k] = backoff
-	}
+	maps.Copy(backoffs, s.replacementBackoffs)
 	backoffs[key] = next
 	s.replacementBackoffs = backoffs
 	s.mu.Unlock()

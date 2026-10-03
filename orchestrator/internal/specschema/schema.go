@@ -5,6 +5,7 @@ package specschema
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"reflect"
 	"strings"
 	"time"
@@ -19,33 +20,33 @@ const (
 )
 
 var (
-	durationType = reflect.TypeOf(time.Duration(0))
-	byteSizeType = reflect.TypeOf(spec.ByteSize(0))
+	durationType = reflect.TypeFor[time.Duration]()
+	byteSizeType = reflect.TypeFor[spec.ByteSize]()
 )
 
 type schema = map[string]any
 
 var requiredFields = map[reflect.Type][]string{
-	reflect.TypeOf(spec.JobSpec{}):           {"name", "namespace", "task_groups"},
-	reflect.TypeOf(spec.TaskGroupSpec{}):     {"name", "count", "tasks"},
-	reflect.TypeOf(spec.APIAccessSpec{}):     {"scope", "access"},
-	reflect.TypeOf(spec.ConstraintSpec{}):    {"attribute", "value"},
-	reflect.TypeOf(spec.RestartPolicySpec{}): {"window"},
-	reflect.TypeOf(spec.TaskSpec{}):          {"name", "image"},
-	reflect.TypeOf(spec.SecretRefSpec{}):     {"name", "target"},
-	reflect.TypeOf(spec.PortSpec{}):          {"port"},
-	reflect.TypeOf(spec.HealthCheckSpec{}):   {"type"},
-	reflect.TypeOf(spec.VolumeSpec{}):        {"name", "host_path", "container_path"},
+	reflect.TypeFor[spec.JobSpec]():           {"name", "namespace", "task_groups"},
+	reflect.TypeFor[spec.TaskGroupSpec]():     {"name", "count", "tasks"},
+	reflect.TypeFor[spec.APIAccessSpec]():     {"scope", "access"},
+	reflect.TypeFor[spec.ConstraintSpec]():    {"attribute", "value"},
+	reflect.TypeFor[spec.RestartPolicySpec](): {"window"},
+	reflect.TypeFor[spec.TaskSpec]():          {"name", "image"},
+	reflect.TypeFor[spec.SecretRefSpec]():     {"name", "target"},
+	reflect.TypeFor[spec.PortSpec]():          {"port"},
+	reflect.TypeFor[spec.HealthCheckSpec]():   {"type"},
+	reflect.TypeFor[spec.VolumeSpec]():        {"name", "host_path", "container_path"},
 }
 
 var enumValues = map[reflect.Type][]string{
-	reflect.TypeOf(spec.UpdateStrategy("")):  {"", "recreate", "rolling"},
-	reflect.TypeOf(spec.Runtime("")):         {"", "runc", "runsc"},
-	reflect.TypeOf(spec.APIAccessScope("")):  {"cluster"},
-	reflect.TypeOf(spec.APIAccessLevel("")):  {"read", "write"},
-	reflect.TypeOf(spec.TaskNetworkMode("")): {"", "none", "namespace", "host"},
-	reflect.TypeOf(spec.HealthCheckType("")): {"http", "tcp", "script"},
-	reflect.TypeOf(spec.SecretTarget("")):    {"env", "file"},
+	reflect.TypeFor[spec.UpdateStrategy]():  {"", "recreate", "rolling"},
+	reflect.TypeFor[spec.Runtime]():         {"", "runc", "runsc"},
+	reflect.TypeFor[spec.APIAccessScope]():  {"cluster"},
+	reflect.TypeFor[spec.APIAccessLevel]():  {"read", "write"},
+	reflect.TypeFor[spec.TaskNetworkMode](): {"", "none", "namespace", "host"},
+	reflect.TypeFor[spec.HealthCheckType](): {"http", "tcp", "script"},
+	reflect.TypeFor[spec.SecretTarget]():    {"env", "file"},
 }
 
 type generator struct {
@@ -55,7 +56,7 @@ type generator struct {
 // Generate returns deterministic canonical-JSON and first-party YAML schemas.
 func Generate() ([]byte, []byte, error) {
 	g := &generator{defs: schema{}}
-	root, err := g.structSchema(reflect.TypeOf(spec.JobSpec{}))
+	root, err := g.structSchema(reflect.TypeFor[spec.JobSpec]())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -85,8 +86,7 @@ func Generate() ([]byte, []byte, error) {
 
 func (g *generator) structSchema(t reflect.Type) (schema, error) {
 	properties := schema{}
-	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
+	for field := range t.Fields() {
 		name := jsonFieldName(field)
 		if name == "" {
 			continue
@@ -446,16 +446,12 @@ func patch(root schema, path []string, values schema) {
 	for _, key := range path {
 		current = current[key].(schema)
 	}
-	for key, value := range values {
-		current[key] = value
-	}
+	maps.Copy(current, values)
 }
 
 func cloneSchema(in schema) schema {
 	out := schema{}
-	for key, value := range in {
-		out[key] = value
-	}
+	maps.Copy(out, in)
 	return out
 }
 

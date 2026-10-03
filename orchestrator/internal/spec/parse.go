@@ -7,11 +7,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-var byteSizeType = reflect.TypeOf(ByteSize(0))
+var byteSizeType = reflect.TypeFor[ByteSize]()
 
 // ParseYAML decodes a YAML job specification.
 func ParseYAML(raw []byte) (*JobSpec, error) {
-	var data map[string]interface{}
+	var data map[string]any
 	err := yaml.Unmarshal(raw, &data)
 	if err != nil {
 		return nil, err

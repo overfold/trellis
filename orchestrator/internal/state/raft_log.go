@@ -155,7 +155,7 @@ type raftLogWriter struct {
 }
 
 func (w *raftLogWriter) Write(p []byte) (int, error) {
-	for _, line := range strings.Split(strings.TrimRight(string(p), "\r\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimRight(string(p), "\r\n"), "\n") {
 		if line = strings.TrimSpace(line); line != "" {
 			w.logger.Log(w.level, line)
 		}

@@ -65,26 +65,14 @@ func Resolve(cpu int, memory int64) (int, int64, error) {
 }
 
 func defaultReserve(cpu int, memory int64) (int, int64) {
-	reservedCPU := cpu / defaultReserveDenominator
-	if reservedCPU < minDefaultCPUReserve {
-		reservedCPU = minDefaultCPUReserve
-	}
-	if reservedCPU > maxDefaultCPUReserve {
-		reservedCPU = maxDefaultCPUReserve
-	}
+	reservedCPU := min(max(cpu/defaultReserveDenominator, minDefaultCPUReserve), maxDefaultCPUReserve)
 	if cpu <= 0 {
 		reservedCPU = 0
 	} else if reservedCPU > cpu/2 {
 		reservedCPU = cpu / 2
 	}
 
-	reservedMemory := memory / defaultReserveDenominator
-	if reservedMemory < minDefaultMemoryReserve {
-		reservedMemory = minDefaultMemoryReserve
-	}
-	if reservedMemory > maxDefaultMemoryReserve {
-		reservedMemory = maxDefaultMemoryReserve
-	}
+	reservedMemory := min(max(memory/defaultReserveDenominator, minDefaultMemoryReserve), maxDefaultMemoryReserve)
 	if memory <= 0 {
 		reservedMemory = 0
 	} else if reservedMemory > memory/2 {

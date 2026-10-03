@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 	"time"
@@ -174,9 +175,7 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 		allocationsByGroup[key] = append(allocationsByGroup[key], allocation)
 	}
 	volumeOwners := make(map[string]uuid.UUID, len(in.VolumeOwners))
-	for key, owner := range in.VolumeOwners {
-		volumeOwners[key] = owner
-	}
+	maps.Copy(volumeOwners, in.VolumeOwners)
 	nodes := sortedNodes(in.Nodes)
 	plannedUpdates := make(map[*Allocation]bool)
 	markUpdated := func(allocation *Allocation) {
@@ -432,7 +431,7 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 					}
 				}
 				drainsToStop := min(max(healthyNew+len(draining)-group.Count, 0), len(draining))
-				for i := 0; i < drainsToStop; i++ {
+				for i := range drainsToStop {
 					if draining[i].NextRetryAt == nil || !now.Before(*draining[i].NextRetryAt) {
 						actions = append(actions, Action{Type: ActionStop, Allocation: draining[i]})
 					}

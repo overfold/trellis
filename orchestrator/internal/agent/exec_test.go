@@ -281,7 +281,7 @@ func TestExecTargetsOnlyRunningVerifiedCurrentGenerationTask(t *testing.T) {
 	addExecTestTask(agent, "allocation-g2-sidecar", "sidecar", 2, "running").ContainerOwnershipUnverified = true
 	addExecTestTask(agent, "allocation-g2-proxy", "proxy", 2, "stopping")
 
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		reservation, err := agent.ReserveExec(context.Background(), "allocation", execTestRequest("", "true"))
 		if err != nil {
 			t.Fatal(err)
@@ -568,7 +568,7 @@ func TestExecSessionPerAllocationLimitReturnsTooManyRequests(t *testing.T) {
 	rt := newExecTestRuntime()
 	agent := newOperationTestAgent(t, rt)
 	addExecTestTask(agent, "allocation-g1-web", "web", 1, "running")
-	for i := 0; i < execSessionPerAllocationLimit; i++ {
+	for i := range execSessionPerAllocationLimit {
 		if _, err := agent.ReserveExec(context.Background(), "allocation", execTestRequest("web", "sh")); err != nil {
 			t.Fatalf("reserve session %d: %v", i, err)
 		}
@@ -606,7 +606,7 @@ func TestExecSessionGlobalLimitIsAtomicAndFailedKillsRetainCapacity(t *testing.T
 	results := make(chan error, execSessionGlobalLimit+1)
 	reservations := make(chan *ExecReservation, execSessionGlobalLimit+1)
 	var wg sync.WaitGroup
-	for i := 0; i < execSessionGlobalLimit+1; i++ {
+	for i := range execSessionGlobalLimit + 1 {
 		allocation := fmt.Sprintf("allocation-%d", i/execSessionPerAllocationLimit)
 		wg.Go(func() {
 			reservation, err := agent.ReserveExec(context.Background(), allocation, execTestRequest("web", "sh"))

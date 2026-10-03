@@ -122,7 +122,7 @@ func (s *Server) planNetworkPortRegistrations(ctx context.Context, namespaces []
 		// count is validated against the bounded configured port range above.
 		start := int(binary.BigEndian.Uint32(hash[:4]) % uint32(count)) //nolint:gosec
 		assigned := -1
-		for offset := 0; offset < count; offset++ {
+		for offset := range count {
 			slot := (start + offset) % count
 			if _, occupied := used[slot]; !occupied {
 				assigned = slot

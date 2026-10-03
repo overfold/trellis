@@ -335,13 +335,13 @@ func (b *BoltStore) RestoreDesired(cluster string, snapshot *DesiredSnapshot) er
 	}
 	return b.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(bucketName)
-		jobsPrefix := []byte(fmt.Sprintf("trellis/%s/jobs/", cluster))
-		revisionsPrefix := []byte(fmt.Sprintf("trellis/%s/job-revisions/", cluster))
-		secretsPrefix := []byte(fmt.Sprintf("trellis/%s/secrets/", cluster))
-		volumesPrefix := []byte(fmt.Sprintf("trellis/%s/volume-registrations/", cluster))
-		networkPortsPrefix := []byte(fmt.Sprintf("trellis/%s/network-port-registrations/", cluster))
-		networkSubnetsPrefix := []byte(fmt.Sprintf("trellis/%s/network-subnet-registrations/", cluster))
-		allocationsPrefix := []byte(fmt.Sprintf("trellis/%s/allocations/", cluster))
+		jobsPrefix := fmt.Appendf(nil, "trellis/%s/jobs/", cluster)
+		revisionsPrefix := fmt.Appendf(nil, "trellis/%s/job-revisions/", cluster)
+		secretsPrefix := fmt.Appendf(nil, "trellis/%s/secrets/", cluster)
+		volumesPrefix := fmt.Appendf(nil, "trellis/%s/volume-registrations/", cluster)
+		networkPortsPrefix := fmt.Appendf(nil, "trellis/%s/network-port-registrations/", cluster)
+		networkSubnetsPrefix := fmt.Appendf(nil, "trellis/%s/network-subnet-registrations/", cluster)
+		allocationsPrefix := fmt.Appendf(nil, "trellis/%s/allocations/", cluster)
 		for _, prefix := range [][]byte{jobsPrefix, revisionsPrefix, secretsPrefix, volumesPrefix, networkPortsPrefix, networkSubnetsPrefix, allocationsPrefix} {
 			key, _ := bucket.Cursor().Seek(prefix)
 			if key != nil && len(key) >= len(prefix) && string(key[:len(prefix)]) == string(prefix) {
@@ -349,7 +349,7 @@ func (b *BoltStore) RestoreDesired(cluster string, snapshot *DesiredSnapshot) er
 			}
 		}
 		if len(snapshot.Cluster) > 0 {
-			if err := bucket.Put([]byte(fmt.Sprintf("trellis/%s/meta", cluster)), snapshot.Cluster); err != nil {
+			if err := bucket.Put(fmt.Appendf(nil, "trellis/%s/meta", cluster), snapshot.Cluster); err != nil {
 				return err
 			}
 		}

@@ -100,8 +100,8 @@ func fill(value reflect.Value, counter *int, depth int) error {
 		m.SetMapIndex(key, element)
 		value.Set(m)
 	case reflect.Struct:
-		for i := 0; i < value.NumField(); i++ {
-			if err := fill(value.Field(i), counter, depth+1); err != nil {
+		for _, field := range value.Fields() {
+			if err := fill(field, counter, depth+1); err != nil {
 				return err
 			}
 		}

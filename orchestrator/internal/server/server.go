@@ -769,9 +769,7 @@ func (s *Server) AcquireLeadership(ctx context.Context) error {
 	epoch := cluster.ControlEpoch
 	s.mu.RLock()
 	jobs := make(map[string]*Job, len(s.jobs))
-	for key, job := range s.jobs {
-		jobs[key] = job
-	}
+	maps.Copy(jobs, s.jobs)
 	s.mu.RUnlock()
 	if err := s.state.ActivateLeadership(ctx, cluster, jobs); err != nil {
 		return fmt.Errorf("persist leadership activation: %w", err)
@@ -1479,9 +1477,7 @@ func (s *Server) deliveredResumes(epoch uint64) map[resumeDeliveryKey]uint64 {
 		return nil
 	}
 	delivered := make(map[resumeDeliveryKey]uint64, len(s.resumes))
-	for key, sequence := range s.resumes {
-		delivered[key] = sequence
-	}
+	maps.Copy(delivered, s.resumes)
 	return delivered
 }
 

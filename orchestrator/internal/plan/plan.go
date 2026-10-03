@@ -139,11 +139,8 @@ func walk(path string, before, after any, changes *[]api.JobPlanChange) {
 				}
 			}
 		}
-		limit := len(leftSlice)
-		if len(rightSlice) > limit {
-			limit = len(rightSlice)
-		}
-		for i := 0; i < limit; i++ {
+		limit := max(len(rightSlice), len(leftSlice))
+		for i := range limit {
 			child := fmt.Sprintf("%s[%d]", path, i)
 			switch {
 			case i >= len(leftSlice):

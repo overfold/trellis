@@ -482,7 +482,7 @@ func TestPlanReconciliationIsDeterministic(t *testing.T) {
 		return string(raw)
 	}
 	var first string
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		plan, err := planReconciliation(planTestInput(jobs, nodes, allocations()...))
 		if err != nil {
 			t.Fatalf("plan: %v", err)

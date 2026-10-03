@@ -173,8 +173,7 @@ func TestEventStreamSendsHeadersBeforeTheFirstEvent(t *testing.T) {
 	s.events = newEventBus()
 	server := httptest.NewServer(authenticatedHandler(s, auth.AccessCluster, auth.AccessRead))
 	defer server.Close()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/v1/namespaces/default/events", nil)
 	if err != nil {
 		t.Fatal(err)

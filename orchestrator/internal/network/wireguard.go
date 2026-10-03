@@ -229,7 +229,7 @@ func reserveAddress(leaseDir, cidr, allocation string) (address, lease string, e
 		return "", "", fmt.Errorf("CIDR %s has no IPv4 allocation space", cidr)
 	}
 	capacity := uint32((uint64(1) << uint(32-prefix.Bits())) - 3) //nolint:gosec // IPv4 prefixes through /29 bound capacity to uint32.
-	for probe := uint32(0); probe < capacity; probe++ {
+	for probe := range capacity {
 		address, err = allocationAddressAt(cidr, allocation, probe)
 		if err != nil {
 			return "", "", err

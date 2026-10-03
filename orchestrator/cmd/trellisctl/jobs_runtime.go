@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -288,12 +289,7 @@ func resolveLogStreams(ctx context.Context, serverClient *client.Client, target,
 }
 
 func containsTask(tasks []string, task string) bool {
-	for _, candidate := range tasks {
-		if candidate == task {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(tasks, task)
 }
 
 func displayTask(task string) string {

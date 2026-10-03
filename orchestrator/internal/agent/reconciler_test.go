@@ -254,8 +254,7 @@ func TestAllocationReconcilerWaitsForHealthAfterRestart(t *testing.T) {
 	rt := &reconcilerRuntime{status: runtime.StatusStopped}
 	check := &spec.HealthCheckSpec{Type: "script", Interval: time.Hour}
 	manager := health.NewHealthManager(slog.Default(), rt, nil)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	manager.SetContext(ctx)
 	manager.RegisterTask("alloc-1", "alloc-1", check)
 	agent := &Agent{
@@ -301,8 +300,7 @@ func TestRestartIgnoresInFlightHealthProbe(t *testing.T) {
 			}
 			check := &spec.HealthCheckSpec{Type: "script", Interval: time.Millisecond, Timeout: time.Hour, Threshold: 1}
 			manager := health.NewHealthManager(slog.Default(), rt, nil)
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+			ctx := t.Context()
 			manager.SetContext(ctx)
 			agent := &Agent{
 				log:         slog.Default(),
@@ -341,7 +339,7 @@ func TestAllocationReconcilerPublishesFailedAfterRestartBudget(t *testing.T) {
 	r := NewAllocationReconciler(rt, subscriber)
 	r.Track("alloc-1", false, &spec.RestartPolicySpec{MaxRestarts: spec.DefaultMaxRestarts, Window: spec.DefaultRestartWindow})
 
-	for i := 0; i < spec.DefaultMaxRestarts+1; i++ {
+	for i := range spec.DefaultMaxRestarts + 1 {
 		if err := r.Reconcile(context.Background(), "alloc-1"); err != nil {
 			t.Fatalf("reconcile %d: %v", i, err)
 		}
@@ -373,7 +371,7 @@ func TestAllocationReconcilerUsesConfiguredRestartBudget(t *testing.T) {
 	r := NewAllocationReconciler(rt, subscriber)
 	r.Track("alloc-1", false, &spec.RestartPolicySpec{MaxRestarts: 1, Window: time.Minute})
 
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if err := r.Reconcile(context.Background(), "alloc-1"); err != nil {
 			t.Fatalf("reconcile %d: %v", i, err)
 		}
@@ -413,7 +411,7 @@ func TestAllocationReconcilerExhaustionIsTerminalAfterWindow(t *testing.T) {
 	window := time.Second
 	r.Track("alloc-1", false, &spec.RestartPolicySpec{MaxRestarts: 1, Window: window})
 
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if err := r.Reconcile(context.Background(), "alloc-1"); err != nil {
 			t.Fatalf("reconcile %d: %v", i, err)
 		}
@@ -422,7 +420,7 @@ func TestAllocationReconcilerExhaustionIsTerminalAfterWindow(t *testing.T) {
 	r.mu.Lock()
 	r.states["alloc-1"].window = time.Now().Add(-10 * window)
 	r.mu.Unlock()
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if err := r.Reconcile(context.Background(), "alloc-1"); err != nil {
 			t.Fatalf("reconcile after window %d: %v", i, err)
 		}
@@ -447,7 +445,7 @@ func TestAllocationReconcilerTrackRecoveredExhaustedDoesNotRestart(t *testing.T)
 	r := NewAllocationReconciler(rt, subscriber)
 	r.TrackRecovered("alloc-1", false, &spec.RestartPolicySpec{MaxRestarts: 1, Window: time.Second}, 1, time.Now().Add(-time.Hour), true)
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if err := r.Reconcile(context.Background(), "alloc-1"); err != nil {
 			t.Fatalf("reconcile %d: %v", i, err)
 		}
@@ -473,7 +471,7 @@ func TestAllocationReconcilerRecoveredExhaustedRunningFailsWhenItStops(t *testin
 		t.Fatalf("statuses = %v, want no failure while the container runs", subscriber.statuses)
 	}
 	rt.status = runtime.StatusStopped
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if err := r.Reconcile(context.Background(), "alloc-1"); err != nil {
 			t.Fatalf("reconcile stopped %d: %v", i, err)
 		}

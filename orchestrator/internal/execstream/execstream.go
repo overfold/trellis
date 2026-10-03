@@ -194,7 +194,7 @@ func SetUpgradeHeaders(r *http.Request) {
 
 func headerHasToken(header http.Header, name, token string) bool {
 	for _, value := range header.Values(name) {
-		for _, candidate := range strings.Split(value, ",") {
+		for candidate := range strings.SplitSeq(value, ",") {
 			if strings.EqualFold(strings.TrimSpace(candidate), token) {
 				return true
 			}

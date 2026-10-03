@@ -893,7 +893,7 @@ func TestUpdatePlanBatchesLargePeerSetWithinDeadline(t *testing.T) {
 
 	const peerCount = 400
 	plan.Peers = make([]PeerPlan, 0, peerCount)
-	for i := 0; i < peerCount; i++ {
+	for i := range peerCount {
 		plan.Peers = append(plan.Peers, PeerPlan{
 			PublicKey:  fmt.Sprintf("peer-%03d", i),
 			Endpoint:   fmt.Sprintf("node-%03d.example.test:51917", i),
@@ -918,7 +918,7 @@ func TestUpdatePlanBatchesLargePeerSetWithinDeadline(t *testing.T) {
 		if len(command) > wireGuardCommandArgBudget {
 			t.Fatalf("WireGuard command exceeded argument budget: %d > %d", len(command), wireGuardCommandArgBudget)
 		}
-		for i := 0; i < peerCount; i++ {
+		for i := range peerCount {
 			key := fmt.Sprintf("peer-%03d", i)
 			if strings.Contains(command, "peer "+key+" ") {
 				seen[key] = true
