@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -50,7 +51,8 @@ func TestStreamReportsHTTPError(t *testing.T) {
 	}))
 	defer server.Close()
 	_, err := (&Client{HTTP: server.Client()}).Stream(context.Background(), server.URL)
-	httpErr, ok := err.(*HTTPError)
+	var httpErr *HTTPError
+	ok := errors.As(err, &httpErr)
 	if !ok || httpErr.Status != http.StatusNotFound || httpErr.Message() != "allocation not found" {
 		t.Fatalf("Stream error = %#v", err)
 	}

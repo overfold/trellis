@@ -302,10 +302,7 @@ func (r *InjectedRuntime) save() error {
 	if err := os.MkdirAll(filepath.Dir(r.path), 0o750); err != nil {
 		return err
 	}
-	b, err := json.Marshal(r.state)
-	if err != nil {
-		return err
-	}
+	b, _ := json.Marshal(r.state)
 	tmp := r.path + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return err

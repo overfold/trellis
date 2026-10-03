@@ -14,3 +14,39 @@ linters:
     - revive
     - unparam
     - unused
+    - errorlint
+    - musttag
+    - exhaustive
+    - noctx
+    - bodyclose
+    - errchkjson
+    - gosec
+    - copyloopvar
+    - nilerr
+    - durationcheck
+    - makezero
+    - fatcontext
+    - errname
+    - recvcheck
+    - testifylint
+    - tparallel
+    - mirror
+    - canonicalheader
+    - nolintlint
+  settings:
+    exhaustive:
+      default-signifies-exhaustive: true
+    errchkjson:
+      check-error-free-encoding: true
+    gosec:
+      excludes:
+        - G301
+        - G302
+        - G304
+        - G306
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - noctx
+          - gosec

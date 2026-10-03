@@ -221,7 +221,7 @@ func (h *harness) nodeClientTLS(i int) *tls.Config {
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	return &tls.Config{Certificates: []tls.Certificate{certificate}, InsecureSkipVerify: true} //nolint:gosec // The test targets loopback nodes by address.
+	return &tls.Config{Certificates: []tls.Certificate{certificate}, InsecureSkipVerify: true}
 }
 
 type node struct {
@@ -413,7 +413,10 @@ func (h *harness) waitHTTP(i int) {
 func (h *harness) request(i int, method, path string, body any) (*http.Response, error) {
 	var rd io.Reader
 	if body != nil {
-		b, _ := json.Marshal(body)
+		b, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
 		rd = bytes.NewReader(b)
 	}
 	req, _ := http.NewRequestWithContext(context.Background(), method, "https://"+addr(h.nodes[i].ports[1])+path, rd)
@@ -455,7 +458,7 @@ func (h *harness) waitNodes(want int) {
 
 // waitVoters waits until members nodes belong to Raft and voters of them vote.
 // It returns each listed node's control-plane role keyed by node ID.
-func (h *harness) waitVoters(members, voters int) map[string]api.ControlPlaneMembership { //nolint:unparam // Both counts keep call sites readable; the suite currently expects three voters.
+func (h *harness) waitVoters(members, voters int) map[string]api.ControlPlaneMembership {
 	var last map[string]api.ControlPlaneMembership
 	h.eventually(90*time.Second, func() bool {
 		r, e := h.request(h.endpoint(), "GET", "/v1/nodes", nil)
@@ -505,7 +508,11 @@ func (h *harness) waitJob(name string, revision, desired int) {
 		}
 		defer func() { _ = r.Body.Close() }()
 		last, _ = io.ReadAll(r.Body)
-		var v struct{ Revision, Desired, Running int }
+		var v struct {
+			Revision int `json:"revision"`
+			Desired  int `json:"desired"`
+			Running  int `json:"running"`
+		}
 		converged = r.StatusCode == 200 && json.Unmarshal(last, &v) == nil && v.Revision == revision && v.Desired == desired && v.Running == desired
 		return converged
 	}, fmt.Sprintf("job %s did not converge", name))
@@ -548,7 +555,10 @@ func (h *harness) leader() int {
 }
 func (h *harness) anyRunning() int { return h.endpoint() }
 func (h *harness) fault(i int, op, timing string) {
-	b, _ := json.Marshal(map[string]any{"operation": op, "timing": timing, "count": 1})
+	b, err := json.Marshal(map[string]any{"operation": op, "timing": timing, "count": 1})
+	if err != nil {
+		h.t.Fatal(err)
+	}
 	if e := os.WriteFile(filepath.Join(h.nodes[i].dir, "fault.json"), b, 0o600); e != nil {
 		h.t.Fatal(e)
 	}

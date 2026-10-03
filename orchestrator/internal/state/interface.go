@@ -20,9 +20,9 @@ type PrefixIterator interface {
 // a non-nil Value stores it (including an empty value). DeletePrefix removes
 // every matching key and is mutually exclusive with Key and Value.
 type Mutation struct {
-	Key          string
-	Value        []byte
-	DeletePrefix string
+	Key          string `json:"Key"`
+	Value        []byte `json:"Value"`
+	DeletePrefix string `json:"DeletePrefix"`
 }
 
 // AtomicStore extends Store with all-or-nothing multi-key updates.

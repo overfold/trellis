@@ -65,10 +65,7 @@ func (r *RaftStore) RestoreDesired(cluster string, snapshot *DesiredSnapshot) er
 		return err
 	}
 	cmd := fsmCommand{Op: "restore_desired", Cluster: cluster, Snapshot: snapshot}
-	data, err := json.Marshal(cmd)
-	if err != nil {
-		return err
-	}
+	data, _ := json.Marshal(cmd)
 	fut := r.raft.Apply(data, 10*time.Second)
 	if err := fut.Error(); err != nil {
 		return err
@@ -82,10 +79,7 @@ func (r *RaftStore) RestoreDesired(cluster string, snapshot *DesiredSnapshot) er
 // Batch applies mutations as one Raft log entry and one Bolt transaction.
 func (r *RaftStore) Batch(_ context.Context, mutations []Mutation) error {
 	cmd := fsmCommand{Op: "batch", Mutations: mutations}
-	data, err := json.Marshal(cmd)
-	if err != nil {
-		return err
-	}
+	data, _ := json.Marshal(cmd)
 	fut := r.raft.Apply(data, 10*time.Second)
 	if err := fut.Error(); err != nil {
 		return err
@@ -134,7 +128,8 @@ func (t *tlsStreamLayer) Addr() net.Addr {
 }
 
 func (t *tlsStreamLayer) Dial(address raft.ServerAddress, timeout time.Duration) (net.Conn, error) {
-	conn, err := net.DialTimeout("tcp", string(address), timeout)
+	// Raft's StreamLayer contract supplies a timeout, but no caller context.
+	conn, err := (&net.Dialer{Timeout: timeout}).DialContext(context.Background(), "tcp", string(address))
 	if err != nil {
 		return nil, err
 	}
@@ -153,11 +148,13 @@ func (t *tlsStreamLayer) Dial(address raft.ServerAddress, timeout time.Duration)
 	// than accepting any cluster certificate through the shared trellis SAN.
 	peerTLS.ServerName = host
 	tlsConn := tls.Client(conn, peerTLS)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 	if err := tlsConn.SetDeadline(time.Now().Add(timeout)); err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
-	if err := tlsConn.Handshake(); err != nil {
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
@@ -312,10 +309,7 @@ func (r *RaftStore) List(ctx context.Context, prefix string) (map[string][]byte,
 // Put applies a replicated value update.
 func (r *RaftStore) Put(_ context.Context, key string, value []byte) error {
 	cmd := fsmCommand{Op: "put", Key: key, Value: value}
-	data, err := json.Marshal(cmd)
-	if err != nil {
-		return err
-	}
+	data, _ := json.Marshal(cmd)
 	fut := r.raft.Apply(data, 10*time.Second)
 	if err := fut.Error(); err != nil {
 		return err
@@ -329,10 +323,7 @@ func (r *RaftStore) Put(_ context.Context, key string, value []byte) error {
 // Delete applies a replicated key deletion.
 func (r *RaftStore) Delete(_ context.Context, key string) error {
 	cmd := fsmCommand{Op: "delete", Key: key}
-	data, err := json.Marshal(cmd)
-	if err != nil {
-		return err
-	}
+	data, _ := json.Marshal(cmd)
 	fut := r.raft.Apply(data, 10*time.Second)
 	if err := fut.Error(); err != nil {
 		return err

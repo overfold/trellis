@@ -21,10 +21,7 @@ func validSnapshotJob(t *testing.T, namespace, name string, revision int) (strin
 	if err := spec.Canonicalize(job, spec.DefaultLimits()); err != nil {
 		t.Fatal(err)
 	}
-	value, err := json.Marshal(persistedJob{Spec: job, Revision: revision, Version: revision})
-	if err != nil {
-		t.Fatal(err)
-	}
+	value, _ := json.Marshal(persistedJob{Spec: job, Revision: revision, Version: revision})
 	return url.QueryEscape(namespace + "\x00" + name), value
 }
 
@@ -109,10 +106,7 @@ func TestBoltSnapshotStreamsDeterministicCompatibleJSON(t *testing.T) {
 	if err := snapshot.Close(); err != nil {
 		t.Fatal(err)
 	}
-	want, err := json.Marshal(map[string][]byte{"z/key": []byte("last"), "a/key": []byte("first"), "m/key": []byte("middle")})
-	if err != nil {
-		t.Fatal(err)
-	}
+	want, _ := json.Marshal(map[string][]byte{"z/key": []byte("last"), "a/key": []byte("first"), "m/key": []byte("middle")})
 	if !bytes.Equal(encoded.Bytes(), want) {
 		t.Fatalf("streamed snapshot = %s, want %s", encoded.Bytes(), want)
 	}

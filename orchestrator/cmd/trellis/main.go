@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -205,7 +206,7 @@ func run(parent context.Context, cfg *config) error {
 		return err
 	}
 	if cfg.AgentAdvertise == "" || cfg.ServerAdvertise == "" || cfg.RaftAdvertise == "" {
-		advertiseHost, err := detectAdvertiseHost()
+		advertiseHost, err := detectAdvertiseHost(ctx)
 		if err != nil {
 			return fmt.Errorf("determine advertise address: %w; configure agent_advertise, server_advertise, and raft_advertise explicitly", err)
 		}
@@ -236,7 +237,7 @@ func run(parent context.Context, cfg *config) error {
 		return fmt.Errorf("TLS bootstrap: %w", err)
 	}
 	id = enrolledID
-	if err := os.WriteFile(filepath.Join(cfg.DataDir, "node-ca.crt"), tlsMaterials.CACert, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cfg.DataDir, "node-ca.crt"), tlsMaterials.CACert, 0o644); err != nil { //nolint:gosec // The operator-selected data directory stores the node's public CA certificate.
 		return fmt.Errorf("write trusted node CA certificate: %w", err)
 	}
 
@@ -450,7 +451,11 @@ func run(parent context.Context, cfg *config) error {
 	var sysinfo syscall.Sysinfo_t
 	memory := int64(0)
 	if syscall.Sysinfo(&sysinfo) == nil {
-		memory = int64(sysinfo.Totalram) * int64(sysinfo.Unit)
+		unit := uint64(sysinfo.Unit)
+		if unit != 0 && sysinfo.Totalram > math.MaxInt64/unit {
+			return fmt.Errorf("node memory exceeds the supported capacity range")
+		}
+		memory = int64(sysinfo.Totalram * unit) //nolint:gosec // The product is bounded to MaxInt64 above (or zero when unit is zero).
 	}
 	if err := ag.SetResources(goruntime.NumCPU()*1000, memory, goruntime.GOOS, goruntime.GOARCH); err != nil {
 		return fmt.Errorf("configure node resources: %w", err)
@@ -572,8 +577,8 @@ func run(parent context.Context, cfg *config) error {
 	}
 }
 
-func detectAdvertiseHost() (string, error) {
-	if conn, err := net.Dial("udp4", "1.1.1.1:53"); err == nil {
+func detectAdvertiseHost(ctx context.Context) (string, error) {
+	if conn, err := (&net.Dialer{}).DialContext(ctx, "udp4", "1.1.1.1:53"); err == nil {
 		defer func() { _ = conn.Close() }()
 		if address, ok := conn.LocalAddr().(*net.UDPAddr); ok {
 			if ip := address.IP.To4(); ip != nil && !ip.IsLoopback() && !ip.IsUnspecified() {
@@ -864,10 +869,7 @@ func saveTLSToStorage(local *storage.LocalStorage, m *tlsutil.Materials) error {
 }
 
 func joinClusterTLS(ctx context.Context, log *slog.Logger, joinAddr, joinToken string, caCert []byte, serverAdvertise, agentAdvertise, raftAdvertise string) (*nodeapi.NodeEnrollmentResponse, error) {
-	body, err := json.Marshal(nodeapi.NodeEnrollmentRequest{ServerAdvertise: serverAdvertise, AgentAdvertise: agentAdvertise, RaftAdvertise: raftAdvertise})
-	if err != nil {
-		return nil, err
-	}
+	body, _ := json.Marshal(nodeapi.NodeEnrollmentRequest{ServerAdvertise: serverAdvertise, AgentAdvertise: agentAdvertise, RaftAdvertise: raftAdvertise})
 	base := joinAddr
 	if !strings.Contains(base, "://") {
 		base = "https://" + base
@@ -911,10 +913,7 @@ func joinClusterTLS(ctx context.Context, log *slog.Logger, joinAddr, joinToken s
 }
 
 func joinClusterRaft(ctx context.Context, log *slog.Logger, joinAddr, serverAddr, raftAddr string, tlsConfig *tls.Config) (*nodeapi.RaftJoinResponse, error) {
-	body, err := json.Marshal(nodeapi.RaftJoinRequest{ServerAddress: serverAddr, RaftAddress: raftAddr})
-	if err != nil {
-		return nil, err
-	}
+	body, _ := json.Marshal(nodeapi.RaftJoinRequest{ServerAddress: serverAddr, RaftAddress: raftAddr})
 	base := joinAddr
 	if !strings.Contains(base, "://") {
 		base = "https://" + base
@@ -1012,7 +1011,7 @@ func (p *controlPlaneProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// than proxy so the leader verifies the original identity instead of the
 	// forwarding member's transport identity.
 	if nodeControlPlaneRoute(r) {
-		http.Redirect(w, r, target+r.URL.RequestURI(), http.StatusTemporaryRedirect)
+		http.Redirect(w, r, target+r.URL.RequestURI(), http.StatusTemporaryRedirect) //nolint:gosec // Redirects intentionally use the elected member's advertised address, not a caller-selected host.
 		return
 	}
 

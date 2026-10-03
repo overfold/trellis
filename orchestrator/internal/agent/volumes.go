@@ -234,7 +234,7 @@ func (vm *VolumeManager) ReleaseStaging(allocationID string) error {
 	var errs []error
 	for _, entry := range entries {
 		target := filepath.Join(dir, entry.Name())
-		if err := vm.unstage(target); err != nil && err != unix.EINVAL && err != unix.ENOENT {
+		if err := vm.unstage(target); err != nil && !errors.Is(err, unix.EINVAL) && !errors.Is(err, unix.ENOENT) {
 			errs = append(errs, fmt.Errorf("unstaging volume %s: %w", entry.Name(), err))
 		}
 		if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
@@ -471,10 +471,7 @@ func (vm *VolumeManager) persistRegistrationsLocked() error {
 	if err := os.MkdirAll(vm.dataRootPath, 0o750); err != nil {
 		return fmt.Errorf("creating data root: %w", err)
 	}
-	raw, err := json.MarshalIndent(vm.registrations, "", "  ")
-	if err != nil {
-		return err
-	}
+	raw, _ := json.MarshalIndent(vm.registrations, "", "  ")
 	path := vm.registrationsPath()
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {

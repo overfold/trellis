@@ -183,6 +183,7 @@ func TestAcceptUpgradesAndCarriesFramesBothWays(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = response.Body.Close() }()
 	stream, err := Upgraded(response)
 	if err != nil {
 		t.Fatal(err)

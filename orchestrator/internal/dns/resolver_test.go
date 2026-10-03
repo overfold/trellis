@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -137,6 +138,30 @@ func TestBuildResponseCountsOnlyIPv4Answers(t *testing.T) {
 	}
 	if rcode := binary.BigEndian.Uint16(resp[2:4]) & 0x000f; rcode != 0 {
 		t.Fatalf("rcode = %d, want NOERROR for an existing name", rcode)
+	}
+}
+
+func TestBuildResponseBoundsAnswerCount(t *testing.T) {
+	ips := make([]net.IP, 65536)
+	for i := range ips {
+		ips[i] = net.IPv4(10, 0, 0, 1)
+	}
+	response := buildResponse(1, "a.", 1, 1, ips)
+	if count := binary.BigEndian.Uint16(response[6:8]); count != 65535 {
+		t.Fatalf("answer count = %d, want 65535", count)
+	}
+	// Twelve header bytes, three name bytes, four question bytes, sixteen per A record.
+	if len(response) != 19+16*65535 {
+		t.Fatalf("response length = %d, inconsistent with bounded answer count", len(response))
+	}
+}
+
+func TestEncodeNameBoundsLabels(t *testing.T) {
+	if got := encodeName(strings.Repeat("a", 63) + "."); len(got) != 65 || got[0] != 63 || got[64] != 0 {
+		t.Fatalf("maximum-length label encoding = %v", got)
+	}
+	if got := encodeName(strings.Repeat("a", 64) + "."); got != nil {
+		t.Fatalf("oversized label accepted: %v", got)
 	}
 }
 

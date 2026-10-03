@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -13,12 +14,16 @@ import (
 	"syscall"
 	"testing"
 
+	v1stats "github.com/containerd/cgroups/v3/cgroup1/stats"
+	v2stats "github.com/containerd/cgroups/v3/cgroup2/stats"
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/containers"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/errdefs"
 	"github.com/opencontainers/runtime-spec/specs-go"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
 )
 
 func buildWorkloadSpec(t *testing.T, runtimeName string, appArmorProfile func(string) oci.SpecOpts, mounts []specs.Mount) *oci.Spec {
@@ -968,5 +973,48 @@ func TestResourceSpecOptsRejectsNegativeLimits(t *testing.T) {
 		if _, err := resourceSpecOpts(options, true); err == nil {
 			t.Errorf("%s: expected negative limit to be rejected", name)
 		}
+	}
+}
+
+func TestDecodeContainerMetricsBounds(t *testing.T) {
+	for _, test := range []struct {
+		name, version string
+		cpu, memory   uint64
+		wantCPU       int64
+		wantErr       bool
+	}{
+		{"units", "v1", 23, 47, 23, false},
+		{"units", "v2", 23, 47, 23000, false},
+		{"CPU limit", "v1", math.MaxInt64, 47, math.MaxInt64, false},
+		{"CPU overflow", "v1", uint64(math.MaxInt64) + 1, 47, 0, true},
+		{"CPU limit", "v2", math.MaxInt64 / 1000, 47, 9223372036854775000, false},
+		{"CPU overflow", "v2", math.MaxInt64/1000 + 1, 47, 0, true},
+		{"memory limit", "v1", 23, math.MaxInt64, 23, false},
+		{"memory overflow", "v1", 23, uint64(math.MaxInt64) + 1, 0, true},
+		{"memory limit", "v2", 23, math.MaxInt64, 23000, false},
+		{"memory overflow", "v2", 23, uint64(math.MaxInt64) + 1, 0, true},
+	} {
+		t.Run(test.version+"/"+test.name, func(t *testing.T) {
+			var message proto.Message
+			if test.version == "v2" {
+				message = &v2stats.Metrics{CPU: &v2stats.CPUStat{UsageUsec: test.cpu}, Memory: &v2stats.MemoryStat{Usage: test.memory}}
+			} else {
+				message = &v1stats.Metrics{CPU: &v1stats.CPUStat{Usage: &v1stats.CPUUsage{Total: test.cpu}}, Memory: &v1stats.MemoryStat{Usage: &v1stats.MemoryEntry{Usage: test.memory}}}
+			}
+			raw, err := proto.Marshal(message)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := decodeContainerMetrics(&anypb.Any{TypeUrl: "io.containerd.cgroups." + test.version + ".Metrics", Value: raw})
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("overflowing metric accepted: %+v", got)
+				}
+				return
+			}
+			if err != nil || got.CPUUsageNanoseconds != test.wantCPU || got.MemoryUsageBytes != int64(test.memory) {
+				t.Fatalf("metrics = %+v, %v; want CPU %d and memory %d", got, err, test.wantCPU, test.memory)
+			}
+		})
 	}
 }

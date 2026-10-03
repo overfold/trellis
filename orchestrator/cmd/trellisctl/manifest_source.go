@@ -161,7 +161,7 @@ func fetchGitHubManifestFile(ctx context.Context, repository githubManifestSourc
 	}
 	request.Header.Set("Accept", "application/vnd.github.raw+json")
 	request.Header.Set("User-Agent", "trellisctl")
-	request.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	request.Header.Set("X-Github-Api-Version", "2022-11-28")
 	if token := githubToken(); token != "" {
 		request.Header.Set("Authorization", "Bearer "+token)
 	}

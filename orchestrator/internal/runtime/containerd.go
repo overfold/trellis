@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -30,11 +31,12 @@ import (
 	"github.com/containerd/errdefs"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
 )
 
 const trellisNamespace = "trellis"
 const gracePeriod = 10 * time.Second
-const secretEnvContainerPath = "/run/trellis/env-secrets"
+const secretEnvContainerPath = "/run/trellis/env-secrets" //nolint:gosec // This is a mount destination, not a credential.
 const healthProbeContainerPath = "/run/trellis/health-probe"
 
 // ContainerdRuntime implements container lifecycle operations with containerd.
@@ -46,22 +48,22 @@ type ContainerdRuntime struct {
 
 // Port maps a host port to a container port.
 type Port struct {
-	HostPort      int
-	ContainerPort int
+	HostPort      int `json:"HostPort"`
+	ContainerPort int `json:"ContainerPort"`
 }
 
 // Mount describes a host path mounted into a container.
 type Mount struct {
-	HostPath      string
-	ContainerPath string
-	ReadOnly      bool
+	HostPath      string `json:"HostPath"`
+	ContainerPath string `json:"ContainerPath"`
+	ReadOnly      bool   `json:"ReadOnly"`
 	// Secret marks a memory-backed mount whose source must be made readable
 	// only by the image-configured process user before container creation.
-	Secret bool
+	Secret bool `json:"Secret"`
 	// SecretEnv marks the private directory containing environment-secret
 	// files. The runtime wraps the configured process so these values never
 	// enter the container's persisted OCI environment.
-	SecretEnv bool
+	SecretEnv bool `json:"SecretEnv"`
 }
 
 // appArmorProfileName is the AppArmor profile Trellis generates from
@@ -449,7 +451,7 @@ func (c *ContainerdRuntime) openLegacyLog(name string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := checkOwnedDir(c.legacyLogDir, info, uint32(os.Geteuid()), true); err != nil {
+	if err := checkOwnedDir(c.legacyLogDir, info, uint32(os.Geteuid()), true); err != nil { //nolint:gosec // Linux effective UIDs are unsigned 32-bit values.
 		return nil, err
 	}
 	fd, err := syscall.Openat(int(dir.Fd()), name, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
@@ -466,7 +468,7 @@ func (c *ContainerdRuntime) openLegacyLog(name string) (*os.File, error) {
 		return nil, fmt.Errorf("legacy log %s is not a regular file", name)
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != uint32(os.Geteuid()) {
+	if !ok || stat.Uid != uint32(os.Geteuid()) { //nolint:gosec // Linux effective UIDs are unsigned 32-bit values.
 		_ = file.Close()
 		return nil, fmt.Errorf("legacy log %s must be owned by the runtime user", name)
 	}
@@ -598,7 +600,7 @@ func (c *ContainerdRuntime) removeAllocationFiles(containerID string) error {
 
 func removeLegacyAllocationFiles(dir *os.File, name string) {
 	info, err := dir.Stat()
-	if err != nil || checkOwnedDir(dir.Name(), info, uint32(os.Geteuid()), true) != nil {
+	if err != nil || checkOwnedDir(dir.Name(), info, uint32(os.Geteuid()), true) != nil { //nolint:gosec // Linux effective UIDs are unsigned 32-bit values.
 		return
 	}
 	for _, suffix := range []string{".log", "-resolv.conf", "-hosts"} {
@@ -699,10 +701,7 @@ func execProcessSpec(containerSpec *specs.Spec, command []string, terminal bool)
 	}
 	// A JSON round trip deep-copies every field, including ones added to the
 	// OCI spec later, so the exec process never aliases the container's.
-	encoded, err := json.Marshal(containerSpec.Process)
-	if err != nil {
-		return nil, fmt.Errorf("copying container process: %w", err)
-	}
+	encoded, _ := json.Marshal(containerSpec.Process)
 	process := &specs.Process{}
 	if err := json.Unmarshal(encoded, process); err != nil {
 		return nil, fmt.Errorf("copying container process: %w", err)
@@ -1222,28 +1221,47 @@ func (c *ContainerdRuntime) Metrics(ctx context.Context, containerID string) (*C
 	if err != nil {
 		return nil, fmt.Errorf("getting metrics for %s: %w", containerID, err)
 	}
+	result, err := decodeContainerMetrics(metric.Data)
+	if err != nil {
+		return nil, fmt.Errorf("decoding metrics for %s: %w", containerID, err)
+	}
+	return result, nil
+}
 
+func decodeContainerMetrics(data *anypb.Any) (*ContainerMetrics, error) {
 	result := &ContainerMetrics{}
-	if metric.Data != nil {
-		switch metric.Data.TypeUrl {
+	if data != nil {
+		switch data.TypeUrl {
 		case "io.containerd.cgroups.v2.Metrics":
 			var m v2stats.Metrics
-			if proto.Unmarshal(metric.Data.Value, &m) == nil {
+			if proto.Unmarshal(data.Value, &m) == nil {
 				if m.CPU != nil {
+					if m.CPU.UsageUsec > math.MaxInt64/1000 {
+						return nil, fmt.Errorf("CPU usage exceeds nanosecond metric range")
+					}
 					result.CPUUsageNanoseconds = int64(m.CPU.UsageUsec) * 1000
 				}
 				if m.Memory != nil {
+					if m.Memory.Usage > math.MaxInt64 {
+						return nil, fmt.Errorf("memory usage exceeds metric range")
+					}
 					result.MemoryUsageBytes = int64(m.Memory.Usage)
 				}
 			}
 		default:
 			// cgroup v1 and other runtimes
 			var m v1stats.Metrics
-			if proto.Unmarshal(metric.Data.Value, &m) == nil {
+			if proto.Unmarshal(data.Value, &m) == nil {
 				if m.CPU != nil && m.CPU.Usage != nil {
+					if m.CPU.Usage.Total > math.MaxInt64 {
+						return nil, fmt.Errorf("CPU usage exceeds metric range")
+					}
 					result.CPUUsageNanoseconds = int64(m.CPU.Usage.Total)
 				}
 				if m.Memory != nil && m.Memory.Usage != nil {
+					if m.Memory.Usage.Usage > math.MaxInt64 {
+						return nil, fmt.Errorf("memory usage exceeds metric range")
+					}
 					result.MemoryUsageBytes = int64(m.Memory.Usage.Usage)
 				}
 			}

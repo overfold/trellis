@@ -1,6 +1,7 @@
 package spec
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -23,8 +24,8 @@ func TestValidateHTTPHealthCheckPath(t *testing.T) {
 	}
 	for _, path := range []string{"@169.254.169.254/latest", "/health check"} {
 		err := Validate(healthCheckJob(&HealthCheckSpec{Type: HealthCheckHTTP, Port: 8080, Path: path}))
-		issues, ok := err.(ValidationErrors)
-		if !ok || len(issues) != 1 {
+		var issues ValidationErrors
+		if !errors.As(err, &issues) || len(issues) != 1 {
 			t.Fatalf("path %q: expected one validation issue, got %T: %v", path, err, err)
 		}
 		if want := "task_groups[api].tasks[server].health_check.path"; issues[0].Path != want || issues[0].Code != "invalid" {
@@ -35,8 +36,9 @@ func TestValidateHTTPHealthCheckPath(t *testing.T) {
 
 func TestValidateReportsLongHTTPHealthCheckPath(t *testing.T) {
 	path := "/" + strings.Repeat("a", probepath.MaxLength)
-	issues, ok := Validate(healthCheckJob(&HealthCheckSpec{Type: HealthCheckHTTP, Port: 8080, Path: path})).(ValidationErrors)
-	if !ok || len(issues) != 1 || issues[0].Code != "too_long" {
+	var issues ValidationErrors
+	err := Validate(healthCheckJob(&HealthCheckSpec{Type: HealthCheckHTTP, Port: 8080, Path: path}))
+	if !errors.As(err, &issues) || len(issues) != 1 || issues[0].Code != "too_long" {
 		t.Fatalf("issues = %+v, want one too_long issue", issues)
 	}
 }

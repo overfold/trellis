@@ -5,16 +5,19 @@ import "context"
 
 // PeerPlan describes a WireGuard peer in a network plan.
 type PeerPlan struct {
-	PublicKey, Endpoint string
-	AllowedIPs          []string
+	PublicKey  string   `json:"PublicKey"`
+	Endpoint   string   `json:"Endpoint"`
+	AllowedIPs []string `json:"AllowedIPs"`
 }
 
 // Plan describes the network configuration for an allocation.
 type Plan struct {
-	CIDR, Gateway, WireGuardAddress string
-	ListenPort                      int
-	APIPort                         int
-	Peers                           []PeerPlan
+	CIDR             string     `json:"CIDR"`
+	Gateway          string     `json:"Gateway"`
+	WireGuardAddress string     `json:"WireGuardAddress"`
+	ListenPort       int        `json:"ListenPort"`
+	APIPort          int        `json:"APIPort"`
+	Peers            []PeerPlan `json:"Peers"`
 }
 
 // PortMapping publishes HostPort on the node to ContainerPort at the
@@ -33,18 +36,18 @@ type AttachRequest struct {
 
 // Attachment records resources created for an allocation network.
 type Attachment struct {
-	AllocationID       string
-	Namespace          string
-	Network            string
-	NetworkNamespace   string
-	HostVeth           string
-	Bridge             string
-	WireGuardInterface string
-	Gateway            string
-	APIPort            int
-	Address            string
-	LeasePath          string
-	Ports              []PortMapping
+	AllocationID       string        `json:"AllocationID"`
+	Namespace          string        `json:"Namespace"`
+	Network            string        `json:"Network"`
+	NetworkNamespace   string        `json:"NetworkNamespace"`
+	HostVeth           string        `json:"HostVeth"`
+	Bridge             string        `json:"Bridge"`
+	WireGuardInterface string        `json:"WireGuardInterface"`
+	Gateway            string        `json:"Gateway"`
+	APIPort            int           `json:"APIPort"`
+	Address            string        `json:"Address"`
+	LeasePath          string        `json:"LeasePath"`
+	Ports              []PortMapping `json:"Ports"`
 }
 
 // Manager attaches and detaches allocation networks and reconciles peers on
@@ -58,9 +61,9 @@ type Manager interface {
 // AttachmentIntent is what an allocation records before Attach, so an
 // attachment whose result was never recorded can still be found and removed.
 type AttachmentIntent struct {
-	AllocationID string
-	Namespace    string
-	Network      string
+	AllocationID string `json:"AllocationID"`
+	Namespace    string `json:"Namespace"`
+	Network      string `json:"Network"`
 }
 
 // AttachmentRecovery finds and removes attachments by allocation ID alone,

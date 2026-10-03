@@ -67,10 +67,7 @@ func (m *WireGuardManager) recordAttachment(record attachmentRecord) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create network attachment records: %w", err)
 	}
-	raw, err := json.Marshal(record)
-	if err != nil {
-		return err
-	}
+	raw, _ := json.Marshal(record)
 	if err := writeAtomicFile(path, raw, 0o600); err != nil {
 		return fmt.Errorf("record network attachment: %w", err)
 	}
@@ -429,7 +426,7 @@ func (m *WireGuardManager) deleteLink(ctx context.Context, name, resource string
 			return nil
 		}
 		if inspectErr != nil {
-			return fmt.Errorf("delete %s %s: %w (verify absence: %v)", resource, name, err, inspectErr)
+			return fmt.Errorf("delete %s %s: %w (verify absence: %w)", resource, name, err, inspectErr)
 		}
 		return fmt.Errorf("delete %s %s: %w", resource, name, err)
 	}

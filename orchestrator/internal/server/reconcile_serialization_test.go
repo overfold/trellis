@@ -23,14 +23,11 @@ func TestReconcileDoesNotMutateStoredJobSpec(t *testing.T) {
 	addTestNode(s, node, s.now())
 	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}
 	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(jobSpec), Revision: 1}
-	before, err := json.Marshal(jobSpec)
-	if err != nil {
-		t.Fatal(err)
-	}
+	before, _ := json.Marshal(jobSpec)
 
 	s.Reconcile(context.Background())
 
-	if after, err := json.Marshal(jobSpec); err != nil || string(after) != string(before) {
+	if after, _ := json.Marshal(jobSpec); string(after) != string(before) {
 		t.Fatalf("reconciliation changed the stored job spec:\nbefore %s\nafter  %s", before, after)
 	}
 	if len(s.allocations) != 1 || s.allocations[0].Tasks[0].Resources == nil {

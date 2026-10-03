@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -57,7 +58,7 @@ func (p *PortManager) check(hostPort int) (bool, error) {
 	}
 
 	addr := fmt.Sprintf(":%d", hostPort)
-	listener, err := net.Listen("tcp", addr)
+	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", addr)
 	if err != nil {
 		var errno syscall.Errno
 		if errors.As(err, &errno) && errno == syscall.EADDRINUSE {
@@ -69,7 +70,7 @@ func (p *PortManager) check(hostPort int) (bool, error) {
 	_ = listener.Close()
 
 	// Published ports forward UDP too, so a UDP listener also holds the port.
-	conn, err := net.ListenPacket("udp", addr)
+	conn, err := (&net.ListenConfig{}).ListenPacket(context.Background(), "udp", addr)
 	if err != nil {
 		var errno syscall.Errno
 		if errors.As(err, &errno) && errno == syscall.EADDRINUSE {

@@ -1,6 +1,7 @@
 package spec
 
 import (
+	"errors"
 	"slices"
 	"testing"
 )
@@ -52,9 +53,9 @@ func TestNetworkingValidationMatrix(t *testing.T) {
 				}
 				return
 			}
-			issues, ok := err.(ValidationErrors)
+			var issues ValidationErrors
 			want := "task_groups[api].tasks[server]." + test.path
-			if !ok || len(issues) != 1 || issues[0].Path != want {
+			if !errors.As(err, &issues) || len(issues) != 1 || issues[0].Path != want {
 				t.Fatalf("Validate() = %#v, want one issue at %s", err, want)
 			}
 		})
@@ -87,8 +88,9 @@ func TestNetworkingNodePortsAreUniqueInGroup(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			job := validJob()
 			job.TaskGroups[0].Tasks = test.tasks
-			issues, ok := Validate(job).(ValidationErrors)
-			if !ok || len(issues) != 1 || issues[0].Path != test.path || issues[0].Code != "duplicate" {
+			var issues ValidationErrors
+			err := Validate(job)
+			if !errors.As(err, &issues) || len(issues) != 1 || issues[0].Path != test.path || issues[0].Code != "duplicate" {
 				t.Fatalf("Validate() = %#v, want duplicate at %s", issues, test.path)
 			}
 		})
@@ -135,8 +137,9 @@ func TestCanonicalizeResolvesNetworking(t *testing.T) {
 	}
 
 	tasks[1].Networking.Ports[0].HostPort = 0
-	issues, ok := ValidateCanonical(job).(ValidationErrors)
-	if !ok || len(issues) != 1 || issues[0].Path != "task_groups[api].tasks[published].networking.ports[0].host_port" || issues[0].Code != "not_canonical" {
+	var issues ValidationErrors
+	err := ValidateCanonical(job)
+	if !errors.As(err, &issues) || len(issues) != 1 || issues[0].Path != "task_groups[api].tasks[published].networking.ports[0].host_port" || issues[0].Code != "not_canonical" {
 		t.Fatalf("ValidateCanonical() = %#v, want unresolved host_port", issues)
 	}
 }

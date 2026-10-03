@@ -108,7 +108,10 @@ func TestStoreAADPreventsReplayAcrossSecretIdentity(t *testing.T) {
 			t.Fatal(err)
 		}
 		replay.Namespace, replay.Name = target.namespace, target.name
-		encoded, _ := json.Marshal(replay)
+		encoded, err := json.Marshal(replay)
+		if err != nil {
+			t.Fatal(err)
+		}
 		key := "trellis/cluster/secrets/" + url.PathEscape(target.namespace) + "/" + url.PathEscape(target.name)
 		if err := bolt.Put(ctx, key, encoded); err != nil {
 			t.Fatal(err)

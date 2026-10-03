@@ -190,7 +190,10 @@ func TestProbeRejectsUnsupportedArguments(t *testing.T) {
 }
 
 func TestProbeClientDialsOnlyLoopback(t *testing.T) {
-	_, err := probeClient(80).Get("http://192.0.2.1:80/")
+	response, err := probeClient(80).Get("http://192.0.2.1:80/")
+	if response != nil {
+		defer func() { _ = response.Body.Close() }()
+	}
 	if err == nil || !strings.Contains(err.Error(), "not the probed loopback address") {
 		t.Fatalf("non-loopback dial error = %v, want refusal", err)
 	}

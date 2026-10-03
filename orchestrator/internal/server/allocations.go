@@ -75,6 +75,8 @@ func allocationTaskEndpoints(allocation *Allocation) []api.AllocationEndpoint {
 		endpoint := observed[task.Name]
 		endpoint.Task = task.Name
 		switch mode {
+		case spec.TaskNetworkDefault, spec.TaskNetworkNone:
+			// Default is canonicalized before execution; neither mode exposes an endpoint.
 		case spec.TaskNetworkHost:
 			if allocation.Node == nil {
 				continue

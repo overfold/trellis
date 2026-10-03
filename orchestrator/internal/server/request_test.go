@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -63,7 +64,8 @@ func TestDecodeJSONRejectsLooseRequests(t *testing.T) {
 			}
 			var request api.CredentialCreateRequest
 			err := decodeRequest(t, contentType, tt.body, limit, &request)
-			httpErr, ok := err.(*echo.HTTPError)
+			var httpErr *echo.HTTPError
+			ok := errors.As(err, &httpErr)
 			if !ok || httpErr.Code != tt.want {
 				t.Fatalf("error = %v, want HTTP %d", err, tt.want)
 			}

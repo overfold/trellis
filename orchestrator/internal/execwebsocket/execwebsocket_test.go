@@ -36,7 +36,10 @@ func TestStreamUsesOneBinaryMessagePerExecFrame(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	conn, _, err := websocket.Dial(ctx, server.URL, &websocket.DialOptions{Subprotocols: []string{Protocol}})
+	conn, response, err := websocket.Dial(ctx, server.URL, &websocket.DialOptions{Subprotocols: []string{Protocol}})
+	if response != nil && response.Body != nil {
+		defer func() { _ = response.Body.Close() }()
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +72,10 @@ func TestStreamRejectsTextMessages(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	conn, _, err := websocket.Dial(ctx, server.URL, &websocket.DialOptions{Subprotocols: []string{Protocol}})
+	conn, response, err := websocket.Dial(ctx, server.URL, &websocket.DialOptions{Subprotocols: []string{Protocol}})
+	if response != nil && response.Body != nil {
+		defer func() { _ = response.Body.Close() }()
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

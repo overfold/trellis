@@ -119,7 +119,8 @@ func (s *Server) planNetworkPortRegistrations(ctx context.Context, namespaces []
 			continue
 		}
 		hash := sha256.Sum256([]byte("wireguard-port\x00" + namespace))
-		start := int(binary.BigEndian.Uint32(hash[:4]) % uint32(count))
+		// count is validated against the bounded configured port range above.
+		start := int(binary.BigEndian.Uint32(hash[:4]) % uint32(count)) //nolint:gosec
 		assigned := -1
 		for offset := 0; offset < count; offset++ {
 			slot := (start + offset) % count

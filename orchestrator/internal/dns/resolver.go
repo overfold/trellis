@@ -256,7 +256,7 @@ func (r *Resolver) serveTCPConnection(ctx context.Context, conn net.Conn) {
 		if response == nil || len(response) > maxDNSMessageSize {
 			return
 		}
-		binary.BigEndian.PutUint16(length[:], uint16(len(response)))
+		binary.BigEndian.PutUint16(length[:], uint16(len(response))) //nolint:gosec // maxDNSMessageSize bounds the checked response length.
 		if _, err := conn.Write(append(length[:], response...)); err != nil {
 			return
 		}
@@ -296,11 +296,11 @@ func (r *Resolver) refresh(ctx context.Context) {
 		}
 		ip := net.ParseIP(svc.Address)
 		if ip == nil {
-			ips, err := net.LookupIP(svc.Address)
+			ips, err := net.DefaultResolver.LookupIPAddr(ctx, svc.Address)
 			if err != nil || len(ips) == 0 {
 				continue
 			}
-			ip = ips[0]
+			ip = ips[0].IP
 		}
 		key := svc.Group + "." + svc.Job + "." + svc.Namespace
 		rec, ok := cache[key]
@@ -438,7 +438,7 @@ func exchangeDNS(ctx context.Context, network, upstream string, packet []byte) (
 			return nil, fmt.Errorf("DNS query exceeds TCP framing limit")
 		}
 		frame := make([]byte, 2+len(packet))
-		binary.BigEndian.PutUint16(frame[:2], uint16(len(packet)))
+		binary.BigEndian.PutUint16(frame[:2], uint16(len(packet))) //nolint:gosec // maxDNSMessageSize bounds the checked packet length.
 		copy(frame[2:], packet)
 		if _, err := conn.Write(frame); err != nil {
 			return nil, err
@@ -490,6 +490,9 @@ func buildResponse(id uint16, name string, qtype, qclass uint16, ips []net.IP) [
 		for _, ip := range ips {
 			if ipv4 := ip.To4(); ipv4 != nil {
 				ipv4s = append(ipv4s, ipv4)
+				if len(ipv4s) == int(^uint16(0)) {
+					break
+				}
 			}
 		}
 	}
@@ -505,8 +508,9 @@ func buildResponse(id uint16, name string, qtype, qclass uint16, ips []net.IP) [
 		flags |= 0x0003 // RCODE=NXDOMAIN
 	}
 	binary.BigEndian.PutUint16(header[2:4], flags)
-	binary.BigEndian.PutUint16(header[4:6], 1)                  // QDCOUNT
-	binary.BigEndian.PutUint16(header[6:8], uint16(len(ipv4s))) // ANCOUNT
+	binary.BigEndian.PutUint16(header[4:6], 1) // QDCOUNT
+	// ipv4s is capped at the maximum representable DNS answer count above.
+	binary.BigEndian.PutUint16(header[6:8], uint16(len(ipv4s))) //nolint:gosec // ANCOUNT
 	buf = append(buf, header...)
 
 	// Question section
@@ -536,7 +540,10 @@ func encodeName(name string) []byte {
 	name = strings.TrimSuffix(name, ".")
 	var buf []byte
 	for _, label := range strings.Split(name, ".") {
-		buf = append(buf, byte(len(label)))
+		if len(label) > 63 {
+			return nil
+		}
+		buf = append(buf, byte(len(label))) //nolint:gosec // DNS labels are bounded to 63 bytes above.
 		buf = append(buf, []byte(label)...)
 	}
 	buf = append(buf, 0)

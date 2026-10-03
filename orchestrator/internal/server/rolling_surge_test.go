@@ -46,6 +46,7 @@ func TestPlanRollingWaitsForCrossNodeStopBeforeStartingNextReplacement(t *testin
 			stops++
 		case ActionStart:
 			starts++
+		case ActionDrain, ActionResume, ActionStopObserved:
 		}
 	}
 	if stops != 1 || starts != 0 {
@@ -164,6 +165,7 @@ func TestPlanRollingMaxParallelReservesEveryLiveSlot(t *testing.T) {
 			stops++
 		case ActionStart:
 			starts++
+		case ActionDrain, ActionResume, ActionStopObserved:
 		}
 	}
 	if stops != 2 || starts != 0 {

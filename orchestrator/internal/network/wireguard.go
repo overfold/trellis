@@ -43,7 +43,9 @@ type commandRunner interface {
 type execRunner struct{}
 
 func (execRunner) Run(ctx context.Context, name string, args ...string) error {
-	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+	// name is selected by Trellis networking call sites (ip, iptables, and wg),
+	// not from operator or workload input.
+	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput() //nolint:gosec
 	if err != nil {
 		return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
@@ -51,7 +53,8 @@ func (execRunner) Run(ctx context.Context, name string, args ...string) error {
 }
 
 func (execRunner) Output(ctx context.Context, name string, args ...string) (string, error) {
-	out, err := exec.CommandContext(ctx, name, args...).Output()
+	// See Run: command names are internal networking tools, not user input.
+	out, err := exec.CommandContext(ctx, name, args...).Output() //nolint:gosec
 	if err != nil {
 		return "", fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
 	}
@@ -201,16 +204,20 @@ func allocationAddressAt(cidr, allocation string, probe uint32) (string, error) 
 	h := sha256.Sum256([]byte(allocation))
 	host := binary.BigEndian.Uint32(h[:4])
 	base := binary.BigEndian.Uint32(p.Addr().AsSlice())
-	bits := uint32(32 - p.Bits())
+	bits := 32 - p.Bits()
 	if bits < 3 {
 		return "", fmt.Errorf("CIDR %s has no allocation space", cidr)
 	}
-	mask := uint32((uint64(1) << bits) - 1)
+	mask := uint32((uint64(1) << bits) - 1) //nolint:gosec // An IPv4 prefix bounds the shifted value to uint32.
 	host = (host+probe)%(mask-2) + 2
-	a := netip.AddrFrom4([4]byte{byte(base >> 24), byte(base >> 16), byte(base >> 8), byte(base)}).Next()
+	var baseBytes [4]byte
+	binary.BigEndian.PutUint32(baseBytes[:], base)
+	a := netip.AddrFrom4(baseBytes).Next()
 	// Add host-1 without depending on platform integer address APIs.
 	b := binary.BigEndian.Uint32(a.AsSlice()) + host - 1
-	return fmt.Sprintf("%d.%d.%d.%d/%d", byte(b>>24), byte(b>>16), byte(b>>8), byte(b), p.Bits()), nil
+	var addressBytes [4]byte
+	binary.BigEndian.PutUint32(addressBytes[:], b)
+	return netip.PrefixFrom(netip.AddrFrom4(addressBytes), p.Bits()).String(), nil
 }
 
 func reserveAddress(leaseDir, cidr, allocation string) (address, lease string, err error) {
@@ -221,7 +228,7 @@ func reserveAddress(leaseDir, cidr, allocation string) (address, lease string, e
 	if !prefix.Addr().Is4() || prefix.Bits() > 29 {
 		return "", "", fmt.Errorf("CIDR %s has no IPv4 allocation space", cidr)
 	}
-	capacity := uint32((uint64(1) << uint(32-prefix.Bits())) - 3)
+	capacity := uint32((uint64(1) << uint(32-prefix.Bits())) - 3) //nolint:gosec // IPv4 prefixes through /29 bound capacity to uint32.
 	for probe := uint32(0); probe < capacity; probe++ {
 		address, err = allocationAddressAt(cidr, allocation, probe)
 		if err != nil {
@@ -402,10 +409,7 @@ func (m *WireGuardManager) persistPeerPlan(namespace, networkName string, peers 
 	if err := os.MkdirAll(planDir, 0o700); err != nil {
 		return fmt.Errorf("create network plan state: %w", err)
 	}
-	raw, err := json.Marshal(peers)
-	if err != nil {
-		return err
-	}
+	raw, _ := json.Marshal(peers)
 	if err := writeAtomicFile(m.planPath(namespace, networkName), raw, 0o600); err != nil {
 		return fmt.Errorf("persist applied network plan: %w", err)
 	}

@@ -226,12 +226,12 @@ type VolumeSpec struct {
 // TaskGroupContentHash returns a digest of task-group fields that affect running containers.
 func TaskGroupContentHash(g *TaskGroupSpec) string {
 	hashable := struct {
-		Name        string
-		Runtime     Runtime
-		Tasks       []TaskSpec
-		APIAccess   *APIAccessSpec
-		Restart     *RestartPolicySpec
-		Constraints []ConstraintSpec
+		Name        string             `json:"Name"`
+		Runtime     Runtime            `json:"Runtime"`
+		Tasks       []TaskSpec         `json:"Tasks"`
+		APIAccess   *APIAccessSpec     `json:"APIAccess"`
+		Restart     *RestartPolicySpec `json:"Restart"`
+		Constraints []ConstraintSpec   `json:"Constraints"`
 	}{Name: g.Name, Runtime: g.Runtime, Tasks: g.Tasks, APIAccess: g.APIAccess, Restart: g.Restart, Constraints: g.Constraints}
 	raw, _ := json.Marshal(hashable)
 	h := sha256.Sum256(raw)

@@ -49,10 +49,7 @@ func TestInjectedRuntimeAmbiguousResultsAndPersistence(t *testing.T) {
 
 func writeFault(t *testing.T, path string, fault InjectedFault) {
 	t.Helper()
-	b, err := json.Marshal(fault)
-	if err != nil {
-		t.Fatal(err)
-	}
+	b, _ := json.Marshal(fault)
 	if err := os.WriteFile(path, b, 0o600); err != nil {
 		t.Fatal(err)
 	}

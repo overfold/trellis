@@ -536,41 +536,41 @@ const (
 // metrics, and observed allocations) live in the leader's memory, so a
 // heartbeat that changes none of these facts does not write to Raft.
 type NodeSummary struct {
-	ID                uuid.UUID
-	Host              string
-	Port              int
-	CPUCapacity       int
-	MemoryCapacity    int64
-	CPUAllocatable    int
-	MemoryAllocatable int64
-	OS                string
-	Arch              string
-	Labels            map[string]string
-	Volumes           []string
-	Capabilities      []spec.NodeCapability
+	ID                uuid.UUID             `json:"ID"`
+	Host              string                `json:"Host"`
+	Port              int                   `json:"Port"`
+	CPUCapacity       int                   `json:"CPUCapacity"`
+	MemoryCapacity    int64                 `json:"MemoryCapacity"`
+	CPUAllocatable    int                   `json:"CPUAllocatable"`
+	MemoryAllocatable int64                 `json:"MemoryAllocatable"`
+	OS                string                `json:"OS"`
+	Arch              string                `json:"Arch"`
+	Labels            map[string]string     `json:"Labels"`
+	Volumes           []string              `json:"Volumes"`
+	Capabilities      []spec.NodeCapability `json:"Capabilities"`
 	// Draining is the operator's durable drain intent. Liveness (healthy or
 	// unhealthy) is derived from heartbeats and is not persisted.
-	Draining           bool `json:"draining,omitempty"`
-	WireGuardPublicKey string
-	WireGuardEndpoint  string
-	WireGuardPortBase  int
-	WireGuardPortCount int
+	Draining           bool   `json:"draining,omitempty"`
+	WireGuardPublicKey string `json:"WireGuardPublicKey"`
+	WireGuardEndpoint  string `json:"WireGuardEndpoint"`
+	WireGuardPortBase  int    `json:"WireGuardPortBase"`
+	WireGuardPortCount int    `json:"WireGuardPortCount"`
 	Version            string `json:"version,omitempty"`
 }
 
 // Job contains a persisted job specification and revision.
 type Job struct {
-	Spec *spec.JobSpec
+	Spec *spec.JobSpec `json:"Spec"`
 	// Incarnation distinguishes jobs recreated with the same namespace and
 	// name. Unlike Revision and Version, it never resets within a job's life.
 	Incarnation string `json:"incarnation"`
 	// Revision identifies the execution content of the job. It advances only
 	// when a task group's execution hash changes, which replaces allocations.
-	Revision int
+	Revision int `json:"Revision"`
 	// Version advances on every accepted change to the job specification,
 	// including label, count, and update-policy changes that keep the
 	// revision. It orders the job's history and fences concurrent applies.
-	Version int
+	Version int `json:"Version"`
 	// ContentHashes stores the content hash of each task group's non-label
 	// fields, keyed by group name. Set at registration time.
 	ContentHashes map[string]string `json:"content_hashes,omitempty"`
@@ -1547,10 +1547,7 @@ func (s *Server) GetJob(namespace, name string) (*api.JobStatusResponse, error) 
 	}
 	// Job records are replaced, never mutated, so the spec is encoded
 	// without holding s.mu.
-	rawSpec, err := json.Marshal(jobSpec)
-	if err != nil {
-		return nil, fmt.Errorf("encode job spec: %w", err)
-	}
+	rawSpec, _ := json.Marshal(jobSpec)
 	r.Spec = rawSpec
 	return r, nil
 }
@@ -1741,10 +1738,7 @@ func (s *Server) ListJobVersions(ctx context.Context, namespace, name string) (a
 	}
 	result := make(api.JobVersionListResponse, 0, len(records))
 	for _, r := range records {
-		rawSpec, err := json.Marshal(r.Spec)
-		if err != nil {
-			return nil, fmt.Errorf("encode job version %d: %w", r.Version, err)
-		}
+		rawSpec, _ := json.Marshal(r.Spec)
 		result = append(result, api.JobVersionResponse{
 			Version:   r.Version,
 			Revision:  r.Revision,

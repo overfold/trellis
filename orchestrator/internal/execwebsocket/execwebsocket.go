@@ -110,7 +110,8 @@ func (s *Stream) Read(p []byte) (int, error) {
 		}
 		s.readBuf = make([]byte, headerSize+len(message)-1)
 		s.readBuf[0] = message[0]
-		binary.BigEndian.PutUint32(s.readBuf[1:headerSize], uint32(len(message)-1))
+		// The payload limit above is well within uint32.
+		binary.BigEndian.PutUint32(s.readBuf[1:headerSize], uint32(len(message)-1)) //nolint:gosec
 		copy(s.readBuf[headerSize:], message[1:])
 	}
 	n := copy(p, s.readBuf)

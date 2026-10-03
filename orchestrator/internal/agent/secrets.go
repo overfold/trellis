@@ -15,7 +15,7 @@ import (
 )
 
 // defaultSecretBase is the memory-backed filesystem holding secret roots.
-const defaultSecretBase = "/dev/shm"
+const defaultSecretBase = "/dev/shm" //nolint:gosec // This is a filesystem path, not a credential.
 
 const secretRootPrefix = "trellis-secrets-"
 const tmpfsMagic = 0x01021994

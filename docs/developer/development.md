@@ -33,6 +33,23 @@ Tests beside each package document state-machine invariants, Raft persistence, s
 
 From the repository root, `bash scripts/install-core_test.sh` exercises the installer's operator-access phase for first installs, replacement clusters, resumes, and joins. It uses the real CLI for context saving and mocks credential creation and host ownership operations; it does not install packages or start services.
 
+## Linting
+
+Run `golangci-lint run` from `orchestrator/` using the version pinned in CI.
+The configuration includes the `integration` build tag and checks error wrapping,
+JSON tags and encoding errors, enum coverage, context-aware networking, HTTP body
+closure, security findings, and lightweight regression guards.
+
+Persisted records, internal wire types, and execution-hash inputs need explicit
+JSON tags. When tagging an existing field, preserve its current JSON name and
+omission behavior; adding tags is not a storage-format or hash migration.
+`errchkjson` permits ignoring encoding errors only for types it proves safe.
+
+Security checks exclude G301/G302/G304/G306 because the orchestrator intentionally
+manages host paths and file permissions. Tests are excluded from `gosec` and
+`noctx`. Other suppressions must be local and explain the validated bound or
+intentional behavior; `nolintlint` rejects unused directives.
+
 ## Three-node Vagrant demo
 
 [`orchestrator/Vagrantfile`](../../orchestrator/Vagrantfile) provides a real three-node local demo cluster for development and for the multi-node public learning-path examples. It uses Vagrant's provider-independent private-network abstraction and guest mDNS rather than hostmanager or provider-specific addressing. With a compatible Vagrant provider configured:

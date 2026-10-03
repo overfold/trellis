@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -84,8 +85,11 @@ func networkSubnetCapacity(pool netip.Prefix) int {
 func networkSubnet(pool netip.Prefix, index int) netip.Prefix {
 	base := pool.Masked().Addr().As4()
 	value := uint32(base[0])<<24 | uint32(base[1])<<16 | uint32(base[2])<<8 | uint32(base[3])
-	value += uint32(index) << 8
-	return netip.PrefixFrom(netip.AddrFrom4([4]byte{byte(value >> 24), byte(value >> 16), byte(value >> 8), byte(value)}), 24)
+	// Planned indexes are bounded by networkSubnetCapacity and maxNetworkSubnets.
+	value += uint32(index) << 8 //nolint:gosec
+	var address [4]byte
+	binary.BigEndian.PutUint32(address[:], value)
+	return netip.PrefixFrom(netip.AddrFrom4(address), 24)
 }
 
 // networkLinkAddress returns the WireGuard interface address selected by

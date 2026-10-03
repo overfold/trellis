@@ -1,6 +1,7 @@
 package spec
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -114,8 +115,9 @@ func TestValidateRejectsDuplicateHostPortsInGroup(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			job := validJob()
 			job.TaskGroups[0].Tasks = test.tasks
-			issues, ok := Validate(job).(ValidationErrors)
-			if !ok || len(issues) != 1 || issues[0].Path != test.path || issues[0].Code != "duplicate" {
+			var issues ValidationErrors
+			err := Validate(job)
+			if !errors.As(err, &issues) || len(issues) != 1 || issues[0].Path != test.path || issues[0].Code != "duplicate" {
 				t.Fatalf("expected duplicate port at %s, got %#v", test.path, issues)
 			}
 		})
@@ -134,8 +136,8 @@ func TestValidateRejectsDuplicateHostPortsInGroup(t *testing.T) {
 func TestValidateAggregatesErrors(t *testing.T) {
 	job := &JobSpec{Namespace: "", Name: "bad name", TaskGroups: []TaskGroupSpec{{Name: "api", Count: 0}}}
 	err := Validate(job)
-	issues, ok := err.(ValidationErrors)
-	if !ok {
+	var issues ValidationErrors
+	if !errors.As(err, &issues) {
 		t.Fatalf("expected ValidationErrors, got %T: %v", err, err)
 	}
 	if len(issues) < 4 {

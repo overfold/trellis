@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -22,6 +23,41 @@ type listingRecoveryRuntime struct {
 	stopErr     error
 	stopCount   int
 	removeCount int
+}
+
+func TestAllocationRecoveryJSONPreservesFencingAndResources(t *testing.T) {
+	const stored = `{"ID":"task","AllocationID":"alloc","Generation":7,"JobRevision":11,"ExecutionHash":"hash","DrainSequence":13,"Ports":[{"HostPort":18080,"ContainerPort":8080}],"Mounts":[{"HostPath":"/data","ContainerPath":"/app","ReadOnly":true,"Secret":false,"SecretEnv":false}],"NetworkIntent":{"AllocationID":"alloc","Namespace":"team","Network":"team"}}`
+	var allocation Allocation
+	if err := json.Unmarshal([]byte(stored), &allocation); err != nil {
+		t.Fatal(err)
+	}
+	if allocation.Generation != 7 || allocation.JobRevision != 11 || allocation.ExecutionHash != "hash" || allocation.DrainSequence != 13 {
+		t.Fatalf("recovered fencing = %+v", allocation)
+	}
+	if len(allocation.Ports) != 1 || allocation.Ports[0].HostPort != 18080 || len(allocation.Mounts) != 1 || !allocation.Mounts[0].ReadOnly || allocation.NetworkIntent == nil || allocation.NetworkIntent.Namespace != "team" {
+		t.Fatalf("recovered resources = %+v", allocation)
+	}
+	raw, err := json.Marshal(&allocation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var encoded map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &encoded); err != nil {
+		t.Fatal(err)
+	}
+	var original map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(stored), &original); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range original {
+		if string(encoded[key]) != string(want) {
+			t.Errorf("persisted %s = %s, want %s", key, encoded[key], want)
+		}
+	}
+	// Fields without omitempty must still be present when zero-valued.
+	if string(encoded["RestartAttempts"]) != "0" || string(encoded["Network"]) != "null" {
+		t.Fatalf("zero-valued recovery fields were omitted: %s", raw)
+	}
 }
 
 func (r *listingRecoveryRuntime) ListManaged(context.Context, string) ([]runtime.ContainerInfo, error) {

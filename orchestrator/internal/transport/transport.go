@@ -227,6 +227,7 @@ func (c *Client) ExecWebSocket(ctx context.Context, target string) (io.ReadWrite
 		if response == nil {
 			return nil, fmt.Errorf("opening exec WebSocket %s: %w", target, err)
 		}
+		defer func() { _ = response.Body.Close() }()
 		body, readErr := io.ReadAll(io.LimitReader(response.Body, MaxResponseBody))
 		if readErr != nil {
 			return nil, fmt.Errorf("read response body: %w", readErr)
@@ -278,11 +279,13 @@ func (c *Client) administratorChallenge(ctx context.Context, target string) (str
 	targetURL.Path = "/v1/auth/administrator/challenge"
 	targetURL.RawPath = ""
 	targetURL.RawQuery = ""
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL.String(), http.NoBody)
+	// target is intentionally the endpoint of the caller's original Trellis
+	// request; administrator signing fetches its challenge from that same server.
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL.String(), http.NoBody) //nolint:gosec
 	if err != nil {
 		return "", fmt.Errorf("construct administrator challenge request: %w", err)
 	}
-	response, err := c.HTTP.Do(request)
+	response, err := c.HTTP.Do(request) //nolint:gosec // The caller intentionally selects the Trellis API endpoint.
 	if err != nil {
 		return "", fmt.Errorf("request administrator challenge: %w", err)
 	}

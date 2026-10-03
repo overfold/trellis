@@ -878,6 +878,8 @@ func terminalStartFailureCode(code nodeapi.OperationCode) bool {
 	switch code {
 	case "", nodeapi.OperationStaleGeneration, nodeapi.OperationConflict, nodeapi.OperationRestartExhausted:
 		return true
+	case nodeapi.OperationOK, nodeapi.OperationStaleEpoch, nodeapi.OperationFailed:
+		return false
 	}
 	return false
 }
@@ -1067,7 +1069,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 					next.NextRetryAt = nil
 					return nil
 				}); persistErr != nil {
-					return fmt.Errorf("%w (persist allocation failure: %v)", err, persistErr)
+					return fmt.Errorf("%w (persist allocation failure: %w)", err, persistErr)
 				}
 				return err
 			}
@@ -1078,7 +1080,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 				}
 				return recordStartFailure(next, now, err.Error())
 			}); persistErr != nil {
-				return fmt.Errorf("%w (persist allocation failure: %v)", err, persistErr)
+				return fmt.Errorf("%w (persist allocation failure: %w)", err, persistErr)
 			}
 			return err
 		}
@@ -1132,7 +1134,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 				next.NextRetryAt = &retryAt
 				return nil
 			}); persistErr != nil {
-				return fmt.Errorf("%w (persist allocation failure: %v)", err, persistErr)
+				return fmt.Errorf("%w (persist allocation failure: %w)", err, persistErr)
 			}
 			return err
 		}

@@ -121,34 +121,34 @@ func (a *Agent) lockAllocationOperation(allocationID string) func() {
 
 // Allocation contains agent-local allocation state.
 type Allocation struct {
-	ID               string
-	AllocationID     string
-	Generation       uint64
-	JobRevision      int
-	ExecutionHash    string
-	Restart          *spec.RestartPolicySpec
-	RestartAttempts  int
-	RestartWindow    time.Time
-	RestartExhausted bool
-	Namespace        string
+	ID               string                  `json:"ID"`
+	AllocationID     string                  `json:"AllocationID"`
+	Generation       uint64                  `json:"Generation"`
+	JobRevision      int                     `json:"JobRevision"`
+	ExecutionHash    string                  `json:"ExecutionHash"`
+	Restart          *spec.RestartPolicySpec `json:"Restart"`
+	RestartAttempts  int                     `json:"RestartAttempts"`
+	RestartWindow    time.Time               `json:"RestartWindow"`
+	RestartExhausted bool                    `json:"RestartExhausted"`
+	Namespace        string                  `json:"Namespace"`
 
-	JobName   string
-	GroupName string
-	TaskName  string
-	Spec      *spec.TaskSpec
+	JobName   string         `json:"JobName"`
+	GroupName string         `json:"GroupName"`
+	TaskName  string         `json:"TaskName"`
+	Spec      *spec.TaskSpec `json:"Spec"`
 
-	ContainerID                  string
-	ContainerOwnershipUnverified bool
-	Ports                        []*runtime.Port
-	Mounts                       []*runtime.Mount
-	SecretDir                    string
-	Network                      *network.Attachment
-	NetworkIntent                *network.AttachmentIntent
-	Status                       string
-	Health                       string
-	Draining                     bool
+	ContainerID                  string                    `json:"ContainerID"`
+	ContainerOwnershipUnverified bool                      `json:"ContainerOwnershipUnverified"`
+	Ports                        []*runtime.Port           `json:"Ports"`
+	Mounts                       []*runtime.Mount          `json:"Mounts"`
+	SecretDir                    string                    `json:"SecretDir"`
+	Network                      *network.Attachment       `json:"Network"`
+	NetworkIntent                *network.AttachmentIntent `json:"NetworkIntent"`
+	Status                       string                    `json:"Status"`
+	Health                       string                    `json:"Health"`
+	Draining                     bool                      `json:"Draining"`
 
-	DrainSequence uint64
+	DrainSequence uint64 `json:"DrainSequence"`
 
 	// unobserved marks a recovered allocation whose container state has not
 	// been read since the agent restarted. Its health is reported as unknown

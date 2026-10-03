@@ -133,7 +133,8 @@ func (w *Writer) WriteFrame(frameType FrameType, payload []byte) error {
 	defer w.mu.Unlock()
 	w.buf = w.buf[:headerSize]
 	w.buf[0] = byte(frameType)
-	binary.BigEndian.PutUint32(w.buf[1:headerSize], uint32(len(payload)))
+	// WriteFrame rejects payloads above MaxPayload, which is well within uint32.
+	binary.BigEndian.PutUint32(w.buf[1:headerSize], uint32(len(payload))) //nolint:gosec
 	w.buf = append(w.buf, payload...)
 	if deadline, ok := w.w.(interface{ SetWriteDeadline(time.Time) error }); ok && w.timeout > 0 {
 		_ = deadline.SetWriteDeadline(time.Now().Add(w.timeout))

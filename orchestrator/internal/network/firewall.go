@@ -243,7 +243,7 @@ func (m *WireGuardManager) removeChain(ctx context.Context, table, chain string)
 		absent := explicitAbsence(err, missingChain...) || explicitAbsence(inspectErr, missingChain...)
 		if ctx.Err() != nil || !absent {
 			if inspectErr != nil {
-				return fmt.Errorf("delete Trellis chain %s: %w (verify absence: %v)", chain, err, inspectErr)
+				return fmt.Errorf("delete Trellis chain %s: %w (verify absence: %w)", chain, err, inspectErr)
 			}
 			return fmt.Errorf("delete Trellis chain %s: %w", chain, err)
 		}
@@ -265,7 +265,7 @@ func (m *WireGuardManager) deleteRule(ctx context.Context, table string, args ..
 			return nil
 		}
 		if inspectErr != nil {
-			return fmt.Errorf("delete firewall rule %s: %w (verify absence: %v)", strings.Join(args, " "), err, inspectErr)
+			return fmt.Errorf("delete firewall rule %s: %w (verify absence: %w)", strings.Join(args, " "), err, inspectErr)
 		}
 		return fmt.Errorf("delete firewall rule %s: %w", strings.Join(args, " "), err)
 	}

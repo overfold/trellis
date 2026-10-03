@@ -415,7 +415,7 @@ func TestPlanReconciliationDoesNotMutateInputs(t *testing.T) {
 	input := planTestInput(map[string]*Job{jobKey("default", "web"): job}, []*Node{healthy}, outdated, failed)
 	input.Backoffs[replacementBackoffKey("default", "old", "app")] = &ReplacementBackoff{Namespace: "default", JobName: "old", TaskGroupName: "app", JobRevision: 1}
 	before := func() string {
-		raw, err := json.Marshal(struct {
+		raw, err := json.Marshal(struct { //nolint:musttag // Snapshot internal planner state using its established field names.
 			Jobs         map[string]*Job
 			Nodes        map[uuid.UUID]*Node
 			Allocations  []*Allocation
@@ -471,7 +471,7 @@ func TestPlanReconciliationIsDeterministic(t *testing.T) {
 		}
 	}
 	encode := func(plan *reconcilePlan) string {
-		raw, err := json.Marshal(struct {
+		raw, err := json.Marshal(struct { //nolint:musttag // Compare internal plan snapshots, not an external wire format.
 			Commit  ReconciliationCommit
 			Actions []plannedAction
 			Events  []api.ClusterEvent

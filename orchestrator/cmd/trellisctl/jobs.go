@@ -75,10 +75,7 @@ func NewJobsApplyCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			rawSpec, err := json.Marshal(job)
-			if err != nil {
-				return fmt.Errorf("encode job: %w", err)
-			}
+			rawSpec, _ := json.Marshal(job)
 			jobPlan, err := serverClient.PlanJob(cmd.Context(), rawSpec)
 			if err != nil {
 				return err

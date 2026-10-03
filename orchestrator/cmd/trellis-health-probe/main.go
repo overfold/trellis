@@ -172,11 +172,11 @@ func runEnvExec(args []string) int {
 		}
 		clear(value)
 	}
-	path, err := execPath(args[2], os.Getenv("PATH"))
+	path, err := execPath(args[2], os.Getenv("PATH")) //nolint:gosec // The length guard above requires at least three arguments.
 	if err != nil {
 		return 1
 	}
-	if err := syscall.Exec(path, args[2:], os.Environ()); err != nil {
+	if err := syscall.Exec(path, args[2:], os.Environ()); err != nil { //nolint:gosec // This container-local entrypoint intentionally executes the workload's configured command.
 		return 1
 	}
 	return 0
@@ -193,7 +193,7 @@ func readSecretEnvironment(dir string) (map[string][]byte, error) {
 			continue
 		}
 		name := entry.Name()
-		value, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		value, err := os.ReadFile(filepath.Join(dir, entry.Name())) //nolint:gosec // The agent supplies this container-local secret mount; entry names come from ReadDir, not workload input.
 		if err != nil {
 			for _, previous := range values {
 				clear(previous)
@@ -211,7 +211,7 @@ func execPath(command, pathEnv string) (string, error) {
 	}
 	for _, dir := range filepath.SplitList(pathEnv) {
 		candidate := filepath.Join(dir, command)
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 { //nolint:gosec // Workload commands intentionally resolve through their container's PATH.
 			return candidate, nil
 		}
 	}

@@ -25,10 +25,14 @@ func nodeTrustHandler(t *testing.T) (*nodeTrustFixture, *echo.Echo) {
 	return f, e
 }
 
-func serveAs(e *echo.Echo, method, path string, body any, admin bool) *httptest.ResponseRecorder {
+func serveAs(t *testing.T, e *echo.Echo, method, path string, body any, admin bool) *httptest.ResponseRecorder {
+	t.Helper()
 	var reader *bytes.Reader
 	if body != nil {
-		raw, _ := json.Marshal(body)
+		raw, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("encode request body: %v", err)
+		}
 		reader = bytes.NewReader(raw)
 	} else {
 		reader = bytes.NewReader(nil)
@@ -47,7 +51,7 @@ func serveAs(e *echo.Echo, method, path string, body any, admin bool) *httptest.
 
 func TestCredentialLifecycleEndpoints(t *testing.T) {
 	f, e := nodeTrustHandler(t)
-	rec := serveAs(e, http.MethodPost, "/v1/credentials", api.CredentialCreateRequest{Scope: "cluster", Access: "read", TTLSeconds: 3600}, true)
+	rec := serveAs(t, e, http.MethodPost, "/v1/credentials", api.CredentialCreateRequest{Scope: "cluster", Access: "read", TTLSeconds: 3600}, true)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create status = %d; body: %s", rec.Code, rec.Body.String())
 	}
@@ -58,7 +62,7 @@ func TestCredentialLifecycleEndpoints(t *testing.T) {
 	if created.Token == "" || created.ID == "" || created.ExpiresAt == nil || !created.ExpiresAt.Equal(f.now.Add(time.Hour)) {
 		t.Fatalf("created credential = %+v", created)
 	}
-	if rec := serveAs(e, http.MethodPost, "/v1/credentials", api.CredentialCreateRequest{Scope: "cluster", Access: "read", TTLSeconds: -1}, true); rec.Code != http.StatusBadRequest {
+	if rec := serveAs(t, e, http.MethodPost, "/v1/credentials", api.CredentialCreateRequest{Scope: "cluster", Access: "read", TTLSeconds: -1}, true); rec.Code != http.StatusBadRequest {
 		t.Fatalf("negative ttl status = %d", rec.Code)
 	}
 
@@ -66,12 +70,12 @@ func TestCredentialLifecycleEndpoints(t *testing.T) {
 		{http.MethodGet, "/v1/credentials"},
 		{http.MethodDelete, "/v1/credentials/" + created.ID},
 	} {
-		if rec := serveAs(e, request.method, request.path, nil, false); rec.Code != http.StatusForbidden {
+		if rec := serveAs(t, e, request.method, request.path, nil, false); rec.Code != http.StatusForbidden {
 			t.Fatalf("%s %s with cluster/write status = %d, want 403", request.method, request.path, rec.Code)
 		}
 	}
 
-	rec = serveAs(e, http.MethodGet, "/v1/credentials", nil, true)
+	rec = serveAs(t, e, http.MethodGet, "/v1/credentials", nil, true)
 	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), created.Token) {
 		t.Fatalf("list status = %d, body exposes token or failed: %s", rec.Code, rec.Body.String())
 	}
@@ -80,26 +84,26 @@ func TestCredentialLifecycleEndpoints(t *testing.T) {
 		t.Fatalf("listed credentials = %+v, %v", listed, err)
 	}
 
-	if rec := serveAs(e, http.MethodDelete, "/v1/credentials/"+created.ID, nil, true); rec.Code != http.StatusNoContent {
+	if rec := serveAs(t, e, http.MethodDelete, "/v1/credentials/"+created.ID, nil, true); rec.Code != http.StatusNoContent {
 		t.Fatalf("revoke status = %d; body: %s", rec.Code, rec.Body.String())
 	}
 	if principal, _ := f.server.tokenManager.ValidateToken(context.Background(), created.Token); principal != nil {
 		t.Fatal("revoked credential still authenticates")
 	}
-	if rec := serveAs(e, http.MethodDelete, "/v1/credentials/"+created.ID, nil, true); rec.Code != http.StatusNotFound {
+	if rec := serveAs(t, e, http.MethodDelete, "/v1/credentials/"+created.ID, nil, true); rec.Code != http.StatusNotFound {
 		t.Fatalf("second revoke status = %d, want 404", rec.Code)
 	}
 }
 
 func TestJoinTokenEndpoints(t *testing.T) {
 	_, e := nodeTrustHandler(t)
-	if rec := serveAs(e, http.MethodPost, "/v1/nodes/join-tokens", api.JoinTokenCreateRequest{}, false); rec.Code != http.StatusForbidden {
+	if rec := serveAs(t, e, http.MethodPost, "/v1/nodes/join-tokens", api.JoinTokenCreateRequest{}, false); rec.Code != http.StatusForbidden {
 		t.Fatalf("create with cluster/write status = %d, want 403", rec.Code)
 	}
-	if rec := serveAs(e, http.MethodPost, "/v1/nodes/join-tokens", api.JoinTokenCreateRequest{TTLSeconds: int64(MaxJoinTokenTTL/time.Second) + 1}, true); rec.Code != http.StatusBadRequest {
+	if rec := serveAs(t, e, http.MethodPost, "/v1/nodes/join-tokens", api.JoinTokenCreateRequest{TTLSeconds: int64(MaxJoinTokenTTL/time.Second) + 1}, true); rec.Code != http.StatusBadRequest {
 		t.Fatalf("over-long ttl status = %d, want 400", rec.Code)
 	}
-	rec := serveAs(e, http.MethodPost, "/v1/nodes/join-tokens", api.JoinTokenCreateRequest{TTLSeconds: 600, MaxUses: 1}, true)
+	rec := serveAs(t, e, http.MethodPost, "/v1/nodes/join-tokens", api.JoinTokenCreateRequest{TTLSeconds: 600, MaxUses: 1}, true)
 	if rec.Code != http.StatusCreated || rec.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("create status = %d, cache-control %q; body: %s", rec.Code, rec.Header().Get("Cache-Control"), rec.Body.String())
 	}
@@ -126,15 +130,15 @@ func TestJoinTokenEndpoints(t *testing.T) {
 		t.Fatalf("enroll with exhausted token status = %d, want 401", code)
 	}
 
-	rec = serveAs(e, http.MethodGet, "/v1/nodes/join-tokens", nil, true)
+	rec = serveAs(t, e, http.MethodGet, "/v1/nodes/join-tokens", nil, true)
 	var listed api.JoinTokenListResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &listed); err != nil || len(listed) != 1 || listed[0].Uses != 1 || strings.Contains(rec.Body.String(), created.Token) {
 		t.Fatalf("listed join tokens = %s, %v", rec.Body.String(), err)
 	}
-	if rec := serveAs(e, http.MethodDelete, "/v1/nodes/join-tokens/"+created.ID, nil, true); rec.Code != http.StatusNoContent {
+	if rec := serveAs(t, e, http.MethodDelete, "/v1/nodes/join-tokens/"+created.ID, nil, true); rec.Code != http.StatusNoContent {
 		t.Fatalf("revoke status = %d", rec.Code)
 	}
-	if rec := serveAs(e, http.MethodDelete, "/v1/nodes/join-tokens/"+created.ID, nil, true); rec.Code != http.StatusNotFound {
+	if rec := serveAs(t, e, http.MethodDelete, "/v1/nodes/join-tokens/"+created.ID, nil, true); rec.Code != http.StatusNotFound {
 		t.Fatalf("second revoke status = %d, want 404", rec.Code)
 	}
 }

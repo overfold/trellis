@@ -281,7 +281,7 @@ func (s *Server) reconciliationSettingsLocked() ReconciliationSettings {
 // never silently stops running allocations; delete or shrink those jobs first.
 func (s *Server) UpdateJobLimits(ctx context.Context, limits spec.Limits) (ClusterSettings, error) {
 	if err := spec.ValidateLimits(limits); err != nil {
-		return ClusterSettings{}, fmt.Errorf("%w: job limits: %v", ErrInvalidClusterSettings, err)
+		return ClusterSettings{}, fmt.Errorf("%w: job limits: %w", ErrInvalidClusterSettings, err)
 	}
 	settings, err := s.updateClusterSettings(ctx, func(settings *ClusterSettings) error {
 		s.mu.RLock()
@@ -303,7 +303,7 @@ func (s *Server) UpdateJobLimits(ctx context.Context, limits spec.Limits) (Clust
 // settings. Every later reconciliation pass on any leader applies them.
 func (s *Server) UpdateReconciliationSettings(ctx context.Context, reconciliation ReconciliationSettings) (ClusterSettings, error) {
 	if err := reconciliation.Validate(); err != nil {
-		return ClusterSettings{}, fmt.Errorf("%w: reconciliation: %v", ErrInvalidClusterSettings, err)
+		return ClusterSettings{}, fmt.Errorf("%w: reconciliation: %w", ErrInvalidClusterSettings, err)
 	}
 	settings, err := s.updateClusterSettings(ctx, func(settings *ClusterSettings) error {
 		settings.Reconciliation = reconciliation

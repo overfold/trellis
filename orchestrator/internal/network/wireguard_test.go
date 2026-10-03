@@ -991,3 +991,16 @@ func TestAttachReturnsSetupErrors(t *testing.T) {
 		t.Fatal("Attach reported success after bridge address setup failed")
 	}
 }
+
+func TestPlanJSONPreservesExecutionHashInput(t *testing.T) {
+	plan := Plan{
+		CIDR: "10.42.1.0/24", Gateway: "10.42.1.1", WireGuardAddress: "169.254.1.1/32",
+		ListenPort: 51917, APIPort: 8080,
+		Peers: []PeerPlan{{PublicKey: "peer", Endpoint: "192.0.2.1:51918", AllowedIPs: []string{"10.42.2.0/24"}}},
+	}
+	raw, _ := json.Marshal(plan)
+	const want = `{"CIDR":"10.42.1.0/24","Gateway":"10.42.1.1","WireGuardAddress":"169.254.1.1/32","ListenPort":51917,"APIPort":8080,"Peers":[{"PublicKey":"peer","Endpoint":"192.0.2.1:51918","AllowedIPs":["10.42.2.0/24"]}]}`
+	if string(raw) != want {
+		t.Fatalf("network plan encoding changed:\ngot  %s\nwant %s", raw, want)
+	}
+}

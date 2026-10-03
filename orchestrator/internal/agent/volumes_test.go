@@ -2,6 +2,7 @@ package agent
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -180,5 +181,18 @@ func TestCleanupStagingKeepsMountsOfExistingContainers(t *testing.T) {
 	}
 	if err := restarted.ReleaseStaging("live"); err != nil {
 		t.Fatalf("release live staging: %v", err)
+	}
+}
+
+func TestReleaseStagingIgnoresWrappedUnmountAbsence(t *testing.T) {
+	manager := NewVolumeManager(t.TempDir())
+	target := manager.stagingPath("allocation", "data")
+	if err := os.MkdirAll(target, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	manager.unstage = func(string) error { return fmt.Errorf("unmount: %w", unix.EINVAL) }
+
+	if err := manager.ReleaseStaging("allocation"); err != nil {
+		t.Fatalf("release staging: %v", err)
 	}
 }

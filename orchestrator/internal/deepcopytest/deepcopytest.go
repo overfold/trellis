@@ -37,7 +37,10 @@ func settable(value reflect.Value) reflect.Value {
 	if value.CanSet() {
 		return value
 	}
-	return reflect.NewAt(value.Type(), unsafe.Pointer(value.UnsafeAddr())).Elem()
+	// This test helper intentionally reaches unexported fields so clone audits
+	// cannot silently miss private mutable state. Callers always pass addressable
+	// values reached from the non-nil pointer checked by Fill.
+	return reflect.NewAt(value.Type(), unsafe.Pointer(value.UnsafeAddr())).Elem() //nolint:gosec
 }
 
 func fill(value reflect.Value, counter *int, depth int) error {
@@ -60,7 +63,8 @@ func fill(value reflect.Value, counter *int, depth int) error {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		value.SetInt(int64(n % 100))
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-		value.SetUint(uint64(n % 100))
+		// n is a positive field counter, and the remainder is bounded to 0..99.
+		value.SetUint(uint64(n % 100)) //nolint:gosec
 	case reflect.Float32, reflect.Float64:
 		value.SetFloat(float64(n%100) / 128)
 	case reflect.String:
@@ -173,6 +177,12 @@ func disjoint(a, b reflect.Value, path string) []string {
 		if !a.IsNil() && !b.IsNil() {
 			shared = append(shared, disjoint(a.Elem(), b.Elem(), path)...)
 		}
+	case reflect.Invalid, reflect.Bool,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+		reflect.Float32, reflect.Float64, reflect.Complex64, reflect.Complex128,
+		reflect.Chan, reflect.Func, reflect.String, reflect.UnsafePointer:
+		// These kinds do not contain recursively mutable state created by Fill.
 	}
 	return shared
 }

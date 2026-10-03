@@ -40,9 +40,9 @@ type CreateOptions struct {
 
 // ContainerInfo describes a managed container.
 type ContainerInfo struct {
-	ID     string
-	Status ContainerStatus
-	Labels map[string]string
+	ID     string            `json:"ID"`
+	Status ContainerStatus   `json:"Status"`
+	Labels map[string]string `json:"Labels"`
 }
 
 // ManagedRuntime is implemented by runtimes that can inventory Trellis-owned

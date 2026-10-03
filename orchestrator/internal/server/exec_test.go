@@ -134,6 +134,8 @@ func TestExecRelaysStreamBetweenClientAndAgent(t *testing.T) {
 			case execstream.FrameStdinClose:
 				_ = writer.WriteJSON(execstream.FrameExit, api.ExecExit{ExitCode: 4})
 				return
+			case execstream.FrameStdout, execstream.FrameStderr, execstream.FrameExit, execstream.FrameError:
+				return
 			}
 		}
 	})
@@ -207,7 +209,10 @@ func TestExecRelayRejectsServerFramesFromClient(t *testing.T) {
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	conn, _, err := websocket.Dial(ctx, test.leader.URL+"/v1/namespaces/team/allocations/alloc-1/exec?command=sh", &websocket.DialOptions{Subprotocols: []string{execwebsocket.Protocol}})
+	conn, response, err := websocket.Dial(ctx, test.leader.URL+"/v1/namespaces/team/allocations/alloc-1/exec?command=sh", &websocket.DialOptions{Subprotocols: []string{execwebsocket.Protocol}})
+	if response != nil && response.Body != nil {
+		defer func() { _ = response.Body.Close() }()
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -148,6 +148,8 @@ func (h *HealthManager) runHealthCheckLoop(ctx context.Context, trackedTask *tra
 			if change {
 				var err error
 				switch status {
+				case StatusInitializing:
+					// RecordResult never reports a change while remaining initializing.
 				case StatusHealthy:
 					err = h.Subscriber.OnHealthy(ctx, trackedTask.allocID)
 				case StatusUnhealthy:

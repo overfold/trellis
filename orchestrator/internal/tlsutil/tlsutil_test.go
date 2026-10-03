@@ -121,8 +121,9 @@ func TestRejectUntrustedClientCert(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: clientCfg}}
-	_, err = client.Get("https://" + ln.Addr().String())
+	resp, err := client.Get("https://" + ln.Addr().String())
 	if err == nil {
+		_ = resp.Body.Close()
 		t.Fatal("expected TLS handshake to fail with untrusted cert")
 	}
 }
@@ -152,8 +153,9 @@ func TestRejectNoClientCert(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: caOnlyCfg}}
-	_, err = client.Get("https://" + ln.Addr().String())
+	resp, err := client.Get("https://" + ln.Addr().String())
 	if err == nil {
+		_ = resp.Body.Close()
 		t.Fatal("expected TLS handshake to fail without client cert")
 	}
 }

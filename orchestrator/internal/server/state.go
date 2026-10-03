@@ -146,10 +146,7 @@ func (s *StateController) PutJob(ctx context.Context, id string, job *Job) error
 // evicts the oldest records beyond the retention window, so each apply
 // replicates only the new record and the evicted keys.
 func (s *StateController) PutJobWithRevision(ctx context.Context, id string, job *Job, record *JobRevisionRecord) error {
-	jobRaw, err := json.Marshal(job)
-	if err != nil {
-		return fmt.Errorf("marshal job: %w", err)
-	}
+	jobRaw, _ := json.Marshal(job)
 	revisionRaw, err := json.Marshal(record)
 	if err != nil {
 		return fmt.Errorf("marshal job revision: %w", err)
@@ -365,10 +362,7 @@ func (s *StateController) CommitReconciliation(ctx context.Context, commit *Reco
 		if registration == nil || registration.Namespace == "" || registration.Slot < 0 {
 			return fmt.Errorf("invalid network port registration")
 		}
-		raw, err := json.Marshal(registration)
-		if err != nil {
-			return fmt.Errorf("marshal network port registration for %s: %w", registration.Namespace, err)
-		}
+		raw, _ := json.Marshal(registration)
 		mutations = append(mutations, state.Mutation{Key: s.networkPortRegistrationKey(registration.Namespace), Value: raw})
 	}
 	for _, registration := range commit.DeleteNetworkSubnetRegistrations {

@@ -254,10 +254,7 @@ func TestBackupRestoreRoundTripsPersistedJob(t *testing.T) {
 	ctx := context.Background()
 	store := &backupStore{data: memoryStore{}, snapshot: &state.DesiredSnapshot{Jobs: map[string][]byte{}, JobRevisions: map[string][]byte{}, Secrets: map[string][]byte{}, VolumeRegistrations: map[string][]byte{}, NetworkPortRegistrations: map[string][]byte{}}}
 	job := &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}}), Incarnation: uuid.NewString(), Revision: 1, Version: 1}
-	raw, err := json.Marshal(job)
-	if err != nil {
-		t.Fatal(err)
-	}
+	raw, _ := json.Marshal(job)
 	store.snapshot.Jobs["default%00web"] = raw
 	historical := &JobRevisionRecord{Version: 1, Revision: 1, Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 2000, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}}), CreatedAt: time.Now()}
 	historicalRaw, err := json.Marshal(historical)

@@ -1,6 +1,7 @@
 package spec
 
 import (
+	"errors"
 	"fmt"
 	"time"
 )
@@ -128,7 +129,9 @@ func ValidateCanonical(job *JobSpec) error {
 		}
 		for taskIndex := range group.Tasks {
 			if err := ValidateCanonicalTask(&group.Tasks[taskIndex]); err != nil {
-				for _, issue := range err.(ValidationErrors) {
+				var taskIssues ValidationErrors
+				errors.As(err, &taskIssues)
+				for _, issue := range taskIssues {
 					issue.Path = fmt.Sprintf("%s.tasks[%s].%s", groupPath, group.Tasks[taskIndex].Name, issue.Path)
 					issues = append(issues, issue)
 				}
