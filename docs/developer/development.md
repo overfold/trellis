@@ -10,7 +10,7 @@ go test ./...
 go vet ./...
 golangci-lint run
 
-go build ./cmd/trellis ./cmd/trellisctl ./cmd/trellis-proxy-sync
+go build ./cmd/trellis ./cmd/trellisctl
 CGO_ENABLED=0 go build ./cmd/trellis-health-probe
 ```
 
@@ -58,4 +58,3 @@ The Vagrant environment provisions `control`, `worker-1`, and `worker-2` Debian 
 
 - `cmd/trellis`: production node composition and flags.
 - `cmd/trellisctl`: CLI, precedence-aware config, TLS setup.
-- `cmd/trellis-proxy-sync`: polling service-catalog consumer for external proxies.

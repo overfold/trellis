@@ -51,7 +51,7 @@ trellisctl jobs apply --file examples/deployment-strategies/stable.yaml
 trellisctl jobs apply --file examples/deployment-strategies/canary.yaml
 ```
 
-Run `trellis-proxy-sync -label route:shop-weighted -container-port 80 ...` with a template that consumes each upstream's weight. Observe errors, latency, saturation, and application-specific success metrics by release track. Increase canary exposure by changing its weight or replica count; remove it immediately with `trellisctl jobs delete shop-canary`.
+`trellis/weight` is a convention of the separate [`trellis-proxy-sync`](https://github.com/overfold/trellis-proxy-sync) project, not something Trellis interprets. Run `trellis-proxy-sync -label route:shop-weighted -container-port 80 ...` with a template that consumes each upstream's weight. Observe errors, latency, saturation, and application-specific success metrics by release track. Increase canary exposure by changing its weight or replica count; remove it immediately with `trellisctl jobs delete shop-canary`.
 
 Weights apply to individual discovered allocations. Four stable replicas at weight 100 plus one canary at weight 5 produce an aggregate stable weight of 400 and canary weight of 5. The manifests therefore require five nodes while both tracks run. Confirm the resulting percentage and load-balancer semantics, especially with sticky sessions or long-lived connections.
 
