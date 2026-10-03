@@ -1,104 +1,68 @@
-# AGENTS.md
+# Trellis agent guidance
 
-This file contains repository-wide instructions for coding agents working on Trellis. A more specific `AGENTS.md` in a subdirectory takes precedence for files under that directory.
+Repository-wide instructions. Read any nested `AGENTS.md` before changing files in its scope; more specific guidance takes precedence where it conflicts with this file.
 
 ## Start here
 
-Before making changes:
+- Read [README.md](README.md) for product scope and design principles, and [architecture](docs/developer/architecture.md) before changing subsystem boundaries.
+- Use [docs/README.md](docs/README.md) to find the relevant subsystem docs. [Development and testing](docs/developer/development.md) owns toolchain and environment-specific test setup.
+- Inspect the owning package and nearby tests before editing. Keep changes scoped to the request; do not reformat or refactor unrelated code.
 
-1. Read `README.md` for the problem statement and design principles.
-2. Read `docs/developer/development.md` for toolchains, test commands, and implementation rules.
-3. Read the relevant developer or public docs for the subsystem you are changing.
-4. Inspect nearby code and tests before introducing a new pattern.
+## Design principles
 
-Prefer small, coherent changes. Do not perform unrelated refactors, rename unrelated symbols, or reformat untouched files.
+Use the [README design principles](README.md#design-principles) to judge feature scope and implementation tradeoffs, not just package placement:
 
-## Project direction
+- **Modular and extensible, but focused.** Keep the containerd-based orchestrator lean and understandable. Expose clean primitives that consumers can build on; do not add speculative extension points, a plugin framework, or Kubernetes-style complexity.
+- **Non-opinionated and flexible.** Keep application architecture and environment-specific policy outside the core. Reverse proxies are ordinary workloads, not special ingress resources. Do not add team/project abstractions or prescribe a platform architecture unless explicitly requested.
+- **Consumers own representation; Trellis owns meaning.** The operator API accepts canonical JSON. `trellisctl` converts human-authored YAML; authoring conveniences must not create separate validation, defaulting, planning, or revision semantics in each consumer.
+- **Declarative, with open-ended delivery.** Accept desired state without coupling orchestration to how it is produced or submitted. Keep CLI, CI/CD, custom frontends, and other API consumers equally viable; do not make a particular delivery workflow a core requirement.
+- **Easy to use through clarity.** Prefer useful errors, thorough documentation, and progressive first-party examples over opinionated defaults that hide behavior. Make the primitives understandable without turning advanced application patterns into beginner defaults.
+- **Open-source and inspectable.** Keep implementation and extension paths understandable to operators who need to read, modify, and run Trellis themselves.
 
-Trellis is a focused container orchestrator built on containerd. Preserve the design principles in `README.md`:
+## Architecture rules
 
-- Keep the core modular, understandable, and narrow in scope. Do not introduce Kubernetes-style resources or opinionated platform abstractions unless the task explicitly calls for them.
-- Keep Trellis non-opinionated. Reverse proxies and similar infrastructure are ordinary workloads; higher-level deployment opinions belong outside the core.
-- Consumers own representation; Trellis owns meaning. The control-plane API consumes canonical JSON. YAML is a first-party human-authoring format and must be converted before reaching the API.
-- Keep first-party terminology aligned across the API, `trellisctl`, docs, schemas, and examples.
+Apply the design principles through clear ownership boundaries:
 
-Trellis is experimental and pre-1.0. Prefer a clean current design over speculative compatibility. Do not add aliases, migrations, fallback paths, or compatibility shims solely for hypothetical older clients or persisted state unless the task explicitly requires them.
+- **Keep wire contracts separate from domain and execution types.** Operator wire types belong in `orchestrator/api`; node-to-node wire types belong in `orchestrator/internal/nodeapi`. Public `api` and `client` exports must be usable by external Go modules without importing internal types, and must not depend on server-side packages. Shared internal transport helpers are permitted.
+- **Change behavior at its owner.** Reuse existing package APIs rather than duplicating semantics in handlers or the CLI. Add a helper, interface, or package only for a coherent responsibility or a real consumer need, not a speculative extension point.
+- **Prefer a clean current design.** Trellis is experimental and pre-1.0. Do not add aliases, migrations, fallbacks, or compatibility shims for hypothetical older clients or persisted state unless required by the task.
 
-## Architecture invariants
+Key ownership boundaries (paths relative to `orchestrator/`; see the architecture guide for the full package map):
 
-Respect these boundaries when changing orchestrator code:
+| Owner | Responsibility |
+|---|---|
+| `internal/spec` / `internal/plan` | Authoring decode, canonical specs, defaults, validation, execution hashing / semantic job planning |
+| `internal/server` | Domain state, operator handlers, scheduling, leader reconciliation, allocation queries, metrics, secret delivery |
+| `internal/agent` / `internal/runtime` | Node-side execution and local reconciliation / runtime abstraction, containerd, integration-only injected runtime, logs |
+| `internal/state` / `internal/election` | State-store abstraction, Bolt persistence, Raft FSM and snapshots / leadership events |
+| `internal/network`, `internal/dns`, `internal/catalog` | Namespace networking, service discovery, healthy endpoint index |
+| `internal/health` / `internal/lifecycle` | Health probing / allocation lifecycle vocabulary and transitions |
+| `internal/secrets` / `internal/auth` | Encrypted secret storage and delivery / credentials and authorization |
+| `client` / `internal/client` / `internal/transport` | Public operator client / node-internal clients / shared HTTP transport |
 
-- `orchestrator/api`: public operator-API wire types. `orchestrator/internal/nodeapi`: node-to-node wire types.
-- `orchestrator/internal/spec`: job authoring decode, canonical spec types, validation, defaults, and execution hashing.
-- `orchestrator/internal/server`: domain state, HTTP handlers, scheduling, reconciliation, allocation queries, metrics, and secret delivery.
-- `orchestrator/internal/agent`: node-side execution and local reconciliation.
-- `orchestrator/internal/runtime`: runtime abstraction, containerd implementation, injected test runtime, and logs.
-- `orchestrator/internal/state`: state-store abstraction, Bolt persistence, Raft FSM, and snapshots.
-- `orchestrator/internal/election`: leadership events.
-- `orchestrator/internal/network` and `orchestrator/internal/dns`: namespace networking and service discovery.
-- `orchestrator/internal/catalog`: healthy service endpoint index.
-- `orchestrator/internal/health` and `orchestrator/internal/lifecycle`: health and allocation lifecycle semantics.
-- `orchestrator/internal/secrets` and `orchestrator/internal/auth`: secret storage/delivery and authorization.
-- `orchestrator/client`: the public Go client for the operator API, used by `trellisctl` and external consumers such as [`trellis-proxy-sync`](https://github.com/overfold/trellis-proxy-sync). `orchestrator/internal/client`: the node-internal agent and node clients. `orchestrator/internal/transport`: their shared HTTP transport.
+### State and distributed execution invariants
 
-Do not blur durable desired state with renewable observations. Allocation lifecycle and health are separate concepts.
+- Keep durable desired state separate from renewable observations such as heartbeats and runtime status. Allocation lifecycle and health are separate concepts; do not infer one from the other.
+- Keep desired-state mutations Raft-backed. FSM application must be deterministic: no wall-clock reads, randomness, or order-dependent map traversal during application. Supply required timestamps or identifiers in the replicated command.
+- Do not mutate scheduler inputs; preserve deterministic placement and ordering.
+- Leader-to-agent start/stop operations must be retriable and idempotent across agent restarts and leadership changes. Preserve allocation identity, generation, control epoch, job revision, and execution-hash fencing where applicable; reject stale operations and observations.
+- Namespaces separate resources, discovery, and workload networks, **not API credential authority or arbitrary workload admission**. Credentials are cluster-scoped; do not treat namespaces as a security sandbox. See [trust boundaries](docs/public/multitenancy.md).
 
-Leader-to-agent operations must remain safe under retries, agent restarts, and leadership changes. Preserve allocation identity, generation, control epoch, job revision, and execution-hash fencing where applicable. Start/stop operations must remain idempotent.
+## Change contracts
 
-Raft-backed mutations must be deterministic. Do not make FSM application depend on wall-clock time, random iteration order, or other node-local nondeterminism. Do not mutate scheduler inputs; deterministic scheduling makes failures reproducible.
+- Validate user-controlled identifiers, paths, ports, resources, and enum values before persistence or execution. Errors must provide useful context without exposing secrets; never log secret plaintext, and clear temporary secret bytes where practical.
+- Run `gofmt` on modified Go files. Add focused tests beside the owning package, including regression cases for bugs. Do not weaken or skip tests to make a change pass.
+- For public wire behavior, update affected handlers, `api`, public `client`, `trellisctl`, tests, and [API docs](docs/developer/api.md) together.
+- For manifest semantics, update `internal/spec`, planning when affected, validation/defaulting tests, generated schemas, [job reference](docs/public/job-specification.md), and affected examples together. Do not hand-edit generated schemas: from `orchestrator/`, run `go run ./cmd/generate-schemas`.
+- Keep terminology consistent across API, CLI, docs, schemas, and examples: cluster → namespaces → jobs → task groups → tasks and allocations; nodes belong to the cluster.
+- Update relevant docs when user-facing behavior changes. [Getting Started](docs/public/getting-started.md) and `examples/hello/` own the installation/first-workload walkthrough; link to them rather than adding competing quick starts. Keep advanced patterns clearly labelled and internals in developer docs or advanced operator material.
+- Put reusable YAML job examples under `examples/`; `TestExampleManifestsValidate` validates its `.yaml` manifests recursively.
 
-## Go changes
+## Verification
 
-The Go module `github.com/overfold/trellis` is rooted at the repository (`go.mod` at the root) and targets the version declared there; its code lives in `orchestrator/`. External modules import the public `orchestrator/api` and `orchestrator/client` packages, so keep them free of internal types in their exported API and do not make them depend on server-side packages.
+The root `go.mod` owns the `github.com/overfold/trellis` module; code lives under `orchestrator/`. Use the tool versions declared in `go.mod` and `mise.toml`. `tutorial/` is a separate Go module and is not covered by the orchestrator checks.
 
-- Follow idiomatic Go and existing package structure.
-- Run `gofmt` on modified Go files.
-- Validate user-controlled identifiers, paths, ports, resources, and enum values before persistence or execution.
-- Return useful errors with enough context to diagnose the failed operation; do not expose secret material.
-- Never log or return secret plaintext. Clear temporary secret byte slices where practical.
-- Prefer focused tests beside the package being changed.
-- Do not weaken, delete, or broadly skip tests merely to make a change pass.
-
-When changing public wire behavior, update the relevant server handler, `api` types, `client` behavior, `trellisctl`, tests, and `docs/developer/api.md` together.
-
-When changing manifest semantics, update `internal/spec`, validation/defaulting, tests, generated schemas, `docs/public/job-specification.md`, and affected examples together.
-
-## Documentation and examples
-
-`docs/README.md` is the authoritative documentation index.
-
-- `docs/public/getting-started.md` is the only installation/first-workload walkthrough.
-- `examples/hello/` is the only first-workload example.
-- Keep beginner, intermediate, and advanced examples distinct; do not present architectural patterns as beginner defaults.
-- Keep documented commands and output descriptions consistent with the current CLI.
-- Internal Raft, RPC, storage, and execution mechanics belong in developer docs or clearly advanced operator material.
-- If a user-facing behavior changes, update the relevant docs in the same change.
-
-Example manifests are validated by the Go test suite. Put reusable manifest examples under `examples/` so they are covered by `TestExampleManifestsValidate`.
-
-## Generated schemas
-
-Checked-in schemas under `schemas/` are generated from the orchestrator spec. Do not hand-edit generated schema output as the source of truth.
-
-From `orchestrator/`:
-
-```sh
-go run ./cmd/generate-schemas
-```
-
-Verify generated files are current with:
-
-```sh
-go run ./cmd/generate-schemas --check
-```
-
-## Validation commands
-
-Run the smallest relevant checks while iterating, then run the checks affected by your final diff before handing off the change.
-
-### Orchestrator
-
-From `orchestrator/`:
+Run focused package tests while iterating. For Go changes, run the relevant final checks below **from `orchestrator/`**, as CI does:
 
 ```sh
 go test ./...
@@ -106,30 +70,12 @@ go vet ./...
 golangci-lint run
 go run ./cmd/generate-schemas --check
 go build ./cmd/trellis ./cmd/trellisctl
+CGO_ENABLED=0 go build ./cmd/trellis-health-probe
 ```
 
-For distributed behavior that crosses server/agent/node boundaries, also run when relevant:
+- Distributed server/agent/node changes: also run `go test -tags=integration ./cmd/trellis ./integration -count=1 -timeout=6m`. The injected runtime is available only with the `integration` build tag; normal builds reject it.
+- Containerd runtime changes: use the containerd E2E commands in [development and testing](docs/developer/development.md). They require Linux, running containerd, root privileges for snapshot mounts, and a statically built health probe for health-probe tests; socket access alone is insufficient.
+- Installer changes: run `bash scripts/install-core_test.sh` **from the repository root**.
+- Documentation-only changes: check referenced paths and commands against the code and CI; a full Go suite is unnecessary unless examples or behavior changed.
 
-```sh
-go test -tags=integration ./cmd/trellis ./integration -count=1 -timeout=6m
-```
-
-For containerd-specific allocation adoption/runtime behavior, run the containerd E2E test on a suitable Linux host with containerd and the required privileges:
-
-```sh
-sudo "$(command -v go)" test -tags=containerd_e2e ./internal/runtime -run TestContainerdAllocationAdoption -count=1 -timeout=3m
-```
-
-If an environment-specific suite cannot be run locally, say so explicitly in the handoff; do not imply it passed.
-
-## Change checklist
-
-Before considering a change complete:
-
-- The implementation follows the README design principles and the architecture boundaries above.
-- New behavior has focused tests, including regression coverage for bug fixes where practical.
-- Public API, CLI, manifest, docs, schema, and example surfaces remain consistent where the change crosses those boundaries.
-- Generated schema files are regenerated when their source changes and pass the schema check.
-- Relevant unit, lint, build, and integration checks have been run, or any environment-limited checks are called out.
-- The diff contains no unrelated cleanup or compatibility code that the task did not require.
-- No secrets, credentials, generated local state, build artifacts, or machine-specific files are committed.
+Before handing off, review the diff for scope and consistency. Do not commit secrets, local state, or build artifacts. Report which checks actually ran and any failures, skips, or environment limitations; do not claim unexecuted suites passed.
