@@ -19,6 +19,14 @@ const attachmentJournalDir = ".attachments"
 
 const defaultNetnsDir = "/var/run/netns"
 
+// CleanupJournaledAttachments removes only resources described by attachment
+// journals below stateDir. Unlike the normal manager constructor, it does not
+// initialize or create network state when there is nothing to clean up.
+func CleanupJournaledAttachments(ctx context.Context, stateDir, dnsAddress string) error {
+	manager := &WireGuardManager{stateDir: stateDir, run: execRunner{}}
+	return manager.CleanupAttachments(ctx, dnsAddress)
+}
+
 // attachmentRecord is journaled before Attach creates anything, and removed
 // only after every resource it names is gone. It holds what Detach needs that
 // cannot be derived from the allocation ID.
@@ -150,6 +158,28 @@ func (m *WireGuardManager) Attachments(context.Context) ([]string, error) {
 		ids = append(ids, id)
 	}
 	return ids, errors.Join(errs...)
+}
+
+// CleanupAttachments removes every attachment described by the durable
+// journals in this manager's state directory. It is intended for offline node
+// removal, after workloads have stopped. An unreadable journal prevents any
+// teardown so uninstall cannot discard the only record of owned resources.
+func (m *WireGuardManager) CleanupAttachments(ctx context.Context, dnsAddress string) error {
+	ip, err := netip.ParseAddr(dnsAddress)
+	if err != nil || !ip.Is4() {
+		return fmt.Errorf("workload DNS address must be IPv4: %s", dnsAddress)
+	}
+	m.dnsAddress = dnsAddress
+	ids, err := m.Attachments(ctx)
+	if err != nil {
+		return fmt.Errorf("inspect network attachments: %w", err)
+	}
+	for _, id := range ids {
+		if err := m.DetachAllocation(ctx, id); err != nil {
+			return fmt.Errorf("detach network attachment %s: %w", id, err)
+		}
+	}
+	return nil
 }
 
 // NamespaceForIP returns the namespace whose locally attached network contains

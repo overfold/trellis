@@ -87,6 +87,11 @@ limits bound work and open connections when workloads flood the node-local
 resolver or an upstream resolver is slow, while preserving the source-network
 namespace check for every admitted discovery query.
 
+Internal discovery publishes IPv4 A records. Queries for AAAA or other record
+types on an existing name return `NOERROR` with no answers, so dual-stack
+lookups can use the A record. Missing or namespace-inaccessible names return
+`NXDOMAIN`.
+
 Each control-plane process also admits at most 256 simultaneous event
 streams (`GET /v1/events` and `GET /v1/namespaces/{namespace}/events`). A request above that limit receives `503 Service
 Unavailable` with `Retry-After: 1`; clients should reconnect with backoff. A
@@ -275,6 +280,8 @@ It removes only dependencies/repositories recorded as introduced by Trellis; old
 Installing a new cluster on this machine replaces the invoking user's `local` context with a freshly minted operator token and a live CA-file reference to `/run/trellis/ca.crt`; unrelated contexts are preserved. Resuming an existing installation or joining a cluster keeps an existing `local` context. File-backed local trust follows the running daemon, but old bearer tokens and administrator keys do not gain access to a replacement cluster. Embedded remote contexts remain pinned to their saved CA; see [CA sources](cli.md#named-cluster-contexts).
 
 Instead of throwing away the encryption key while retaining encrypted state, normal uninstall archives the complete recoverable set—node data, `/etc/trellis` configuration and the configured secrets key, plus installer state—under a timestamped `/var/lib/trellis/recovery/` directory.
+
+After the daemon and its containers stop, uninstall uses the installed Trellis binary to remove every local network resource recorded in its attachment journals. This applies equally to single-node, `--force`, and `--purge` removal. If network cleanup fails, uninstall stops before deleting the binary, journals, configuration, or node data so the same command can be retried; it never guesses at or deletes unjournaled host interfaces or firewall rules.
 
 If a broken installation cannot inspect or update cluster membership, use `--force` to skip cluster operations and remove the local installation:
 

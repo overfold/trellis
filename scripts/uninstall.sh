@@ -143,16 +143,39 @@ else
 fi
 
 ui_section "Software"
-systemctl stop trellis >/dev/null 2>&1 || true
-systemctl disable trellis >/dev/null 2>&1 || true
+if ! systemctl stop trellis >/dev/null 2>&1; then
+    ui_die "Could not stop the Trellis service. Network state and installed files were retained for retry."
+fi
 
 if command -v ctr >/dev/null 2>&1; then
-    for cid in $(ctr -n trellis containers ls -q 2>/dev/null || true); do
+    if ! containers="$(ctr -n trellis containers ls -q)"; then
+        ui_die "Could not inspect Trellis containers. Network state and installed files were retained for retry."
+    fi
+    for cid in $containers; do
         ctr -n trellis tasks kill "$cid" -s SIGKILL >/dev/null 2>&1 || true
         ctr -n trellis tasks delete "$cid" >/dev/null 2>&1 || true
         ctr -n trellis containers rm "$cid" >/dev/null 2>&1 || true
     done
+    if ! remaining="$(ctr -n trellis containers ls -q)"; then
+        ui_die "Could not verify Trellis container removal. Network state and installed files were retained for retry."
+    fi
+    if [ -n "$remaining" ]; then
+        ui_die "Could not remove all Trellis containers. Network state and installed files were retained for retry."
+    fi
+else
+    ui_die "ctr is required to verify workloads are stopped before network cleanup. Installed files and state were retained for retry."
 fi
+
+cleanup_args=(--data-dir "$DATA_DIR")
+if [ -f "$CONFIG_FILE" ]; then
+    cleanup_args+=(--config "$CONFIG_FILE")
+fi
+if ! "${INSTALL_DIR}/trellis" network-cleanup "${cleanup_args[@]}"; then
+    ui_die "Could not remove Trellis network resources. Network journals, node data, and installed files were retained for retry."
+fi
+ui_step "Removed journaled Trellis network resources"
+
+systemctl disable trellis >/dev/null 2>&1 || true
 rm -f "$SERVICE_FILE"
 systemctl daemon-reload
 systemctl reset-failed >/dev/null 2>&1 || true

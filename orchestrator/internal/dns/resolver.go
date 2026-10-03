@@ -380,7 +380,7 @@ func (r *Resolver) handleQueryNetworkContext(ctx context.Context, packet []byte,
 		}
 	}
 
-	if qtype != 1 || qclass != 1 {
+	if qclass != 1 {
 		return buildResponse(id, name, qtype, qclass, nil)
 	}
 	ips := r.resolve(name)
@@ -486,9 +486,11 @@ func buildErrorResponse(packet []byte, rcode uint16) []byte {
 func buildResponse(id uint16, name string, qtype, qclass uint16, ips []net.IP) []byte {
 	buf := make([]byte, 0, 512)
 	ipv4s := make([]net.IP, 0, len(ips))
-	for _, ip := range ips {
-		if ipv4 := ip.To4(); ipv4 != nil {
-			ipv4s = append(ipv4s, ipv4)
+	if qtype == 1 && qclass == 1 {
+		for _, ip := range ips {
+			if ipv4 := ip.To4(); ipv4 != nil {
+				ipv4s = append(ipv4s, ipv4)
+			}
 		}
 	}
 
@@ -497,7 +499,9 @@ func buildResponse(id uint16, name string, qtype, qclass uint16, ips []net.IP) [
 	binary.BigEndian.PutUint16(header[0:2], id)
 	flags := uint16(0x8000) // QR=1 (response)
 	flags |= 0x0400         // AA=1 (authoritative)
-	if len(ipv4s) == 0 {
+	// A known name with no records of the requested type is NODATA, not
+	// NXDOMAIN. In particular, AAAA must not invalidate a successful A lookup.
+	if len(ips) == 0 {
 		flags |= 0x0003 // RCODE=NXDOMAIN
 	}
 	binary.BigEndian.PutUint16(header[2:4], flags)

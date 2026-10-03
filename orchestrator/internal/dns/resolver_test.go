@@ -135,8 +135,55 @@ func TestBuildResponseCountsOnlyIPv4Answers(t *testing.T) {
 	if got := binary.BigEndian.Uint16(resp[6:8]); got != 0 {
 		t.Fatalf("ANCOUNT = %d, want 0", got)
 	}
-	if rcode := binary.BigEndian.Uint16(resp[2:4]) & 0x000f; rcode != 3 {
-		t.Fatalf("rcode = %d, want NXDOMAIN", rcode)
+	if rcode := binary.BigEndian.Uint16(resp[2:4]) & 0x000f; rcode != 0 {
+		t.Fatalf("rcode = %d, want NOERROR for an existing name", rcode)
+	}
+}
+
+func TestHandleQueryRecordTypes(t *testing.T) {
+	services := nodeapi.ServiceListResponse{
+		{Group: "db", Job: "bower", Namespace: "platform", Address: "10.64.0.91"},
+	}
+	namespaces := namespaceLookup{netip.MustParsePrefix("10.64.0.0/24"): "platform"}
+	r := NewResolver(nil, &mockLookup{services: &services}, namespaces, "trellis")
+	r.refresh(t.Context())
+	for _, tc := range []struct {
+		name    string
+		query   string
+		source  string
+		qtype   uint16
+		rcode   uint16
+		answers uint16
+	}{
+		{"A", "db.bower.platform.trellis.", "10.64.0.169", 1, 0, 1},
+		{"AAAA NODATA", "db.bower.platform.trellis.", "10.64.0.169", 28, 0, 0},
+		{"MX NODATA", "db.bower.platform.trellis.", "10.64.0.169", 15, 0, 0},
+		{"missing A", "missing.bower.platform.trellis.", "10.64.0.169", 1, 3, 0},
+		{"missing AAAA", "missing.bower.platform.trellis.", "10.64.0.169", 28, 3, 0},
+		{"denied A", "db.bower.platform.trellis.", "192.0.2.9", 1, 3, 0},
+		{"denied AAAA", "db.bower.platform.trellis.", "192.0.2.9", 28, 3, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			query := buildQuery(tc.query)
+			binary.BigEndian.PutUint16(query[len(query)-4:], tc.qtype)
+			resp := r.handleQueryNetwork(query, "udp", &net.UDPAddr{IP: net.ParseIP(tc.source), Port: 53000})
+			if got := binary.BigEndian.Uint16(resp[2:4]) & 0x000f; got != tc.rcode {
+				t.Fatalf("rcode = %d, want %d", got, tc.rcode)
+			}
+			if got := binary.BigEndian.Uint16(resp[6:8]); got != tc.answers {
+				t.Fatalf("ANCOUNT = %d, want %d", got, tc.answers)
+			}
+			_, offset := decodeName(resp, 12)
+			if got := binary.BigEndian.Uint16(resp[offset:]); got != tc.qtype {
+				t.Fatalf("question type = %d, want %d", got, tc.qtype)
+			}
+			if tc.answers == 1 && !net.IP(resp[len(resp)-4:]).Equal(net.ParseIP("10.64.0.91")) {
+				t.Fatalf("wrong A address: %v", resp[len(resp)-4:])
+			}
+			if tc.answers == 0 && len(resp) != offset+4 {
+				t.Fatal("empty response contains unexpected answer data")
+			}
+		})
 	}
 }
 
@@ -154,6 +201,43 @@ func TestHandleQueryNXDomain(t *testing.T) {
 	rcode := flags & 0x000F
 	if rcode != 3 {
 		t.Fatalf("expected NXDOMAIN (3), got rcode %d", rcode)
+	}
+}
+
+func TestDualStackLookupOfIPv4OnlyName(t *testing.T) {
+	services := nodeapi.ServiceListResponse{
+		{Group: "db", Job: "bower", Namespace: "platform", Address: "10.64.0.91"},
+	}
+	r := NewResolver(nil, &mockLookup{services: &services}, nil, "trellis")
+	r.refresh(t.Context())
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- r.serveUDP(ctx, conn) }()
+	t.Cleanup(func() {
+		cancel()
+		_ = conn.Close()
+		if err := <-done; err != nil {
+			t.Errorf("serve UDP: %v", err)
+		}
+	})
+	resolver := &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "udp", conn.LocalAddr().String())
+		},
+	}
+	lookupCtx, stop := context.WithTimeout(ctx, 5*time.Second)
+	defer stop()
+	addresses, err := resolver.LookupIPAddr(lookupCtx, "db.bower.platform.trellis.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(addresses) != 1 || !addresses[0].IP.Equal(net.ParseIP("10.64.0.91")) {
+		t.Fatalf("addresses = %v, want only 10.64.0.91", addresses)
 	}
 }
 

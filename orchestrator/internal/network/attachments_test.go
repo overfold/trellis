@@ -171,6 +171,60 @@ func TestDetachAllocationKeepsOtherAllocationsAndNamespacePath(t *testing.T) {
 	assertAttachments(t, manager, "alloc-two")
 }
 
+func TestCleanupAttachmentsTearsDownAllJournaledResourcesAndIsIdempotent(t *testing.T) {
+	manager, runner := newRecoveryTestManager(t)
+	first := attachForRecovery(t, manager, "alloc-one")
+	second := attachForRecovery(t, manager, "alloc-two")
+	runner.commands = nil
+
+	if err := manager.CleanupAttachments(context.Background(), WorkloadDNSAddress); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(runner.commands, "\n")
+	for _, want := range []string{
+		"ip link del " + first.HostVeth,
+		"ip netns del alloc-one",
+		"ip link del " + second.HostVeth,
+		"ip netns del alloc-two",
+		"iptables -D TRELLIS-INPUT -i " + first.Bridge + " -s 10.42.1.0/24 -d " + WorkloadDNSAddress + " -p udp --dport 53 -j ACCEPT",
+		"ip link del " + first.WireGuardInterface,
+		"ip link del " + first.Bridge,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("cleanup did not run %q:\n%s", want, joined)
+		}
+	}
+	assertAttachments(t, manager)
+
+	runner.commands = nil
+	if err := manager.CleanupAttachments(context.Background(), WorkloadDNSAddress); err != nil {
+		t.Fatalf("repeated cleanup: %v", err)
+	}
+	if len(runner.commands) != 0 {
+		t.Fatalf("repeated cleanup ran commands:\n%s", strings.Join(runner.commands, "\n"))
+	}
+}
+
+func TestCleanupAttachmentsFailsClosedOnUnreadableJournal(t *testing.T) {
+	manager, runner := newRecoveryTestManager(t)
+	attachForRecovery(t, manager, "alloc-one")
+	dir := filepath.Join(manager.stateDir, attachmentJournalDir)
+	if err := os.WriteFile(filepath.Join(dir, "alloc-bad.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner.commands = nil
+
+	if err := manager.CleanupAttachments(context.Background(), WorkloadDNSAddress); err == nil {
+		t.Fatal("cleanup succeeded with an unreadable journal")
+	}
+	if len(runner.commands) != 0 {
+		t.Fatalf("failed-closed cleanup ran commands:\n%s", strings.Join(runner.commands, "\n"))
+	}
+	if _, err := os.Stat(manager.journalPath("alloc-one")); err != nil {
+		t.Fatalf("readable journal was removed: %v", err)
+	}
+}
+
 func TestDetachAllocationSucceedsWhenResourcesAreAlreadyGone(t *testing.T) {
 	manager, runner := newRecoveryTestManager(t)
 	attachment := attachForRecovery(t, manager, "alloc-one")
