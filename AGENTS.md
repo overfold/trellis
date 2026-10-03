@@ -39,7 +39,7 @@ Respect these boundaries when changing orchestrator code:
 - `orchestrator/internal/catalog`: healthy service endpoint index.
 - `orchestrator/internal/health` and `orchestrator/internal/lifecycle`: health and allocation lifecycle semantics.
 - `orchestrator/internal/secrets` and `orchestrator/internal/auth`: secret storage/delivery and authorization.
-- `orchestrator/client`: the public Go client for the operator API, used by `trellisctl`, `trellis-proxy-sync`, and external consumers. `orchestrator/internal/client`: the node-internal agent and node clients. `orchestrator/internal/transport`: their shared HTTP transport.
+- `orchestrator/client`: the public Go client for the operator API, used by `trellisctl` and external consumers such as [`trellis-proxy-sync`](https://github.com/overfold/trellis-proxy-sync). `orchestrator/internal/client`: the node-internal agent and node clients. `orchestrator/internal/transport`: their shared HTTP transport.
 
 Do not blur durable desired state with renewable observations. Allocation lifecycle and health are separate concepts.
 
@@ -105,7 +105,7 @@ go test ./...
 go vet ./...
 golangci-lint run
 go run ./cmd/generate-schemas --check
-go build ./cmd/trellis ./cmd/trellisctl ./cmd/trellis-proxy-sync
+go build ./cmd/trellis ./cmd/trellisctl
 ```
 
 For distributed behavior that crosses server/agent/node boundaries, also run when relevant:

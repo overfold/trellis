@@ -35,7 +35,7 @@ tasks:
           host_port: 443
 ```
 
-Run a fully trusted controller with `api_access` set to `scope: cluster` and the narrowest required `access` level. It should query allocations by an explicitly configured namespace and label, include only healthy endpoints, render or update the upstream set, and preserve its last known-good routing state through temporary control-plane failures. The credential itself is cluster-wide; namespace filtering is controller behavior, not authorization. The bundled `trellis-proxy-sync` implements this polling pattern. It writes each upstream as the allocation's address and the port the task listens on: the namespace address for namespace-networked backends, reachable from a proxy in the same namespace, or the node address for host-networked ones. Pass the application port with `-container-port`; it selects among an allocation's declared ports and is used directly for backends that declare none.
+Run a fully trusted controller with `api_access` set to `scope: cluster` and the narrowest required `access` level. It should query allocations by an explicitly configured namespace and label, include only healthy endpoints, render or update the upstream set, and preserve its last known-good routing state through temporary control-plane failures. The credential itself is cluster-wide; namespace filtering is controller behavior, not authorization. The separate [`trellis-proxy-sync`](https://github.com/overfold/trellis-proxy-sync) project implements this polling pattern. It writes each upstream as the allocation's address and the port the task listens on: the namespace address for namespace-networked backends, reachable from a proxy in the same namespace, or the node address for host-networked ones. Pass the application port with `-container-port`; it selects among an allocation's declared ports and is used directly for backends that declare none.
 
 Give `trellis-proxy-sync` write access to the output config's parent directory, even when the config file already exists and is writable. It writes a temporary file there and renames it over the config so the proxy never reads a partial update. The output must be a regular file (or a symlink to one); missing files are created with mode `0644`, subject to the process umask and parent directory's default ACL. For an existing config, the synchronizer preserves its owner, group, mode, ACLs, and security labels; its process must be permitted to set that metadata.
 
@@ -168,7 +168,7 @@ Store and review the routing switch like application code. Trellis maintains the
 
 **Outcome:** send limited real traffic to a new release while the stable release continues serving most requests.
 
-Run stable and canary as separate jobs or independently routable groups. Give them the same route label and distinct release metadata. With the bundled proxy synchronizer, `trellis/weight` can be passed through to a proxy template:
+Run stable and canary as separate jobs or independently routable groups. Give them the same route label and distinct release metadata. Trellis does not interpret routing weights. With the separate [`trellis-proxy-sync`](https://github.com/overfold/trellis-proxy-sync), its `trellis/weight` label convention passes a per-allocation weight through to a proxy template:
 
 ```yaml
 labels:

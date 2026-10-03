@@ -2,7 +2,7 @@
 
 ## Process topology
 
-`trellis` composes the control plane and worker agent. The control plane owns desired state, scheduling, service catalog, health-derived status, HTTP endpoints, Prometheus metrics, and reconciliation. The agent owns actual containers, ports, volumes, logs, secrets materialization, and local restart/health loops. `trellisctl` is the human CLI; `trellis-proxy-sync` turns catalog allocation labels into a proxy configuration.
+`trellis` composes the control plane and worker agent. The control plane owns desired state, scheduling, service catalog, health-derived status, HTTP endpoints, Prometheus metrics, and reconciliation. The agent owns actual containers, ports, volumes, logs, secrets materialization, and local restart/health loops. `trellisctl` is the human CLI. Consumers such as reverse-proxy controllers are ordinary workloads outside this repository; [`trellis-proxy-sync`](https://github.com/overfold/trellis-proxy-sync), for example, turns labelled allocations into a proxy configuration.
 
 The design is leader-driven. A Raft-backed state store persists jobs, secrets, allocation records, membership-related desired state, and a monotonically meaningful control epoch. Followers serve as cluster members, but only the elected leader reconciles. At most five members vote; the rest replicate as non-voters that the leader promotes to keep an odd voter set (see [control-plane membership](control-plane.md#control-plane-membership)). The server-to-agent protocol includes epoch, allocation generation, job revision, and execution hash to make repeat requests safe and reject stale control traffic.
 
@@ -24,5 +24,5 @@ Desired state is durable. Observations—heartbeats, runtime status, logs, much 
 - `internal/catalog`: healthy endpoint index.
 - `internal/health` and `internal/lifecycle`: health probes and state-machine vocabulary/events.
 - `internal/secrets` and `internal/auth`: envelope-style encrypted secret records and bearer token scopes.
-- `api` / `client`: public operator-API wire types and Go client, used by `trellisctl`, `trellis-proxy-sync`, and external integrations.
+- `api` / `client`: public operator-API wire types and Go client, used by `trellisctl` and external integrations such as [`trellis-proxy-sync`](https://github.com/overfold/trellis-proxy-sync).
 - `internal/nodeapi` / `internal/client`: node-internal wire types and the agent and node clients; `internal/transport` is the HTTP transport shared with the public client.
