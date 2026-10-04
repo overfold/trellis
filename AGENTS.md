@@ -4,13 +4,13 @@ Repository-wide instructions. Read any nested `AGENTS.md` before changing files 
 
 ## Start here
 
-- Read [README.md](README.md) for product scope and design principles, and [architecture](docs/developer/architecture.md) before changing subsystem boundaries.
+- Read [README.md](README.md) for product scope, [design principles](docs/public/design-principles.md) for what belongs in Trellis, and [architecture](docs/developer/architecture.md) before changing subsystem boundaries.
 - Use [docs/README.md](docs/README.md) to find the relevant subsystem docs. [Development and testing](docs/developer/development.md) owns toolchain and environment-specific test setup.
 - Inspect the owning package and nearby tests before editing. Keep changes scoped to the request; do not reformat or refactor unrelated code.
 
 ## Design principles
 
-Use the [README design principles](README.md#design-principles) to judge feature scope and implementation tradeoffs, not just package placement:
+Use the [design principles](docs/public/design-principles.md) to judge feature scope and implementation tradeoffs, not just package placement:
 
 - **Modular and extensible, but focused.** Keep the containerd-based orchestrator lean and understandable. Expose clean primitives that consumers can build on; do not add speculative extension points, a plugin framework, or Kubernetes-style complexity.
 - **Non-opinionated and flexible.** Keep application architecture and environment-specific policy outside the core. Reverse proxies are ordinary workloads, not special ingress resources. Do not add team/project abstractions or prescribe a platform architecture unless explicitly requested.
