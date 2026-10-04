@@ -37,6 +37,7 @@ import (
 type Agent struct {
 	nodeID       uuid.UUID
 	allocations  map[string]*Allocation
+	retainedLogs map[string]*retainedTaskLog
 	execSessions map[string]*execSession
 	// execSessionCount includes sessions being started and sessions whose
 	// process has not yet exited as well as sessions in execSessions, so a
@@ -157,6 +158,14 @@ type Allocation struct {
 	unobserved bool
 }
 
+type retainedTaskLog struct {
+	AllocationID string `json:"allocation_id"`
+	Generation   uint64 `json:"generation"`
+	Namespace    string `json:"namespace"`
+	TaskName     string `json:"task_name"`
+	ContainerID  string `json:"container_id"`
+}
+
 const heartbeatInterval = 10 * time.Second
 
 const (
@@ -255,6 +264,10 @@ func allocationRecordKey(id string) string {
 	return "agent/allocations/" + allocationFileName(id)
 }
 
+func retainedLogRecordKey(id string) string {
+	return "agent/retained-logs/" + allocationFileName(id)
+}
+
 func (a *Agent) persistAllocation(allocation *Allocation) error {
 	if a.local == nil {
 		return nil
@@ -267,6 +280,20 @@ func (a *Agent) deleteAllocationRecord(id string) error {
 		return nil
 	}
 	return a.local.Delete(allocationRecordKey(id))
+}
+
+func (a *Agent) persistRetainedLog(record *retainedTaskLog) error {
+	if a.local == nil {
+		return nil
+	}
+	return a.local.Put(retainedLogRecordKey(record.ContainerID), record)
+}
+
+func (a *Agent) deleteRetainedLogRecord(id string) error {
+	if a.local == nil {
+		return nil
+	}
+	return a.local.Delete(retainedLogRecordKey(id))
 }
 
 func (a *Agent) markAllocationStopping(id string) error {
@@ -289,6 +316,7 @@ func NewAgent(log *slog.Logger, runtime runtime.ContainerRuntime, health *health
 	agent := &Agent{
 		nodeID:                   nodeID,
 		allocations:              make(map[string]*Allocation),
+		retainedLogs:             make(map[string]*retainedTaskLog),
 		execSessions:             make(map[string]*execSession),
 		execSessionsByAllocation: make(map[string]int),
 		execTiming:               defaultExecTiming,
@@ -435,6 +463,20 @@ func (a *Agent) recover(ctx context.Context) error {
 		return fmt.Errorf("read allocation recovery records: %w; %s", err, recoveryGuidance)
 	}
 	stored := make(map[string]*Allocation, len(records))
+	retained, retainedErrs := a.local.ListRaw("agent/retained-logs")
+	if err := errors.Join(retainedErrs...); err != nil {
+		return fmt.Errorf("read retained log records: %w; %s", err, recoveryGuidance)
+	}
+	if epochErr != nil && len(retained) != 0 {
+		return fmt.Errorf("control-plane epoch %s is missing while retained logs exist; %s", controlEpochKey, recoveryGuidance)
+	}
+	for name, raw := range retained {
+		var record retainedTaskLog
+		if err := json.Unmarshal(raw, &record); err != nil || record.AllocationID == "" || record.Generation == 0 || record.Namespace == "" || record.TaskName == "" || record.ContainerID == "" || record.ContainerID == "." || record.ContainerID == ".." || record.ContainerID != filepath.Base(record.ContainerID) || name != allocationFileName(record.ContainerID) {
+			return fmt.Errorf("decode retained log record agent/retained-logs/%s: invalid identity; %s", name, recoveryGuidance)
+		}
+		a.retainedLogs[record.ContainerID] = &record
+	}
 	for name, raw := range records {
 		var allocation Allocation
 		if err := json.Unmarshal(raw, &allocation); err != nil {
@@ -644,7 +686,7 @@ func (a *Agent) recoverContainer(container runtime.ContainerInfo, allocation *Al
 		a.reconciler.TrackRecovered(allocation.ID, healthManaged, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow, allocation.RestartExhausted)
 	}
 	if healthManaged && !stopping && !recoveryPending && !exhausted {
-		a.health.RegisterTask(allocation.ID, allocation.ContainerID, allocation.Spec.HealthCheck)
+		a.health.RegisterTask(allocation.ID, allocation.ContainerID, allocation.Spec.HealthCheck, "namespace", allocation.Namespace, "job", allocation.JobName, "allocation", allocation.AllocationID, "task", allocation.TaskName)
 	}
 }
 
@@ -676,7 +718,7 @@ func (a *Agent) recoverMissing(ctx context.Context, allocation *Allocation) {
 		a.mu.Lock()
 		a.allocations[allocation.ID] = allocation
 		a.mu.Unlock()
-		if err := a.stopAllocation(context.WithoutCancel(ctx), allocation.ID); err != nil {
+		if err := a.stopAllocation(context.WithoutCancel(ctx), allocation.ID, false); err != nil {
 			a.log.Error("recover unverified allocation container", "allocation", allocation.AllocationID, "error", err)
 		}
 		return
@@ -936,7 +978,7 @@ func (a *Agent) stopSuperseded(ctx context.Context, id, allocationID string) {
 	if !qualifies {
 		return
 	}
-	if err := a.stopAllocation(context.WithoutCancel(ctx), id); err != nil {
+	if err := a.stopAllocation(context.WithoutCancel(ctx), id, false); err != nil {
 		a.log.Error("stop superseded allocation", "allocation", allocationID, "error", err)
 	}
 }
@@ -1229,6 +1271,12 @@ func (a *Agent) StopGroup(ctx context.Context, request *nodeapi.StopAllocationRe
 			ids = append(ids, id)
 		}
 	}
+	for _, record := range a.retainedLogs {
+		if record.AllocationID == request.AllocationID && record.Generation > request.Generation {
+			a.mu.RUnlock()
+			return fmt.Errorf("%w: current %d, requested %d", ErrStaleGeneration, record.Generation, request.Generation)
+		}
+	}
 	listPending := a.recoveryListPending
 	a.mu.RUnlock()
 	var containers []runtime.ContainerInfo
@@ -1244,9 +1292,12 @@ func (a *Agent) StopGroup(ctx context.Context, request *nodeapi.StopAllocationRe
 	}
 	var errs []error
 	for _, id := range ids {
-		if err := a.stopAllocation(ctx, id); err != nil {
+		if err := a.stopAllocation(ctx, id, request.RetainLogs); err != nil {
 			errs = append(errs, err)
 		}
+	}
+	if !request.RetainLogs {
+		errs = append(errs, a.removeRetainedLogs(request.AllocationID, request.Generation))
 	}
 	if listPending {
 		if listErr != nil {
@@ -1314,7 +1365,7 @@ func (a *Agent) stopUnrecorded(ctx context.Context, request *nodeapi.StopAllocat
 		persistErr := a.persistAllocation(allocation)
 		a.mu.Unlock()
 		a.reconciler.TrackStopping(allocation.ID, false, nil, 0, time.Time{}, false)
-		if err := a.stopAllocation(ctx, allocation.ID); err != nil {
+		if err := a.stopAllocation(ctx, allocation.ID, request.RetainLogs); err != nil {
 			errs = append(errs, errors.Join(persistErr, err))
 		}
 	}
@@ -1580,7 +1631,7 @@ func (a *Agent) prepareTaskRecord(ctx context.Context, task *taskStart) (int, ti
 	// retry into a terminal execution conflict. An empty status means
 	// recovery already confirmed the container missing and cleaned it up.
 	if status != "" {
-		if err := a.stopAllocation(context.WithoutCancel(ctx), task.ID); err != nil {
+		if err := a.stopAllocation(context.WithoutCancel(ctx), task.ID, false); err != nil {
 			return 0, time.Time{}, false, fmt.Errorf("clean up incomplete allocation %s before retry: %w", task.ID, err)
 		}
 	}
@@ -1849,7 +1900,7 @@ func (a *Agent) commitTaskStart(launch *taskLaunch, mounts []*runtime.Mount) err
 	launch.tracked = true
 	if ts.HealthCheck != nil {
 		check := *ts.HealthCheck
-		a.health.RegisterTask(task.ID, alloc.ContainerID, &check)
+		a.health.RegisterTask(task.ID, alloc.ContainerID, &check, "namespace", alloc.Namespace, "job", alloc.JobName, "allocation", alloc.AllocationID, "task", alloc.TaskName)
 		launch.healthRegistered = true
 	}
 	if ts.HealthCheck == nil {
@@ -1987,10 +2038,10 @@ func (a *Agent) StopAllocation(ctx context.Context, allocID string) error {
 	}
 	unlock := a.lockAllocationOperation(allocation.AllocationID)
 	defer unlock()
-	return a.stopAllocation(ctx, allocID)
+	return a.stopAllocation(ctx, allocID, false)
 }
 
-func (a *Agent) stopAllocation(ctx context.Context, allocID string) error {
+func (a *Agent) stopAllocation(ctx context.Context, allocID string, retainLogs bool) error {
 	a.mu.RLock()
 	stored, ok := a.allocations[allocID]
 	var alloc Allocation
@@ -2015,6 +2066,15 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string) error {
 			return fmt.Errorf("%w: container %s has different execution metadata", ErrExecutionConflict, containerID)
 		}
 	}
+	if retainLogs {
+		record := &retainedTaskLog{AllocationID: alloc.AllocationID, Generation: alloc.Generation, Namespace: alloc.Namespace, TaskName: alloc.TaskName, ContainerID: containerID}
+		if err := a.persistRetainedLog(record); err != nil {
+			return fmt.Errorf("persist retained log record before cleanup: %w", err)
+		}
+		a.mu.Lock()
+		a.retainedLogs[containerID] = record
+		a.mu.Unlock()
+	}
 	a.reconciler.BeginStop(allocID)
 	persistStopErr := a.markAllocationStopping(allocID)
 	a.closeExecSessionsForTask(ctx, allocID, containerID)
@@ -2035,7 +2095,13 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string) error {
 	}
 	containerRemoved := true
 	if !containerMissing {
-		if err := a.runtime.Remove(ctx, containerID); err != nil {
+		var err error
+		if retainedRuntime, ok := a.runtime.(runtime.RetainedLogRuntime); retainLogs && ok {
+			err = retainedRuntime.RemoveRetainingLogs(ctx, containerID)
+		} else {
+			err = a.runtime.Remove(ctx, containerID)
+		}
+		if err != nil {
 			containerRemoved = false
 			errs = append(errs, fmt.Errorf("remove container %s: %w", containerID, err))
 		}
@@ -2070,6 +2136,35 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string) error {
 	}
 
 	return persistStopErr
+}
+
+func (a *Agent) removeRetainedLogs(allocationID string, generation uint64) error {
+	retainedRuntime, ok := a.runtime.(runtime.RetainedLogRuntime)
+	a.mu.RLock()
+	var records []*retainedTaskLog
+	for _, record := range a.retainedLogs {
+		if record.AllocationID == allocationID && record.Generation <= generation {
+			records = append(records, record)
+		}
+	}
+	a.mu.RUnlock()
+	var errs []error
+	for _, record := range records {
+		if ok {
+			if err := retainedRuntime.RemoveRetainedLogs(record.ContainerID); err != nil {
+				errs = append(errs, fmt.Errorf("remove retained logs for %s: %w", record.ContainerID, err))
+				continue
+			}
+		}
+		if err := a.deleteRetainedLogRecord(record.ContainerID); err != nil {
+			errs = append(errs, fmt.Errorf("delete retained log record for %s: %w", record.ContainerID, err))
+			continue
+		}
+		a.mu.Lock()
+		delete(a.retainedLogs, record.ContainerID)
+		a.mu.Unlock()
+	}
+	return errors.Join(errs...)
 }
 
 // OnHealthy and OnUnhealthy are observation callbacks from the health manager.
@@ -2118,7 +2213,7 @@ func (a *Agent) OnReconciledStatus(allocID, status string) {
 			alloc.Status = status
 			if status == "running" && alloc.Spec != nil && alloc.Spec.HealthCheck != nil {
 				alloc.Health = "unknown"
-				a.health.RegisterTask(allocID, alloc.ContainerID, alloc.Spec.HealthCheck)
+				a.health.RegisterTask(allocID, alloc.ContainerID, alloc.Spec.HealthCheck, "namespace", alloc.Namespace, "job", alloc.JobName, "allocation", alloc.AllocationID, "task", alloc.TaskName)
 			}
 		}
 		if err := a.persistAllocation(alloc); err != nil {
@@ -2217,7 +2312,7 @@ func (a *Agent) runHeartbeatLoop(ctx context.Context) {
 func (a *Agent) allocationStatuses() []nodeapi.AllocationStatus {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	actual := make([]nodeapi.AllocationStatus, 0, len(a.allocations))
+	actual := make([]nodeapi.AllocationStatus, 0, len(a.allocations)+len(a.retainedLogs))
 	for _, alloc := range a.allocations {
 		ports := make([]api.PortMapping, 0, len(alloc.Ports))
 		for _, p := range alloc.Ports {
@@ -2228,6 +2323,12 @@ func (a *Agent) allocationStatuses() []nodeapi.AllocationStatus {
 			reason = nodeapi.OperationRestartExhausted
 		}
 		actual = append(actual, nodeapi.AllocationStatus{ID: alloc.AllocationID, Generation: alloc.Generation, Task: alloc.TaskName, Address: allocationNetworkAddress(alloc), Phase: lifecycle.Phase(alloc.Status), Health: lifecycle.Health(reportedHealth(alloc)), Reason: reason, Ports: ports})
+	}
+	for _, record := range a.retainedLogs {
+		if a.allocations[record.ContainerID] != nil {
+			continue
+		}
+		actual = append(actual, nodeapi.AllocationStatus{ID: record.AllocationID, Generation: record.Generation, Task: record.TaskName, RetainedLogs: true, Phase: lifecycle.PhaseStopped, Health: lifecycle.HealthUnknown})
 	}
 	return append(actual, a.startingStatusesLocked()...)
 }

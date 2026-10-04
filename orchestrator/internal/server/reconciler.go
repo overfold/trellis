@@ -48,6 +48,7 @@ type Action struct {
 	Node       *Node
 	ID         string
 	Generation uint64
+	RetainLogs bool
 }
 
 const (
@@ -895,7 +896,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 		if nodeStatus != NodeStatusHealthy && nodeStatus != NodeStatusDraining {
 			return fmt.Errorf("node %s is unavailable for observed allocation stop", node.ID)
 		}
-		return s.client.StopAllocation(ctx, node.ID, address, &nodeapi.StopAllocationRequest{AllocationID: action.ID, Generation: action.Generation, Epoch: epoch})
+		return s.client.StopAllocation(ctx, node.ID, address, &nodeapi.StopAllocationRequest{AllocationID: action.ID, Generation: action.Generation, Epoch: epoch, RetainLogs: action.RetainLogs})
 	}
 	alloc := action.Allocation
 
@@ -1119,7 +1120,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 		if nodeStatus != NodeStatusHealthy && nodeStatus != NodeStatusDraining {
 			return fmt.Errorf("node %s is unavailable for allocation stop", requestNodeID)
 		}
-		if err := s.client.StopAllocation(ctx, requestNodeID, address, &nodeapi.StopAllocationRequest{AllocationID: allocationID, Generation: generation, Epoch: epoch}); err != nil {
+		if err := s.client.StopAllocation(ctx, requestNodeID, address, &nodeapi.StopAllocationRequest{AllocationID: allocationID, Generation: generation, Epoch: epoch, RetainLogs: true}); err != nil {
 			if code := agentOperationCode(err); code == nodeapi.OperationStaleEpoch || code == nodeapi.OperationStaleGeneration {
 				return err
 			}

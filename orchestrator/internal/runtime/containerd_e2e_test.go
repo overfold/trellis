@@ -25,6 +25,81 @@ import (
 // This intentionally stays small: distributed behavior belongs in the
 // injected-runtime process suite, while this test protects the real containerd
 // boundary and the managed-allocation inventory used for restart adoption.
+func TestContainerdRetainedLogsAfterRemoval(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("containerd E2E requires root")
+	}
+	socket := os.Getenv("CONTAINERD_ADDRESS")
+	if socket == "" {
+		socket = "/run/containerd/containerd.sock"
+	}
+	if _, err := os.Stat(socket); err != nil {
+		t.Skipf("containerd unavailable: %v", err)
+	}
+	r, err := runtime.NewContainerdRuntime(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	const image = "docker.io/library/nginx:1.27-alpine"
+	if err := r.Pull(ctx, image); err != nil {
+		t.Fatal(err)
+	}
+	const id = "trellis-e2e-retained-logs"
+	_ = r.Stop(ctx, id)
+	_ = r.Remove(ctx, id)
+	if _, err := r.Create(ctx, runtime.CreateOptions{ID: id, Image: image}); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Stop(context.Background(), id); _ = r.Remove(context.Background(), id) }()
+	if err := r.Start(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	var output []byte
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+		stream, err := r.Logs(ctx, id, false, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		output, err = io.ReadAll(stream)
+		_ = stream.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(output, []byte("nginx/")) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !bytes.Contains(output, []byte("nginx/")) {
+		t.Fatalf("missing nginx startup output: %s", output)
+	}
+	if err := r.Stop(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RemoveRetainingLogs(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	stream, err := r.Logs(ctx, id, false, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retained, err := io.ReadAll(stream)
+	_ = stream.Close()
+	if err != nil || !bytes.Contains(retained, output) {
+		t.Fatalf("retained logs=%s error=%v", retained, err)
+	}
+	if err := r.RemoveRetainedLogs(id); err != nil {
+		t.Fatal(err)
+	}
+	if stream, err := r.Logs(ctx, id, false, 0); err == nil {
+		_ = stream.Close()
+		t.Fatal("pruned logs still readable")
+	}
+}
+
 func TestContainerdAllocationAdoption(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("containerd overlayfs E2E requires root; run this test with sudo")

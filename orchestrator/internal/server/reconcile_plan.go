@@ -197,10 +197,13 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 			generation uint64
 		}
 		desired := make(map[observationKey]bool)
+		active := make(map[observationKey]bool)
 		lost := make(map[observationKey]*Allocation)
 		for _, allocation := range allocations {
-			if allocation.Node != nil && activeAllocationPhase(allocation.Phase) {
-				desired[observationKey{nodeID: allocation.Node.ID, allocation: allocation.ID, generation: allocation.Generation}] = true
+			if allocation.Node != nil {
+				key := observationKey{nodeID: allocation.Node.ID, allocation: allocation.ID, generation: allocation.Generation}
+				desired[key] = true
+				active[key] = activeAllocationPhase(allocation.Phase)
 			}
 			if allocation.Node != nil && allocation.Phase == lifecycle.PhaseLost {
 				lost[observationKey{nodeID: allocation.Node.ID, allocation: allocation.ID, generation: allocation.Generation}] = allocation
@@ -212,14 +215,17 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 			}
 			for _, observed := range node.observedAllocations {
 				key := observationKey{nodeID: node.ID, allocation: observed.ID, generation: observed.Generation}
-				if desired[key] {
+				if desired[key] && observed.RetainedLogs {
+					continue
+				}
+				if active[key] && !observed.RetainedLogs {
 					continue
 				}
 				if original := lost[key]; original != nil && observed.Phase == lifecycle.PhaseRunning {
 					retained = append(retained, &retainedOriginal{allocation: original, node: node})
 					continue
 				}
-				actions = append(actions, Action{Type: ActionStopObserved, Node: node, ID: observed.ID, Generation: observed.Generation})
+				actions = append(actions, Action{Type: ActionStopObserved, Node: node, ID: observed.ID, Generation: observed.Generation, RetainLogs: desired[key]})
 			}
 		}
 		sortRetainedOriginals(retained)
@@ -558,6 +564,12 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 	prunedSet := make(map[*Allocation]bool, len(plan.Pruned))
 	for _, allocation := range plan.Pruned {
 		prunedSet[allocation] = true
+		for i := range plan.Actions {
+			action := &plan.Actions[i]
+			if action.Type == ActionStopObserved && action.ID == allocation.ID && action.Generation == allocation.Generation {
+				action.RetainLogs = false
+			}
+		}
 	}
 	retainedGroups := make(map[string]bool)
 	for _, allocation := range allocations {

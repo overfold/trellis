@@ -54,6 +54,13 @@ type ManagedRuntime interface {
 	ListManaged(ctx context.Context, cluster string) ([]ContainerInfo, error)
 }
 
+// RetainedLogRuntime separates execution cleanup from task-log cleanup. The
+// agent keeps logs while the control plane keeps the terminal allocation.
+type RetainedLogRuntime interface {
+	RemoveRetainingLogs(ctx context.Context, containerID string) error
+	RemoveRetainedLogs(containerID string) error
+}
+
 // ContainerMetrics holds a point-in-time resource usage snapshot for a container.
 type ContainerMetrics struct {
 	// CPUUsageNanoseconds is the cumulative CPU time consumed by the container.

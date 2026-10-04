@@ -512,8 +512,9 @@ type Node struct {
 }
 
 type observedAllocation struct {
-	ID         string
-	Generation uint64
+	ID           string
+	Generation   uint64
+	RetainedLogs bool
 	// Phase is the lifecycle phase aggregated from the node's task reports.
 	Phase lifecycle.Phase
 }

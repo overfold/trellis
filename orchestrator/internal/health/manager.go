@@ -39,6 +39,7 @@ type trackedTask struct {
 	config HealthConfig
 	health *TaskHealth
 	cancel context.CancelFunc
+	log    *slog.Logger
 }
 
 // HealthManager schedules health checks and publishes status changes.
@@ -73,7 +74,7 @@ func (h *HealthManager) SetContext(ctx context.Context) {
 }
 
 // RegisterTask starts health checking an allocation task.
-func (h *HealthManager) RegisterTask(allocID string, containerID string, spec *spec.HealthCheckSpec) {
+func (h *HealthManager) RegisterTask(allocID string, containerID string, spec *spec.HealthCheckSpec, identity ...any) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -93,6 +94,7 @@ func (h *HealthManager) RegisterTask(allocID string, containerID string, spec *s
 		config:      config,
 		health:      NewTaskHealth(config.Threshold),
 		cancel:      cancel,
+		log:         h.log.With(identity...).With("container", containerID),
 	}
 	h.tasks[allocID] = newTrackedTask
 
@@ -137,7 +139,7 @@ func (h *HealthManager) runHealthCheckLoop(ctx context.Context, trackedTask *tra
 		case <-ticker.C:
 			result, err := h.runHealthCheck(ctx, trackedTask)
 			if err != nil {
-				h.log.Error("health check failed", "error", err)
+				trackedTask.log.Error("health check failed", "error", err)
 				result = false
 			}
 
@@ -156,7 +158,7 @@ func (h *HealthManager) runHealthCheckLoop(ctx context.Context, trackedTask *tra
 					err = h.Subscriber.OnUnhealthy(ctx, trackedTask.allocID)
 				}
 				if err != nil {
-					h.log.Error("health status callback failed", "status", status, "error", err)
+					trackedTask.log.Error("health status callback failed", "status", status, "error", err)
 				}
 			}
 		}

@@ -34,6 +34,7 @@ type allocationObservation struct {
 	Ports         []api.PortMapping
 	ObservedTasks map[string]bool
 	StartFailure  *nodeapi.StartFailure
+	RetainedLogs  bool
 }
 
 type allocationGeneration struct {
@@ -315,6 +316,10 @@ func observeAllocation(a *Allocation, observation *nodeObservation, heartbeatAt 
 		}
 		info = allocationObservation{Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown}
 	}
+	if info.RetainedLogs {
+		// Log inventory is not an execution or health observation.
+		return false
+	}
 	for _, task := range a.Tasks {
 		if !info.ObservedTasks[task.Name] {
 			if info.Phase == lifecycle.PhaseRunning {
@@ -441,6 +446,9 @@ func newNodeObservation(nodeID uuid.UUID, at time.Time, actual []nodeapi.Allocat
 		if !a.Phase.Valid() || !a.Health.Valid() {
 			return nil, fmt.Errorf("invalid allocation state for %s: phase=%q health=%q", a.ID, a.Phase, a.Health)
 		}
+		if a.RetainedLogs && (a.Phase != lifecycle.PhaseStopped || a.Health != lifecycle.HealthUnknown || a.Reason != "" || a.StartFailure != nil || a.Address != "" || len(a.Ports) != 0 || a.Generation == 0 || a.Task == "") {
+			return nil, fmt.Errorf("invalid retained log observation for %s", a.ID)
+		}
 		if a.Reason != "" && (a.Phase != lifecycle.PhaseFailed || a.Reason != nodeapi.OperationRestartExhausted) {
 			return nil, fmt.Errorf("invalid failure reason for %s: phase=%q reason=%q", a.ID, a.Phase, a.Reason)
 		}
@@ -452,7 +460,9 @@ func newNodeObservation(nodeID uuid.UUID, at time.Time, actual []nodeapi.Allocat
 		info := statuses[key]
 		if len(info.ObservedTasks) == 0 {
 			info.ID, info.Generation, info.Phase, info.Health = a.ID, a.Generation, phase, health
+			info.RetainedLogs = a.RetainedLogs
 		} else {
+			info.RetainedLogs = info.RetainedLogs && a.RetainedLogs
 			// A terminally failed task fails the whole group regardless of
 			// the order in which the agent reports sibling tasks.
 			if phase != lifecycle.PhaseRunning && info.Phase != lifecycle.PhaseFailed {
@@ -490,7 +500,7 @@ func newNodeObservation(nodeID uuid.UUID, at time.Time, actual []nodeapi.Allocat
 	}
 	observed := make([]observedAllocation, 0, len(statuses))
 	for _, info := range statuses {
-		observed = append(observed, observedAllocation{ID: info.ID, Generation: info.Generation, Phase: info.Phase})
+		observed = append(observed, observedAllocation{ID: info.ID, Generation: info.Generation, RetainedLogs: info.RetainedLogs, Phase: info.Phase})
 	}
 	sort.Slice(observed, func(i, j int) bool {
 		if observed[i].ID == observed[j].ID {

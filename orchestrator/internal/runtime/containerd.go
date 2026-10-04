@@ -566,6 +566,15 @@ func (c *ContainerdRuntime) Stop(ctx context.Context, containerID string) error 
 
 // Remove deletes a container and its resources.
 func (c *ContainerdRuntime) Remove(ctx context.Context, containerID string) error {
+	if err := c.RemoveRetainingLogs(ctx, containerID); err != nil {
+		return err
+	}
+	return c.RemoveRetainedLogs(containerID)
+}
+
+// RemoveRetainingLogs removes execution resources and ephemeral runtime files,
+// but leaves the task log available for terminal allocation history.
+func (c *ContainerdRuntime) RemoveRetainingLogs(ctx context.Context, containerID string) error {
 	ctx = c.withNamespace(ctx)
 
 	container, err := c.client.LoadContainer(ctx, containerID)
@@ -580,30 +589,36 @@ func (c *ContainerdRuntime) Remove(ctx context.Context, containerID string) erro
 		}
 	}
 
-	return c.removeAllocationFiles(containerID)
+	return c.removeAllocationFiles(containerID, "-resolv.conf", "-hosts")
 }
 
-func (c *ContainerdRuntime) removeAllocationFiles(containerID string) error {
+// RemoveRetainedLogs removes a retained task log after its control-plane
+// allocation record has been pruned.
+func (c *ContainerdRuntime) RemoveRetainedLogs(containerID string) error {
+	return c.removeAllocationFiles(containerID, ".log")
+}
+
+func (c *ContainerdRuntime) removeAllocationFiles(containerID string, suffixes ...string) error {
 	name := filepath.Base(containerID)
 	var paths []string
-	for _, suffix := range []string{".log", "-resolv.conf", "-hosts"} {
+	for _, suffix := range suffixes {
 		paths = append(paths, filepath.Join(c.logDir, name+suffix))
 	}
 	err := removeRuntimeFiles(paths...)
 	// Old log locations may be controlled by local users. Cleanup there is best effort.
 	if dir, openErr := os.OpenFile(c.legacyLogDir, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_DIRECTORY, 0); openErr == nil {
-		removeLegacyAllocationFiles(dir, name)
+		removeLegacyAllocationFiles(dir, name, suffixes...)
 		_ = dir.Close()
 	}
 	return err
 }
 
-func removeLegacyAllocationFiles(dir *os.File, name string) {
+func removeLegacyAllocationFiles(dir *os.File, name string, suffixes ...string) {
 	info, err := dir.Stat()
 	if err != nil || checkOwnedDir(dir.Name(), info, uint32(os.Geteuid()), true) != nil { //nolint:gosec // Linux effective UIDs are unsigned 32-bit values.
 		return
 	}
-	for _, suffix := range []string{".log", "-resolv.conf", "-hosts"} {
+	for _, suffix := range suffixes {
 		// Stay anchored to the checked directory even if a writable ancestor
 		// of the legacy temp directory is renamed or replaced with a symlink.
 		_ = syscall.Unlinkat(int(dir.Fd()), name+suffix)

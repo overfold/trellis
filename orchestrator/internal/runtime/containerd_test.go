@@ -260,7 +260,7 @@ func TestRemoveAllocationFilesCleansCurrentAndLegacyFiles(t *testing.T) {
 		}
 	}
 	for range 2 {
-		if err := r.removeAllocationFiles("allocation"); err != nil {
+		if err := r.removeAllocationFiles("allocation", ".log", "-resolv.conf", "-hosts"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -303,7 +303,7 @@ func TestRemoveLegacyAllocationFilesUsesOpenedDirectory(t *testing.T) {
 	if err := os.Symlink(target, legacy); err != nil {
 		t.Fatal(err)
 	}
-	removeLegacyAllocationFiles(dir, "allocation")
+	removeLegacyAllocationFiles(dir, "allocation", suffixes...)
 	for _, suffix := range suffixes {
 		if _, err := os.Lstat(filepath.Join(moved, "allocation"+suffix)); !os.IsNotExist(err) {
 			t.Fatalf("original legacy file was not removed: %v", err)
@@ -332,7 +332,7 @@ func TestRemoveAllocationFilesIgnoresUnremovableLegacyEntry(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(legacyLog, "blocker"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.removeAllocationFiles("allocation"); err != nil {
+	if err := r.removeAllocationFiles("allocation", ".log", "-resolv.conf", "-hosts"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(r.logPath("allocation")); !os.IsNotExist(err) {

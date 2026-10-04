@@ -45,6 +45,9 @@ type StopAllocationRequest struct {
 	AllocationID string `json:"allocation_id"`
 	Generation   uint64 `json:"generation"`
 	Epoch        uint64 `json:"epoch"`
+	// RetainLogs keeps task logs and their minimal lookup metadata while the
+	// control plane retains this terminal allocation generation.
+	RetainLogs bool `json:"retain_logs,omitempty"`
 }
 
 // DrainAllocationRequest identifies an allocation generation whose automatic

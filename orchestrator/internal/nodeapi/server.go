@@ -59,12 +59,15 @@ type HeartbeatRequest struct {
 
 // AllocationStatus reports the observed state of an allocation.
 type AllocationStatus struct {
-	ID         string           `json:"id"`
-	Generation uint64           `json:"generation"`
-	Task       string           `json:"task,omitempty"`
-	Address    string           `json:"address,omitempty"`
-	Phase      lifecycle.Phase  `json:"phase"`
-	Health     lifecycle.Health `json:"health"`
+	ID         string `json:"id"`
+	Generation uint64 `json:"generation"`
+	Task       string `json:"task,omitempty"`
+	// RetainedLogs reports a terminal task whose execution resources are gone
+	// but whose logs remain pending control-plane history pruning.
+	RetainedLogs bool             `json:"retained_logs,omitempty"`
+	Address      string           `json:"address,omitempty"`
+	Phase        lifecycle.Phase  `json:"phase"`
+	Health       lifecycle.Health `json:"health"`
 	// Reason identifies why a task reported phase failed. It is empty for
 	// every other phase.
 	Reason OperationCode     `json:"reason,omitempty"`

@@ -10,6 +10,7 @@ import (
 func (a *Agent) TaskLogs(ctx context.Context, allocationID, task string, follow bool, tail int) (io.ReadCloser, error) {
 	a.mu.RLock()
 	var match *Allocation
+	var retained *retainedTaskLog
 	matches := 0
 	for _, allocation := range a.allocations {
 		if allocation.AllocationID != allocationID {
@@ -21,9 +22,23 @@ func (a *Agent) TaskLogs(ctx context.Context, allocationID, task string, follow 
 		match = allocation
 		matches++
 	}
+	if matches == 0 {
+		var generation uint64
+		for _, candidate := range a.retainedLogs {
+			if candidate.AllocationID == allocationID && candidate.Generation > generation {
+				generation = candidate.Generation
+			}
+		}
+		for _, candidate := range a.retainedLogs {
+			if candidate.AllocationID == allocationID && candidate.Generation == generation && (task == "" || candidate.TaskName == task) {
+				retained = candidate
+				matches++
+			}
+		}
+	}
 	a.mu.RUnlock()
 
-	if matches == 0 || match == nil {
+	if matches == 0 {
 		if task == "" {
 			return nil, fmt.Errorf("%w: %s", ErrAllocationNotFound, allocationID)
 		}
@@ -31,6 +46,10 @@ func (a *Agent) TaskLogs(ctx context.Context, allocationID, task string, follow 
 	}
 	if task == "" && matches > 1 {
 		return nil, fmt.Errorf("allocation %s has multiple tasks; specify task", allocationID)
+	}
+	if retained != nil {
+		// A terminal stream has no producer and must finish at the current EOF.
+		return a.runtime.Logs(ctx, retained.ContainerID, false, tail)
 	}
 	return a.runtime.Logs(ctx, match.ContainerID, follow, tail)
 }

@@ -348,9 +348,12 @@ func (a *Agent) runGroupTasks(ctx context.Context, start *groupStart, request *n
 	request.Draining, request.DrainSequence = start.draining, start.drainSequence
 	a.mu.RUnlock()
 	for _, id := range oldIDs {
-		if err := a.stopAllocation(ctx, id); err != nil {
+		if err := a.stopAllocation(ctx, id, false); err != nil {
 			return fmt.Errorf("replace older generation: %w", err)
 		}
+	}
+	if err := a.removeRetainedLogs(request.AllocationID, request.Generation-1); err != nil {
+		return fmt.Errorf("remove logs of superseded generations: %w", err)
 	}
 	draining, drainSequence := a.startDrainState(request)
 	// Tasks that are already running keep their records, so apply the drain

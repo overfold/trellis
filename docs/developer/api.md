@@ -89,6 +89,8 @@ Malformed preconditions (a negative version, or the combinations above) return `
 
 For allocation logs, `task` selects the task name from the allocation's task group. It may be omitted when the allocation has exactly one task; a multi-task allocation returns `400` until the caller selects one. The allocation ID is the Trellis allocation identity, not an agent/container runtime ID.
 
+Logs for terminal allocations remain available after container cleanup while their control-plane history is retained. Requests still require the allocation to belong to the route's namespace. Retained task logs are node-local and survive agent restarts; `follow=true` on a cleaned-up task returns the remaining output and closes at EOF. History pruning makes the allocation unavailable through this API and causes eventual node-side log deletion. Nodes report retained log inventory in heartbeats, allowing cleanup to be retried after node or leader downtime. There is no log rotation or size limit.
+
 ### Exec streams
 
 `GET /v1/namespaces/{ns}/allocations/{id}/exec` runs one command in an allocation task over a single long-lived, bidirectional WebSocket. The opening handshake uses the standard RFC 6455 upgrade with WebSocket subprotocol `trellis.exec.v1` and the usual credentials, and the server answers `101 Switching Protocols` once the command is admitted. Clients using the HTTP/1.1 WebSocket handshake send `Connection: Upgrade`, `Upgrade: websocket`, and `Sec-WebSocket-Protocol: trellis.exec.v1`. Followers proxy the WebSocket to the leader like any other request.
