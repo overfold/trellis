@@ -11,6 +11,7 @@ import (
 	"github.com/overfold/trellis/orchestrator/api"
 	"github.com/overfold/trellis/orchestrator/internal/execstream"
 	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
 const (
@@ -191,4 +192,26 @@ func (e *ExecStream) Relay(client io.ReadWriteCloser) {
 	}
 	_ = client.Close()
 	wg.Wait()
+}
+
+func resolveExecTask(id, task string, tasks []spec.TaskSpec) (string, error) {
+	if task == "" {
+		switch len(tasks) {
+		case 1:
+			return tasks[0].Name, nil
+		case 0:
+			return "", nil
+		default:
+			return "", fmt.Errorf("%w: allocation %s has multiple tasks; specify task", ErrTaskSelection, id)
+		}
+	}
+	if len(tasks) > 0 {
+		for _, candidate := range tasks {
+			if candidate.Name == task {
+				return task, nil
+			}
+		}
+		return "", fmt.Errorf("%w: allocation %s has no task %q", ErrTaskSelection, id, task)
+	}
+	return task, nil
 }

@@ -2,6 +2,11 @@
 package server
 
 import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/google/uuid"
 	"github.com/overfold/trellis/orchestrator/api"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
@@ -196,4 +201,88 @@ func matchAllocationLabel(labels map[string]string, filter string) bool {
 	}
 	_, ok := labels[filter]
 	return ok
+}
+
+// rebuildAllocationNodeIndexLocked rebuilds allocationsByNode from the
+// canonical allocation slice. The caller must hold s.mu for writing.
+func (s *Server) rebuildAllocationNodeIndexLocked() {
+	index := make(map[uuid.UUID][]*Allocation)
+	for _, allocation := range s.allocations {
+		if allocation.Node != nil {
+			index[allocation.Node.ID] = append(index[allocation.Node.ID], allocation)
+		}
+	}
+	s.allocationsByNode = index
+}
+
+// StopAllocationByID stops a single allocation identified by namespace and ID.
+// The stop runs on the reconciliation action path, so it waits for any pass's
+// actions on the same node, and a pass follows it so the task group converges
+// on its desired count.
+func (s *Server) StopAllocationByID(ctx context.Context, namespace, id string) error {
+	s.mu.RLock()
+	var found *Allocation
+	for _, alloc := range s.allocations {
+		if alloc.ID == id && alloc.Namespace == namespace {
+			found = alloc
+			break
+		}
+	}
+	if found == nil || found.Node == nil {
+		s.mu.RUnlock()
+		return fmt.Errorf("allocation not found")
+	}
+	nodeID := found.Node.ID
+	s.mu.RUnlock()
+	slots, busy := s.claimActionNode(nodeID)
+	slots, ok := s.awaitActionNode(ctx, nodeID, slots, busy)
+	if !ok {
+		return ctx.Err()
+	}
+	err := s.Execute(ctx, &Action{Type: ActionStop, Allocation: found})
+	<-slots
+	s.releaseActionNode(nodeID)
+	if err != nil {
+		return err
+	}
+	s.Reconcile(ctx)
+	return nil
+}
+
+// ErrAllocationNotFound indicates that the control plane has no placed
+// allocation with the requested ID in the caller's namespace.
+var ErrAllocationNotFound = errors.New("allocation not found")
+
+func (s *Server) allocationAgentAddress(namespace, id string) (uuid.UUID, string, []spec.TaskSpec, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, alloc := range s.allocations {
+		if alloc.ID == id && alloc.Namespace == namespace {
+			if alloc.Node == nil {
+				return uuid.Nil, "", nil, ErrAllocationNotFound
+			}
+			return alloc.Node.ID, fmt.Sprintf("%s:%d", alloc.Node.Host, alloc.Node.Port), append([]spec.TaskSpec(nil), alloc.Tasks...), nil
+		}
+	}
+	return uuid.Nil, "", nil, ErrAllocationNotFound
+}
+
+// AllocationMetrics returns resource usage for all tasks in an allocation.
+func (s *Server) AllocationMetrics(ctx context.Context, namespace, id string) (api.AllocationMetricsListResponse, error) {
+	s.mu.RLock()
+	var found *Allocation
+	for _, alloc := range s.allocations {
+		if alloc.ID == id && alloc.Namespace == namespace {
+			found = alloc
+			break
+		}
+	}
+	if found == nil || found.Node == nil {
+		s.mu.RUnlock()
+		return nil, ErrAllocationNotFound
+	}
+	nodeID := found.Node.ID
+	address := fmt.Sprintf("%s:%d", found.Node.Host, found.Node.Port)
+	s.mu.RUnlock()
+	return s.client.AllocationMetrics(ctx, nodeID, address, id)
 }

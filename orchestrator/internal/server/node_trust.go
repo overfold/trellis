@@ -442,3 +442,63 @@ func (a *RaftPeerAuthorizer) Authorize(certificate *x509.Certificate) error {
 	}
 	return fmt.Errorf("node %s is not a Raft member", id)
 }
+
+// RecordNodeServerAddress persists the control-plane address used to resolve a
+// Raft node UUID without conflating Raft identity with network location.
+func (s *Server) RecordNodeServerAddress(ctx context.Context, id uuid.UUID, address string) error {
+	return s.state.PutNodeServerAddress(ctx, id.String(), address)
+}
+
+// NodeServerAddress resolves an immutable Raft node UUID to its control-plane address.
+func (s *Server) NodeServerAddress(ctx context.Context, id string) (string, error) {
+	return s.state.GetNodeServerAddress(ctx, id)
+}
+
+// BindNodeCertificate durably associates a node UUID with exactly one
+// certificate. Repeating the same binding is safe; replacing it is forbidden.
+func (s *Server) BindNodeCertificate(ctx context.Context, id uuid.UUID, certificate *x509.Certificate) error {
+	if id == uuid.Nil || certificate == nil {
+		return fmt.Errorf("node ID and certificate are required")
+	}
+	certificateID, err := tlsutil.NodeID(certificate)
+	if err != nil || certificateID != id {
+		return fmt.Errorf("node certificate identity does not match %s", id)
+	}
+	s.mutationMu.Lock()
+	defer s.mutationMu.Unlock()
+	if removed, err := s.state.NodeRemoved(ctx, id.String()); err != nil {
+		return err
+	} else if removed {
+		return fmt.Errorf("node %s: %w", id, ErrNodeRemoved)
+	}
+	fingerprint := nodeCertificateFingerprint(certificate)
+	existing, found, err := s.state.GetNodeCertificateFingerprint(ctx, id.String())
+	if err != nil {
+		return err
+	}
+	if found {
+		if subtle.ConstantTimeCompare([]byte(existing), []byte(fingerprint)) != 1 {
+			return fmt.Errorf("node identity %s is already bound to another certificate", id)
+		}
+		return nil
+	}
+	return s.state.PutNodeCertificateFingerprint(ctx, id.String(), fingerprint)
+}
+
+// AuthorizeNodeCertificate checks the durable UUID-to-certificate binding and
+// rejects removed node identities.
+func (s *Server) AuthorizeNodeCertificate(ctx context.Context, id uuid.UUID, certificate *x509.Certificate) bool {
+	if id == uuid.Nil || certificate == nil {
+		return false
+	}
+	if removed, err := s.state.NodeRemoved(ctx, id.String()); err != nil || removed {
+		return false
+	}
+	existing, found, err := s.state.GetNodeCertificateFingerprint(ctx, id.String())
+	return err == nil && found && subtle.ConstantTimeCompare([]byte(existing), []byte(nodeCertificateFingerprint(certificate))) == 1
+}
+
+func nodeCertificateFingerprint(certificate *x509.Certificate) string {
+	digest := sha256.Sum256(certificate.Raw)
+	return hex.EncodeToString(digest[:])
+}

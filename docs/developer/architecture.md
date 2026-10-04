@@ -26,3 +26,26 @@ Desired state is durable. Observations—heartbeats, runtime status, logs, much 
 - `internal/secrets` and `internal/auth`: envelope-style encrypted secret records and bearer token scopes.
 - `api` / `client`: public operator-API wire types and Go client, used by `trellisctl` and external integrations such as [`trellis-proxy-sync`](https://github.com/overfold/trellis-proxy-sync).
 - `internal/nodeapi` / `internal/client`: node-internal wire types and the agent and node clients; `internal/transport` is the HTTP transport shared with the public client.
+
+## Control-plane source organization
+
+Within `internal/server`, `server.go` owns the shared coordinator, its locking
+contract, construction, initialization, and leadership lifecycle. Related
+operations are grouped by responsibility:
+
+- `types.go`: cluster, node, job, and allocation records, including allocation
+  lifecycle methods and persistence encoding.
+- `jobs.go` / `nodes.go`: job admission, planning, queries, and mutations / node
+  registration, heartbeats, queries, and drain operations.
+- `backup.go` / `catalog.go`: desired-state backup and restore / service-discovery
+  queries and catalog projection.
+- `allocations.go` / `task_logs.go` / `exec.go`: allocation queries and operations,
+  log access, and exec streams.
+- `auth.go` / `node_trust.go` / `secrets.go`: operator authentication, node identity
+  and trust, and secret operations.
+
+These files remain one package, not independently synchronized services. Job,
+node, and allocation mutations and reconciliation commits share the coordinator's
+mutation ordering and leadership fencing. `StateController` in `state.go` owns
+typed persistence; the existing liveness, observation-queue, and exec-relay
+components own their local synchronization.

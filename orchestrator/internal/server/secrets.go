@@ -68,3 +68,6 @@ func (s *Server) DeleteSecret(ctx context.Context, namespace, name string) error
 	s.log.Info("secret deleted", "namespace", namespace, "secret", name)
 	return nil
 }
+
+// SetSecretStore configures encrypted secret storage.
+func (s *Server) SetSecretStore(store *secretstore.Store) { s.secrets = store }

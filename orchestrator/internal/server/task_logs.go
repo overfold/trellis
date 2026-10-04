@@ -56,3 +56,28 @@ func (s *Server) AllocationTaskLogsForNamespace(ctx context.Context, namespace, 
 
 	return s.client.TaskLogs(ctx, nodeID, address, id, task, follow, tail)
 }
+
+// AllocationLogs opens logs for an allocation.
+func (s *Server) AllocationLogs(ctx context.Context, id string, follow bool, tail int) (io.ReadCloser, error) {
+	return s.AllocationLogsForNamespace(ctx, "", id, follow, tail)
+}
+
+// AllocationLogsForNamespace opens allocation logs after namespace validation.
+func (s *Server) AllocationLogsForNamespace(ctx context.Context, namespace, id string, follow bool, tail int) (io.ReadCloser, error) {
+	s.mu.RLock()
+	var found *Allocation
+	for _, alloc := range s.allocations {
+		if alloc.ID == id && alloc.Namespace == namespace {
+			found = alloc
+			break
+		}
+	}
+	if found == nil || found.Node == nil {
+		s.mu.RUnlock()
+		return nil, ErrAllocationNotFound
+	}
+	nodeID := found.Node.ID
+	address := fmt.Sprintf("%s:%d", found.Node.Host, found.Node.Port)
+	s.mu.RUnlock()
+	return s.client.Logs(ctx, nodeID, address, id, follow, tail)
+}
