@@ -63,6 +63,19 @@ vagrant up
 
 The Vagrant environment provisions `control`, `worker-1`, and `worker-2` Debian 12 VMs, installs containerd and Trellis, joins the nodes, and applies the workloads in `demo/workloads.sh`. It is a disposable development/demo environment rather than a production deployment method.
 
+## README terminal demo
+
+[`docs/images/demo.tape`](../images/demo.tape) uses the [rolling-update example](../../examples/rolling-update/) and the real CLI. Install [VHS](https://github.com/charmbracelet/vhs) (rendered with v0.10.0), `ttyd`, `ffmpeg`, `jq`, and DejaVu Sans Mono. Select a **disposable three-node cluster** context with cluster write access: all nodes schedulable, port 8080 free, and no existing `default/rolling-update` job. From the repository root:
+
+```sh
+go build -o /tmp/trellisctl ./orchestrator/cmd/trellisctl
+PATH="/tmp:$PATH" vhs docs/images/demo.tape
+```
+
+The tape seeds v1, changes only the image to v2, waits for rollout and drain convergence, then deletes the demo job and undrains the selected node. Idle waits are cut from playback. **Never use a production cluster.** After a failed recording, delete the demo job and undrain its node before retrying.
+
+The GIF uses three Trellis processes with the integration-only injected runtime: simulated containers/probes, real Raft, planning, scheduling, and reconciliation. The containerd-backed Vagrant demo also supports the tape. Inspect the plan and before/after allocation tables, keep playback at 20–30 seconds and under 3 MB, and commit the tape and GIF together.
+
 ## Design rules
 
 - Put operator-API wire types in the public `api` package and client methods in the public `client` package; put node-to-node wire types in `internal/nodeapi`. Keep job YAML/JSON schema in `internal/spec`; the public API carries job specifications as canonical JSON.
