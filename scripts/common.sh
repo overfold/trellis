@@ -246,6 +246,20 @@ wait_for_service() {
     return 1
 }
 
+wait_for_local_node() {
+    local operator_config="$1" address="$2" attempt
+    for attempt in $(seq 1 30); do
+        if env -u TRELLIS_TOKEN -u TRELLIS_ADMINISTRATOR_KEY TRELLIS_CONFIG="$operator_config" \
+            "${INSTALL_DIR}/trellisctl" --context local --server-addr https://127.0.0.1:8128 \
+            --ca-cert "${RUN_DIR}/ca.crt" --cert= --key= \
+            nodes status "$address" --output table 2>/dev/null | grep -qx 'Status: healthy'; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
 wait_for_local_allocations_to_stop() {
     command -v ctr >/dev/null 2>&1 || return 1
     local deadline=$((SECONDS + 300))

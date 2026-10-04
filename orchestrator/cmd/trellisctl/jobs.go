@@ -356,7 +356,7 @@ func printJobStatus(w io.Writer, status *api.JobStatusResponse) error {
 			return err
 		}
 		for _, a := range status.Allocations {
-			if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", shortID(a.ID), a.Group, allocationNode(a), a.Phase, a.Health, diagnosticSummary(a)); err != nil {
+			if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", a.ID, a.Group, allocationNode(a), a.Phase, a.Health, diagnosticSummary(a)); err != nil {
 				return err
 			}
 		}
@@ -391,7 +391,7 @@ func printReplacementBackoff(w io.Writer, backoffs []api.ReplacementBackoffRespo
 		}
 		lastFailure := "—"
 		if b.LastAllocationID != "" {
-			lastFailure = shortID(b.LastAllocationID)
+			lastFailure = b.LastAllocationID
 		}
 		if _, err := fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\n", b.Group, b.Failures, b.NextReplacementAt.Format(time.RFC3339), lastFailure, diagnostic); err != nil {
 			return err
@@ -416,7 +416,7 @@ func printJobProblems(w io.Writer, status *api.JobStatusResponse) error {
 			continue
 		}
 		problems++
-		if _, err := fmt.Fprintf(w, "- %s %s on %s: lifecycle=%s health=%s\n", shortID(a.ID), a.Group, allocationNode(a), a.Phase, a.Health); err != nil {
+		if _, err := fmt.Fprintf(w, "- %s %s on %s: lifecycle=%s health=%s\n", a.ID, a.Group, allocationNode(a), a.Phase, a.Health); err != nil {
 			return err
 		}
 		if a.Reason != "" {
@@ -474,9 +474,6 @@ func diagnosticSummary(a api.AllocationResponse) string {
 }
 
 func allocationNode(a api.AllocationResponse) string {
-	if a.Address != "" {
-		return a.Address
-	}
 	if a.NodeID.String() == "00000000-0000-0000-0000-000000000000" {
 		return "—"
 	}

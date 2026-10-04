@@ -326,6 +326,12 @@ else
         ui_step "Saved local cluster/write context for ${operator_user}"
     fi
 fi
+if [ -z "$join_addr" ] && [ -z "$existing_join" ] && [ -f "$operator_config" ]; then
+    ui_detail "Waiting for the local worker to register and become healthy."
+    wait_for_local_node "$operator_config" "${advertise_host}:8127" || \
+        ui_die "The control-plane API is healthy, but the local worker is not ready. Check 'journalctl -u trellis -n 200' and rerun install."
+    ui_step "Local worker is registered and healthy"
+fi
 unset administrator_private_key administrator_public_key admin_public_key_config join_token
 
 STATE_COMPLETE=true

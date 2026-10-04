@@ -131,7 +131,7 @@ func loadJobEvents(ctx context.Context, serverClient *client.Client, target, all
 	for _, allocation := range matches {
 		events, err := serverClient.AllocationEvents(ctx, allocation.ID)
 		if err != nil {
-			return nil, fmt.Errorf("allocation %s: %w", shortID(allocation.ID), err)
+			return nil, fmt.Errorf("allocation %s: %w", allocation.ID, err)
 		}
 		for _, event := range events {
 			result = append(result, jobAllocationEvent{
@@ -167,7 +167,7 @@ func printJobEvents(w io.Writer, events []jobAllocationEvent) error {
 			tw,
 			"%s\t%s\t%s\t%s\t%s\t%s\n",
 			event.At.Format(time.RFC3339),
-			shortID(event.Allocation),
+			event.Allocation,
 			event.Group,
 			event.Phase,
 			singleLine(event.Reason),
@@ -205,7 +205,7 @@ func runJobLogs(ctx context.Context, w io.Writer, serverClient *client.Client, t
 
 	for i, stream := range streams {
 		if len(streams) > 1 {
-			if _, err := fmt.Fprintf(w, "==> %s %s/%s <==\n", shortID(stream.allocation.ID), stream.allocation.Group, displayTask(stream.task)); err != nil {
+			if _, err := fmt.Fprintf(w, "==> %s %s/%s <==\n", stream.allocation.ID, stream.allocation.Group, displayTask(stream.task)); err != nil {
 				return err
 			}
 		}
@@ -302,7 +302,7 @@ func displayTask(task string) string {
 func logStreamRefs(streams []jobLogStream) string {
 	refs := make([]string, 0, len(streams))
 	for _, stream := range streams {
-		refs = append(refs, fmt.Sprintf("%s/%s/%s", shortID(stream.allocation.ID), stream.allocation.Group, displayTask(stream.task)))
+		refs = append(refs, fmt.Sprintf("%s/%s/%s", stream.allocation.ID, stream.allocation.Group, displayTask(stream.task)))
 	}
 	sort.Strings(refs)
 	return strings.Join(refs, ", ")
@@ -354,7 +354,7 @@ func resolveAllocationPrefix(allocations []api.AllocationResponse, ref string) (
 func allocationRefs(allocations []api.AllocationResponse) string {
 	refs := make([]string, 0, len(allocations))
 	for _, allocation := range allocations {
-		refs = append(refs, shortID(allocation.ID))
+		refs = append(refs, allocation.ID)
 	}
 	sort.Strings(refs)
 	return strings.Join(refs, ", ")

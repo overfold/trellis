@@ -159,7 +159,7 @@ trellisctl jobs list
 trellisctl jobs status web
 ```
 
-Table output shows short allocation references and node addresses instead of requiring full internal UUIDs. Full IDs and API fields remain available through `--output json`.
+Table output shows full allocation IDs that can be copied into `--allocation`. The Node column shows the node UUID prefix accepted by `trellisctl nodes status`, not the task's private network address; unplaced allocations show `—`. Full node IDs and API fields remain available through `--output json`.
 
 `jobs status` is also the diagnostic view. When a job is not ready, the normal status output automatically includes allocations that need attention, their lifecycle and health states, reason codes, human-readable messages, retry timing, and attempt count. An unmet replica appears as a pending allocation with a placement reason such as `no_healthy_nodes`, `constraint_mismatch`, `volume_owner_unavailable`, `missing_capability`, `host_port_conflict`, or `insufficient_capacity`; its message identifies the relevant scheduler filter. Healthy allocations and old draining allocations do not create diagnostic noise.
 
@@ -169,10 +169,10 @@ When the current state is not enough to explain what happened, inspect the recor
 trellisctl jobs status web --history
 ```
 
-The history view combines lifecycle transitions from the job's allocations in timestamp order and shows the allocation, task group, phase, reason, and message for every transition. Narrow it to one allocation using the short reference printed by `jobs status`:
+The history view combines lifecycle transitions from the job's allocations in timestamp order and shows the allocation, task group, phase, reason, and message for every transition. Narrow it to one allocation using the ID printed by `jobs status` (a unique ID prefix is also accepted):
 
 ```sh
-trellisctl jobs status web --history --allocation a1b2c3d4
+trellisctl jobs status web --history --allocation default-web-frontend-a1b2c3d4
 ```
 
 When failed allocations put a task group into replacement backoff, `jobs status` prints a **Replacement backoff** table with the failure count, next replacement time, and latest failure. After fixing a cause outside the job manifest, reset the backoff so the failed allocations are replaced without waiting:
@@ -198,10 +198,10 @@ trellisctl jobs logs web --group frontend
 trellisctl jobs logs web --task app
 ```
 
-Following needs exactly one task stream. Combine the short allocation reference displayed by `jobs status` with a task selector when a task group has multiple tasks:
+Following needs exactly one task stream. Combine the allocation ID displayed by `jobs status` with a task selector when a task group has multiple tasks:
 
 ```sh
-trellisctl jobs logs web --allocation a1b2c3d4 --task app --follow
+trellisctl jobs logs web --allocation default-web-frontend-a1b2c3d4 --task app --follow
 ```
 
 ## Run commands and open an allocation terminal

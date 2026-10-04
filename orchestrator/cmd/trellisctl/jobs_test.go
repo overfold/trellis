@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/overfold/trellis/orchestrator/api"
 )
 
@@ -170,6 +171,45 @@ func TestResolveAllocationPrefix(t *testing.T) {
 	_, err = resolveAllocationPrefix(append(allocations, api.AllocationResponse{ID: "abcdef99-three"}), "abcdef")
 	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
 		t.Fatalf("expected ambiguous error, got %v", err)
+	}
+}
+
+func TestAllocationDisplayPreservesSelectionIDsAndNodeIdentity(t *testing.T) {
+	allocations := []api.AllocationResponse{
+		{ID: "default-hello-web-1234abcd", Group: "web", NodeID: uuid.MustParse("44562de6-36e1-4349-9947-043906ae8467"), Address: "10.64.0.27", Phase: api.PhaseRunning, Health: api.HealthHealthy},
+		{ID: "default-hello-web-5678efab", Group: "web", NodeID: uuid.MustParse("44562de6-36e1-4349-9947-043906ae8467"), Phase: api.PhaseStarting},
+		{ID: "default-hello-web-90abcdef", Group: "web", Phase: api.PhasePending},
+	}
+	var output strings.Builder
+	if err := printJobStatus(&output, &api.JobStatusResponse{Name: "hello", Desired: 3, Allocations: allocations}); err != nil {
+		t.Fatal(err)
+	}
+	for _, allocation := range allocations {
+		if !strings.Contains(output.String(), allocation.ID) {
+			t.Fatalf("status omits selection ID %s: %s", allocation.ID, &output)
+		}
+		resolved, err := resolveAllocationPrefix(allocations, allocation.ID)
+		if err != nil || resolved.ID != allocation.ID {
+			t.Fatalf("displayed ID %s cannot be selected: %v", allocation.ID, err)
+		}
+	}
+	if strings.Contains(output.String(), "10.64.0.27") {
+		t.Fatalf("status labels task address as node: %s", &output)
+	}
+	for i, want := range []string{"44562de6", "44562de6", "—"} {
+		if got := allocationNode(allocations[i]); got != want {
+			t.Fatalf("allocation %d node = %q, want %q", i, got, want)
+		}
+	}
+	_, err := resolveAllocationPrefix(allocations, "default-")
+	if err == nil {
+		t.Fatal("expected ambiguous prefix")
+	}
+	streams := []jobLogStream{{allocation: allocations[0], task: "hello"}, {allocation: allocations[1], task: "hello"}}
+	for _, allocation := range allocations[:2] {
+		if !strings.Contains(err.Error(), allocation.ID) || !strings.Contains(logStreamRefs(streams), allocation.ID+"/web/hello") {
+			t.Fatalf("selection diagnostics omit full ID %s", allocation.ID)
+		}
 	}
 }
 

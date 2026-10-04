@@ -26,13 +26,13 @@ func TestJobsStatusObservationModesRegistered(t *testing.T) {
 func TestPrintJobEvents(t *testing.T) {
 	events := []jobAllocationEvent{
 		{
-			Allocation: "abcdef12-rest",
+			Allocation: "default-hello-web-1234abcd",
 			Group:      "web",
 			Phase:      api.PhaseRunning,
 			At:         time.Date(2026, 9, 3, 12, 0, 2, 0, time.UTC),
 		},
 		{
-			Allocation: "abcdef12-rest",
+			Allocation: "default-hello-web-5678efab",
 			Group:      "web",
 			Phase:      api.PhaseFailed,
 			Reason:     "image_pull_failed",
@@ -50,7 +50,8 @@ func TestPrintJobEvents(t *testing.T) {
 		"Allocation",
 		"Task group",
 		"Lifecycle",
-		"abcdef12",
+		"default-hello-web-1234abcd",
+		"default-hello-web-5678efab",
 		"failed",
 		"image_pull_failed",
 		"first line second line",

@@ -16,6 +16,8 @@ For automation, the same choices are available as flags. `--without-gvisor` opts
 
 The installer uses the administrator key transiently to mint a normal `cluster/write` operator credential and saves a `local` context for the user who invoked `sudo`. It displays the base64 PKCS#8 Ed25519 private key once so you can move it to an operator password manager; the daemon receives and replicates only the public key. Routine `trellisctl` commands therefore do **not** need `sudo` and do not receive the administrator key.
 
+Before reporting a new single-node cluster ready, the installer waits for the local worker to register and become healthy. If the worker does not become ready within the bounded retry window, installation stops with a diagnostic rather than reporting success; check the daemon logs and rerun the installer to resume.
+
 Verify the service and saved context:
 
 ```sh
