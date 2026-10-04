@@ -65,16 +65,14 @@ The Vagrant environment provisions `control`, `worker-1`, and `worker-2` Debian 
 
 ## README terminal demo
 
-[`docs/images/demo.tape`](../images/demo.tape) uses the [rolling-update example](../../examples/rolling-update/) and the real CLI. Install [VHS](https://github.com/charmbracelet/vhs) (rendered with v0.10.0), `ttyd`, `ffmpeg`, `jq`, and DejaVu Sans Mono. Select a **disposable three-node cluster** context with cluster write access: all nodes schedulable, port 8080 free, and no existing `default/rolling-update` job. From the repository root:
+[`docs/images/demo.tape`](../images/demo.tape) records plan, apply, status, and delete using the [hello example](../../examples/hello/). Install [VHS](https://github.com/charmbracelet/vhs) (rendered with v0.10.0), `ttyd`, `ffmpeg`, and [JetBrains Mono](https://www.jetbrains.com/lp/mono/) (rendered with v2.304). Select a **disposable cluster** context with write access and no existing `default/hello` job. From the repository root:
 
 ```sh
 go build -o /tmp/trellisctl ./orchestrator/cmd/trellisctl
 PATH="/tmp:$PATH" vhs docs/images/demo.tape
 ```
 
-The tape seeds v1, changes only the image to v2, waits for rollout and drain convergence, then deletes the demo job and undrains the selected node. Idle waits are cut from playback. **Never use a production cluster.** After a failed recording, delete the demo job and undrain its node before retrying.
-
-The GIF uses three Trellis processes with the integration-only injected runtime: simulated containers/probes, real Raft, planning, scheduling, and reconciliation. The containerd-backed Vagrant demo also supports the tape. Inspect the plan and before/after allocation tables, keep playback at 20–30 seconds and under 3 MB, and commit the tape and GIF together.
+The tape creates and deletes `default/hello`; never use a production cluster. Idle polling is cut from playback. The committed GIF uses the real CLI and a Trellis process with the integration-only injected runtime (simulated containers, real planning and reconciliation). Inspect all four commands and commit the tape and GIF together.
 
 ## Design rules
 

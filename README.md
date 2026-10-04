@@ -6,7 +6,7 @@ Every project that ships software ends up rebuilding the same infrastructure: wo
 
 You describe the jobs you want to run, and Trellis places them across your machines, keeps them healthy, and rolls out changes. It gives you primitives rather than a platform, so you can build your own workflows on top. [Bower](https://github.com/overfold/bower), a deployment dashboard, is one example.
 
-![Trellis previews a semantic image-change plan, rolls out healthy replacement allocations one at a time, then reschedules allocations onto the remaining nodes after a node drain—without another deploy.](docs/images/demo.gif)
+![Trellis CLI: preview a job plan, apply the manifest, inspect a healthy allocation, and delete the job.](docs/images/demo.gif)
 
 > [!NOTE]
 > Trellis is experimental and pre-1.0. Expect breaking changes between releases, and do not rely on it for production workloads yet.
