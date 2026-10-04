@@ -143,23 +143,34 @@ else
 fi
 
 ui_section "Software"
-if ! systemctl stop trellis >/dev/null 2>&1; then
+if ! systemctl stop trellis; then
     ui_die "Could not stop the Trellis service. Network state and installed files were retained for retry."
 fi
 
 if command -v ctr >/dev/null 2>&1; then
+    if ! tasks="$(ctr -n trellis tasks ls -q)"; then
+        ui_die "Could not inspect Trellis tasks. The containerd error is shown above; installed files and node data were retained for retry."
+    fi
+    for tid in $tasks; do
+        # --force registers an exit waiter, kills all processes, waits for exit,
+        # and only then deletes the task. A separate kill/delete races shutdown.
+        if ! ctr -n trellis tasks delete --force "$tid"; then
+            ui_die "Could not stop and delete Trellis task ${tid}. The containerd error is shown above; installed files and node data were retained for retry."
+        fi
+    done
     if ! containers="$(ctr -n trellis containers ls -q)"; then
         ui_die "Could not inspect Trellis containers. Network state and installed files were retained for retry."
     fi
     for cid in $containers; do
-        ctr -n trellis tasks kill "$cid" -s SIGKILL >/dev/null 2>&1 || true
-        ctr -n trellis tasks delete "$cid" >/dev/null 2>&1 || true
-        ctr -n trellis containers rm "$cid" >/dev/null 2>&1 || true
+        if ! ctr -n trellis containers rm "$cid"; then
+            ui_die "Could not remove Trellis container ${cid}. The containerd error is shown above; installed files and node data were retained for retry."
+        fi
     done
     if ! remaining="$(ctr -n trellis containers ls -q)"; then
         ui_die "Could not verify Trellis container removal. Network state and installed files were retained for retry."
     fi
     if [ -n "$remaining" ]; then
+        ui_warn "Remaining containers: ${remaining}"
         ui_die "Could not remove all Trellis containers. Network state and installed files were retained for retry."
     fi
 else
@@ -170,27 +181,23 @@ cleanup_args=(--data-dir "$DATA_DIR")
 if [ -f "$CONFIG_FILE" ]; then
     cleanup_args+=(--config "$CONFIG_FILE")
 fi
-if ! "${INSTALL_DIR}/trellis" network-cleanup "${cleanup_args[@]}"; then
-    ui_die "Could not remove Trellis network resources. Network journals, node data, and installed files were retained for retry."
+if ! "${INSTALL_DIR}/trellis" local-cleanup "${cleanup_args[@]}"; then
+    ui_die "Could not remove Trellis network resources or volume staging mounts. The cleanup error is shown above; node data and installed files were retained for retry."
 fi
-ui_step "Removed journaled Trellis network resources"
-
-systemctl disable trellis >/dev/null 2>&1 || true
-rm -f "$SERVICE_FILE"
-systemctl daemon-reload
-systemctl reset-failed >/dev/null 2>&1 || true
-rm -f "${INSTALL_DIR}/trellis" "${INSTALL_DIR}/trellisctl" "${INSTALL_DIR}/trellis-health-probe"
-rm -rf "$RUN_DIR"
-ui_step "Removed Trellis service and binaries"
-remove_owned_dependencies
+ui_step "Removed journaled Trellis network resources and volume staging mounts"
 
 if [ "$purge" = true ]; then
     ui_section "Data"
-    if [ -n "$DATA_DIR" ] && [ "$DATA_DIR" != "/" ]; then rm -rf "$DATA_DIR"; fi
+    if [ -n "$DATA_DIR" ] && [ "$DATA_DIR" != "/" ]; then
+        if ! rm -rf "$DATA_DIR"; then
+            ui_die "Could not purge node data at ${DATA_DIR}. Data may be partially deleted; the binary, service, configuration, and dependencies were retained. Fix the error above and rerun uninstall."
+        fi
+    fi
     if [ -n "$SECRETS_KEY_FILE" ] && [ "$SECRETS_KEY_FILE" != "/" ]; then rm -f "$SECRETS_KEY_FILE"; fi
-    rm -rf "$CONFIG_DIR" "$STATE_ROOT"
+    if ! rm -rf "$STATE_ROOT" "$CONFIG_DIR"; then
+        ui_die "Could not finish purging Trellis state and configuration. The binary, service, and dependencies were retained for retry; data may be partially deleted."
+    fi
     ui_step "Permanently removed Trellis node data"
-    ui_done "Trellis was purged from this node"
 else
     ui_section "Recovery"
     stamp="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -207,6 +214,21 @@ else
     if [ -f "$STATE_FILE" ]; then cp -a "$STATE_FILE" "${recovery_dir}/install-state"; fi
     rm -f "$STATE_FILE"
     ui_step "Archived recoverable node state at ${recovery_dir}"
+fi
+
+ui_section "Software"
+remove_owned_dependencies
+systemctl disable trellis >/dev/null 2>&1 || true
+rm -f "$SERVICE_FILE"
+systemctl daemon-reload
+systemctl reset-failed >/dev/null 2>&1 || true
+rm -f "${INSTALL_DIR}/trellis" "${INSTALL_DIR}/trellisctl" "${INSTALL_DIR}/trellis-health-probe"
+rm -rf "$RUN_DIR"
+ui_step "Removed Trellis service and binaries"
+
+if [ "$purge" = true ]; then
+    ui_done "Trellis was purged from this node"
+else
     ui_done "Trellis was removed; node data was preserved"
     ui_detail "Recovery  ${recovery_dir}"
 fi

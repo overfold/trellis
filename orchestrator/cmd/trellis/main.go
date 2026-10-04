@@ -106,7 +106,7 @@ func main() {
 		Args:  cobra.NoArgs,
 		Run:   func(_ *cobra.Command, _ []string) { fmt.Println(version.Current()) },
 	})
-	root.AddCommand(newNetworkCleanupCommand())
+	root.AddCommand(newLocalCleanupCommand())
 	f := root.Flags()
 	f.StringVar(&cfg.ConfigFile, "config", "", "Path to Trellis node configuration YAML")
 	f.StringVar(&cfg.AgentListen, "agent-listen", ":8127", "Agent API listen address")

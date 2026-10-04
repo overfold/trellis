@@ -281,7 +281,11 @@ Installing a new cluster on this machine replaces the invoking user's `local` co
 
 Instead of throwing away the encryption key while retaining encrypted state, normal uninstall archives the complete recoverable set—node data, `/etc/trellis` configuration and the configured secrets key, plus installer state—under a timestamped `/var/lib/trellis/recovery/` directory.
 
-After the daemon and its containers stop, uninstall uses the installed Trellis binary to remove every local network resource recorded in its attachment journals. This applies equally to single-node, `--force`, and `--purge` removal. If network cleanup fails, uninstall stops before deleting the binary, journals, configuration, or node data so the same command can be retried; it never guesses at or deletes unjournaled host interfaces or firewall rules.
+After stopping the daemon, uninstall force-deletes containerd tasks, waiting for their processes to exit before removing containers. Failures show the underlying containerd error and identify the task or container that could not be removed; cleanup stops before changing network resources or node data.
+
+Once all containers are removed, uninstall uses the installed Trellis binary to remove every local network resource recorded in its attachment journals and detach leftover volume-staging bind mounts. This applies equally to single-node, `--force`, and `--purge` removal. Staging cleanup does not delete backing volume contents and runs before either archiving or purging data; uninstall never guesses at or deletes unjournaled host interfaces or firewall rules.
+
+The service, binaries, and dependencies remain installed until data handling succeeds. If local resource cleanup or data handling fails, fix the reported error and rerun the same uninstall command. A failed purge may already have deleted some data; retryability does not make purge reversible.
 
 If a broken installation cannot inspect or update cluster membership, use `--force` to skip cluster operations and remove the local installation:
 

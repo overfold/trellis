@@ -6,6 +6,7 @@ import (
 	"net"
 	"path/filepath"
 
+	"github.com/overfold/trellis/orchestrator/internal/agent"
 	"github.com/overfold/trellis/orchestrator/internal/network"
 	"github.com/spf13/cobra"
 )
@@ -14,11 +15,16 @@ var cleanupNetworkAttachments = func(ctx context.Context, stateDir, dnsAddress s
 	return network.CleanupJournaledAttachments(ctx, stateDir, dnsAddress)
 }
 
-func newNetworkCleanupCommand() *cobra.Command {
+var cleanupVolumeStaging = func(dataDir string) error {
+	return agent.NewVolumeManager(dataDir).CleanupStaging(nil)
+}
+
+// The caller must stop the daemon and remove all local containers first.
+func newLocalCleanupCommand() *cobra.Command {
 	cfg := &config{}
 	cmd := &cobra.Command{
-		Use:    "network-cleanup",
-		Short:  "Remove journaled local workload network resources",
+		Use:    "local-cleanup",
+		Short:  "Remove journaled local network resources and volume staging mounts",
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -34,7 +40,13 @@ func newNetworkCleanupCommand() *cobra.Command {
 			if host == "" || host == "0.0.0.0" {
 				host = network.WorkloadDNSAddress
 			}
-			return cleanupNetworkAttachments(cmd.Context(), filepath.Join(cfg.DataDir, "network"), host)
+			if err := cleanupNetworkAttachments(cmd.Context(), filepath.Join(cfg.DataDir, "network"), host); err != nil {
+				return fmt.Errorf("cleaning local network resources: %w", err)
+			}
+			if err := cleanupVolumeStaging(cfg.DataDir); err != nil {
+				return fmt.Errorf("cleaning volume staging mounts: %w", err)
+			}
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&cfg.ConfigFile, "config", "", "Path to Trellis node configuration YAML")

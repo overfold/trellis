@@ -8,6 +8,7 @@ mkdir -p "$tmp/scripts" "$tmp/mocks"
 cp "$script_dir/uninstall.sh" "$script_dir/common.sh" "$tmp/scripts/"
 # Allow the same isolated tests to run without root or a supported host OS.
 printf '\nrequire_root_linux_amd64() { :; }\n' >>"$tmp/scripts/common.sh"
+printf '\nremove_owned_dependencies() { echo dependencies >>"$CALL_LOG"; }\n' >>"$tmp/scripts/common.sh"
 cat >"$tmp/mocks/systemctl" <<'MOCK'
 #!/usr/bin/env bash
 printf 'systemctl %s\n' "$*" >>"$CALL_LOG"
@@ -17,6 +18,22 @@ MOCK
 cat >"$tmp/mocks/ctr" <<'MOCK'
 #!/usr/bin/env bash
 printf 'ctr %s\n' "$*" >>"$CALL_LOG"
+case "$*" in
+    '-n trellis tasks ls -q')
+        [ "$SCENARIO" != task-inspect-failure ] || { echo 'socket unavailable' >&2; exit 1; }
+        if [ "$SCENARIO" != taskless ] && [ "$SCENARIO" != graceful ]; then printf 'test-container\n'; fi
+        ;;
+    '-n trellis tasks delete --force test-container')
+        [ "$SCENARIO" != task-delete-failure ] || { echo 'shim did not respond' >&2; exit 1; }
+        touch "${CTR_LISTED}.task-deleted"
+        ;;
+    '-n trellis containers rm test-container')
+        # An active task must be synchronously removed before its container.
+        [ "$SCENARIO" = taskless ] || [ "$SCENARIO" = graceful ] || test -e "${CTR_LISTED}.task-deleted" || exit 1
+        [ "$SCENARIO" != container-delete-failure ] || { echo 'snapshot is busy' >&2; exit 1; }
+        ;;
+    *'tasks kill'*|*'tasks delete'*) echo 'unsafe task cleanup' >&2; exit 1 ;;
+esac
 if [ "$*" = '-n trellis containers ls -q' ]; then
     [ "$SCENARIO" != inspect-failure ] || exit 1
     if [ ! -e "$CTR_LISTED" ] || [ "$SCENARIO" = containers-remain ]; then
@@ -43,9 +60,27 @@ cat >"$tmp/mocks/trellis" <<'MOCK'
 printf 'trellis %s\n' "$*" >>"$CALL_LOG"
 [ "$SCENARIO" != cleanup-failure ]
 MOCK
+cat >"$tmp/mocks/rm" <<'MOCK'
+#!/usr/bin/env bash
+printf 'rm %s\n' "$*" >>"$CALL_LOG"
+if [ "$SCENARIO" = purge-failure ] && [ "$*" = "-rf $DATA_DIR" ]; then
+    /bin/rm -f "$DATA_DIR/state"
+    echo 'Device or resource busy' >&2
+    exit 1
+fi
+exec /bin/rm "$@"
+MOCK
+cat >"$tmp/mocks/mv" <<'MOCK'
+#!/usr/bin/env bash
+if [ "$SCENARIO" = archive-failure ] && [ "${1:-}" = "$DATA_DIR" ]; then
+    echo 'archive move failed' >&2
+    exit 1
+fi
+exec /bin/mv "$@"
+MOCK
 chmod +x "$tmp/mocks/"*
 
-for scenario in membership-failure cleanup-failure stop-failure inspect-failure verify-failure containers-remain force force-purge graceful single-node; do
+for scenario in membership-failure cleanup-failure stop-failure task-inspect-failure task-delete-failure container-delete-failure inspect-failure verify-failure containers-remain purge-failure archive-failure taskless force force-purge graceful single-node; do
     (
         export SCENARIO="$scenario" CALL_LOG="$tmp/$scenario.calls" CTR_LISTED="$tmp/$scenario.ctr-listed"
         export PATH="$tmp/mocks:$PATH"
@@ -67,8 +102,9 @@ for scenario in membership-failure cleanup-failure stop-failure inspect-failure 
         printf 'complete=true\n' >"$STATE_FILE"
         args=(--yes)
         case "$scenario" in
-            force) args+=(--force) ;;
+            force|taskless) args+=(--force) ;;
             force-purge) args+=(--force --purge) ;;
+            archive-failure) args+=(--force) ;;
         esac
         if [ "$scenario" = membership-failure ]; then
             if bash "$tmp/scripts/uninstall.sh" "${args[@]}" >"$root/output" 2>&1; then
@@ -78,14 +114,44 @@ for scenario in membership-failure cleanup-failure stop-failure inspect-failure 
             test -f "$SERVICE_FILE" && test -f "$INSTALL_DIR/trellisctl"
             test -f "$DATA_DIR/state" && test -f "$SECRETS_KEY_FILE"
             ! grep -q 'systemctl stop\|ctr ' "$CALL_LOG"
+        elif [ "$scenario" = purge-failure ] || [ "$scenario" = archive-failure ]; then
+            if [ "$scenario" = purge-failure ]; then args+=(--force --purge); fi
+            if bash "$tmp/scripts/uninstall.sh" "${args[@]}" >"$root/output" 2>&1; then
+                echo "Expected $scenario" >&2; exit 1
+            fi
+            test -f "$SERVICE_FILE" && test -x "$INSTALL_DIR/trellis"
+            test -f "$CONFIG_FILE" && test -f "$SECRETS_KEY_FILE" && test -f "$STATE_FILE"
+            ! grep -q 'systemctl disable trellis\|dependencies' "$CALL_LOG"
+            if [ "$scenario" = purge-failure ]; then
+                grep -q 'Data may be partially deleted' "$root/output"
+                export SCENARIO=force-purge
+            else
+                grep -q 'archive move failed' "$root/output"
+                export SCENARIO=force
+            fi
+            # The exact same uninstall command must work after fixing the cause.
+            bash "$tmp/scripts/uninstall.sh" "${args[@]}" >"$root/retry-output" 2>&1
+            test ! -e "$SERVICE_FILE" && test ! -e "$INSTALL_DIR/trellis"
+            if [ "$scenario" = purge-failure ]; then
+                test ! -e "$STATE_ROOT"
+            else
+                grep -qx durable-state "$STATE_ROOT"/recovery/*/data/state
+            fi
         elif [[ "$scenario" = *-failure || "$scenario" = containers-remain ]]; then
             if bash "$tmp/scripts/uninstall.sh" --yes --force --purge >"$root/output" 2>&1; then
                 echo "Expected $scenario" >&2; exit 1
             fi
             if [ "$scenario" = cleanup-failure ]; then
-                grep -q 'trellis network-cleanup --data-dir' "$CALL_LOG"
+                grep -q 'trellis local-cleanup --data-dir' "$CALL_LOG"
             else
-                ! grep -q 'trellis network-cleanup' "$CALL_LOG"
+                ! grep -q 'trellis local-cleanup' "$CALL_LOG"
+            fi
+            if [ "$scenario" = task-delete-failure ]; then
+                grep -q 'shim did not respond' "$root/output"
+                grep -q 'Could not stop and delete Trellis task test-container' "$root/output"
+            elif [ "$scenario" = container-delete-failure ]; then
+                grep -q 'snapshot is busy' "$root/output"
+                grep -q 'Could not remove Trellis container test-container' "$root/output"
             fi
             test -f "$SERVICE_FILE" && test -x "$INSTALL_DIR/trellis"
             test -f "$DATA_DIR/state" && test -f "$SECRETS_KEY_FILE" && test -f "$STATE_FILE"
@@ -96,11 +162,19 @@ for scenario in membership-failure cleanup-failure stop-failure inspect-failure 
             test ! -e "$INSTALL_DIR/trellis" && test ! -e "$INSTALL_DIR/trellis-health-probe"
             test ! -e "$RUN_DIR" && test ! -e "$CONFIG_DIR" && test ! -e "$DATA_DIR"
             grep -q 'systemctl stop trellis' "$CALL_LOG"
-            grep -q 'ctr -n trellis tasks kill test-container -s SIGKILL' "$CALL_LOG"
-            grep -q "trellis network-cleanup --data-dir $DATA_DIR --config $CONFIG_FILE" "$CALL_LOG"
-            cleanup_line="$(grep -n 'trellis network-cleanup' "$CALL_LOG" | cut -d: -f1)"
+            if [ "$scenario" = taskless ] || [ "$scenario" = graceful ]; then
+                ! grep -q 'ctr -n trellis tasks delete' "$CALL_LOG"
+            else
+                grep -q 'ctr -n trellis tasks delete --force test-container' "$CALL_LOG"
+            fi
+            grep -q "trellis local-cleanup --data-dir $DATA_DIR --config $CONFIG_FILE" "$CALL_LOG"
+            cleanup_line="$(grep -n 'trellis local-cleanup' "$CALL_LOG" | cut -d: -f1)"
             remove_line="$(grep -n 'ctr -n trellis containers rm test-container' "$CALL_LOG" | cut -d: -f1)"
             test "$cleanup_line" -gt "$remove_line"
+            data_line="$(grep -n "rm -rf $CONFIG_DIR\|rm -rf $STATE_ROOT $CONFIG_DIR" "$CALL_LOG" | head -1 | cut -d: -f1)"
+            dependencies_line="$(grep -n '^dependencies' "$CALL_LOG" | cut -d: -f1)"
+            test "$dependencies_line" -gt "$data_line"
+            test "$data_line" -gt "$cleanup_line"
             if [ "$scenario" = graceful ]; then
                 grep -q 'trellisctl nodes drain test-node' "$CALL_LOG"
                 grep -q 'trellisctl nodes remove test-node' "$CALL_LOG"
