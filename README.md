@@ -1,64 +1,97 @@
 # Trellis
 
-Trellis is a container scheduler built on containerd. It sits in the space between rolling your own deployment scripts and adopting Kubernetes — a real orchestrator for container workloads, without the operational complexity.
+A lightweight container orchestrator, built on containerd, for the space between deploy scripts and Kubernetes.
 
-Every project that ships software ends up rebuilding the same infrastructure: workload placement, health checks, rolling updates, port reservation. Tools like Coolify improve the developer experience, but at their core they are not orchestrators. Kubernetes is a full orchestrator, but it brings significant complexity that many workloads simply do not need. Trellis is closer to Nomad in spirit: a lightweight, focused scheduler you can understand and operate yourself.
+Every project that ships software ends up rebuilding the same infrastructure: workload placement, health checks, rolling updates, and port reservation. Deployment tools such as Coolify improve the developer experience, but they are not orchestrators. Kubernetes is, but it brings complexity that many workloads do not need. Trellis is closer to [Nomad](https://github.com/hashicorp/nomad) in spirit: a focused scheduler that you can read, understand, and operate yourself.
 
-Every machine runs the same `trellis` daemon. Raft consensus elects one node to serve the control-plane API and reconcile jobs, while every node continues to run allocations. Up to five nodes vote in elections; any other node replicates state and can be promoted to replace a voter.
+You describe the jobs you want to run, and Trellis places them across your machines, keeps them healthy, and rolls out changes. It gives you primitives rather than a platform, so you can build your own workflows on top. [Bower](https://github.com/overfold/bower), a deployment dashboard, is one example.
 
-## Get started
+> [!NOTE]
+> Trellis is experimental and pre-1.0. Expect breaking changes between releases, and do not rely on it for production workloads yet.
 
-Follow [Getting Started](docs/public/getting-started.md) for the single authoritative installation and first-workload walkthrough. It covers the interactive installer, automation flags, CLI connection, and the complete apply/inspect/update/log/delete lifecycle. Grow an installed node into a cluster with [Multi-node clusters](docs/public/multi-node.md), and use [Operations](docs/public/operations.md) for upgrades and removal.
+## Features
 
-## User model
+- **Declarative jobs.** Write YAML job manifests, validate them locally, preview a semantic plan, and apply them as revisions you can watch roll out.
+- **Scheduling and placement.** Nodes register, heartbeat, and drain. Trellis balances allocations across them and reserves published ports per node.
+- **Health and recovery.** HTTP and TCP health checks, restart policies, bounded replacement backoff, and diagnostics that explain why a job is not ready.
+- **Updates.** Rolling and recreate strategies, with every change previewed as a plan before you apply it.
+- **Networking.** Each namespace gets its own WireGuard network with built-in DNS discovery, NAT egress, and published ports.
+- **Storage and secrets.** Persistent local volumes, and write-only, namespace-scoped secrets that are encrypted at rest and delivered to tasks in memory.
+- **Highly available control plane.** Every machine runs the same `trellis` daemon. Raft elects a leader to serve the API, while every node keeps running workloads.
+- **CLI and API.** `trellisctl` with named cluster contexts for humans and automation, and a JSON HTTP API with a public Go client for everything else.
 
-All first-party interfaces use the same hierarchy and terminology:
+## Quick start
 
-```text
-cluster
-├── nodes
-└── namespaces
-    └── jobs
-        └── task groups
-            ├── tasks
-            └── allocations (runtime instances)
-```
+You need a Debian or Ubuntu x86-64 machine with `sudo`.
 
-The first-party CLI, `trellisctl`, lets humans author **YAML job manifests**. It converts that representation into Trellis's canonical JSON job model before contacting the control plane. Applying desired state creates or advances a job revision; Trellis then creates runtime **allocations** to satisfy the desired task-group replicas. Allocation **lifecycle** and **health** are separate concepts.
+1. Install a single-node cluster. The installer shows its plan before it changes anything, installs containerd if it is missing, and saves a `trellisctl` context for your user:
 
-See the [Trellis user model](docs/public/user-model.md) for the canonical vocabulary shared by `trellisctl`, docs, examples, and API.
+   ```sh
+   curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/install.sh | sudo bash
+   ```
+
+2. Download the `hello` example manifest and deploy it:
+
+   ```sh
+   curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/examples/hello/trellis.yaml -o trellis.yaml
+   trellisctl jobs apply --file trellis.yaml --wait
+   ```
+
+3. Check that it is running and read its logs:
+
+   ```sh
+   trellisctl jobs status hello
+   trellisctl jobs logs hello --tail 100
+   ```
+
+[Getting Started](docs/public/getting-started.md) explains each step and continues the walkthrough with an update and a clean removal. To grow the node into a cluster, see [Multi-node clusters](docs/public/multi-node.md).
+
+## How it works
+
+Every machine runs the same `trellis` daemon. The nodes elect a leader through Raft, and the leader serves the API, stores desired state, and decides where work runs. Every node, the leader included, runs workloads. Up to five nodes vote in elections; any additional node replicates state and can be promoted to replace a voter.
+
+You describe workloads with four concepts:
+
+- **Namespaces** group related jobs and give them their own private network and service discovery.
+- **Jobs** describe the desired state of a workload. Each change you apply creates a new version.
+- **Task groups** are the unit that Trellis places, scales, and updates. Each contains one or more **tasks**, the containers that run together, such as an app and its sidecar.
+- **Allocations** are the running copies of a task group. Each one reports its lifecycle, such as running or failed, separately from its health.
+
+When you apply a job, the leader plans the change and places allocations on nodes with capacity. It then keeps reconciling: when an allocation fails or its node stops responding, Trellis places a replacement. The [user model](docs/public/user-model.md) defines every term precisely.
 
 ## Design principles
 
-**Modular and extensible, but focused.** Trellis exposes clean primitives you can build on. The core repository stays lean — only the essentials live here. If you need something specific to your environment, you can extend Trellis yourself rather than waiting on a plugin ecosystem. No Kubernetes complexity, and no surface area you did not ask for.
+These principles decide what belongs in Trellis and what does not. Contributors use them to judge scope and tradeoffs.
 
-**Non-opinionated and flexible.** Trellis provides the necessary building blocks without prescribing application architecture. Reverse proxies, for instance, are ordinary jobs rather than a special first-class service or ingress resource. Namespaces separate resources, discovery, and workload networks; API credentials grant cluster-wide access, and namespaces are not admission policy for arbitrary job manifests. Trellis does not add separate team or project abstractions on top. Operators can run Trellis as-is, or build their own frontends and abstractions on top for their specific use case. See [Multitenancy and trust boundaries](docs/public/multitenancy.md) when building for untrusted tenants.
+**Modular and extensible, but focused.** Trellis exposes clean primitives that you can build on, and the core keeps only the essentials. If your environment needs something specific, extend Trellis yourself instead of waiting for a plugin ecosystem. You get no Kubernetes-style complexity, and no surface area you did not ask for.
 
-**Consumers own representation; Trellis owns meaning.** The control-plane API consumes canonical JSON, not YAML, HCL, Python, or another authoring language. A consumer may expose any representation it wants, but it must convert that representation into the canonical JSON model before calling Trellis. Human conveniences such as `64MiB` or `10s` therefore belong to the consumer; canonical validation, defaults, planning, revision semantics, and reconciliation belong to Trellis. This keeps custom frontends and abstractions open-ended without allowing each interface to invent different Trellis semantics.
+**Non-opinionated and flexible.** Trellis provides building blocks without prescribing an application architecture. A reverse proxy, for example, is an ordinary job rather than a special ingress resource, and Trellis adds no team or project abstractions. Run Trellis as it is, or build your own frontend and abstractions on top of it for your use case.
 
-**Declarative, with open-ended delivery.** Trellis accepts declarative desired state. The first-party human-authored representation is YAML, but it is only one consumer of the canonical JSON model. You can use `trellisctl`, drive it from CI/CD, build a custom UI or HCL/Python abstraction, or integrate with any tooling that can produce the API model. The workflow that generates and submits desired state is entirely yours.
+**Consumers own representation; Trellis owns meaning.** The API accepts only canonical JSON, not YAML, HCL, Python, or another authoring language. Each consumer can offer any representation it likes, but converts it to canonical JSON before calling Trellis. Human conveniences such as `64MiB` or `10s` therefore belong to the consumer, while validation, defaults, planning, revisions, and reconciliation belong to Trellis. Frontends stay open-ended, and no interface can invent its own Trellis semantics.
 
-**Easy to use.** The tension between "flexible building blocks" and "easy to use" is addressed through thorough documentation and first-party examples. Trellis favors clear documentation over opinionated defaults that hide what is actually happening.
+**Declarative, with open-ended delivery.** Trellis accepts declarative desired state and does not care how it is produced. YAML through `trellisctl` is the first-party option, but you can equally drive Trellis from CI/CD, a custom UI, an HCL or Python abstraction, or any tool that can produce the API model.
 
-**Open-source.** Trellis is fully open-source. Read it, modify it, and run it wherever you like.
+**Easy to use through clarity.** Trellis resolves the tension between flexible building blocks and ease of use with thorough documentation and first-party examples, not with opinionated defaults that hide what is actually happening.
 
-## Capabilities
+**Open source and inspectable.** You can read Trellis, modify it, and run it wherever you like.
 
-- YAML job authoring with canonical JSON validation, semantic planning, revisioned apply, and rollout watching
-- Named `trellisctl` cluster contexts with explicit flag/environment overrides for automation
-- Node registration, heartbeats, draining, and balanced placement
-- Allocation lifecycle management, health checks, restart handling, diagnostics, and filterable runtime queries
-- Rolling and recreate update strategies
-- Container resource limits, per-node port publishing and reservation, and persistent local volumes
-- Per-namespace WireGuard networking with built-in DNS discovery, NAT egress, and published ports
-- Namespace-scoped, write-only secrets with encrypted persistence and memory-backed delivery
+Namespaces separate resources, service discovery, and workload networks, but they are not a security boundary. API credentials are cluster-wide, so read [Multitenancy and trust boundaries](docs/public/multitenancy.md) before exposing Trellis to untrusted tenants.
 
 ## Documentation
 
-There is one authoritative [documentation index](docs/README.md). New users should follow this order:
+The [documentation index](docs/README.md) lists every guide in learning order.
 
-1. [Getting Started](docs/public/getting-started.md) — install, connect, deploy, inspect, update, read logs, and remove one trivial workload.
-2. [Learning path](docs/public/learning-path.md) — add health checks, networking, secrets, volumes, rolling updates, sidecars, API access, and advanced architectures progressively.
-3. [User model](docs/public/user-model.md) and [job manifest reference](docs/public/job-specification.md) — use the canonical vocabulary and complete schema.
+- [Getting Started](docs/public/getting-started.md): install a node and run the full job lifecycle
+- [Learning path](docs/public/learning-path.md): add health checks, networking, rolling updates, secrets, volumes, sidecars, and API access, one at a time
+- [Examples](examples/README.md): beginner, intermediate, and advanced manifests
+- [CLI workflows](docs/public/cli.md): contexts, and how to check, preview, apply, inspect, and delete jobs
+- [Job manifest reference](docs/public/job-specification.md): the complete YAML schema and validation rules
+- [Operations](docs/public/operations.md): upgrades, backups, TLS, failure diagnosis, and removal
+- [Multi-node clusters](docs/public/multi-node.md): adding nodes, choosing a cluster size, and handling node failure
+- [Architecture](docs/developer/architecture.md): how Trellis is built, for contributors and integrators
 
-The [examples index](examples/README.md) separates beginner, intermediate, and advanced patterns. Contributor and internals guides are linked from the documentation index rather than duplicated here.
+## Contributing
+
+Bug reports, feature requests, and questions go in [GitHub issues](https://github.com/overfold/trellis/issues).
+
+To build and test Trellis locally, see [Development and testing](docs/developer/development.md). Read the [architecture guide](docs/developer/architecture.md) before changing subsystem boundaries.

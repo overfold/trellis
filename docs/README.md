@@ -13,7 +13,7 @@ Read these in order if this is your first time using Trellis:
 3. **[User model](public/user-model.md)** — learn the precise vocabulary shared by manifests, the CLI, examples, and API.
 4. **[Core concepts](public/core-concepts.md)** — understand scheduling, reconciliation, networking, persistence, and updates.
 
-Getting Started is the only installation walkthrough and [`examples/hello`](../examples/hello/) is the only first-workload example. Other pages link back to them rather than maintaining competing quick starts.
+Getting Started is the only installation walkthrough and [`examples/hello`](../examples/hello/) is the only first-workload example. The root README's quick start is a condensed excerpt that uses the same installer command and manifest; other pages link back to them rather than maintaining competing quick starts.
 
 ## Workload guides and reference
 

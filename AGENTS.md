@@ -55,7 +55,7 @@ Key ownership boundaries (paths relative to `orchestrator/`; see the architectur
 - For public wire behavior, update affected handlers, `api`, public `client`, `trellisctl`, tests, and [API docs](docs/developer/api.md) together.
 - For manifest semantics, update `internal/spec`, planning when affected, validation/defaulting tests, generated schemas, [job reference](docs/public/job-specification.md), and affected examples together. Do not hand-edit generated schemas: from `orchestrator/`, run `go run ./cmd/generate-schemas`.
 - Keep terminology consistent across API, CLI, docs, schemas, and examples: cluster → namespaces → jobs → task groups → tasks and allocations; nodes belong to the cluster.
-- Update relevant docs when user-facing behavior changes. [Getting Started](docs/public/getting-started.md) and `examples/hello/` own the installation/first-workload walkthrough; link to them rather than adding competing quick starts. Keep advanced patterns clearly labelled and internals in developer docs or advanced operator material.
+- Update relevant docs when user-facing behavior changes. [Getting Started](docs/public/getting-started.md) and `examples/hello/` own the installation/first-workload walkthrough; link to them rather than adding competing quick starts. The README quick start condenses them and must keep the same installer command and manifest. Keep advanced patterns clearly labelled and internals in developer docs or advanced operator material.
 - Put reusable YAML job examples under `examples/`; `TestExampleManifestsValidate` validates its `.yaml` manifests recursively.
 
 ## Verification
