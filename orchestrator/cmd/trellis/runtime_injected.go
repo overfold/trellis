@@ -11,6 +11,8 @@ import (
 	"net/netip"
 	"path/filepath"
 
+	"github.com/distribution/reference"
+	"github.com/opencontainers/go-digest"
 	"github.com/overfold/trellis/orchestrator/internal/network"
 	containerruntime "github.com/overfold/trellis/orchestrator/internal/runtime"
 	"github.com/spf13/pflag"
@@ -37,6 +39,21 @@ func init() {
 			return r, r, nil
 		},
 		network: injectedNetwork{},
+		resolveImage: func(_ context.Context, image string) (string, error) {
+			named, err := reference.ParseNormalizedNamed(image)
+			if err != nil {
+				return "", err
+			}
+			named = reference.TagNameOnly(named)
+			if _, ok := named.(reference.Digested); ok {
+				return named.String(), nil
+			}
+			pinned, err := reference.WithDigest(named, digest.FromString(image))
+			if err != nil {
+				return "", err
+			}
+			return pinned.String(), nil
+		},
 	}
 }
 

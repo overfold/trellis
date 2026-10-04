@@ -166,13 +166,37 @@ Task groups are the unit of placement, scaling, updates, restart behavior, and d
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `name` | Yes | Task identifier, unique within the group. |
-| `image` | Yes | Pullable OCI image reference. Pin a version or digest for reproducible deployment. |
+| `image` | Yes | Pullable OCI image reference. Tags are resolved on plan/apply; use a digest to fix the artifact across applies. |
 | `env` | No | Literal environment-variable map. Do not place credentials here. |
 | `networking` | No | Network mode and the ports the task listens on. |
 | `resources` | No | CPU in millicores and memory as a byte count or readable size. |
 | `volumes` | No | Namespace-scoped named volume mounts with explicit host and container paths. |
 | `secrets` | No | References to namespace secrets delivered as environment variables or files. |
 | `health_check` | No | HTTP, TCP, or script readiness/health observation. |
+
+### Image updates
+
+Every plan resolves image tags to their current registry digests. Applying the
+same manifest rolls out new content if a tag has moved, including `latest`,
+`main`, and version-shaped tags such as `1.4.2`. If the specification and resolved
+images are unchanged, apply is a no-op. An image without a tag uses `latest`.
+Choosing a tag accepts that a later apply, even for a configuration or count
+change, can deploy different content. Use `repository@sha256:…` (or
+`repository:tag@sha256:…`) to select an immutable artifact instead.
+
+Trellis preserves the authored reference and records the resolved image for each
+accepted job version. All replicas, including replacements after node failure,
+use that recorded digest; registry pushes alone do not update running jobs.
+Plans and ordinary tagged applies require registry access and fail without
+changing desired state if resolution fails. `trellisctl` passes the plan's exact
+pins into apply, so a tag moving between those requests cannot change the planned
+deployment. `--check` validates locally without resolving images.
+
+The control plane resolves registry metadata without downloading image layers;
+workers pull the recorded images when starting allocations. Resolution uses
+anonymous registry access, matching the current runtime pull configuration.
+For multi-platform images, Trellis pins the image index and each worker selects
+its platform from that index.
 
 ### Networking and ports
 

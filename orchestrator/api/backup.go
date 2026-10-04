@@ -7,7 +7,7 @@ import (
 
 // BackupFormatVersion is the current desired-state backup format. A backup is
 // restored only by a Trellis release that uses the same format version.
-const BackupFormatVersion = 5
+const BackupFormatVersion = 6
 
 // BackupSnapshot contains desired state and the replicated cluster settings.
 // Secret values remain encrypted exactly as stored in Raft and still require

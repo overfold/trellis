@@ -54,6 +54,13 @@ A volume has a stable namespace-scoped `name`, an explicit node-side `host_path`
 
 ## Updates
 
+Image tags are resolved on explicit plan/apply, not during reconciliation.
+Reapplying `latest`, `main`, or any other tag deploys new content when its digest
+changes. Each accepted version records the exact images used by every replica,
+including later recovery and replacement. A registry push alone does not deploy
+anything. Use digest references when later applies must retain the same artifact;
+see [Image updates](job-specification.md#image-updates).
+
 `recreate` stops outdated allocations before replacements. `rolling` starts bounded replacements and removes draining old allocations after replacements are healthy.
 
 Blue/green and canary releases are deployment patterns composed from ordinary jobs, task groups, labels, health checks, and routing. They are not additional Trellis resource types. See the [Cookbook](cookbook.md) and [examples](../../examples/README.md).

@@ -63,10 +63,11 @@ type desiredStore interface {
 
 // Server coordinates desired state, scheduling, and node operations.
 type Server struct {
-	log     *slog.Logger
-	storage *storage.LocalStorage
-	state   *StateController
-	client  *client.AgentClient
+	log          *slog.Logger
+	storage      *storage.LocalStorage
+	state        *StateController
+	client       *client.AgentClient
+	resolveImage func(context.Context, string) (string, error)
 
 	cluster     *Cluster
 	nodes       map[uuid.UUID]*Node
@@ -279,6 +280,12 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 		if record.Incarnation == "" {
 			return fmt.Errorf("validate job %q: job incarnation is missing", key)
 		}
+		if record.ResolvedImages == nil {
+			return fmt.Errorf("validate job %q: resolved images are missing", key)
+		}
+		if _, err := s.resolveJobImages(ctx, record.Spec, record.ResolvedImages); err != nil {
+			return fmt.Errorf("validate job %q: %w", key, err)
+		}
 		snapshot.Jobs[key] = value
 		restored[jobKey(record.Spec.Namespace, record.Spec.Name)] = &record
 	}
@@ -297,6 +304,12 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 		}
 		if record.Spec == nil || record.Version < 1 || record.Revision < 1 || record.CreatedAt.IsZero() {
 			return fmt.Errorf("validate job revision %q: invalid revision record", key)
+		}
+		if record.ResolvedImages == nil {
+			return fmt.Errorf("validate job revision %q: resolved images are missing", key)
+		}
+		if _, err := s.resolveJobImages(ctx, record.Spec, record.ResolvedImages); err != nil {
+			return fmt.Errorf("validate job revision %q: %w", key, err)
 		}
 		snapshot.JobRevisions[key] = value
 	}
@@ -561,7 +574,8 @@ type NodeSummary struct {
 
 // Job contains a persisted job specification and revision.
 type Job struct {
-	Spec *spec.JobSpec `json:"Spec"`
+	Spec           *spec.JobSpec     `json:"Spec"`
+	ResolvedImages map[string]string `json:"resolved_images"`
 	// Incarnation distinguishes jobs recreated with the same namespace and
 	// name. Unlike Revision and Version, it never resets within a job's life.
 	Incarnation string `json:"incarnation"`
@@ -717,6 +731,7 @@ func NewServer(log *slog.Logger, storage *storage.LocalStorage, state *StateCont
 		storage:            storage,
 		state:              state,
 		client:             &client.AgentClient{},
+		resolveImage:       resolveRegistryImage,
 		nodes:              make(map[uuid.UUID]*Node),
 		jobs:               make(map[string]*Job),
 		networkPool:        settings.WireGuardPool,
@@ -1043,7 +1058,7 @@ func jobKey(namespace, name string) string {
 
 // RegisterJob creates or updates desired job state. A nil preconditions
 // applies unconditionally.
-func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spec.JobSpec, preconditions *JobPreconditions) (*api.JobRegistrationResponse, error) {
+func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spec.JobSpec, preconditions *JobPreconditions, resolvedImages map[string]string) (*api.JobRegistrationResponse, error) {
 	if preconditions == nil {
 		preconditions = &JobPreconditions{}
 	}
@@ -1056,6 +1071,11 @@ func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spe
 	if jobSpec.Namespace != namespace {
 		return nil, fmt.Errorf("job namespace does not match request namespace")
 	}
+	images, err := s.resolveJobImages(ctx, jobSpec, resolvedImages)
+	if err != nil {
+		return nil, err
+	}
+	execution := executionSpec(jobSpec, images)
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
 	key := jobKey(namespace, jobSpec.Name)
@@ -1069,7 +1089,7 @@ func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spe
 	if err := preconditions.check(existing); err != nil {
 		return nil, err
 	}
-	if existing != nil && len(plan.Diff(existing.Spec, jobSpec)) == 0 {
+	if existing != nil && len(plan.Diff(existing.Spec, jobSpec)) == 0 && maps.Equal(existing.ResolvedImages, images) {
 		return &api.JobRegistrationResponse{Namespace: namespace, Name: jobSpec.Name, Incarnation: existing.Incarnation, Version: existing.Version, Revision: existing.Revision}, nil
 	}
 	s.mu.RLock()
@@ -1078,7 +1098,7 @@ func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spe
 	if limits == (spec.Limits{}) {
 		limits = spec.DefaultLimits()
 	}
-	err := spec.ValidateWithLimits(jobSpec, limits)
+	err = spec.ValidateWithLimits(jobSpec, limits)
 	if err != nil {
 		err = fmt.Errorf("validate job: %w", err)
 	} else {
@@ -1090,8 +1110,8 @@ func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spe
 	}
 
 	hashes := make(map[string]string, len(jobSpec.TaskGroups))
-	for i := range jobSpec.TaskGroups {
-		hashes[jobSpec.TaskGroups[i].Name] = spec.TaskGroupContentHash(&jobSpec.TaskGroups[i])
+	for i := range execution.TaskGroups {
+		hashes[execution.TaskGroups[i].Name] = spec.TaskGroupContentHash(&execution.TaskGroups[i])
 	}
 
 	revision, version := 1, 1
@@ -1109,13 +1129,14 @@ func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spe
 		incarnation = existing.Incarnation
 	}
 	job := &Job{
-		Spec:          jobSpec,
-		Incarnation:   incarnation,
-		Revision:      revision,
-		Version:       version,
-		ContentHashes: hashes,
+		Spec:           jobSpec,
+		ResolvedImages: images,
+		Incarnation:    incarnation,
+		Revision:       revision,
+		Version:        version,
+		ContentHashes:  hashes,
 	}
-	revisionRecord := &JobRevisionRecord{Version: version, Revision: revision, Spec: jobSpec, CreatedAt: s.now().UTC()}
+	revisionRecord := &JobRevisionRecord{Version: version, Revision: revision, Spec: jobSpec, ResolvedImages: images, CreatedAt: s.now().UTC()}
 	if err := s.state.PutJobWithRevision(ctx, key, job, revisionRecord); err != nil {
 		return nil, fmt.Errorf("save job remotely: %w", err)
 	}
@@ -1556,7 +1577,7 @@ func (s *Server) jobStatus(namespace, name string) (*api.JobStatusResponse, *spe
 	if !ok {
 		return nil, nil, false
 	}
-	r := &api.JobStatusResponse{Name: name, Incarnation: job.Incarnation, Version: job.Version, Revision: job.Revision}
+	r := &api.JobStatusResponse{Name: name, Incarnation: job.Incarnation, Version: job.Version, Revision: job.Revision, ResolvedImages: maps.Clone(job.ResolvedImages)}
 	for _, g := range job.Spec.TaskGroups {
 		r.Desired += g.Count
 	}
@@ -1581,16 +1602,28 @@ func (s *Server) jobStatus(namespace, name string) (*api.JobStatusResponse, *spe
 }
 
 // PlanJob returns the semantic plan for applying desired, a canonical job.
-func (s *Server) PlanJob(desired *spec.JobSpec) api.JobPlanResponse {
+func (s *Server) PlanJob(ctx context.Context, desired *spec.JobSpec) (api.JobPlanResponse, error) {
+	images, err := s.resolveJobImages(ctx, desired, nil)
+	if err != nil {
+		return api.JobPlanResponse{}, err
+	}
+	execution := executionSpec(desired, images)
 	s.mu.RLock()
 	current := s.jobs[jobKey(desired.Namespace, desired.Name)]
 	s.mu.RUnlock()
+	var result api.JobPlanResponse
 	if current == nil {
-		return plan.Build(nil, plan.Base{}, desired)
+		result = plan.Build(nil, plan.Base{}, execution)
+	} else {
+		// Job records are replaced, never mutated, so current is read safely.
+		result = plan.Build(executionSpec(current.Spec, current.ResolvedImages), plan.Base{Incarnation: current.Incarnation, Version: current.Version, Revision: current.Revision}, execution)
+		// An authored reference change can resolve to the same execution ref.
+		if result.Action == "none" {
+			result = plan.Build(current.Spec, plan.Base{Incarnation: current.Incarnation, Version: current.Version, Revision: current.Revision}, desired)
+		}
 	}
-	// Job records are replaced, never mutated, so current is read safely
-	// without s.mu.
-	return plan.Build(current.Spec, plan.Base{Incarnation: current.Incarnation, Version: current.Version, Revision: current.Revision}, desired)
+	result.ResolvedImages = images
+	return result, nil
 }
 
 // DeleteJob removes desired job state.
@@ -1737,10 +1770,11 @@ func (s *Server) ListJobVersions(ctx context.Context, namespace, name string) (a
 	for _, r := range records {
 		rawSpec, _ := json.Marshal(r.Spec)
 		result = append(result, api.JobVersionResponse{
-			Version:   r.Version,
-			Revision:  r.Revision,
-			Spec:      rawSpec,
-			CreatedAt: r.CreatedAt,
+			Version:        r.Version,
+			Revision:       r.Revision,
+			Spec:           rawSpec,
+			ResolvedImages: r.ResolvedImages,
+			CreatedAt:      r.CreatedAt,
 		})
 	}
 	return result, nil

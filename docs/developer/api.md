@@ -74,7 +74,27 @@ Node resource values use millicores for CPU and bytes for memory. In `GET /v1/no
 
 When desired capacity cannot be placed, job status includes one `pending` allocation per unmet replica. Its existing allocation `reason` and `message` fields carry the current placement diagnostic: `no_healthy_nodes`, `constraint_mismatch`, `volume_owner_unavailable`, `missing_capability`, `host_port_conflict`, or `insufficient_capacity`. Reconciliation reuses these records rather than creating another pending allocation on every pass. It updates a record only when the blocking reason changes and places the same allocation, clearing the diagnostic, when a node becomes eligible. These are observations of scheduler filters, not new desired-state resources or scheduling policy.
 
-A job has an identity and two counters, all reported by `GET /v1/namespaces/{ns}/jobs` and `GET /v1/namespaces/{ns}/jobs/{name}`. `incarnation` is an opaque ID assigned when the job is created; it never changes during the job's life, and a job deleted and recreated under the same name gets a new one. `version` advances on every accepted change to the specification, including label, `count`, and update-policy changes. `revision` identifies execution content: it advances only when a task group's execution hash changes, and allocations carry it as `job_revision` for fencing and rolling updates. Submitting a specification identical to the current one changes neither and writes nothing.
+A job has an identity and two counters, all reported by `GET /v1/namespaces/{ns}/jobs` and `GET /v1/namespaces/{ns}/jobs/{name}`. `incarnation` is an opaque ID assigned when the job is created; it never changes during the job's life, and a job deleted and recreated under the same name gets a new one. `version` advances on every accepted change to the specification or resolved images, including label, `count`, and update-policy changes. `revision` identifies execution content: it advances only when a task group's execution hash changes, and allocations carry it as `job_revision` for fencing and rolling updates. Submitting an identical specification with identical resolved images changes neither and writes nothing.
+
+Planning resolves every distinct image tag to a digest-qualified reference and
+returns `resolved_images`, a map from authored image strings to those references.
+The plan's image changes compare pinned execution references, so an unchanged tag
+with new content produces an update. The manifest itself retains authored tags.
+Digest-qualified inputs do not require a registry lookup. Resolution is bounded
+to 30 seconds per image and uses anonymous registry access; failure returns `422`
+with task context and leaves desired state unchanged. Multi-platform images are
+pinned by their top-level index digest, not the control-plane node's platform.
+
+Submission accepts optional `resolved_images`. Omission resolves images afresh.
+To apply a reviewed plan, pass its complete map alongside the original `spec`
+and base preconditions; apply validates the pins without resolving tags again.
+Every supplied reference must include a valid digest and retain the authored
+repository, tag (including implicit `latest`), and any explicit digest. Missing,
+extra, or mismatched pins are rejected with `422`. Explicit pins are desired
+state selected by the caller, not proof of a registry's current tag mapping.
+`GET .../jobs/{name}` exposes both authored `spec` and `resolved_images`.
+Allocation creation, recovery, and `POST .../restart` use recorded pins and never
+resolve tags again.
 
 The job submitted to `POST /v1/namespaces/{ns}/jobs` or `.../jobs/plan` must name the path namespace in `spec.namespace`; a mismatch returns `400`. The plan returns `base_incarnation`, `base_version`, and `base_revision` for an existing job. Submission accepts optional preconditions:
 
@@ -85,7 +105,7 @@ The job submitted to `POST /v1/namespaces/{ns}/jobs` or `.../jobs/plan` must nam
 
 Malformed preconditions (a negative version, or the combinations above) return `400`. The leader checks the preconditions and commits the change under the same serialized job-mutation lock, so of several concurrent applies against the same version exactly one succeeds; the others receive `409 Conflict` with a `message` naming the expected and current versions, or saying that the job was deleted and recreated. A successful submit returns `202` with `{"namespace", "name", "incarnation", "version", "revision"}` describing the committed job, so clients need not re-read it. `trellisctl jobs apply` always sends the `base_incarnation` and `base_version` of the plan it showed (or `expected_version: 0` for a create). `job.registered` events on the event streams fire for every apply that changes a job and carry its new `version` and `revision`.
 
-`GET /v1/namespaces/{ns}/jobs/{name}/versions` returns the retained history in ascending version order; each entry has `version`, the `revision` that version ran, the full canonical `spec`, and `created_at`. Trellis retains at most the 10 newest versions for each live job, and every apply that changes the specification compacts that job's history. A newly elected leader also compacts all histories and removes records orphaned by older job deletions. Deleting a job atomically deletes all of its history, so recreating the same name starts again at version 1 and revision 1. Backups use format version 5, which records the producing `trellis_version`, carries the replicated `cluster_settings`, and holds canonical job and history records. `POST /v1/backup/restore` accepts only the current format version; a backup in any other format is refused with an error that names its format and the Trellis release that created it, so it can be restored with a release that uses the same format. Formats are never migrated.
+`GET /v1/namespaces/{ns}/jobs/{name}/versions` returns the retained history in ascending version order; each entry has `version`, the `revision` that version ran, the full canonical `spec`, `resolved_images`, and `created_at`. To roll back to an exact historical deployment, submit that entry's `spec` and `resolved_images` together; submitting its tagged spec alone selects today's tag content instead. Trellis retains at most the 10 newest versions for each live job, and every changed apply compacts that job's history. A newly elected leader also compacts all histories and removes records orphaned by older job deletions. Deleting a job atomically deletes all of its history, so recreating the same name starts again at version 1 and revision 1. Backups use format version 6, which records the producing `trellis_version`, carries the replicated `cluster_settings`, and holds canonical job and history records with resolved image pins. Restore validates those pins without registry lookups. `POST /v1/backup/restore` accepts only the current format version; a backup in any other format is refused with an error that names its format and the Trellis release that created it, so it can be restored with a release that uses the same format. Formats are never migrated.
 
 For allocation logs, `task` selects the task name from the allocation's task group. It may be omitted when the allocation has exactly one task; a multi-task allocation returns `400` until the caller selects one. The allocation ID is the Trellis allocation identity, not an agent/container runtime ID.
 

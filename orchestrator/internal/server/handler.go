@@ -678,8 +678,9 @@ func validationResponse(c *echo.Context, err error) error {
 
 // jobRequest is a decoded job apply or plan request.
 type jobRequest struct {
-	Spec          spec.JobSpec
-	Preconditions JobPreconditions
+	Spec           spec.JobSpec
+	Preconditions  JobPreconditions
+	ResolvedImages map[string]string
 }
 
 // decodeJobRequest decodes and canonicalizes a job submission addressed to
@@ -690,7 +691,7 @@ func (h *Handler) decodeJobRequest(c *echo.Context, ns string) (*jobRequest, err
 	if err := decodeJSON(c, &body, maxJobRequestBytes); err != nil {
 		return nil, err
 	}
-	request := &jobRequest{Preconditions: JobPreconditions{Version: body.ExpectedVersion, Incarnation: body.ExpectedIncarnation}}
+	request := &jobRequest{Preconditions: JobPreconditions{Version: body.ExpectedVersion, Incarnation: body.ExpectedIncarnation}, ResolvedImages: body.ResolvedImages}
 	if err := decodeJobSpec(body.Spec, &request.Spec); err != nil {
 		return nil, err
 	}
@@ -718,7 +719,11 @@ func (h *Handler) handlePlanJob(c *echo.Context) error {
 	if err := requireAPIAccessDelegation(c, &request.Spec); err != nil {
 		return err
 	}
-	return c.JSON(http.StatusOK, h.server.PlanJob(&request.Spec))
+	result, err := h.server.PlanJob(c.Request().Context(), &request.Spec)
+	if err != nil {
+		return validationResponse(c, err)
+	}
+	return c.JSON(http.StatusOK, result)
 }
 
 func (h *Handler) handleRegisterJob(c *echo.Context) error {
@@ -733,7 +738,7 @@ func (h *Handler) handleRegisterJob(c *echo.Context) error {
 	if err := requireAPIAccessDelegation(c, &request.Spec); err != nil {
 		return err
 	}
-	result, err := h.server.RegisterJob(c.Request().Context(), ns, &request.Spec, &request.Preconditions)
+	result, err := h.server.RegisterJob(c.Request().Context(), ns, &request.Spec, &request.Preconditions, request.ResolvedImages)
 	switch {
 	case errors.Is(err, ErrJobVersionConflict):
 		return echo.NewHTTPError(http.StatusConflict, err.Error())

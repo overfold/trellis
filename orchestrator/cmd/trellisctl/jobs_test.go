@@ -289,10 +289,11 @@ func TestJobsApplySendsPlannedVersionAndReportsConflict(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var expected *int
 			var expectedIncarnation string
+			pinned := "docker.io/library/app:v1@sha256:" + strings.Repeat("a", 64)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/v1/namespaces/default/jobs/plan":
-					_ = json.NewEncoder(w).Encode(api.JobPlanResponse{Action: "update", Namespace: "default", Job: "web", BaseIncarnation: "inc-1", BaseVersion: 4, BaseRevision: 2, Changes: []api.JobPlanChange{{Operation: "change", Path: "task_groups[api].count", Before: 1, After: 3}}})
+					_ = json.NewEncoder(w).Encode(api.JobPlanResponse{Action: "update", Namespace: "default", Job: "web", BaseIncarnation: "inc-1", BaseVersion: 4, BaseRevision: 2, ResolvedImages: map[string]string{"app:v1": pinned}, Changes: []api.JobPlanChange{{Operation: "change", Path: "task_groups[api].count", Before: 1, After: 3}}})
 				case "/v1/namespaces/default/jobs":
 					var request api.JobRegistrationRequest
 					decoder := json.NewDecoder(r.Body)
@@ -301,6 +302,9 @@ func TestJobsApplySendsPlannedVersionAndReportsConflict(t *testing.T) {
 						t.Error(err)
 					}
 					expected, expectedIncarnation = request.ExpectedVersion, request.ExpectedIncarnation
+					if request.ResolvedImages["app:v1"] != pinned {
+						t.Errorf("apply lost the plan's image pin: %+v", request.ResolvedImages)
+					}
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(tc.status)
 					_, _ = w.Write([]byte(tc.body))

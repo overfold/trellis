@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/distribution/reference"
 	"github.com/overfold/trellis/orchestrator/internal/probepath"
 )
 
@@ -175,6 +176,8 @@ func Validate(job *JobSpec) error {
 			}
 			if strings.TrimSpace(task.Image) == "" {
 				add(taskPath+".image", "required", "image is required")
+			} else if _, err := reference.ParseNormalizedNamed(task.Image); err != nil {
+				add(taskPath+".image", "invalid_image", "must be a valid OCI image reference (repository, optional tag or digest)")
 			}
 			if task.Resources != nil {
 				if task.Resources.CPU <= 0 {

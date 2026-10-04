@@ -469,10 +469,11 @@ func (s *StateController) get(ctx context.Context, key string, value any) (bool,
 // JobRevisionRecord stores a historical job spec snapshot. Records are keyed
 // by job version; Revision is the execution revision that version ran.
 type JobRevisionRecord struct {
-	Version   int           `json:"version"`
-	Revision  int           `json:"revision"`
-	Spec      *spec.JobSpec `json:"spec"`
-	CreatedAt time.Time     `json:"created_at"`
+	Version        int               `json:"version"`
+	Revision       int               `json:"revision"`
+	Spec           *spec.JobSpec     `json:"spec"`
+	ResolvedImages map[string]string `json:"resolved_images"`
+	CreatedAt      time.Time         `json:"created_at"`
 }
 
 // ListJobRevisions returns the retained history records for a job in

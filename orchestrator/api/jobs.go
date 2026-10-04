@@ -11,6 +11,10 @@ type JobRegistrationRequest struct {
 	// Spec is the job specification as a canonical JSON document. Its
 	// namespace must be the namespace in the request path.
 	Spec json.RawMessage `json:"spec"`
+	// ResolvedImages pins each authored image reference to a digest-qualified
+	// reference. Pass the complete map returned by planning (or retained
+	// history) to deploy those exact artifacts. Omission resolves tags afresh.
+	ResolvedImages map[string]string `json:"resolved_images,omitempty"`
 	// ExpectedVersion makes the apply conditional on the job's current
 	// version: 0 requires that the job does not exist, and N requires that
 	// the job is at version N. A nonzero ExpectedVersion also requires
@@ -54,7 +58,8 @@ type JobStatusResponse struct {
 	ReplacementBackoff []ReplacementBackoffResponse `json:"replacement_backoff,omitempty"`
 	// Spec is the job's canonical specification. It is omitted when
 	// listing jobs.
-	Spec json.RawMessage `json:"spec,omitempty"`
+	Spec           json.RawMessage   `json:"spec,omitempty"`
+	ResolvedImages map[string]string `json:"resolved_images,omitempty"`
 }
 
 // JobListResponse is the response returned when listing jobs.
@@ -76,10 +81,11 @@ type ReplacementBackoffResponse struct {
 // JobVersionResponse describes one retained version of a job and the
 // execution revision it ran. Spec is the version's canonical specification.
 type JobVersionResponse struct {
-	Version   int             `json:"version"`
-	Revision  int             `json:"revision"`
-	Spec      json.RawMessage `json:"spec"`
-	CreatedAt time.Time       `json:"created_at"`
+	Version        int               `json:"version"`
+	Revision       int               `json:"revision"`
+	Spec           json.RawMessage   `json:"spec"`
+	ResolvedImages map[string]string `json:"resolved_images"`
+	CreatedAt      time.Time         `json:"created_at"`
 }
 
 // JobVersionListResponse is the response returned when listing job versions.
@@ -90,14 +96,15 @@ type JobVersionListResponse = []JobVersionResponse
 // does not exist; an apply of the plan passes them as its preconditions.
 type JobPlanResponse struct {
 	// Action is create, update, or none.
-	Action             string          `json:"action"`
-	Namespace          string          `json:"namespace"`
-	Job                string          `json:"job"`
-	BaseIncarnation    string          `json:"base_incarnation,omitempty"`
-	BaseVersion        int             `json:"base_version,omitempty"`
-	BaseRevision       int             `json:"base_revision,omitempty"`
-	DesiredAllocations int             `json:"desired_allocations"`
-	Changes            []JobPlanChange `json:"changes"`
+	Action             string            `json:"action"`
+	Namespace          string            `json:"namespace"`
+	Job                string            `json:"job"`
+	BaseIncarnation    string            `json:"base_incarnation,omitempty"`
+	BaseVersion        int               `json:"base_version,omitempty"`
+	BaseRevision       int               `json:"base_revision,omitempty"`
+	DesiredAllocations int               `json:"desired_allocations"`
+	Changes            []JobPlanChange   `json:"changes"`
+	ResolvedImages     map[string]string `json:"resolved_images"`
 }
 
 // JobPlanChange describes one semantic change to a job specification.

@@ -126,7 +126,7 @@ Plan: update production/web from version 12 (revision 7)
   ~ task_groups[frontend].update.max_parallel: 1 -> 2
 ```
 
-A normal `apply` also asks the server for a plan first and uses its `none` result for the no-op decision. It then submits the manifest conditioned on the plan's incarnation and version, so the change you reviewed is exactly the change applied. If another apply changed, created, or deleted the job in between—including deleting and recreating it under the same name, which restarts its version at 1—the command fails with a version conflict and changes nothing; run it again to review the new plan. `jobs status` prints the job's `Incarnation`, which identifies the job from its creation until it is deleted.
+A normal `apply` also asks the server for a plan first and uses its `none` result for the no-op decision. Planning resolves image tags; the image changes shown in the plan include digest-qualified references, so reapplying an unchanged manifest can update a moved tag. The CLI submits the plan's exact image pins along with the manifest, conditioned on the plan's incarnation and version. A tag moving after planning cannot change the submitted deployment. If another apply changed, created, or deleted the job in between—including deleting and recreating it under the same name, which restarts its version at 1—the command fails with a version conflict and changes nothing; run it again to review the new plan. `jobs status` prints the job's `Incarnation`, which identifies the job from its creation until it is deleted.
 
 ## Apply and observe convergence
 

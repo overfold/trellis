@@ -65,6 +65,8 @@ func TestValidateRejectsInvalidJobs(t *testing.T) {
 		{"missing namespace", func(j *JobSpec) { j.Namespace = "" }},
 		{"zero replicas", func(j *JobSpec) { j.TaskGroups[0].Count = 0 }},
 		{"missing image", func(j *JobSpec) { j.TaskGroups[0].Tasks[0].Image = "" }},
+		{"image URL", func(j *JobSpec) { j.TaskGroups[0].Tasks[0].Image = "https://registry.example/app:main" }},
+		{"invalid image digest", func(j *JobSpec) { j.TaskGroups[0].Tasks[0].Image = "app@sha256:abc" }},
 		{"invalid port", func(j *JobSpec) {
 			j.TaskGroups[0].Tasks[0].Networking = &TaskNetworkingSpec{Mode: TaskNetworkHost, Ports: []PortSpec{{Port: 70000}}}
 		}},

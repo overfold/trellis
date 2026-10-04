@@ -209,7 +209,7 @@ func TestRegisterJobUsesJobLimitsCurrentAtCommit(t *testing.T) {
 	if _, err := s.UpdateJobLimits(ctx, limits); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.RegisterJob(ctx, "default", job, nil); err == nil || !strings.Contains(err.Error(), "exceeds operator limit of 2 replicas") {
+	if _, err := s.RegisterJob(ctx, "default", job, nil, nil); err == nil || !strings.Contains(err.Error(), "exceeds operator limit of 2 replicas") {
 		t.Fatalf("registering a job above the job limits current at commit: err = %v", err)
 	}
 }

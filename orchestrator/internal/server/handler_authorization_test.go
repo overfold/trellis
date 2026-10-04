@@ -48,7 +48,7 @@ func TestPlanRejectsAPIAccessAboveCallerAuthority(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			control := &Server{jobs: make(map[string]*Job)}
+			control := &Server{jobs: make(map[string]*Job), resolveImage: testImageResolver}
 			e := echo.New()
 			NewHandler(control).Register(e)
 

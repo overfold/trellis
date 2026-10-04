@@ -18,13 +18,14 @@ func newTestServerWithAgent() (*Server, *testAgent) {
 	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	agent := newTestAgent()
 	s := &Server{
-		log:     slog.Default(),
-		state:   newNopStateController(),
-		client:  newTestAgentClient(),
-		nodes:   make(map[uuid.UUID]*Node),
-		jobs:    make(map[string]*Job),
-		now:     func() time.Time { return now },
-		catalog: newNopCatalog(),
+		log:          slog.Default(),
+		state:        newNopStateController(),
+		client:       newTestAgentClient(),
+		resolveImage: testImageResolver,
+		nodes:        make(map[uuid.UUID]*Node),
+		jobs:         make(map[string]*Job),
+		now:          func() time.Time { return now },
+		catalog:      newNopCatalog(),
 	}
 	return s, agent
 }
@@ -408,7 +409,7 @@ func TestLabelOnlyRevisionSkipsDrain(t *testing.T) {
 			Tasks:  []spec.TaskSpec{{Name: "server", Image: "app:v1"}},
 		}},
 	}
-	if _, err := s.RegisterJob(context.Background(), "default", jobSpec, nil); err != nil {
+	if _, err := s.RegisterJob(context.Background(), "default", jobSpec, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	job := s.jobs[jobKey("default", "web")]
@@ -425,7 +426,7 @@ func TestLabelOnlyRevisionSkipsDrain(t *testing.T) {
 			Tasks:  []spec.TaskSpec{{Name: "server", Image: "app:v1"}},
 		}},
 	}
-	if _, err := s.RegisterJob(context.Background(), "default", updatedSpec, nil); err != nil {
+	if _, err := s.RegisterJob(context.Background(), "default", updatedSpec, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	job = s.jobs[jobKey("default", "web")]
@@ -444,7 +445,7 @@ func TestTaskChangeBumpsRevision(t *testing.T) {
 			Tasks: []spec.TaskSpec{{Name: "server", Image: "app:v1"}},
 		}},
 	}
-	if _, err := s.RegisterJob(context.Background(), "default", jobSpec, nil); err != nil {
+	if _, err := s.RegisterJob(context.Background(), "default", jobSpec, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -455,7 +456,7 @@ func TestTaskChangeBumpsRevision(t *testing.T) {
 			Tasks: []spec.TaskSpec{{Name: "server", Image: "app:v2"}},
 		}},
 	}
-	if _, err := s.RegisterJob(context.Background(), "default", updated, nil); err != nil {
+	if _, err := s.RegisterJob(context.Background(), "default", updated, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	job := s.jobs[jobKey("default", "web")]
@@ -474,7 +475,7 @@ func TestCountChangeIsLabelOnly(t *testing.T) {
 			Tasks: []spec.TaskSpec{{Name: "server", Image: "app:v1"}},
 		}},
 	}
-	if _, err := s.RegisterJob(context.Background(), "default", jobSpec, nil); err != nil {
+	if _, err := s.RegisterJob(context.Background(), "default", jobSpec, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -486,7 +487,7 @@ func TestCountChangeIsLabelOnly(t *testing.T) {
 			Tasks: []spec.TaskSpec{{Name: "server", Image: "app:v1"}},
 		}},
 	}
-	if _, err := s.RegisterJob(context.Background(), "default", updated, nil); err != nil {
+	if _, err := s.RegisterJob(context.Background(), "default", updated, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	job := s.jobs[jobKey("default", "web")]

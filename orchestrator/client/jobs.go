@@ -40,6 +40,7 @@ func (c *Client) GetJob(ctx context.Context, name string) (*api.JobStatusRespons
 // JSON job specification in the client's namespace. Passing the plan's
 // BaseVersion and BaseIncarnation as the preconditions of ApplyJob applies
 // the specification only if the job has not changed since it was planned.
+// Also pass ResolvedImages to deploy the reviewed digests even if tags move.
 func (c *Client) PlanJob(ctx context.Context, spec json.RawMessage) (*api.JobPlanResponse, error) {
 	path, err := c.namespacedPath("/jobs/plan")
 	if err != nil {
@@ -53,7 +54,9 @@ func (c *Client) PlanJob(ctx context.Context, spec json.RawMessage) (*api.JobPla
 }
 
 // ApplyJob creates or updates a job in the client's namespace, which must
-// be the specification's namespace. A failed precondition returns an
+// be the specification's namespace. Without ResolvedImages it resolves tags
+// afresh; with the complete plan/history pins it uses those artifacts.
+// A failed precondition returns an
 // *HTTPError with status 409 Conflict; an invalid specification returns
 // status 422 Unprocessable Entity.
 func (c *Client) ApplyJob(ctx context.Context, request *api.JobRegistrationRequest) (*api.JobRegistrationResponse, error) {

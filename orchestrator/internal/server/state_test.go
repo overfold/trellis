@@ -254,9 +254,12 @@ func TestBackupRestoreRoundTripsPersistedJob(t *testing.T) {
 	ctx := context.Background()
 	store := &backupStore{data: memoryStore{}, snapshot: &state.DesiredSnapshot{Jobs: map[string][]byte{}, JobRevisions: map[string][]byte{}, Secrets: map[string][]byte{}, VolumeRegistrations: map[string][]byte{}, NetworkPortRegistrations: map[string][]byte{}}}
 	job := &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}}), Incarnation: uuid.NewString(), Revision: 1, Version: 1}
+	pinned := "docker.io/library/app:latest@sha256:" + strings.Repeat("a", 64)
+	job.ResolvedImages = map[string]string{"app": pinned}
 	raw, _ := json.Marshal(job)
 	store.snapshot.Jobs["default%00web"] = raw
 	historical := &JobRevisionRecord{Version: 1, Revision: 1, Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 2000, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}}), CreatedAt: time.Now()}
+	historical.ResolvedImages = map[string]string{"app": pinned}
 	historicalRaw, err := json.Marshal(historical)
 	if err != nil {
 		t.Fatal(err)
@@ -291,7 +294,7 @@ func TestBackupRestoreRoundTripsPersistedJob(t *testing.T) {
 	if err := json.Unmarshal(store.snapshot.Jobs["default%00web"], &restored); err != nil {
 		t.Fatal(err)
 	}
-	if restored.Spec == nil || restored.Spec.TaskGroups[0].Tasks[0].Resources == nil || restored.Incarnation != job.Incarnation {
+	if restored.Spec == nil || restored.Spec.TaskGroups[0].Tasks[0].Resources == nil || restored.Incarnation != job.Incarnation || restored.ResolvedImages["app"] != pinned {
 		t.Fatalf("restored job is not the canonical backed-up job: %#v", restored)
 	}
 	if string(store.snapshot.JobRevisions["default%00web/1"]) != string(historicalRaw) {

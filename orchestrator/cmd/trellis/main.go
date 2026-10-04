@@ -320,6 +320,9 @@ func run(parent context.Context, cfg *config) error {
 	}
 
 	control := server.NewServer(log, local, stateCtl, raftStore, cfg.Cluster, cfg.ServerAdvertise)
+	if buildTestRuntime != nil && cfg.Runtime == buildTestRuntime.name {
+		control.SetImageResolver(buildTestRuntime.resolveImage)
+	}
 	if cfg.SecretsKey != "" {
 		key, keyID, err := loadSecretsKey(cfg.SecretsKey, cfg.SecretsKeyID)
 		if err != nil {
@@ -614,7 +617,8 @@ type testRuntime struct {
 	addFlags func(*pflag.FlagSet)
 	open     func(dataDir string) (containerruntime.ContainerRuntime, io.Closer, error)
 	// network replaces namespace networking for the test runtime.
-	network network.Manager
+	network      network.Manager
+	resolveImage func(context.Context, string) (string, error)
 }
 
 var buildTestRuntime *testRuntime

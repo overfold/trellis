@@ -136,6 +136,9 @@ func TestApplyJobSendsSpecAndPreconditions(t *testing.T) {
 		if string(request["spec"]) != `{"namespace":"default","name":"web"}` || string(request["expected_version"]) != "3" || string(request["expected_incarnation"]) != `"b7c2"` {
 			t.Errorf("request = %s", request)
 		}
+		if string(request["resolved_images"]) != `{"app:main":"app:main@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}` {
+			t.Errorf("resolved images = %s", request["resolved_images"])
+		}
 		w.WriteHeader(http.StatusConflict)
 		_, _ = io.WriteString(w, `{"message":"job version conflict: the job was deleted and recreated"}`)
 	}))
@@ -144,6 +147,7 @@ func TestApplyJobSendsSpecAndPreconditions(t *testing.T) {
 	version := 3
 	_, err := mustNew(t, Config{Address: server.URL, Token: "token", Namespace: "default"}).ApplyJob(context.Background(), &api.JobRegistrationRequest{
 		Spec:                json.RawMessage(`{"namespace":"default","name":"web"}`),
+		ResolvedImages:      map[string]string{"app:main": "app:main@sha256:" + strings.Repeat("a", 64)},
 		ExpectedVersion:     &version,
 		ExpectedIncarnation: "b7c2",
 	})

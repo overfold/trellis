@@ -38,7 +38,7 @@ func jobIncarnation(s *Server) string { return s.jobs[jobKey("default", "web")].
 func TestRegisterJobConcurrentAppliesAtSameVersionConflict(t *testing.T) {
 	s, _ := newTestServerWithAgent()
 	ctx := context.Background()
-	if _, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v1", 1), expectVersion(0, "")); err != nil {
+	if _, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v1", 1), expectVersion(0, ""), nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -48,7 +48,7 @@ func TestRegisterJobConcurrentAppliesAtSameVersionConflict(t *testing.T) {
 	errs := make([]error, appliers)
 	for i := range appliers {
 		wg.Go(func() {
-			_, errs[i] = s.RegisterJob(ctx, "default", versionTestSpec(fmt.Sprintf("app:v%d", i+2), 1), expectVersion(1, incarnation))
+			_, errs[i] = s.RegisterJob(ctx, "default", versionTestSpec(fmt.Sprintf("app:v%d", i+2), 1), expectVersion(1, incarnation), nil)
 		})
 	}
 	wg.Wait()
@@ -75,10 +75,10 @@ func TestRegisterJobExpectedVersionPreconditions(t *testing.T) {
 	s, _ := newTestServerWithAgent()
 	ctx := context.Background()
 
-	if _, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v1", 1), expectVersion(1, "missing")); !errors.Is(err, ErrJobVersionConflict) {
+	if _, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v1", 1), expectVersion(1, "missing"), nil); !errors.Is(err, ErrJobVersionConflict) {
 		t.Fatalf("update of a missing job error = %v, want version conflict", err)
 	}
-	created, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v1", 1), expectVersion(0, ""))
+	created, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v1", 1), expectVersion(0, ""), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestRegisterJobExpectedVersionPreconditions(t *testing.T) {
 		t.Fatalf("created job = %+v, want version 1 revision 1 in the job's incarnation", created)
 	}
 	var conflict *JobVersionConflictError
-	if _, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v2", 1), expectVersion(0, "")); !errors.As(err, &conflict) || !conflict.Exists || conflict.Current != 1 {
+	if _, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v2", 1), expectVersion(0, ""), nil); !errors.As(err, &conflict) || !conflict.Exists || conflict.Current != 1 {
 		t.Fatalf("create of an existing job error = %v, want conflict at version 1", err)
 	}
 	for name, preconditions := range map[string]*JobPreconditions{
@@ -94,16 +94,16 @@ func TestRegisterJobExpectedVersionPreconditions(t *testing.T) {
 		"version without incarnation": expectVersion(1, ""),
 		"absent job with incarnation": expectVersion(0, created.Incarnation),
 	} {
-		if _, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v2", 1), preconditions); !errors.Is(err, ErrInvalidJobPreconditions) {
+		if _, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v2", 1), preconditions, nil); !errors.Is(err, ErrInvalidJobPreconditions) {
 			t.Fatalf("%s error = %v, want invalid preconditions", name, err)
 		}
 	}
 	// An unconditional apply still succeeds.
-	if _, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v2", 1), nil); err != nil {
+	if _, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v2", 1), nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	// Stale version is rejected even when the spec already matches.
-	if _, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v2", 1), expectVersion(1, created.Incarnation)); !errors.Is(err, ErrJobVersionConflict) {
+	if _, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v2", 1), expectVersion(1, created.Incarnation), nil); !errors.Is(err, ErrJobVersionConflict) {
 		t.Fatalf("stale no-op apply error = %v, want version conflict", err)
 	}
 }
@@ -111,7 +111,7 @@ func TestRegisterJobExpectedVersionPreconditions(t *testing.T) {
 func TestRegisterJobScaleChangeAdvancesVersionAndHistory(t *testing.T) {
 	s, _ := newTestServerWithAgent()
 	ctx := context.Background()
-	if _, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v1", 1), nil); err != nil {
+	if _, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v1", 1), nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	incarnation := s.jobs[jobKey("default", "web")].Incarnation
@@ -120,7 +120,7 @@ func TestRegisterJobScaleChangeAdvancesVersionAndHistory(t *testing.T) {
 	if !ok {
 		t.Fatal("subscribe to events")
 	}
-	scaled, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v1", 3), expectVersion(1, incarnation))
+	scaled, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v1", 3), expectVersion(1, incarnation), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,14 +135,14 @@ func TestRegisterJobScaleChangeAdvancesVersionAndHistory(t *testing.T) {
 	if scaled.Version != 2 || scaled.Revision != 1 {
 		t.Fatalf("scaled job = %+v, want version 2 at unchanged revision 1", scaled)
 	}
-	unchanged, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v1", 3), expectVersion(2, incarnation))
+	unchanged, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v1", 3), expectVersion(2, incarnation), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if unchanged.Version != 2 || unchanged.Revision != 1 {
 		t.Fatalf("identical apply = %+v, want version 2 revision 1", unchanged)
 	}
-	updated, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v2", 3), expectVersion(2, incarnation))
+	updated, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v2", 3), expectVersion(2, incarnation), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestRegisterJobHistoryIsBoundedAndClearedByDelete(t *testing.T) {
 	s, _ := newTestServerWithAgent()
 	ctx := context.Background()
 	for count := 1; count <= jobRevisionRetention+2; count++ {
-		if _, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v1", count), nil); err != nil {
+		if _, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v1", count), nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -196,7 +196,7 @@ func TestRegisterJobHistoryIsBoundedAndClearedByDelete(t *testing.T) {
 	if err := s.DeleteJob(ctx, "default", "web"); err != nil {
 		t.Fatal(err)
 	}
-	recreated, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v9", 1), expectVersion(0, ""))
+	recreated, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v9", 1), expectVersion(0, ""), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,17 +262,17 @@ func TestRegisterJobHandlerReportsVersionConflict(t *testing.T) {
 func TestRegisterJobDetectsDeleteAndRecreate(t *testing.T) {
 	s, _ := newTestServerWithAgent()
 	ctx := context.Background()
-	original, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v1", 1), expectVersion(0, ""))
+	original, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v1", 1), expectVersion(0, ""), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := s.DeleteJob(ctx, "default", "web"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v1", 1), &JobPreconditions{Incarnation: original.Incarnation}); !errors.Is(err, ErrJobVersionConflict) {
+	if _, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v1", 1), &JobPreconditions{Incarnation: original.Incarnation}, nil); !errors.Is(err, ErrJobVersionConflict) {
 		t.Fatalf("apply to a deleted incarnation error = %v, want conflict", err)
 	}
-	recreated, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v2", 1), nil)
+	recreated, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v2", 1), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,17 +283,17 @@ func TestRegisterJobDetectsDeleteAndRecreate(t *testing.T) {
 	// A caller that read version 1 of the original job must not overwrite the
 	// recreated job, although it is also at version 1.
 	var conflict *JobVersionConflictError
-	_, err = s.RegisterJob(ctx, "default", versionTestSpec("app:v3", 1), expectVersion(original.Version, original.Incarnation))
+	_, err = s.RegisterJob(ctx, "default", versionTestSpec("app:v3", 1), expectVersion(original.Version, original.Incarnation), nil)
 	if !errors.As(err, &conflict) || !conflict.Recreated || !strings.Contains(err.Error(), "deleted and recreated") {
 		t.Fatalf("apply against the original incarnation error = %v, want recreated conflict", err)
 	}
-	if _, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v3", 1), &JobPreconditions{Incarnation: original.Incarnation}); !errors.As(err, &conflict) || !conflict.Recreated {
+	if _, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v3", 1), &JobPreconditions{Incarnation: original.Incarnation}, nil); !errors.As(err, &conflict) || !conflict.Recreated {
 		t.Fatalf("incarnation-only apply error = %v, want recreated conflict", err)
 	}
 	if got := jobIncarnation(s); got != recreated.Incarnation {
 		t.Fatalf("incarnation after rejected applies = %s, want %s", got, recreated.Incarnation)
 	}
-	updated, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v3", 1), expectVersion(recreated.Version, recreated.Incarnation))
+	updated, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v3", 1), expectVersion(recreated.Version, recreated.Incarnation), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

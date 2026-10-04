@@ -14,6 +14,7 @@ import (
 func TestDeleteAndRecreateJobDoesNotAdoptPreviousIncarnation(t *testing.T) {
 	store := memoryStore{}
 	s := NewServer(slog.Default(), nil, NewStateController(store, "test"), store, "test", "")
+	s.SetImageResolver(testImageResolver)
 	agent := newTestAgent()
 	t.Cleanup(agent.server.Close)
 	s.client = newTestAgentClient()
@@ -22,7 +23,7 @@ func TestDeleteAndRecreateJobDoesNotAdoptPreviousIncarnation(t *testing.T) {
 	addTestNode(s, node, s.now())
 	ctx := context.Background()
 
-	if _, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v1", 1), nil); err != nil {
+	if _, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v1", 1), nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	firstIncarnation := s.jobs[jobKey("default", "web")].Incarnation
@@ -45,7 +46,7 @@ func TestDeleteAndRecreateJobDoesNotAdoptPreviousIncarnation(t *testing.T) {
 	if err := s.DeleteJob(ctx, "default", "web"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v2", 1), nil); err != nil {
+	if _, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v2", 1), nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	secondIncarnation := s.jobs[jobKey("default", "web")].Incarnation
@@ -86,13 +87,14 @@ func TestDeleteAndRecreateJobDoesNotAdoptPreviousIncarnation(t *testing.T) {
 func TestConcurrentDeleteAndRecreateFencesOldAllocations(t *testing.T) {
 	store := memoryStore{}
 	s := NewServer(slog.Default(), nil, NewStateController(store, "test"), store, "test", "")
+	s.SetImageResolver(testImageResolver)
 	agent := newTestAgent()
 	t.Cleanup(agent.server.Close)
 	s.client = newTestAgentClient()
 	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
 	addTestNode(s, node, s.now())
 	ctx := context.Background()
-	if _, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v1", 1), nil); err != nil {
+	if _, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v1", 1), nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	s.Reconcile(ctx)
@@ -112,7 +114,7 @@ func TestConcurrentDeleteAndRecreateFencesOldAllocations(t *testing.T) {
 	}
 	recreated := make(chan error, 1)
 	go func() {
-		_, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v2", 1), nil)
+		_, err := s.RegisterJob(ctx, "default", versionTestSpec("app:v2", 1), nil, nil)
 		recreated <- err
 	}()
 	for {

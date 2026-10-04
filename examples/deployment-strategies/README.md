@@ -21,7 +21,7 @@ trellisctl --namespace default jobs status shop-rolling
 
 Old allocations become draining. Trellis starts at most one not-yet-healthy replacement at a time and removes old capacity after replacements become healthy. With the fixed port in this example, three steady-state replicas require three nodes and `max_parallel: 1` requires at least one additional compatible node during the update. If the readiness check never succeeds, progress intentionally stalls; inspect allocation events and task logs rather than repeatedly applying the same manifest.
 
-Rollback is another revision: restore the earlier image/configuration and apply it. Trellis does not erase revision history by calling the new revision a rollback.
+Rollback is another revision: restore the earlier image digest/configuration and apply it. Reusing an earlier tag resolves its current content, which may no longer be the original artifact. API consumers can submit a retained version's `spec` and `resolved_images` together for an exact rollback. Trellis does not erase revision history by calling the new revision a rollback.
 
 ## Blue/green switch
 

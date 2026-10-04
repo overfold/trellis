@@ -152,7 +152,7 @@ update:
 
 Rolling replacement marks old-revision allocations as draining, starts bounded replacement capacity, and removes old allocations as healthy replacements become available. `max_parallel` limits both not-yet-healthy replacements and temporary live capacity above `count`; a stop must succeed before its capacity can be reused. It is not a percentage.
 
-Rolling updates require spare schedulable capacity and a useful health check. If the group publishes or reserves a fixed node port, spare capacity also means another node where that port is available. Recreate updates avoid overlap but can reduce or eliminate service capacity during replacement. In either case, preview with `trellisctl jobs apply --dry-run` before applying and treat rollback as another desired-state revision: restore the earlier image/configuration and apply it again.
+Rolling updates require spare schedulable capacity and a useful health check. If the group publishes or reserves a fixed node port, spare capacity also means another node where that port is available. Recreate updates avoid overlap but can reduce or eliminate service capacity during replacement. In either case, preview with `trellisctl jobs apply --dry-run` before applying and treat rollback as another desired-state revision: restore the earlier image digest/configuration and apply it again. An old tag selects its current registry content, not necessarily the original artifact. API consumers can instead submit the retained version's `spec` and `resolved_images` together for an exact rollback.
 
 ## Switch complete releases with blue/green routing
 

@@ -369,7 +369,7 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 		}
 		jobName := job.Spec.Name
 		namespace := job.Spec.Namespace
-		for _, group := range job.Spec.TaskGroups {
+		for _, group := range executionSpec(job.Spec, job.ResolvedImages).TaskGroups {
 			backoffKey := replacementBackoffKey(namespace, jobName, group.Name)
 			backoff := planReplacementBackoff(policy, in.Backoffs[backoffKey], namespace, jobName, group.Name, job.Revision, allocationsByGroup[backoffKey], now, job.Incarnation)
 			plannedBackoffs[backoffKey] = backoff

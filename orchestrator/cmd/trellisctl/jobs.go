@@ -98,6 +98,7 @@ func NewJobsApplyCmd() *cobra.Command {
 			expectedVersion := jobPlan.BaseVersion
 			applied, err := serverClient.ApplyJob(cmd.Context(), &api.JobRegistrationRequest{
 				Spec:                rawSpec,
+				ResolvedImages:      jobPlan.ResolvedImages,
 				ExpectedVersion:     &expectedVersion,
 				ExpectedIncarnation: jobPlan.BaseIncarnation,
 			})
