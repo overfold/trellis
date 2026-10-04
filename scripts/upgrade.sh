@@ -9,13 +9,19 @@ drained=false
 node_id=""
 had_health_probe=false
 
+upgrade_ctl() {
+    env -u TRELLIS_TOKEN -u TRELLIS_ADMINISTRATOR_KEY TRELLIS_CONFIG="$operator_config" \
+        "${INSTALL_DIR}/trellisctl" --context local --server-addr https://127.0.0.1:8128 \
+        --ca-cert "${RUN_DIR}/ca.crt" --cert= --key= "$@"
+}
+
 cleanup() {
     local rc=$?
     if [ "$rc" -ne 0 ]; then
         if [ "$ROLLBACK_NEEDED" = true ]; then
             rollback || true
         elif [ "$drained" = true ] && [ -n "$WORK_TMP" ] && [ -n "$node_id" ]; then
-            local_ctl "$WORK_TMP" nodes undrain "$node_id" >/dev/null 2>&1 || true
+            upgrade_ctl nodes undrain "$node_id" >/dev/null 2>&1 || true
         fi
     fi
     [ -z "$WORK_TMP" ] || rm -rf "$WORK_TMP"
@@ -90,16 +96,23 @@ fi
 
 if [ "$was_running" = true ] && [ -n "$node_id" ]; then
     ui_section "Drain"
-    if ! node_json="$(local_ctl "$WORK_TMP" nodes list --output json 2>/dev/null)"; then
+    operator_config="${TRELLIS_CONFIG:-}"
+    if [ -z "$operator_config" ]; then
+        operator_home="$(getent passwd "${SUDO_USER:-root}" | cut -d: -f6)"
+        [ -n "$operator_home" ] || ui_die "Could not determine the invoking user's home directory."
+        operator_config="${operator_home}/.config/trellis/config.yaml"
+    fi
+    [ -f "$operator_config" ] || ui_die "Operator config missing at ${operator_config}; provide TRELLIS_CONFIG with a local cluster/write context. No binaries were changed."
+    if ! node_json="$(upgrade_ctl nodes list --output json)"; then
         ui_die "Could not inspect cluster membership; no binaries were changed."
     fi
     node_count="$(printf '%s' "$node_json" | grep -c '"id"' || true)"
     if [ "${node_count:-0}" -gt 1 ]; then
-        local_ctl "$WORK_TMP" nodes drain "$node_id" >/dev/null
+        upgrade_ctl nodes drain "$node_id" >/dev/null
         drained=true
         ui_step "Drain started"
         if ! wait_for_local_allocations_to_stop; then
-            local_ctl "$WORK_TMP" nodes undrain "$node_id" >/dev/null 2>&1 || true
+            upgrade_ctl nodes undrain "$node_id" >/dev/null 2>&1 || true
             ui_die "Timed out waiting for allocations to move; the node was undrained and no binaries were changed."
         fi
         ui_step "Allocations moved to healthy replacements"
@@ -130,7 +143,7 @@ rollback() {
     if [ "$was_running" = true ]; then systemctl start trellis >/dev/null 2>&1 || true; fi
     if [ "$drained" = true ]; then
         for _ in $(seq 1 20); do
-            if local_ctl "$WORK_TMP" nodes undrain "$node_id" >/dev/null 2>&1; then break; fi
+            if upgrade_ctl nodes undrain "$node_id" >/dev/null 2>&1; then break; fi
             sleep 1
         done
     fi
@@ -165,7 +178,7 @@ fi
 
 if [ "$drained" = true ]; then
     ui_section "Resume"
-    local_ctl "$WORK_TMP" nodes undrain "$node_id" >/dev/null
+    upgrade_ctl nodes undrain "$node_id" >/dev/null
     ui_step "Node is schedulable again"
 fi
 write_state_version "$RELEASE_TAG"

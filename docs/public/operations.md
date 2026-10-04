@@ -225,6 +225,15 @@ It downloads and verifies the new release before touching the running daemon, th
 
 A service that was already stopped remains stopped. On a multi-node cluster the script also evacuates the node first; see [Multi-node clusters](multi-node.md#maintain-a-multi-node-cluster).
 
+Membership checks, drain, and undrain use the invoking user's saved `local` context from `~/.config/trellis/config.yaml` (the sudo user's home when run with `sudo`). This context needs a valid cluster/write operator credential. Maintenance connects to the node's local API and uses `/run/trellis/ca.crt`, regardless of the currently selected context. A missing context or rejected credential stops the upgrade before binaries are changed and reports the underlying CLI error.
+
+On a joining node without a saved `local` context, configure one with a cluster/write credential first. For a configuration stored elsewhere, download the script and pass its path explicitly:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/upgrade.sh -o /tmp/trellis-upgrade.sh
+sudo env TRELLIS_CONFIG="$HOME/.config/trellis/config.yaml" bash /tmp/trellis-upgrade.sh
+```
+
 ## Agent recovery refused
 
 When the daemon starts, its allocation agent restores the node's allocations from durable records below `data_dir` (`agent/control-epoch` and `agent/allocations/`) and compares them with the containers containerd reports for the cluster. If containerd cannot list containers, the agent starts anyway: it keeps its recorded allocations and their ports, reports them with unknown health, and retries until a listing succeeds. Restore containerd; nothing else is needed.

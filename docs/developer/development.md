@@ -33,6 +33,8 @@ Tests beside each package document state-machine invariants, Raft persistence, s
 
 From the repository root, `bash scripts/install-core_test.sh` exercises the installer's operator-access phase for first installs, replacement clusters, resumes, and joins. It uses the real CLI for context saving and mocks credential creation and host ownership operations; it does not install packages or start services.
 
+`bash scripts/upgrade_test.sh` exercises the full upgrade script with mocked releases, CLI calls, and host services. It checks local-context selection, single- and multi-node maintenance, explicit configuration paths, missing or rejected credentials, drain timeouts, and rollback without changing host services.
+
 ## Linting
 
 Run `golangci-lint run` from `orchestrator/` using the version pinned in CI.
