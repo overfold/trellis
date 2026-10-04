@@ -6,9 +6,6 @@ Trellis places containers across your machines, keeps them healthy, and rolls ou
 
 ![Trellis CLI: preview a job plan, apply the manifest, inspect a healthy allocation, and delete the job.](docs/images/demo.gif)
 
-> [!NOTE]
-> Trellis is experimental and pre-1.0. Expect breaking changes between releases, and do not rely on it for production workloads yet.
-
 ## Features
 
 - **Declarative jobs.** YAML manifests through `trellisctl`, or JSON through the API and Go client, previewed as a plan before you apply them.
