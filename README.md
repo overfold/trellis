@@ -48,21 +48,16 @@ You need a Debian or Ubuntu x86-64 machine with `sudo`.
 
 ## How it works
 
-Every interface, including the CLI, API, docs, and examples, uses the same hierarchy:
+Every machine runs the same `trellis` daemon. The nodes elect a leader through Raft, and the leader serves the API, stores desired state, and decides where work runs. Every node, the leader included, runs workloads. Up to five nodes vote in elections; any additional node replicates state and can be promoted to replace a voter.
 
-```text
-cluster
-├── nodes
-└── namespaces
-    └── jobs
-        └── task groups
-            ├── tasks
-            └── allocations (runtime instances)
-```
+You describe workloads with four concepts:
 
-A **job** describes the desired state of a workload. Applying it creates a new job revision, and Trellis then creates **allocations** to run the requested number of copies of each task group. An allocation's **lifecycle**, such as running or failed, is tracked separately from its **health**.
+- **Namespaces** group related jobs and give them their own private network and service discovery.
+- **Jobs** describe the desired state of a workload. Each change you apply creates a new version.
+- **Task groups** are the unit that Trellis places, scales, and updates. Each contains one or more **tasks**, the containers that run together, such as an app and its sidecar.
+- **Allocations** are the running copies of a task group. Each one reports its lifecycle, such as running or failed, separately from its health.
 
-Each cluster elects a leader through Raft. The leader serves the API and reconciles jobs, while every node, the leader included, runs allocations. Up to five nodes vote in elections. Any additional node replicates state and can be promoted to replace a voter. The [user model](docs/public/user-model.md) defines this vocabulary precisely.
+When you apply a job, the leader plans the change and places allocations on nodes with capacity. It then keeps reconciling: when an allocation fails or its node stops responding, Trellis places a replacement. The [user model](docs/public/user-model.md) defines every term precisely.
 
 ## Design principles
 
