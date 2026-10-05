@@ -2,7 +2,23 @@
 
 Complete [Getting Started](getting-started.md) first. It establishes the only golden path: install → connect → deploy → inspect → update → view logs → remove. This page then introduces one layer of Trellis at a time instead of beginning with an application architecture.
 
+## Get the examples
+
+Getting Started needs no clone. For this extended tutorial, use Git to get the examples and guides together at the version installed by the release installer:
+
+```sh
+TRELLIS_VERSION=$(trellisctl version)
+git clone --branch "$TRELLIS_VERSION" https://github.com/overfold/trellis.git trellis-examples
+cd trellis-examples
+```
+
+You do not need to build Trellis. Run the example commands from this repository root, and read `docs/public/learning-path.md` in the checkout so the instructions match the manifests and installed release. Git's detached-HEAD notice is expected when checking out a release tag; you can still edit the examples. For a locally built `dev` version, use the source checkout that produced it instead of a release tag.
+
+If you only want to try the next service, use the [web-service download instructions](../../examples/web-service/README.md#try-it-without-cloning) without cloning.
+
 ## The sequence
+
+The stage numbers identify lessons, not a requirement to provision more machines before learning secrets or volumes. After stage 2, choose the single-node or multi-node continuation below.
 
 | Stage | Learn | Run |
 |---|---|---|
@@ -46,9 +62,15 @@ The task omits `networking.mode`, so it runs in the default `namespace` network 
 
 Apply the example and reach the service at the selected node's port 8080. If its health check blocks readiness, `jobs status web-service` includes the relevant allocation diagnostics automatically. Do not add replicas yet; first make the one-allocation service model concrete.
 
-### Before stage 3: add nodes
+### Choose your next step
 
-Stages 1 and 2 work on the single node from Getting Started. From stage 3 onward, several lessons need more than one schedulable node to make placement and rollout overlap visible. Follow [Multi-node clusters](multi-node.md) to grow your cluster to three nodes, or use its local three-node Vagrant lab. Volume locality (stage 6) and namespace networking (stage 8) are also more instructive across several nodes.
+**Keep exploring on one node.** You can leave replicas and rolling overlap for later:
+
+- Adapt a copy of the web-service manifest to your own image. Match its listening port, health endpoint, and resource requirements; check and preview before applying, then use status and logs to inspect it. Remove the tutorial service first if your application publishes the same node port.
+- Continue to [Secrets](#5-secrets) to learn environment and file delivery. The single-node installer already configured the encryption key; preserve it before storing real credentials.
+- Continue to [Volumes](#6-volumes) to learn local persistence. The example works on one node with its documented path and label preparation. Use disposable data, and remember that deleting a job does not delete its volume contents.
+
+**Explore orchestration across machines.** For stages 3 and 4, follow [Multi-node clusters](multi-node.md) to grow your cluster to three nodes, or use its local three-node Vagrant lab. These lessons demonstrate replica placement and the temporary capacity needed for rolling overlap. Volume locality (stage 6) and namespace networking (stage 8) are also more instructive across several nodes, but do not require adding nodes before trying secrets or local storage.
 
 ## 3. Replicas and placement
 

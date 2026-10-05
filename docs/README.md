@@ -9,13 +9,15 @@ Trellis is experimental. These pages describe the current repository and do not 
 Read these in order if this is your first time using Trellis:
 
 1. **[Getting Started](public/getting-started.md)** — install a single-node cluster, connect the CLI, and complete the apply/inspect/update/log/delete lifecycle.
-2. **[Learning path](public/learning-path.md)** — add health checks, networking, rolling updates, secrets, volumes, sidecars, API access, and advanced patterns in a deliberate sequence.
+2. **[Learning path](public/learning-path.md)** — get release-matched examples, add a reachable service, then choose single-node workload features or multi-node placement and rolling updates before advanced patterns.
 3. **[User model](public/user-model.md)** — learn the precise vocabulary shared by manifests, the CLI, examples, and API.
 4. **[Core concepts](public/core-concepts.md)** — understand scheduling, reconciliation, networking, persistence, and updates.
 
 [Design principles](public/design-principles.md) explains what belongs in Trellis and why.
 
 Getting Started is the only installation walkthrough and [`examples/hello`](../examples/hello/) is the only first-workload example. The root README's quick start is a condensed excerpt that uses the same installer command and manifest; other pages link back to them rather than maintaining competing quick starts.
+
+Getting Started requires no clone or build. The extended learning path recommends a release-matched repository checkout for its examples and guides, without building Trellis; the web-service lesson also offers a direct manifest download. Adding nodes is optional until you choose lessons that require distributed placement.
 
 ## Workload guides and reference
 

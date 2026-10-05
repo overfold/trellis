@@ -6,6 +6,8 @@ This is the shortest complete Trellis journey: install one node, use the CLI as 
 
 You need a systemd-based Debian or Ubuntu x86-64 host with `sudo`, `curl`, and outbound access to GitHub and the package repositories. The installer can install containerd when it is missing. Run it on the host, not inside a container; Trellis and containerd need the same host mount namespace.
 
+Have a password manager ready before installing: the installer displays the administrator private key once, and Trellis does not retain it.
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/install.sh | sudo bash
 ```
@@ -30,7 +32,14 @@ trellisctl nodes list
 
 ## 2. Create the first manifest
 
-Create an empty working directory and save this as `trellis.yaml`:
+Create an empty working directory and download the example matching your installed release:
+
+```sh
+TRELLIS_VERSION=$(trellisctl version)
+curl -fsSL "https://raw.githubusercontent.com/overfold/trellis/${TRELLIS_VERSION}/examples/hello/trellis.yaml" -o trellis.yaml
+```
+
+For the release described by this guide, the manifest is:
 
 ```yaml
 # yaml-language-server: $schema=https://raw.githubusercontent.com/overfold/trellis/main/schemas/trellis-job.schema.json
@@ -107,6 +116,10 @@ You have now completed the full workload lifecycle: install → connect → depl
 - Image-pull failures usually mean the node cannot reach GHCR or the image/tag is unavailable.
 - `trellisctl context current` and `trellisctl nodes list` verify the saved operator connection.
 
-Continue with the [learning path](learning-path.md). It reuses the tutorial application and adds concepts one at a time: first a published port and `/health`, then replicas and placement, then rolling-update overlap before moving on to secrets, volumes, sidecars, namespace networking, API access, release patterns, and stateful architectures.
+## Next: explore at your own pace
+
+Getting Started required no repository checkout. For the extended [learning path](learning-path.md#get-the-examples), clone the repository at your installed release to get the examples and their guides together; you do not need to build Trellis. If you only want to try a reachable web service, its guide also offers a [direct manifest download](../../examples/web-service/README.md#try-it-without-cloning).
+
+After that service, choose whether to keep exploring on one node with your own image, secrets, and volumes, or add nodes to learn replica placement and rolling-update overlap. You do not need a multi-node cluster to continue learning useful workload features.
 
 [Documentation index](../README.md) · [Next: Learning path](learning-path.md)

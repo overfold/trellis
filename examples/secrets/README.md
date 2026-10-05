@@ -8,6 +8,8 @@ This example injects one secret as an environment variable and one as a read-onl
 
 Every server must use the same separately managed secrets encryption key and key ID. The key must be a root-readable 32-byte value (or its accepted base64 representation) supplied with `--secrets-key`. Losing it makes encrypted secret records—including records in a Trellis backup—unrecoverable.
 
+One node is enough for this lesson. The Getting Started installer already configured its encryption key at `/etc/trellis/secrets.key`; keep a secure backup before storing real credentials. Additional nodes must receive the same key when joining.
+
 Create the namespace-scoped values before applying the job:
 
 ```sh
@@ -16,6 +18,8 @@ trellisctl --namespace default secrets set tls-key --file ./server.key
 trellisctl jobs apply --check --file examples/secrets/trellis.yaml
 trellisctl jobs apply --file examples/secrets/trellis.yaml --wait
 ```
+
+`./server.key` is a file you supply. For a disposable delivery-only trial without a real TLS key, replace the second command with `openssl rand -base64 32 | trellisctl --namespace default secrets set tls-key --stdin`. These random bytes demonstrate file delivery, not a usable TLS key.
 
 `API_TOKEN` receives the first value. The second appears at `/run/trellis-secrets/tls.key`; decimal mode `256` is octal `0400`. File targets must use a clean path below `/run/trellis-secrets/` and may use mode `0400` or `0600`.
 

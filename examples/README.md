@@ -4,6 +4,10 @@ The examples form a learning path, not a flat catalog. Start with one conceptual
 
 Complete [Getting Started](../docs/public/getting-started.md) first, or follow the expanded [learning path](../docs/public/learning-path.md). Commands below assume `trellisctl` is connected to the manifest's namespace.
 
+Getting Started needs no clone. For the extended tutorial, [clone the repository at your installed release](../docs/public/learning-path.md#get-the-examples) and run commands from its root; the checkout supplies examples and guides, not a requirement to build Trellis. The [web-service example](web-service/README.md#try-it-without-cloning) also supports a direct download if you only want to try one more workload.
+
+After the web service, [choose your next step](../docs/public/learning-path.md#choose-your-next-step). Secrets and volumes can be explored on the single installed node; replicas and rolling overlap need more nodes. The order below is a concept map, not a requirement to add machines before trying runtime configuration or persistence.
+
 ## Beginner
 
 | Order | Example | Adds |

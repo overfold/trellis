@@ -19,6 +19,8 @@ Trellis places containers across your machines, keeps them healthy, and rolls ou
 
 You need a systemd-based Debian or Ubuntu x86-64 host with `sudo`, `curl`, and outbound access to GitHub and package repositories.
 
+You do not need to clone or build Trellis for this quick start. Have a password manager ready: the installer displays the administrator private key once, and Trellis does not retain it.
+
 1. Install a single-node cluster. The installer shows its plan before it changes anything, installs containerd if it is missing, and saves a `trellisctl` context for your user:
 
    ```sh
@@ -28,9 +30,12 @@ You need a systemd-based Debian or Ubuntu x86-64 host with `sudo`, `curl`, and o
 2. Download the `hello` example manifest and deploy it:
 
    ```sh
-   curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/examples/hello/trellis.yaml -o trellis.yaml
+   TRELLIS_VERSION=$(trellisctl version)
+   curl -fsSL "https://raw.githubusercontent.com/overfold/trellis/${TRELLIS_VERSION}/examples/hello/trellis.yaml" -o trellis.yaml
    trellisctl jobs apply --file trellis.yaml --wait
    ```
+
+   The download uses the installed release's example rather than the latest development manifest on `main`.
 
 3. Check that it is running and read its logs:
 
