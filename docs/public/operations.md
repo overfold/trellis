@@ -55,6 +55,32 @@ are [cluster settings](#cluster-settings): they only initialize a new cluster,
 and afterwards every node uses the replicated values. Editing them here and
 restarting has no effect on an existing cluster.
 
+### Host resource reserve
+
+Scheduling uses the node's **allocatable** CPU and memory, not its whole-host
+capacity or current utilization. Trellis automatically reserves 5% for the host:
+CPU is bounded to 100–1000 millicores and memory to 256 MiB–2 GiB, each capped
+at half the host's capacity on small machines. Override either dimension in the
+node configuration when the OS, containerd, or other host services need more:
+
+```yaml
+resources:
+  reserved:
+    cpu: 500
+    memory: 512MiB
+```
+
+CPU is millicores and memory accepts the same byte-size notation as job YAML.
+Omitting a dimension keeps its automatic reserve; explicit zero disables that
+reserve. Negative values or a reserve greater than host capacity are rejected.
+This is per-node policy, not replicated job limits, and is applied after a
+daemon restart. Inspect capacity, allocatable resources, and live usage with
+`trellisctl nodes status NODE`; a low utilization reading alone does not make
+room for a job whose declared requests exceed allocatable capacity. A reserve
+is scheduler accounting, not a dedicated cgroup protecting host services.
+
+### Task process limit
+
 Every task container a node creates is limited to `resources.task_pids_limit`
 processes and threads (default `4096`, maximum `4194304`; flag
 `--task-pids-limit`), so a fork bomb in one task cannot exhaust the host's PIDs
@@ -79,25 +105,29 @@ limit also cannot start those. Raise it for workloads that legitimately run
 many threads or processes. Keep it consistent across nodes unless you
 deliberately want different per-node bounds.
 
-Each node admits at most 256 concurrent UDP DNS queries and 128 active TCP DNS
-connections. UDP queries above the limit receive `SERVFAIL`; excess TCP
-connections are closed. Admission is released as soon as a query or connection
-finishes, and DNS forwarding is canceled during node shutdown. These fixed
-limits bound work and open connections when workloads flood the node-local
-resolver or an upstream resolver is slow, while preserving the source-network
-namespace check for every admitted discovery query.
+### Fixed service limits
+
+These limits are not configurable cluster settings. Reduce concurrent clients
+or reconnect with backoff when they are reached:
+
+| Service | Limit | Overload behavior |
+|---|---|---|
+| Node DNS | 256 concurrent UDP queries; 128 active TCP connections per node | UDP receives `SERVFAIL`; excess TCP connections close |
+| API events | 256 event streams per control-plane process | `503 Service Unavailable`, `Retry-After: 1` |
+| Exec | 256 relays per leader; 64 sessions per node; 8 per allocation | `429 Too Many Requests` before opening a stream |
+
+Exec closes after 30 minutes without input, output, or resize, or after eight
+hours even while active. A client that stops consuming output can also be
+disconnected after 30 minutes. Leadership changes end existing exec sessions;
+run the command again after a leader is available. See [CLI exec](cli.md#run-commands-and-open-an-allocation-terminal)
+and the [API stream contract](api.md#exec-streams).
 
 Internal discovery publishes IPv4 A records. Queries for AAAA or other record
 types on an existing name return `NOERROR` with no answers, so dual-stack
 lookups can use the A record. Missing or namespace-inaccessible names return
 `NXDOMAIN`.
 
-Each control-plane process also admits at most 256 simultaneous event
-streams (`GET /v1/events` and `GET /v1/namespaces/{namespace}/events`). A request above that limit receives `503 Service
-Unavailable` with `Retry-After: 1`; clients should reconnect with backoff. A
-disconnected or canceled stream releases its slot immediately. The limit is per
-process, so clients reconnecting after a leader change are admitted against the
-new leader's independent limit.
+### Apply node configuration
 
 Edit this file when changing persistent node configuration, then restart the service:
 
@@ -117,7 +147,7 @@ The root-run containerd runtime stores task logs and generated DNS/hosts mount f
 
 `terminal_allocation_retention` governs terminal history and its retained task logs. Once the control plane prunes an allocation, the leader asks its node to delete the logs. The agent reports retained log inventory in every heartbeat, so deletion is retried and catches up when an unavailable node returns. Logs are node-local, not replicated: they are unavailable while the node is unreachable and cannot be recovered if its disk is lost. There is currently no log rotation or log-size limit; operators must monitor disk usage. Health-check error messages include namespace, job, allocation, task, and container identifiers to distinguish failures in colocated workloads.
 
-Logs from allocations already running at the former `$TMPDIR/trellis-logs` location (`/tmp/trellis-logs` by default) remain readable only when that directory is owned by the runtime user, is not group- or world-writable, and denies access to other users. Legacy symlinks and non-regular log files are rejected. New task starts use the protected location; Trellis does not migrate existing mount files.
+The runtime's retained-log lookup and cleanup mechanics, including older temporary-directory paths, are described in [runtime internals](../developer/node-internals.md#runtime-abstraction).
 
 ## Cluster settings
 
@@ -221,11 +251,11 @@ The upgrade entrypoint performs the node-maintenance sequence instead of asking 
 curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/upgrade.sh | sudo bash
 ```
 
-It downloads and verifies the new release before touching the running daemon, then swaps the binaries, refreshes the installer-owned systemd unit, starts the daemon, and verifies both the service and control-plane API. If the new daemon does not become healthy, the previous binaries and unit are restored.
+It downloads and verifies the new release before touching the running daemon, then swaps the binaries, refreshes the installer-owned systemd unit, and starts the daemon. Verification checks that systemd reports the service active and the local API can serve authentication requests; it does not verify worker registration or workload readiness. If this check fails, the previous binaries and unit are restored. Afterward, inspect `trellisctl nodes status NODE` and affected jobs for workload health.
 
 A service that was already stopped remains stopped. On a multi-node cluster the script also evacuates the node first; see [Multi-node clusters](multi-node.md#maintain-a-multi-node-cluster).
 
-Membership checks, drain, and undrain use the invoking user's saved `local` context from `~/.config/trellis/config.yaml` (the sudo user's home when run with `sudo`). This context needs a valid cluster/write operator credential. Maintenance connects to the node's local API and uses `/run/trellis/ca.crt`, regardless of the currently selected context. A missing context or rejected credential stops the upgrade before binaries are changed and reports the underlying CLI error.
+Membership checks, drain, and undrain use the invoking user's saved `local` context from `~/.config/trellis/config.yaml` (the user identified by `SUDO_USER` when run through `sudo`, or root's home when run directly as root). This context needs a valid cluster/write operator credential. Maintenance connects to the node's local API and uses `/run/trellis/ca.crt`, regardless of the currently selected context. A missing context or rejected credential stops the upgrade before binaries are changed and reports the underlying CLI error.
 
 On a joining node without a saved `local` context, configure one with a cluster/write credential first. For a configuration stored elsewhere, download the script and pass its path explicitly:
 
@@ -236,7 +266,7 @@ sudo env TRELLIS_CONFIG="$HOME/.config/trellis/config.yaml" bash /tmp/trellis-up
 
 ## Agent recovery refused
 
-When the daemon starts, its allocation agent restores the node's allocations from durable records below `data_dir` (`agent/control-epoch` and `agent/allocations/`) and compares them with the containers containerd reports for the cluster. If containerd cannot list containers, the agent starts anyway: it keeps its recorded allocations and their ports, reports them with unknown health, and retries until a listing succeeds. Restore containerd; nothing else is needed.
+When the daemon starts, its allocation agent recovers from records below `data_dir` (`agent/control-epoch` and `agent/allocations/`). With intact records, an unavailable containerd listing is retried while health is unknown; restore containerd rather than deleting agent state.
 
 The agent refuses to start, and the daemon exits, when that state is broken:
 
@@ -244,7 +274,7 @@ The agent refuses to start, and the daemon exits, when that state is broken:
 - the control epoch is missing while allocation records or managed containers exist, or while containerd cannot be listed to confirm an empty first boot;
 - a Trellis container of this cluster has no allocation record.
 
-The last check also runs when a listing succeeds after containerd was unavailable at startup; the daemon then exits with the same error, and restarting refuses at startup. The agent does not adopt such a container from its labels: labels carry no control epoch, drain state, or restart budget, so adopting it could keep running or restart a task the control plane has already replaced. While the daemon is down its allocations stop heartbeating and are replaced on other nodes.
+The container-without-record check also runs when containerd becomes available after startup. While the daemon is down its allocations stop heartbeating and can be replaced on other nodes. Do not fabricate records or delete fencing state to bypass the refusal; [agent convergence](../developer/node-internals.md#agent-convergence) explains the recovery invariants.
 
 The error names the file or container and ends with `see "Agent recovery refused"`. To recover:
 
@@ -346,8 +376,11 @@ Allocation secret files are held on a verified tmpfs rather than a durable node 
 The control plane exposes Prometheus metrics at `/metrics` on its API port. Metrics name namespaces and jobs across the cluster, so a scrape needs a cluster-scoped credential; `read` access is enough. Mint one for Prometheus and scrape any control-plane node, which forwards the request to the leader:
 
 ```sh
-trellisctl credentials create --scope cluster --access read
+trellisctl --administrator-key ./trellis-administrator.pem \
+  credentials create --scope cluster --access read
 ```
+
+Credential creation requires the administrator key (alternatively set `TRELLIS_ADMINISTRATOR_KEY`). Save the returned token securely in the scrape's `credentials_file`; it is shown only once.
 
 ```yaml
 scrape_configs:
@@ -370,7 +403,7 @@ For normal workload diagnosis, start and usually finish with `jobs status`. `rea
 
 Every node runs namespace networking, the default task network, and requires WireGuard tools, iproute2, and iptables; the installer sets them up and the daemon refuses to start without them. Trellis enables IPv4 forwarding and keeps its rules in its own iptables chains, jumped to first from `FORWARD`, `INPUT`, and the nat table's `PREROUTING`, `OUTPUT`, and `POSTROUTING`. Namespace-networked tasks reach beyond their namespace network through the node, masqueraded to its address, so they can reach whatever the node can, including its private network and cloud metadata endpoints; block destinations tasks must not reach with firewalling outside Trellis. Published task ports are forwarded to their task before your host `FORWARD` rules run, so a host firewall does not restrict who can reach them; restrict access to published ports at the network edge instead. See [Networking and ports](job-specification.md#networking-and-ports) and [Multitenancy](multitenancy.md#networking).
 
-Workloads use Trellis's node-local DNS resolver on the reserved internal address `198.18.0.53:53`; it is not intended to be exposed on external interfaces. Node and Raft transports require mutually authenticated TLS. Possession of the CA key is not API or leader authorization: requests still need the durably bound certificate for one immutable node ID, and leader work is executed only by the current Raft leader with control-epoch, generation, revision, and execution-hash fencing where applicable. Followers preserve that certificate identity by redirecting node-authenticated control-plane requests, and Raft streams verify the peer's joined advertised address. Inbound Raft streams additionally require the peer's certificate to be the one bound to a current Raft member's UUID, so a certificate that merely chains to the cluster CA cannot replicate or vote. Removing a node tombstones its UUID, which every node-authenticated path rejects. Administrator credentials and join tokens are separate from node identity; managed enrollment receives the CA key only after certificate-bound Raft admission, and in managed mode every member therefore holds it (see [Multi-node clusters](multi-node.md#managed-signing-default)).
+Workloads use Trellis's node-local DNS resolver on the reserved internal address `198.18.0.53:53`; it is not intended to be exposed externally. Node and Raft transports require mutually authenticated TLS and certificate-bound node identities; removing a node permanently revokes its identity. Administrator keys, operator tokens, and join tokens have separate purposes and must not be substituted for node credentials. In managed signing mode every admitted member holds the CA private key, so treat a compromised member as a cluster compromise (see [Multi-node clusters](multi-node.md#managed-signing-default)). Protocol fencing and Raft peer verification belong to [internal APIs](../developer/api.md) and [Raft transport authorization](../developer/control-plane.md#raft-transport-authorization).
 
 Ports and WireGuard settings needed between nodes are described in [Multi-node clusters](multi-node.md#prepare-the-network-and-configuration).
 

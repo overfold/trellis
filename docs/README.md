@@ -23,6 +23,7 @@ Getting Started is the only installation walkthrough and [`examples/hello`](../e
 |---|---|
 | [CLI workflows](public/cli.md) | Manage contexts; check, preview, apply, inspect, watch, log, and delete jobs |
 | [Job manifest reference](public/job-specification.md) | Look up the complete current YAML schema and validation rules |
+| [HTTP API and Go client](public/api.md) | Build external integrations and workload controllers using the public JSON contract |
 | [Examples](../examples/README.md) | Run beginner, intermediate, and advanced manifests in learning order |
 | [Cookbook](public/cookbook.md) | Adapt Trellis primitives to deployment outcomes and architecture patterns |
 
@@ -41,7 +42,7 @@ Read these after the public model unless you are working on Trellis itself:
 - [Architecture and major boundaries](developer/architecture.md)
 - [Control plane, reconciliation, and lifecycle](developer/control-plane.md)
 - [Runtime, networking, storage, and secrets](developer/node-internals.md)
-- [JSON HTTP API](developer/api.md)
+- [Internal APIs and transport](developer/api.md)
 - [Development and testing](developer/development.md)
 
 ## Documentation contract
@@ -50,6 +51,6 @@ Read these after the public model unless you are working on Trellis itself:
 - The manifest schema in [Job manifest reference](public/job-specification.md) must match `orchestrator/internal/spec/types.go`.
 - Commands use the canonical `apply`, `status`, `logs`, and `delete` workflow from the CLI guide; validation/planning and watch/history are modes of those commands rather than separate verbs.
 - Example READMEs state their level and prerequisites; advanced patterns must not masquerade as turnkey beginner workloads.
-- Internal Raft, RPC, and storage mechanics belong in developer documentation or explicitly advanced operator sections.
+- Public documentation owns workload semantics, operator procedures, trust boundaries, and the external HTTP/Go integration contract. Developer documentation owns implementation, private node protocols, persistence mechanics, and contribution/testing workflows. Advanced operator sections retain only internals needed to perform a recovery or maintenance procedure safely and link to their developer owner for details.
 
 > Security note: use TLS, protect cluster-scoped operator and workload tokens, bind administrative endpoints to a trusted network, and keep the secrets encryption key outside the data directory. Namespaces do not restrict API credential authority.

@@ -14,7 +14,8 @@ Desired state is durable. Observations—heartbeats, runtime status, logs, much 
 
 ## Package map
 
-- `internal/spec`: YAML decode, types, validation, execution hashing.
+- `internal/spec`: YAML decode, canonical types, defaulting, validation, and execution hashing.
+- `internal/plan`: semantic job-change planning over canonical specifications and resolved images.
 - `internal/server`: domain state, handlers, scheduler, reconciliation, metrics, secrets delivery, allocation queries.
 - `internal/agent`: agent endpoints and local reconciliation, ports, volumes, restart integration.
 - `internal/runtime`: the container runtime interface, containerd implementation, injected test runtime, log access.

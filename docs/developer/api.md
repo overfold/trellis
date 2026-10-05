@@ -1,246 +1,35 @@
-# HTTP API
-
-The control-plane API defaults to port 8128. Ordinary operator and workload callers send `Authorization: Bearer TOKEN`. Administrator requests use the signing protocol below. Use TLS outside a local sandbox.
-
-Every namespaced resource names its namespace in the path: `/v1/namespaces/{namespace}/jobs`, `/allocations`, `/events`, and `/secrets`. There is no namespace header and no implicit default namespace. Listing across namespaces is a separate, explicit cluster-scoped request (`GET /v1/allocations`, `GET /v1/events`).
-
-JSON request bodies must be sent with `Content-Type: application/json` (otherwise `415`) and are decoded strictly, with the same rules as YAML manifests and the published schemas: a body must contain exactly one JSON value, and unknown fields, trailing data, and an empty body are rejected with `400` and a `message` naming the problem (for example `invalid request body: json: unknown field "imgae"`). Bodies are size-limited per route; an oversized body returns `413`. Job submissions and plans are limited to 4 MiB, heartbeats to 32 MiB, backup restores to 64 MiB, secret writes to 96 KiB, exec input to 128 KiB, and other requests to 64 KiB or 1 MiB.
+# Internal APIs and transport
 
-Trellis distinguishes three credential kinds:
+This page describes node-to-node implementation contracts. Operator tools and external integrations use the [public HTTP API and Go client](../public/api.md), not these endpoints. Wire types live in `internal/nodeapi`, node and agent clients in `internal/client`, and shared HTTP transport in `internal/transport`. Public wire types and clients remain in `api` and `client` without server-side dependencies.
 
-- `administrator` — the root request context granted after verification of an operator-held Ed25519 key;
-- `operator` — an explicitly minted API credential with `cluster` scope and `read` or `write` access;
-- `workload` — a scoped credential injected through task-group `api_access`.
+## Node identity and enrollment
 
-Credential prefixes (`trls_op_`, `trls_wl_`) are descriptive only. The server authenticates the complete bearer value and uses its authoritative stored principal metadata for generated credentials. An operator credential may carry an expiry chosen at creation; from that instant it no longer authenticates. Node join tokens (`trls_join_<id>.<secret>`) are not API credentials: they are accepted only by managed enrollment.
+`POST /v1/nodes`, `POST /v1/nodes/{id}/heartbeat`, `GET /v1/internal/discovery`, `POST /v1/raft/join`, and the agent API on port 8127 require a trusted node certificate whose URI SAN identifies the immutable node UUID. Followers redirect certificate-authenticated control-plane requests instead of proxying them with their own certificate. Registration and heartbeat IDs must match the caller's UUID.
 
-A task group requests workload access with an object such as `{"scope":"cluster","access":"read"}`. Workload credentials, like operator credentials, allow only explicit `cluster` scope and `read` or `write` access. Cluster scope grants only the ordinary API authority represented by the credential; it never turns into the administrator credential. Trellis sets `TRELLIS_NAMESPACE` to the job namespace so clients can conveniently build `/v1/namespaces/{namespace}/...` request paths, but this value is not an authorization boundary.
+Each UUID is durably bound to its admitted certificate. Removed UUIDs have replicated tombstones and are rejected on node-authenticated paths, enrollment, and Raft join regardless of their certificate. Raft join derives the member ID from the certificate, requires advertised hosts to match certificate SANs, and admits a non-voter. In managed mode the identity must already be bound by enrollment or bootstrap; external mode binds it on first join. The join response carries `members` (member IDs at admission) and, in managed mode, the CA private key. Outbound Raft streams verify the peer's joined address; inbound streams require a bound, non-removed member identity. See [membership and Raft transport authorization](control-plane.md#control-plane-membership).
 
-Each workload credential belongs to one allocation generation and carries a subject naming its namespace, job, and task group, which `GET /v1/auth/whoami` reports as `subject`. The leader mints it on the generation's first start and, like every generated credential, authenticates it by hash. Replicated state keeps only that hash and a copy sealed with the secrets encryption key, so start retries and leadership changes re-deliver the same token and the allocation execution hash stays stable. A server without a secrets key cannot start API-enabled allocations. Starting a new generation of the allocation, or with a different grant, replaces its credential and revokes the previous one. The leader's reconciliation revokes a workload credential once its allocation record is pruned, its job or task group is deleted, the job is recreated under the same name, or the task group's current `api_access` is removed or narrowed below the credential's scope or access. Widening `api_access` does not revoke existing credentials. A start for a generation older than the credential's recorded generation is rejected rather than revoking the newer credential, and a storage error while recovering a credential fails the start instead of rotating the token.
+Managed-only `POST /v1/nodes/enroll` uses a join-token bearer credential over TLS authenticated with the pinned node CA. Unknown, revoked, expired, or exhausted tokens return `401` without distinguishing the cause. The leader serializes enrollment and consumes a token use in the same replicated batch that binds the assigned UUID and certificate. Enrollment returns the certificate and private key without the CA key; only successful certificate-bound Raft admission delivers the CA key so that an admitted member can later lead enrollment.
 
-The API uses the same resource vocabulary as the [Trellis user model](../public/user-model.md), but JSON is the transport representation. Humans author jobs as YAML manifests; job submission carries the equivalent JSON `JobSpec` inside the API request. Human-readable YAML memory sizes are normalized to byte counts in JSON.
+## Registration, heartbeats, and discovery
 
-## Public/operator endpoints
+Registration reports physical and allocatable resources, capabilities, and the node's WireGuard public key, advertised endpoint, local port base, and range size. Heartbeats carry a complete current observation, including capabilities and `raft_applied_index`; optional host usage fields may be absent when counters are unavailable. They return no desired state. A `204` means the leader validated the report and recorded liveness, not that allocation observations have been durably persisted: observations are queued asynchronously. An unregistered node's heartbeat fails, causing registration before the next heartbeat.
 
-| Method | Path | Purpose |
-|---|---|---|
-| `GET` | `/metrics` | Prometheus metrics of the leader; requires cluster scope. |
-| `POST` | `/v1/auth/administrator/challenge` | Issue a short-lived one-time administrator signing challenge. |
-| `GET` | `/v1/auth/whoami` | Return the current credential kind, scope, access, and available provenance metadata. |
-| `GET` | `/v1/nodes` | List node capacity, discovered capabilities, status, and control-plane membership; requires cluster scope. |
-| `POST` / `DELETE` | `/v1/nodes/{id}/drain` | Drain or undrain; requires `cluster/write`. |
-| `GET` | `/v1/namespaces` | Discover namespace names visible to the caller. |
-| `GET` | `/v1/allocations?label=key:value` | List/filter allocations across all namespaces; requires cluster scope. |
-| `GET` | `/v1/events` | Server-sent event stream across all namespaces; requires cluster scope. |
-| `GET`, `POST` | `/v1/namespaces/{ns}/jobs` | List jobs or submit `{"spec": JobSpec, "expected_version": N, "expected_incarnation": ID}`; submitting requires write access. |
-| `POST` | `/v1/namespaces/{ns}/jobs/plan` | Validate and calculate the authoritative semantic plan for a `JobSpec`. |
-| `GET`, `DELETE` | `/v1/namespaces/{ns}/jobs/{name}` | Read job state/API representation or delete the job; deleting requires write access. |
-| `POST` | `/v1/namespaces/{ns}/jobs/{name}/restart` | Restart the job's allocations; requires write access. |
-| `GET` | `/v1/namespaces/{ns}/jobs/{name}/versions` | List the job's retained version history. |
-| `POST` | `/v1/namespaces/{ns}/jobs/{name}/groups/{group}/replacement-backoff/reset` | Clear a task group's replacement backoff; requires write access. |
-| `GET` | `/v1/namespaces/{ns}/allocations?label=key:value` | List/filter the namespace's allocations. |
-| `DELETE` | `/v1/namespaces/{ns}/allocations/{id}` | Stop one allocation; requires write access. |
-| `GET` | `/v1/namespaces/{ns}/allocations/{id}/events` | Lifecycle event array. |
-| `GET` | `/v1/namespaces/{ns}/allocations/{id}/logs?task=NAME&tail=100&follow=true` | Plain-text logs for one task in an allocation. |
-| `GET` | `/v1/namespaces/{ns}/allocations/{id}/exec?command=...` | Upgrade to a bidirectional WebSocket (`trellis.exec.v1`) that runs one command; requires write access. See [Exec streams](#exec-streams). |
-| `GET` | `/v1/namespaces/{ns}/allocations/{id}/metrics` | Current per-task CPU and memory usage. |
-| `GET` | `/v1/namespaces/{ns}/events` | Server-sent event stream for one namespace. |
-| `PUT` | `/v1/namespaces/{ns}/secrets/{name}` | Set a secret; requires write access. |
-| `GET` | `/v1/namespaces/{ns}/secrets[/{name}]` | List/get secret metadata only. |
-| `DELETE` | `/v1/namespaces/{ns}/secrets/{name}` | Delete a secret; requires write access. |
+Heartbeat bodies are limited to 32 MiB and 320,000 allocation-task reports (`413` on excess). A task `reason` is allowed only for phase `failed`, and currently only `restart_budget_exhausted` is accepted. A task in phase `starting` may carry `start_failure`: `attempt`, a message of at most 1024 bytes, and optional code `stale_generation`, `execution_conflict`, or `restart_budget_exhausted`. Other phases reject that field. The leader counts a failure for the allocation's current attempt once; a non-retryable code immediately fails it.
 
-Authorization of `/v1/namespaces/{ns}/...` routes checks cluster scope and access (`read` or `write`) separately, as noted per route. Operator and workload API credentials may address every namespace; the path selects the resource namespace rather than narrowing credential authority. A `{ns}` that is not a valid identifier returns `400`.
+Internal discovery exposes catalog entries only for namespaces with active allocations on the authenticated node. The node resolver additionally checks the workload's source namespace before answering. The leader combines durable namespace port slots with node-advertised bases to build WireGuard peer plans; see [networking](node-internals.md#networking).
 
-`GET /v1/auth/whoami` is the capability/introspection primitive clients should use instead of probing protected endpoints. Typical generated-token response:
+## Leader-to-agent operations
 
-```json
-{
-  "kind": "operator",
-  "scope": "cluster",
-  "access": "write",
-  "created_at": "2026-09-02T20:00:00Z"
-}
-```
+The client verifies that the agent certificate identifies the scheduled node. The agent verifies that the caller identifies its locally known Raft leader. Start, stop, drain, resume, and network-plan mutations require a positive control epoch; allocation operations also require a positive generation, and starts verify revision and execution hash. Protocol conflicts reject stale or incompatible execution rather than changing newer work.
 
-A workload credential additionally reports `"subject": {"namespace": "payments", "job": "router", "task_group": "sync"}`.
+The agent acknowledges a fenced start before pulling images and creating tasks in the background. The request's `attempt` is excluded from the execution hash and is returned in background-start failure observations. Exhausted restart budgets reject same-generation starts with HTTP `409` and operation code `restart_budget_exhausted`.
 
-An administrator credential reports `kind: "administrator"`, `scope: "cluster"`, and `access: "write"`, but callers must still treat `administrator` as more privileged than ordinary `cluster/write`: root-only endpoint checks use the credential kind/context, not merely those two effective fields.
+Drain/resume requests carry a persisted intent sequence. The leader saves intent before delivery; a failed undrain save contacts no agent, while a delivery failure after a successful save is retried by reconciliation. Starts carry `draining` and `drain_sequence` outside the execution hash. The agent uses the higher sequence of its local intent and the request (the request wins ties), including for tasks already running, so delayed drains cannot override resumes and start retries cannot restart drained tasks. See [reconciliation](control-plane.md#reconciliation) and [agent convergence](node-internals.md#agent-convergence).
 
-`GET /v1/namespaces` is discovery, not namespace lifecycle management. It returns the sorted union of namespace names that currently have a desired job or a stored secret. Credentials do not create discoverable namespaces. There is no namespace-creation call: storing a secret in or applying a job to a previously unseen namespace makes it discoverable.
+## Exec relay
 
-Node resource values use millicores for CPU and bytes for memory. In `GET /v1/nodes`, `cpu_capacity` and `memory_capacity` are whole-host capacity, while `cpu_allocatable` and `memory_allocatable` are the capacity available to the scheduler after the node's host reserve. The existing `cpu` and `memory` fields carry the same allocatable values. `last_heartbeat` is when the current leader last received a heartbeat from the node; heartbeat times are not replicated, so it is omitted until the node reports to a newly elected leader. `cpu_usage` is a whole-host ratio from 0 to 1; `memory_used`, `memory_available`, and `metrics_at` describe the same point-in-time host sample and are omitted until the agent can collect one. Scheduling uses allocatable capacity, never live utilization. `control_plane` is `voter` or `nonvoter` for a Raft member and omitted for a registered node that is no longer one.
+The [public exec WebSocket](../public/api.md#exec-streams) is authorized at the leader and relayed over the node-certificate mTLS agent API. Clients never connect directly to agents. The relay carries the control epoch: agents reject older epochs and end open streams when fenced by a newer one, while a leader ends its relays when its term ends.
 
-`GET /v1/namespaces/{ns}/jobs` and `GET /v1/namespaces/{ns}/jobs/{name}` include `replacement_backoff` for task groups whose failed allocations are being replaced with a delay. Each entry has `group`, `job_revision`, `failures` (consecutive failed allocations counted since the last reset), `last_failure_at`, `last_allocation_id`, the failed allocation's `reason` and `message`, and `next_replacement_at`, the earliest time a new allocation may be placed for the group. The field is omitted when no group has counted failures. The backoff delays only replacements of failed allocations; allocations lost with their node and a higher `count` are placed immediately. `POST /v1/namespaces/{ns}/jobs/{name}/groups/{group}/replacement-backoff/reset` clears a group's backoff so its failed allocations are replaced at once; it returns `204` (also when the group has no counted failures), `404` when the job or task group does not exist in the namespace, and `403` without write access. The event streams emits `job.replacement_delayed` with `job`, `group`, `allocation_id`, `revision`, `failures`, and `next_replacement_at` whenever a failure is counted, and `job.replacement_backoff_reset` with `job`, `group`, and `revision` when a backoff is reset. `/metrics` exposes the same state as `trellis_replacement_backoff_failures` and `trellis_replacement_backoff_remaining_seconds`, labelled by `namespace`, `job`, and `group`. Only the five newest terminal allocations per task group are retained, so older `stopped`, `failed`, and `lost` allocations disappear from job status and allocation queries. If a node later reports a container for a pruned allocation, reconciliation treats it as an observed orphan and stops it.
+The leader buffers one frame per direction; the agent queues at most four input frames. Output is unbuffered, applying backpressure to the process. A blocked frame times out after 30 minutes. Limits are 256 relays per leader, 64 sessions per node, and 8 per allocation; admission stays held until the process exits, including while failed kills are retried. Streams are ephemeral, not Raft state. An agent crash can leave an exec process running until it exits or its container stops; graceful shutdown kills it. Runtime process confinement is described in [node internals](node-internals.md#runtime-abstraction).
 
-When desired capacity cannot be placed, job status includes one `pending` allocation per unmet replica. Its existing allocation `reason` and `message` fields carry the current placement diagnostic: `no_healthy_nodes`, `constraint_mismatch`, `volume_owner_unavailable`, `missing_capability`, `host_port_conflict`, or `insufficient_capacity`. Reconciliation reuses these records rather than creating another pending allocation on every pass. It updates a record only when the blocking reason changes and places the same allocation, clearing the diagnostic, when a node becomes eligible. These are observations of scheduler filters, not new desired-state resources or scheduling policy.
-
-A job has an identity and two counters, all reported by `GET /v1/namespaces/{ns}/jobs` and `GET /v1/namespaces/{ns}/jobs/{name}`. `incarnation` is an opaque ID assigned when the job is created; it never changes during the job's life, and a job deleted and recreated under the same name gets a new one. `version` advances on every accepted change to the specification or resolved images, including label, `count`, and update-policy changes. `revision` identifies execution content: it advances only when a task group's execution hash changes, and allocations carry it as `job_revision` for fencing and rolling updates. Submitting an identical specification with identical resolved images changes neither and writes nothing.
-
-Planning resolves every distinct image tag to a digest-qualified reference and
-returns `resolved_images`, a map from authored image strings to those references.
-The plan's image changes compare pinned execution references, so an unchanged tag
-with new content produces an update. The manifest itself retains authored tags.
-Digest-qualified inputs do not require a registry lookup. Resolution is bounded
-to 30 seconds per image and uses anonymous registry access; failure returns `422`
-with task context and leaves desired state unchanged. Multi-platform images are
-pinned by their top-level index digest, not the control-plane node's platform.
-
-Submission accepts optional `resolved_images`. Omission resolves images afresh.
-To apply a reviewed plan, pass its complete map alongside the original `spec`
-and base preconditions; apply validates the pins without resolving tags again.
-Every supplied reference must include a valid digest and retain the authored
-repository, tag (including implicit `latest`), and any explicit digest. Missing,
-extra, or mismatched pins are rejected with `422`. Explicit pins are desired
-state selected by the caller, not proof of a registry's current tag mapping.
-`GET .../jobs/{name}` exposes both authored `spec` and `resolved_images`.
-Allocation creation, recovery, and `POST .../restart` use recorded pins and never
-resolve tags again.
-
-The job submitted to `POST /v1/namespaces/{ns}/jobs` or `.../jobs/plan` must name the path namespace in `spec.namespace`; a mismatch returns `400`. The plan returns `base_incarnation`, `base_version`, and `base_revision` for an existing job. Submission accepts optional preconditions:
-
-- `expected_version: 0` requires that the job does not exist. It cannot be combined with `expected_incarnation`.
-- `expected_version: N` (N > 0) requires that the job is at version `N`. Versions restart at 1 when a job is deleted and recreated, so a version alone cannot tell the job that was read from a recreated one; a nonzero `expected_version` therefore requires `expected_incarnation`, and is rejected with `400` without it.
-- `expected_incarnation` alone requires that the job exists and has not been deleted and recreated since it was read, at any version.
-- Omitting both applies unconditionally.
-
-Malformed preconditions (a negative version, or the combinations above) return `400`. The leader checks the preconditions and commits the change under the same serialized job-mutation lock, so of several concurrent applies against the same version exactly one succeeds; the others receive `409 Conflict` with a `message` naming the expected and current versions, or saying that the job was deleted and recreated. A successful submit returns `202` with `{"namespace", "name", "incarnation", "version", "revision"}` describing the committed job, so clients need not re-read it. `trellisctl jobs apply` always sends the `base_incarnation` and `base_version` of the plan it showed (or `expected_version: 0` for a create). `job.registered` events on the event streams fire for every apply that changes a job and carry its new `version` and `revision`.
-
-`GET /v1/namespaces/{ns}/jobs/{name}/versions` returns the retained history in ascending version order; each entry has `version`, the `revision` that version ran, the full canonical `spec`, `resolved_images`, and `created_at`. To roll back to an exact historical deployment, submit that entry's `spec` and `resolved_images` together; submitting its tagged spec alone selects today's tag content instead. Trellis retains at most the 10 newest versions for each live job, and every changed apply compacts that job's history. A newly elected leader also compacts all histories and removes records orphaned by older job deletions. Deleting a job atomically deletes all of its history, so recreating the same name starts again at version 1 and revision 1. Backups use format version 6, which records the producing `trellis_version`, carries the replicated `cluster_settings`, and holds canonical job and history records with resolved image pins. Restore validates those pins without registry lookups. `POST /v1/backup/restore` accepts only the current format version; a backup in any other format is refused with an error that names its format and the Trellis release that created it, so it can be restored with a release that uses the same format. Formats are never migrated.
-
-For allocation logs, `task` selects the task name from the allocation's task group. It may be omitted when the allocation has exactly one task; a multi-task allocation returns `400` until the caller selects one. The allocation ID is the Trellis allocation identity, not an agent/container runtime ID.
-
-Logs for terminal allocations remain available after container cleanup while their control-plane history is retained. Requests still require the allocation to belong to the route's namespace. Retained task logs are node-local and survive agent restarts; `follow=true` on a cleaned-up task returns the remaining output and closes at EOF. History pruning makes the allocation unavailable through this API and causes eventual node-side log deletion. Nodes report retained log inventory in heartbeats, allowing cleanup to be retried after node or leader downtime. There is no log rotation or size limit.
-
-### Exec streams
-
-`GET /v1/namespaces/{ns}/allocations/{id}/exec` runs one command in an allocation task over a single long-lived, bidirectional WebSocket. The opening handshake uses the standard RFC 6455 upgrade with WebSocket subprotocol `trellis.exec.v1` and the usual credentials, and the server answers `101 Switching Protocols` once the command is admitted. Clients using the HTTP/1.1 WebSocket handshake send `Connection: Upgrade`, `Upgrade: websocket`, and `Sec-WebSocket-Protocol: trellis.exec.v1`. Followers proxy the WebSocket to the leader like any other request.
-
-The query string describes the process:
-
-| Parameter | Meaning |
-|---|---|
-| `command` | Required and repeated: the argv, in order, such as `command=/bin/sh&command=-c&command=ls`. Trellis never adds a shell. |
-| `task` | The task to run in. It may be omitted when the allocation has exactly one task. |
-| `stdin=true` | Attach the stream's input frames to the process. Without it the process has no standard input. |
-| `tty=true` | Allocate a terminal. Terminal output arrives as stdout frames; there is no separate stderr. |
-| `term` | `TERM` for a TTY process: at most 64 characters of letters, digits, `.`, `_`, `+`, and `-`. |
-| `cols`, `rows` | Initial TTY size, 1–1000 each; default 80×24. |
-
-`term`, `cols`, and `rows` require `tty=true`. The command runs with the selected task container's OCI process context: environment variables, user, working directory, and security confinement are inherited from the task. `TERM` is the only override. Exec addresses only the current generation's running tasks, as do allocation metrics.
-
-After the upgrade, both directions send binary WebSocket messages. Each message is exactly one exec event: a one-byte type followed by a payload of at most 32 KiB. The WebSocket message boundary supplies the payload length. Data messages carry raw bytes after the type byte; control messages carry JSON. Text messages, empty messages, oversized payloads, and unknown or wrong-direction types are invalid.
-
-| Type | Name | Direction | Payload |
-|---|---|---|---|
-| 1 | stdin | client → server | Input bytes. Requires `stdin=true`. |
-| 2 | stdin-close | client → server | Empty. Ends the process's input, as end of file. |
-| 3 | resize | client → server | `{"cols":120,"rows":32}`, 1–1000 each. Requires `tty=true`. |
-| 4 | stdout | server → client | Output bytes; with a TTY, all terminal output. |
-| 5 | stderr | server → client | Standard error bytes of a non-TTY process. |
-| 6 | exit | server → client | `{"exit_code":0}`. The process exited; the server then closes the connection. |
-| 7 | error | server → client | `{"message":"..."}`. The stream ended without an exit status; the server then closes the connection. |
-
-Every stream ends with exactly one exit or error frame, unless the client disconnects first. Closing the connection kills the process, so a client that is interrupted never leaves a command running. A frame of an unknown or wrong-direction type, a malformed resize, or input without `stdin=true` ends the stream with an error frame. An error frame is sent when the process could not be started (for example, the executable does not exist), when its task stops, when the stream is idle or reaches its lifetime, when the node agent shuts down, when the node agent connection is lost, and when control-plane leadership changes.
-
-The leader authorizes the request exactly as other namespaced writes, then relays the stream to the node agent that owns the allocation over the node-certificate mTLS agent API; clients never connect to agents. The relay carries the leader's control epoch. The agent rejects a stream from an older epoch and ends open streams as soon as a newer leader has fenced it, and a leader ends every stream it relays with an error frame when its term ends, so a failover never leaves a stream open to a deposed leader. Exec streams are node-local, ephemeral diagnostics state: they are not persisted in Raft, and processes left behind by an agent crash keep running in their containers until they exit or the container stops.
-
-Buffering is bounded end to end. The leader holds one frame per direction of each stream, and the agent holds at most four input frames ahead of the process. Output is not buffered: a client that stops reading stalls the process's output instead of growing memory, and a single frame that the peer does not accept within 30 minutes ends the stream. A stream with no input, output, or resize for 30 minutes is closed, and a stream lasts at most eight hours even while active. Each node agent admits at most 64 streams in total and 8 for one allocation; a slot is held until the process has exited, including while a failed kill is being retried. Each leader relays at most 256 streams.
-
-Exec and allocation-metrics requests that fail before the upgrade return a JSON `{"message":"..."}` body with these statuses:
-
-| Status | Meaning |
-|---|---|
-| `400` | The request is invalid, is not a WebSocket request for subprotocol `trellis.exec.v1`, or must name one task: the allocation has several tasks, or the named task is not in its task group. |
-| `403` | The credential lacks write access (exec only). |
-| `404` | The allocation is not placed in the path namespace. |
-| `409` | The allocation exists but its node has no running target for the request, such as a task that has not started or has exited. It also covers conflicting execution records for the task on the node, and an agent already fenced by a newer leader. Retry after the allocation is running again. |
-| `429` | The node or allocation exec stream limit, or the leader's relay limit, has been reached. Close a stream or retry later. |
-| `502` | The node agent failed while it was handling the request. Details are logged by the control plane, not returned. |
-| `503` | The node agent is unreachable or shutting down, or the control-plane leader is not active. Retry later or target a replacement allocation. |
-
-
-Secret write body: `{"value_base64":"...","expected_version":1}`; omit `expected_version` for unconditional update. Decoded values may contain at most 65,536 bytes; an oversized request returns `413` before base64 decoding. Lists are JSON arrays. Non-2xx responses are errors; clients must tolerate reconciliation-driven changes between reads.
-
-Secrets follow the same path-routing rule as jobs: a cluster credential with `write` access may set and delete secrets in any namespace, and one with read access may list and describe secret metadata. Secrets are write-only for every caller, including the administrator: no endpoint returns a stored value. Values reach a task only through leader-to-agent delivery for an allocation whose job references the secret, so a read-back API would add plaintext exposure without adding capability.
-
-The control plane admits 256 simultaneous `/v1/events` subscribers per
-process. Additional requests receive `503 Service Unavailable` and
-`Retry-After: 1` without allocating a stream buffer. Subscriber admission does
-not alter authorization: `GET /v1/namespaces/{ns}/events` receives only that
-namespace's events, and only `GET /v1/events` spans namespaces. Clients should reconnect with
-backoff after overload or a leader change.
-
-## Cluster settings
-
-Job limits, reconciliation settings, and namespace-network settings are cluster-wide semantics, so they live in the replicated cluster record rather than in each node's configuration; every leader applies the same values. The node that creates the cluster supplies the initial job limits and network settings from its configuration; reconciliation settings start at their defaults.
-
-`GET /v1/cluster/settings` requires cluster-scoped read access (or the administrator credential) and returns:
-
-```json
-{
-  "job_limits": {
-    "max_replicas_per_task_group": 500,
-    "max_task_groups_per_job": 64,
-    "max_tasks_per_task_group": 32,
-    "max_desired_allocations": 1000,
-    "max_desired_allocations_per_namespace": 10000,
-    "default_task_cpu": 100,
-    "default_task_memory": 134217728,
-    "max_task_cpu": 1000000,
-    "max_task_memory": 1099511627776
-  },
-  "reconciliation": {
-    "allocation_loss_timeout": 45000000000,
-    "replacement_backoff_base": 10000000000,
-    "replacement_backoff_max": 300000000000,
-    "replacement_stable_after": 600000000000,
-    "terminal_allocation_retention": 5
-  },
-  "network": {"wireguard_pool": "10.64.0.0/10", "wireguard_port_count": 256}
-}
-```
-
-Memory values are byte counts. `PUT /v1/cluster/settings/job-limits` requires an administrator-signed request and replaces the complete `job_limits` object (unknown fields are rejected with `400`). It returns the updated settings, `422` when the limits are invalid (every value positive, defaults no larger than their maximums), and `409` when the new limits would stop admitting a job that is currently desired, naming the jobs; shrink or delete those jobs first. A job apply that races the change is checked against the limits current when it commits. Durations are nanoseconds. `PUT /v1/cluster/settings/reconciliation` requires an administrator-signed request and replaces the complete `reconciliation` object (unknown fields are rejected with `400`). It returns the updated settings or `422` when a value is out of bounds: `allocation_loss_timeout` between 30s and 24h, `replacement_backoff_base` between 1s and 24h, `replacement_backoff_max` between the base and 24h, `replacement_stable_after` between 10s and 24h, and `terminal_allocation_retention` between 0 and 100. Every later reconciliation pass, on any leader, applies the new values. The `network` settings are fixed when the cluster is created, because every namespace subnet and WireGuard port slot is assigned from them; the leader rejects node registrations whose WireGuard port count differs from `wireguard_port_count`.
-
-## Administrator, enrollment, and cluster-internal endpoints
-
-`POST /v1/credentials`, `GET /v1/credentials`, `DELETE /v1/credentials/{id}`, `POST /v1/nodes/join-tokens`, `GET /v1/nodes/join-tokens`, `DELETE /v1/nodes/join-tokens/{id}`, `PUT /v1/cluster/settings/job-limits`, `PUT /v1/cluster/settings/reconciliation`, `GET /v1/backup`, `POST /v1/backup/restore`, `DELETE /v1/raft/members/{id}`, and `POST /v1/raft/leadership-transfer` require an administrator-signed request. The operator keeps the Ed25519 private key; replicated cluster state contains only its PKIX public key.
-
-`POST /v1/credentials` takes `scope` (which must be `cluster`), `access` (`read` or `write`), and optional `ttl_seconds`; a positive value makes the credential expire that many seconds after creation, and zero or absence means no expiry. It returns `201` with the `token`, shown only in this response, and the credential's metadata: `id`, `scope`, `access`, `created_at`, and `expires_at` when set. There is no top-level namespace in the request or response. Existing namespace-scoped tokens are rejected when used; they are not promoted to cluster authority. `GET /v1/credentials` lists metadata for every operator credential, expired ones included, ordered by creation time; it never returns a token, and its table representation has no Namespace column. The `id` is the first 16 hexadecimal digits of the SHA-256 hash under which the token is stored. `DELETE /v1/credentials/{id}` revokes an operator credential and returns `204`, or `404` when no operator credential has that ID. Workload credentials are neither listed nor revocable through these endpoints. `GET /v1/auth/whoami` also reports `expires_at` for an expiring credential and has no top-level namespace; a workload subject still contains its job namespace, job, and task group.
-
-`POST /v1/nodes/join-tokens` takes optional `ttl_seconds` (default 3600, between 1 and 604800) and `max_uses` (0, the default, for unlimited uses until expiry, up to 10000) and returns `201` with the `token`, shown only in this response, and its metadata: `id`, `created_at`, `expires_at`, `max_uses`, and `uses`. Replicated state stores only the token's SHA-256 hash; creating a token also prunes expired token records. `GET /v1/nodes/join-tokens` lists unexpired tokens' metadata. `DELETE /v1/nodes/join-tokens/{id}` revokes a token (`204`, or `404` when no unexpired token has that ID); nodes already enrolled with it are unaffected.
-
-`DELETE /v1/raft/members/{id}` takes a node UUID (`400` otherwise) and permanently removes that node. It first records a replicated tombstone for the UUID, which revokes the node's certificate on every node-authenticated path, and then changes Raft membership. Removing a voter first promotes a healthy caught-up non-voter when one exists. The request returns `409` without recording the tombstone or changing membership if the remaining voters could not form a quorum from reachable members, or if the node is the current leader, which must first transfer leadership (`POST /v1/raft/leadership-transfer`): once tombstoned, followers would reject its new Raft streams before its own removal could commit. Removing a node that is not a Raft member still records the tombstone and succeeds, so retries are safe and an enrolled node that never joined can be revoked. Leadership transfer only targets voters.
-
-To sign a request, first `POST /v1/auth/administrator/challenge`. The leader returns a short-lived one-time `challenge`. Sign these newline-separated fields as UTF-8 bytes: `trellis-admin-request-v1`, challenge, uppercase HTTP method, exact path and query (`RequestURI`), and lowercase hexadecimal SHA-256 of the transmitted body. Send the challenge in `X-Trellis-Admin-Challenge` and the unpadded base64url Ed25519 signature in `X-Trellis-Admin-Signature`. The leader consumes a challenge on its first verification attempt. Challenges are leader-local and bound to the control epoch. A leader retains at most 4,096 outstanding challenges; issuing another invalidates the oldest rather than refusing issuance. Clients receiving `X-Trellis-Admin-Challenge-Status: invalid` must obtain a fresh challenge and retry. `trellisctl` does this automatically.
-
-`POST /v1/nodes`, `POST /v1/nodes/{id}/heartbeat`, `GET /v1/internal/discovery`, `POST /v1/raft/join`, and agent port 8127 require a trusted node certificate whose URI SAN identifies the immutable node UUID. Followers redirect these control-plane requests rather than proxying them with the follower's certificate, so the leader authenticates the original node. Each UUID is durably bound to its first admitted certificate, preventing another CA-signed certificate for the same UUID from becoming that node or the current leader. A UUID removed with `DELETE /v1/raft/members/{id}` is rejected on all of these paths (`403`), and by enrollment and Raft join, whatever certificate it presents. Registration and heartbeat IDs must match it; Raft join derives the member ID from it, requires advertised hosts to match certificate SANs, admits the node as a non-voter, and returns the managed CA key. In managed mode Raft join admits only an identity whose certificate is already bound, by join-token enrollment or as the bootstrap node, so a certificate minted with the CA key for a new UUID is refused (`403`); in external mode the first join binds the certificate. The response carries the managed CA key (managed mode) and `members`, the Raft member IDs at admission; see [Control-plane membership](control-plane.md#control-plane-membership). Ongoing outbound Raft streams verify the peer certificate against that joined Raft address rather than only the shared `trellis` DNS identity. Inbound Raft streams accept a peer only when its UUID is not removed, its certificate matches the UUID's binding, and it is a member of the receiving node's current Raft configuration; see [Raft transport authorization](control-plane.md#raft-transport-authorization). Internal discovery returns catalog entries only for namespaces with active allocations assigned to the authenticated node; the node resolver applies the workload source-namespace check before answering. Managed-only `POST /v1/nodes/enroll` requires a join token as its bearer credential over a connection authenticated with the pinned node CA, and returns `401` for a token that is unknown, revoked, expired, or exhausted, without saying which. Enrollment consumes one use of the token in the same replicated batch that binds the new identity's certificate, and the leader serializes enrollments, so a use limit holds under concurrent enrollment. The server assigns the enrollment UUID and returns the node certificate and key without the CA key; a successful certificate-bound Raft join returns the managed CA key so the admitted member can later lead enrollment after it is promoted to voter and wins an election. Node registration reports physical and allocatable resources and includes the node WireGuard public key, externally reachable base endpoint, local port-range base, and port-range size when namespace networking is available. Heartbeats carry a complete current resource observation with discovered capabilities and the node's Raft applied index (`raft_applied_index`), and return no desired state; host usage fields may be absent when the platform counters are unavailable. A heartbeat body may contain at most 32 MiB and 320,000 allocation-task status reports; larger reports are rejected with `413`. Each reported allocation task may carry a `reason` only with phase `failed`; the agent currently reports `restart_budget_exhausted` when a task exhausted its restart budget, and the leader records that reason on the allocation when the observation moves it to `failed`. Heartbeats with any other reason, or a reason on another phase, are rejected. A task reported with phase `starting` may carry `start_failure` (`attempt`, `message` of at most 1024 bytes, and an optional `code` of `stale_generation`, `execution_conflict`, or `restart_budget_exhausted`) when the agent's background start of that generation failed; the field is rejected on any other phase. The leader counts a failure whose `attempt` equals the allocation's current attempt once, and fails the allocation with the code as its reason when a code is present. The control plane combines the namespace's durable port slot with each node's advertised bases when building WireGuard peer plans. Leader-to-agent requests verify both that the agent certificate identifies the scheduled target node and that the caller certificate identifies the current locally known Raft leader. Start, stop, drain, resume, and network-plan mutations require a positive control epoch. Allocation mutations also require a positive generation; starts additionally retain revision and execution-hash checks. The agent answers a start once it is fenced and pulls images and creates tasks in the background; the start request carries the leader's `attempt` count for the generation, which is excluded from the execution hash, and heartbeats report the outcome. A start for a generation whose restart budget the agent has exhausted is rejected with HTTP 409 and operation code `restart_budget_exhausted`; the leader records the allocation as failed rather than retrying it. Drain and resume requests carry a persisted allocation intent sequence so a delayed drain cannot override a later resume in the same epoch. The leader saves a drain or resume before delivering it. Undrain (`DELETE /v1/nodes/{id}/drain`) fails without contacting any agent if saving the resumed allocations or node fails; once saved it succeeds even when an agent is unreachable, and reconciliation redelivers the saved resume to running allocations until the agent acknowledges it. Start requests carry the allocation's current `draining` state and `drain_sequence` outside the execution hash; the agent keeps whichever of that state and its locally applied drain or resume has the higher sequence (the request on a tie) and applies the result to tasks already running before starting any task, so a retried start stays restart-suppressed while draining. These cluster-internal APIs are not a substitute for ordinary scoped operator access.
-
-For heartbeats, a `204` means the leader validated the report and recorded the node as live. Allocation and node observations are persisted asynchronously; a heartbeat from an unregistered node fails so the agent registers again. Namespace networking runs on every node, so every registration reports its WireGuard identity and port range.
-
-## Go client
-
-Package [`github.com/overfold/trellis/orchestrator/client`](../../orchestrator/client/) is the Go client for the endpoints in [Public/operator endpoints](#publicoperator-endpoints) and the administrator endpoints above, including administrator request signing and exec streams. Its wire types are in [`github.com/overfold/trellis/orchestrator/api`](../../orchestrator/api/). Job specifications cross that API as canonical JSON (`json.RawMessage`) described by the [published schemas](../../schemas/); the Go job model in `internal/spec` stays internal. `trellisctl` uses the package, and external consumers such as [`trellis-proxy-sync`](https://github.com/overfold/trellis-proxy-sync) import only these two public packages.
-
-Node-to-node protocols stay internal: `internal/nodeapi` holds the agent, registration, heartbeat, enrollment, Raft-join, and discovery types, and `internal/client` holds the leader's agent client and a node's control-plane client. Both packages, and the public client, share the HTTP transport in `internal/transport`.
-
-The module is rooted at the repository, so `go get github.com/overfold/trellis@VERSION` resolves release tags directly. The package is pre-1.0 and changes with the wire format.
-
-## Example
-
-First-party clients treat a server address without an explicit scheme as HTTPS. In an API-enabled workload, use the injected namespace and CA rather than falling back to plaintext HTTP:
-
-```sh
-case "$TRELLIS_ADDR" in
-  https://*) api_url=${TRELLIS_ADDR%/} ;;
-  http://*) echo "refusing to send TRELLIS_TOKEN over plaintext HTTP" >&2; exit 1 ;;
-  *) api_url="https://${TRELLIS_ADDR%/}" ;;
-esac
-
-printf '%s\n' "$TRELLIS_CA_CERT" > /tmp/trellis-ca.pem
-curl -fsS --connect-timeout 5 --max-time 15 --cacert /tmp/trellis-ca.pem \
-  -H "Authorization: Bearer $TRELLIS_TOKEN" \
-  "$api_url/v1/namespaces/$TRELLIS_NAMESPACE/jobs"
-```
-
-Never send a workload bearer credential over plaintext HTTP. See [`examples/api-access/`](../../examples/api-access/) for an in-allocation cluster-scoped helper with the same TLS and timeout behavior and an explicit discussion of its security impact.
+[Documentation index](../README.md) · [Public HTTP API](../public/api.md)

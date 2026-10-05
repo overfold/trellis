@@ -4,7 +4,7 @@ This is the shortest complete Trellis journey: install one node, use the CLI as 
 
 ## 1. Install one node
 
-You need a Debian or Ubuntu x86-64 machine with `sudo`. The installer can install containerd when it is missing.
+You need a systemd-based Debian or Ubuntu x86-64 host with `sudo`, `curl`, and outbound access to GitHub and the package repositories. The installer can install containerd when it is missing. Run it on the host, not inside a container; Trellis and containerd need the same host mount namespace.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/install.sh | sudo bash

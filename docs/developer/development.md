@@ -9,17 +9,20 @@ cd orchestrator
 go test ./...
 go vet ./...
 golangci-lint run
+go run ./cmd/generate-schemas --check
 
 go build ./cmd/trellis ./cmd/trellisctl
 CGO_ENABLED=0 go build ./cmd/trellis-health-probe
 ```
 
-Containerd end-to-end tests need a Linux host, containerd, permissions on its socket, and `CONTAINERD_ADDRESS`. Build the task-local probe first and pass its host path to the suite:
+Containerd end-to-end tests need a Linux host, a running containerd, and root privileges for namespace and snapshot mounts; socket access alone is insufficient. Build the task-local probe statically and pass its host path and socket address explicitly through `sudo` (adjust the address if needed):
 
 ```sh
 CGO_ENABLED=0 go build -o /tmp/trellis-health-probe ./cmd/trellis-health-probe
-sudo env TRELLIS_HEALTH_PROBE=/tmp/trellis-health-probe "$(command -v go)" test -tags=containerd_e2e ./internal/runtime -run 'TestContainerd(AllocationAdoption|HealthProbe|StopsCreatedTask|RestartsTaskWithManagedVolume|ListsPausedContainer|ListsContainerWithDeletedTask|ExecStream)' -count=1 -timeout=3m
+sudo env CONTAINERD_ADDRESS=/run/containerd/containerd.sock TRELLIS_HEALTH_PROBE=/tmp/trellis-health-probe "$(command -v go)" test -v -tags=containerd_e2e ./internal/runtime -run '^TestContainerd' -count=1 -timeout=6m
 ```
+
+Read the output for skipped tests: a green suite that skipped runtime tests is not containerd verification. These tests create and remove test containers and managed-volume fixtures; use a disposable development host.
 
 Multi-node integration uses the test/injected runtime and is separated in CI. The injected runtime is compiled into the node binary only under the `integration` build tag; the suite builds its own node binary with that tag:
 
@@ -34,6 +37,8 @@ Tests beside each package document state-machine invariants, Raft persistence, s
 From the repository root, `bash scripts/install-core_test.sh` exercises the installer's operator-access phase for first installs, replacement clusters, resumes, and joins. It uses the real CLI for context saving and mocks credential creation and host ownership operations; it does not install packages or start services.
 
 `bash scripts/upgrade_test.sh` exercises the full upgrade script with mocked releases, CLI calls, and host services. It checks local-context selection, single- and multi-node maintenance, explicit configuration paths, missing or rejected credentials, drain timeouts, and rollback without changing host services.
+
+`bash scripts/uninstall_test.sh` exercises evacuation, membership removal, local resource cleanup, archiving, force/purge modes, and failures with mocked host services. Like the upgrade tests, it does not remove a real installation.
 
 ## Linting
 

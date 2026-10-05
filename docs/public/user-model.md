@@ -34,11 +34,12 @@ cluster
 | **Job** | Named desired workload in a namespace. |
 | **Job manifest** | The YAML document humans author and apply to create or update a job. |
 | **Version** | The job specification produced by an accepted apply. Every change advances it, including scaling and label changes. |
-| **Revision** | The execution content of a job. It advances only when a change replaces allocations, such as a new image or command. |
+| **Incarnation** | Opaque identity for one job's lifetime; deleting and recreating the same name creates a new identity. |
+| **Revision** | The execution content of a job. It advances only when a change replaces allocations, such as a new image or environment. |
 | **Task group** | Placement, scaling, restart, and update unit inside a job. |
 | **Task** | One container definition, including its network attachment, inside a task group. |
 | **Allocation** | Runtime instance created by Trellis to satisfy desired task-group capacity. |
-| **Lifecycle** | Execution phase of an allocation: placed, starting, running, stopping, stopped, failed, or lost. |
+| **Lifecycle** | Execution phase of an allocation: pending, placed, starting, running, stopping, stopped, failed, or lost. |
 | **Health** | Readiness/health of a running allocation: unknown, healthy, or unhealthy. |
 | **Drain** | Prevent new work on a node and move existing allocations away when replacements can be scheduled. |
 | **Secret** | Namespace-scoped named secret material referenced by jobs but not stored in manifests. |
@@ -82,9 +83,9 @@ Use the same verbs across interfaces:
 - **Inspect an allocation** for placement, lifecycle, health, events, and task logs.
 - **Set**, **describe**, and **delete** secrets.
 
-Every apply that changes the job specification advances the job's **version** and records the new specification in its history. Changes to execution content (for example an image, command, environment, resources, or networking) also advance the **revision** and roll allocations according to the update policy; label, `count`, and update-policy-only changes keep the revision, so scaling does not restart running allocations but still appears in history. Applying an unchanged manifest creates neither. Trellis keeps the 10 newest versions of each live job for inspection and backup. Deleting a job removes its history, so applying the same name later starts again at version 1 and revision 1.
+Every apply that changes the job specification or resolved images advances the job's **version** and records the new deployment in its history. Changes to execution content (for example an image, environment, resources, or networking) also advance the **revision** and roll allocations according to the update policy; label, `count`, and update-policy-only changes keep the revision, so scaling does not restart running allocations but still appears in history. Applying an unchanged manifest with unchanged image digests creates neither. Trellis keeps the 10 newest versions of each live job for inspection and backup. Deleting a job removes its history, so applying the same name later starts again at version 1 and revision 1, with a new incarnation.
 
-Applies are fenced by version. `trellisctl jobs apply` sends the version their plan was computed against, and Trellis rejects the apply with a conflict when the job was changed, created, or deleted in between, so two concurrent pipelines cannot silently overwrite each other. Plan again to review the current state and apply that. Because a recreated job starts again at version 1, a delete followed by a recreation that reaches the same version before the stale apply arrives is not detected.
+Applies are fenced by incarnation and version. `trellisctl jobs apply` sends the identity and version its plan was computed against, and Trellis rejects the apply with a conflict when the job was changed, created, deleted, or deleted and recreated in between. This detects a recreated job even if it has reached the same version number, so two concurrent pipelines cannot silently overwrite each other. Plan again to review the current state and apply that.
 
 Documentation and CLI output use these canonical terms; CLI aliases are convenience spellings rather than a second vocabulary.
 

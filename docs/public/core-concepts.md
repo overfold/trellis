@@ -12,7 +12,7 @@ Trellis uses Raft internally to replicate desired state and elect a control-plan
 
 A **namespace** separates jobs, allocations, secrets, volume identities, networking, and discovery. It is not an API authorization boundary: operator and workload credentials have cluster scope and can address any namespace. Nor does it act as admission policy for manifest capabilities such as host networking or absolute host paths. See [Multitenancy and trust boundaries](multitenancy.md) when accepting workloads from untrusted tenants.
 
-A **job** is named desired state inside a namespace. Humans define a job with a YAML **job manifest**. Applying a manifest creates the job or advances its **revision** when desired state changes.
+A **job** is named desired state inside a namespace. Humans define a job with a YAML **job manifest**. Applying a changed manifest or changed image digests advances its **version**; its **revision** advances only when execution content changes. Scaling and label-only edits do not restart existing allocations.
 
 ## Task groups, tasks, and allocations
 
@@ -25,14 +25,14 @@ Trellis creates runtime **allocations** to satisfy desired task-group capacity. 
 Keep these concepts separate when reading any Trellis interface:
 
 - The job manifest and revision are **desired state**.
-- Allocation **lifecycle** is execution state: `placed`, `starting`, `running`, `stopping`, `stopped`, `failed`, or `lost`.
+- Allocation **lifecycle** is execution state: `pending` (waiting for an eligible node), `placed`, `starting`, `running`, `stopping`, `stopped`, `failed`, or `lost`.
 - Allocation **health** is readiness/health state: `unknown`, `healthy`, or `unhealthy`.
 
 An allocation can therefore be `running` and `unhealthy`. Lifecycle and health are independent parts of the canonical allocation state.
 
 ## Scheduling
 
-The scheduler considers only healthy, non-draining nodes. It filters on `os`, `arch`, custom label constraints, registered volume locality, CPU millicores, and memory bytes. Among the remaining nodes it places each replica on the node with the fewest replicas of the same task group, counting replicas already placed there (draining replicas that are being replaced do not count). Among nodes with equally few replicas it prefers the one that would be most utilized after placement (best fit), and any remaining tie goes to the lowest node ID, so the same inputs always produce the same placements. Spreading is soft: when constraints, volumes, node ports, or capacity leave only some nodes eligible, replicas share those nodes. Resource values of zero on a node mean capacity is not enforced for that dimension.
+The scheduler considers only healthy, non-draining nodes with matching constraints, runtime capabilities, volume locality, available node ports, and declared CPU/memory capacity. It favors spreading replicas of a task group, then best-fit resource utilization. Placement is deterministic, but spreading is soft: when constraints, volumes, node ports, or capacity leave only some nodes eligible, replicas share those nodes. Scheduling uses declared requests and allocatable capacity, not live utilization. See the [developer scheduling algorithm](../developer/control-plane.md#scheduling-algorithm) for scoring and tie-breaking details.
 
 ## Reconciliation and failure handling
 

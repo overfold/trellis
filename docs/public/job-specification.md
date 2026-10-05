@@ -79,7 +79,7 @@ Memory is bytes and durations are nanoseconds in the current API model. Parsing 
 
 ### Defaults and the stored job
 
-Before a job is planned or stored, Trellis resolves every omitted optional field to its effective value. The stored job, `trellisctl jobs get`, and plans therefore show exactly what Trellis runs, and later changes to cluster settings or Trellis defaults never change the behavior of a job that is already stored. Applying the same manifest again produces no change because its resolved form is identical.
+Before a job is planned or stored, Trellis resolves omitted defaults to their effective values. Inspect the complete stored specification with `trellisctl jobs status NAME --output json`; table status and plan output are summaries, not the full specification. Later changes to cluster settings or Trellis defaults do not change a stored job. Reapplying a manifest is a no-op only when its effective specification and resolved image digests are unchanged; moved tags or changed defaults can produce an update.
 
 | Omitted field | Resolved value |
 | --- | --- |
@@ -147,7 +147,7 @@ API-enabled allocations require the servers to be configured with the secrets en
 
 Enabled API access injects `TRELLIS_ADDR`, `TRELLIS_TOKEN`, and `TRELLIS_NAMESPACE`; when TLS is configured, `TRELLIS_CA_CERT` contains the cluster CA PEM. `TRELLIS_NAMESPACE` is initialized to the job namespace solely as a routing convenience. It does not limit the cluster-scoped credential's authority.
 
-`TRELLIS_ADDR` is a Trellis-owned workload endpoint, currently exposed as the TLS name `trellis` on the control-plane port. Trellis maps that name to the node-local control plane for host-networked tasks and to the namespace gateway for namespace-networked tasks; the local listener proxies requests to the current leader. API-enabled tasks must therefore use `namespace` (the default) or `host` networking. `mode: none` is rejected because it intentionally has no route to the control plane.
+`TRELLIS_ADDR` is a workload-reachable Trellis endpoint that remains usable when leadership changes. Use it with the injected CA rather than hard-coding a node address or using plaintext HTTP. API-enabled tasks must use `namespace` (the default) or `host` networking. `mode: none` is rejected because it intentionally has no route to the control plane. The [HTTP API guide](api.md) covers requests and clients; endpoint mapping is described in [node internals](../developer/node-internals.md#secrets-and-api-access).
 
 `api_access` is a task-group privilege boundary: every task in the group can read a cluster-wide credential. Do not colocate untrusted sidecars with an API-enabled controller, and omit API access unless that authority is required. Request read rather than write when possible.
 

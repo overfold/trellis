@@ -17,7 +17,7 @@ Trellis places containers across your machines, keeps them healthy, and rolls ou
 
 ## Quick start
 
-You need a Debian or Ubuntu x86-64 machine with `sudo`.
+You need a systemd-based Debian or Ubuntu x86-64 host with `sudo`, `curl`, and outbound access to GitHub and package repositories.
 
 1. Install a single-node cluster. The installer shows its plan before it changes anything, installs containerd if it is missing, and saves a `trellisctl` context for your user:
 

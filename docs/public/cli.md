@@ -142,7 +142,7 @@ To make deployment completion part of the command result, wait for desired capac
 trellisctl jobs apply --file trellis.yaml --wait --timeout 5m
 ```
 
-The command prints only meaningful state changes while the revision converges. The same observer is available from `status`:
+The command prints only meaningful state changes while the job converges. Waiting follows the named job's latest state, not a pinned incarnation or revision: a concurrent apply can change the deployment being observed. The same observer is available from `status`:
 
 ```sh
 trellisctl jobs status web --watch --timeout 5m
@@ -190,6 +190,8 @@ For non-following output, a job name is enough. Trellis prints every matching ta
 ```sh
 trellisctl jobs logs web --tail 200
 ```
+
+The default is the last 100 lines per selected task stream. Use `--tail 0` for all retained output. Logs are node-local and are not rotated or size-limited; plan disk capacity accordingly.
 
 Narrow the streams by task group or task when appropriate:
 
