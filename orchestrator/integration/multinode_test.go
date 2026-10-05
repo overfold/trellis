@@ -35,6 +35,7 @@ func TestMultiNodeFailureRecovery(t *testing.T) {
 	if testing.Short() {
 		t.Skip("multi-process integration test")
 	}
+	t.Parallel()
 	h := newHarness(t, 3)
 	defer h.close()
 	h.waitNodes(3)
@@ -99,6 +100,7 @@ func TestMultiNodeVoterMembership(t *testing.T) {
 	if testing.Short() {
 		t.Skip("multi-process integration test")
 	}
+	t.Parallel()
 	h := newHarness(t, 4)
 	defer h.close()
 	h.waitNodes(4)
@@ -141,6 +143,7 @@ func TestMultiNodeRemovedNodeIsRevoked(t *testing.T) {
 	if testing.Short() {
 		t.Skip("multi-process integration test")
 	}
+	t.Parallel()
 	h := newHarness(t, 3)
 	defer h.close()
 	h.waitNodes(3)
