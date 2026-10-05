@@ -330,7 +330,11 @@ func (s *Server) Reload(ctx context.Context) error {
 		if summary.Draining {
 			status = NodeStatusDraining
 		}
-		nodes[summary.ID] = &Node{ID: summary.ID, Host: summary.Host, Port: summary.Port, CPUCapacity: summary.CPUCapacity, MemoryCapacity: summary.MemoryCapacity, CPUAllocatable: summary.CPUAllocatable, MemoryAllocatable: summary.MemoryAllocatable, OS: summary.OS, Arch: summary.Arch, Labels: summary.Labels, Volumes: summary.Volumes, Capabilities: summary.Capabilities, Status: status, WireGuardPublicKey: summary.WireGuardPublicKey, WireGuardEndpoint: summary.WireGuardEndpoint, WireGuardPortBase: summary.WireGuardPortBase, WireGuardPortCount: summary.WireGuardPortCount, Version: summary.Version}
+		runsWorkloads := true
+		if summary.RunsWorkloads != nil {
+			runsWorkloads = *summary.RunsWorkloads
+		}
+		nodes[summary.ID] = &Node{ID: summary.ID, Host: summary.Host, Port: summary.Port, CPUCapacity: summary.CPUCapacity, MemoryCapacity: summary.MemoryCapacity, CPUAllocatable: summary.CPUAllocatable, MemoryAllocatable: summary.MemoryAllocatable, OS: summary.OS, Arch: summary.Arch, Labels: summary.Labels, Volumes: summary.Volumes, Capabilities: summary.Capabilities, Status: status, WireGuardPublicKey: summary.WireGuardPublicKey, WireGuardEndpoint: summary.WireGuardEndpoint, WireGuardPortBase: summary.WireGuardPortBase, WireGuardPortCount: summary.WireGuardPortCount, Version: summary.Version, RunsWorkloads: new(runsWorkloads)}
 	}
 	allocations := make([]*Allocation, 0, len(allocationMap))
 	for _, allocation := range allocationMap {

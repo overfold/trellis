@@ -64,6 +64,8 @@ A manifest may reference a secret name, and the allocation receives the value fr
 
 ## Shared surfaces and residual risk
 
+Worker-only nodes (`control_plane: false`) hold no Raft state, cluster secrets-encryption key, or CA private key, and relay API TLS without decrypting it. A compromised worker can expose secrets and workload API tokens delivered to its allocations, disrupt traffic, and attack shared infrastructure, but does not thereby acquire every namespace's secrets or authority to impersonate the API. A compromised control-plane node remains a full cluster compromise. Use `runs_workloads: false` to keep workloads off control-plane nodes when stronger separation is needed.
+
 Namespaces share the cluster's nodes, host kernels, container runtime, image cache and pull path, physical network, local disks, DNS forwarders, control plane, and operator-managed secret-encryption key. Consequences include:
 
 - node or control-plane failure can affect several tenants;

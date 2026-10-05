@@ -13,6 +13,7 @@ import (
 	"github.com/labstack/echo/v5"
 	"github.com/overfold/trellis/orchestrator/api"
 	"github.com/overfold/trellis/orchestrator/internal/auth"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 )
 
 func nodeTrustHandler(t *testing.T) (*nodeTrustFixture, *echo.Echo) {
@@ -113,7 +114,9 @@ func TestJoinTokenEndpoints(t *testing.T) {
 	}
 
 	enroll := func(token string) int {
-		req := httptest.NewRequest(http.MethodPost, "/v1/nodes/enroll", strings.NewReader(`{"server_advertise":"n:8128","agent_advertise":"n:8127","raft_advertise":"n:8129"}`))
+		csr, _ := testCSR(t)
+		body, _ := json.Marshal(nodeapi.NodeEnrollmentRequest{Role: api.NodeRoleControlPlane, CSR: csr})
+		req := httptest.NewRequest(http.MethodPost, "/v1/nodes/enroll", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		req = req.WithContext(context.WithValue(req.Context(), JoinTokenContextKey, token))
 		rec := httptest.NewRecorder()

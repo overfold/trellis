@@ -6,27 +6,29 @@ Read it when you are ready to grow the first node into a cluster, or when the [l
 
 ## How a cluster is formed
 
-Every machine runs the same `trellis` daemon. There are no separate server and worker roles:
+Every machine runs the same `trellis` daemon, with two independent settings:
 
-- every node runs allocations;
-- every node replicates desired state through Raft; up to five of them are **voters** that take part in leader election and must acknowledge changes, and the others are **non-voters** that can be promoted when needed;
+- `control_plane` (default `true`) determines whether it replicates state through Raft and may lead;
+- `runs_workloads` (default `true`) determines whether it receives allocations;
+- worker-only nodes (`control_plane: false`) register and heartbeat but hold no Raft state, secrets-encryption key, or CA private key;
+- up to five control-plane nodes are **voters**; other control-plane nodes are **non-voters** that can be promoted;
 - one elected voter, the **leader**, serves the control-plane API, schedules, and reconciles jobs.
 
 Trellis chooses the voters itself. A node always joins as a non-voter, and the leader promotes healthy nodes that have caught up with the replicated state until the cluster has the right number of voters. `trellisctl nodes list` shows each node's role in the **Control plane** column.
 
-Any node accepts control-plane requests. Followers proxy ordinary operator and administrator requests to the current leader, so `trellisctl` contexts and in-cluster `TRELLIS_ADDR` clients can point at any reachable node and do not need reconfiguring when leadership moves. Certificate-authenticated node requests are redirected instead, preserving the caller's node certificate end to end. `trellisctl` also retries administrator-signed requests automatically if leadership changes mid-request.
+Any node accepts control-plane connections. A worker is a TCP relay: the client-to-control-plane TLS session remains encrypted end to end, so the worker cannot read bearer tokens or requests. Control-plane followers proxy to the leader. `trellisctl` also retries administrator-signed requests automatically if leadership changes mid-request.
 
 ## Choose a cluster size
 
 A majority of voters (a **quorum**) must be reachable for Trellis to elect a leader and accept changes. Trellis keeps an odd number of voters, because an even number tolerates no more failures than one fewer:
 
-| Nodes | Voters | Voter failures tolerated |
+| Control-plane nodes | Voters | Voter failures tolerated |
 |---|---|---|
 | 1–2 | 1 | 0 |
 | 3–4 | 3 | 1 |
 | 5 or more | 5 | 2 |
 
-Three nodes is the smallest cluster that survives a node failure, and five survive two. Beyond five, extra nodes add workload capacity without enlarging the quorum, so the node count can follow workload needs rather than consensus arithmetic. A second node adds capacity and a standby copy of the state, but the control plane still depends on the first node until a third joins.
+Three control-plane nodes is the smallest cluster that survives a control-plane failure, and five survive two. Worker count does not affect quorum. Set `runs_workloads: false` to dedicate control-plane nodes, or keep its default to use their capacity.
 
 Voters are replaced automatically when that is safe:
 
@@ -61,32 +63,44 @@ Namespace networking gives each namespace one stable UDP port from the cluster's
 
 If network slots or subnets are exhausted, free registrations by removing unneeded namespace-networked jobs and waiting for their allocations to stop. Editing the pool or port count on existing nodes cannot expand the cluster. A larger range or pool requires a new cluster; a backup restore still requires matching network settings and is not a resizing mechanism.
 
-Some node settings must still match on every node, because any node may become leader or take part in the same namespace network:
+Some settings must match on control-plane nodes:
 
 - the **secrets-encryption key** (and `secrets_key_id`, if set explicitly), so every potential leader can decrypt replicated secret records;
-- the node signing mode and trusted node CA.
+- the node signing mode and trusted node CA. Workers need the public CA certificate, but not its private key.
 
 ## Add a node
 
 ### Managed signing (default)
 
-Adding a node is explicit rather than another branch in the first-install questionnaire. The joining node needs four pieces of information:
+Adding a node is explicit. Every joining node needs an existing address, a role-bound join token, and the public CA certificate. A control-plane node additionally needs the shared secrets-encryption key; a worker must not receive it.
 
 - an existing control-plane address such as `node-a:8128`;
 - a **join token** minted for this purpose by the administrator;
 - a pinned copy of the trusted node CA certificate;
-- the **same secrets-encryption key used by the existing nodes**.
+- for a control-plane join only, the **same secrets-encryption key used by the existing control-plane nodes**.
 
 A joining node must not generate its own secrets key; see the matching settings above.
 
-Mint a join token from an operator context that holds the administrator key. A join token expires after `--ttl` (default `1h`, at most `168h`), and `--max-uses N` limits how many nodes may enroll with it; a token for one machine should be single-use:
+Mint a join token from an operator context that holds the administrator key. Control-plane tokens are the default, are always single-use, and expire within one hour:
 
 ```sh
 trellisctl --administrator-key ./trellis-administrator.pem \
-  nodes join-token create --ttl 30m --max-uses 1 > trellis-join-token
+  nodes join-token create --role control-plane --ttl 30m > trellis-join-token
 ```
 
 The token is printed once; the cluster stores only its hash. `trellisctl nodes join-token list` shows unexpired tokens with their use counts, and `trellisctl nodes join-token revoke ID` withdraws one before it expires. Revoking a token does not affect nodes that already enrolled with it. Each enrollment attempt that the leader accepts uses the token once, even if its response is lost before the node stores its identity; if a node then reports that its token is exhausted, mint another.
+
+For a worker, create a worker token and omit the secrets-key transfer:
+
+```sh
+trellisctl --administrator-key ./trellis-administrator.pem \
+  nodes join-token create --role worker --ttl 24h --max-uses 10 > trellis-worker-token
+curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/install.sh | \
+  sudo bash -s -- --worker --join node-a:8128 \
+    --join-token-file trellis-worker-token --ca-cert-file trellis-node-ca.crt
+```
+
+The installer writes `control_plane: false` and the selected `runs_workloads` value, and neither requests nor writes a secrets key, CA key, or Raft configuration for a worker. `--control-plane true|false` and `--runs-workloads true|false` are available for automation and both default to `true`.
 
 On an existing node, make temporary root-readable copies of the CA certificate and secrets key for secure transfer:
 
@@ -118,9 +132,11 @@ After the daemon starts, verify membership from any operator context:
 trellisctl nodes list
 ```
 
-A join token is accepted only by the managed enrollment endpoint and is never administrator API authority. Enrollment sends it only over TLS authenticated by the pinned CA, and each enrollment consumes one use in the same replicated transaction that records the new identity, so a use limit holds even when enrollments race. The leader assigns the new UUID rather than accepting a caller-selected identity and initially returns only that node's certificate and private key. The managed CA signing key is delivered only after the node proves that certificate and is admitted under the assigned UUID as a Raft member. After enrollment, node registration, heartbeats, Raft joins, Raft replication, and node-to-agent traffic use the node's unique certificate-bound UUID instead of a shared bearer token. Administrator requests are checked by the current leader against the replicated public key, so followers do not need or retain the administrator private key.
+A join token is accepted only by the managed enrollment endpoint and is never administrator API authority. Enrollment sends it only over TLS authenticated by the pinned CA, and each enrollment consumes one use in the same replicated transaction that records the new identity, so a use limit holds even when enrollments race. The node generates its private key locally and submits a signing request; the leader ignores requested names, assigns the new UUID, and returns only the certificate. Node identity certificates carry `<uuid>.node.trellis`, never the API name `trellis`. Control-plane nodes serve that name with a separate 24-hour API certificate, renewed hourly by the leader while the node remains admitted. The managed CA signing key is delivered only after a control-plane identity proves its certificate and joins Raft. Administrator requests are checked by the current leader against the replicated public key, so followers do not need or retain the administrator private key.
 
-**In managed mode every node holds the cluster CA private key.** Each admitted member receives it so that any node can lead enrollment after failover. Anyone who controls any node can therefore issue certificates, so treat compromise of any admitted node in managed mode as compromise of the cluster. Trellis still limits what a stolen CA key alone achieves: a certificate for a new UUID was never enrolled with a join token, so Raft join and the Raft transport refuse it, a certificate for an existing UUID does not match that UUID's durably bound certificate, and a removed UUID is refused everywhere. When no node should hold the CA private key, use `node_signing_mode: external`.
+**In managed mode every control-plane node holds the cluster CA private key; workers do not.** Compromise of a control-plane node is therefore cluster compromise. To promote an enrolled worker, run `trellisctl --administrator-key ./trellis-administrator.pem nodes promote NODE`, then set `control_plane: true`, configure the matching secrets key if the cluster uses one, and restart its daemon. Changing local configuration alone cannot promote a worker.
+
+There is no in-place demotion operation: remove and freshly enroll the machine with a worker token. A former control-plane node may retain the CA and secrets keys; removal, certificate expiry, or re-enrollment does **not** undo that exposure. If it is untrusted, replace the exposed cluster keys and reissue certificates before treating the cluster as secure. Short-lived API certificates stop normal renewal after removal, but cannot prevent a holder of the CA key from signing its own certificates.
 
 To grow a single node into a fault-tolerant cluster, repeat this for two more machines.
 
@@ -128,7 +144,7 @@ To grow a single node into a fault-tolerant cluster, repeat this for two more ma
 
 Set `node_signing_mode: external` when the operator owns the node CA. This is the mode in which no Trellis node holds the CA private key. Every node configuration must provide `ca_cert`, `cert`, and `key`; omit `ca_key` and `join_token`, since join tokens only authorize managed enrollment. Trellis verifies the key pair, trust chain, client-auth usage, and immutable node ID at startup, stores the trusted CA certificate and node key pair, and does not require or persist the CA private key.
 
-Before first start, choose a UUID, write it to `<data_dir>/node-id` with mode `0600`, and have the external signer issue a certificate containing that UUID as URI SAN `trellis-node:UUID`. The certificate must allow TLS client and server authentication and include `trellis` plus the node's agent, control-plane, and Raft advertised DNS names or IP addresses as SANs. A minimal first-node configuration is:
+Before first start, choose a UUID, write it to `<data_dir>/node-id` with mode `0600`, and have the external signer issue an identity certificate containing URI SAN `trellis-node:UUID` and DNS SAN `<uuid>.node.trellis`. Never issue the API name `trellis` to a worker. Control-plane API certificates are separate and short-lived. A minimal first-node configuration is:
 
 ```yaml
 node_signing_mode: external
@@ -136,6 +152,8 @@ administrator_public_key: MCowBQYDK2VwAyEA...
 ca_cert: /etc/trellis/node-ca.crt
 cert: /etc/trellis/node.crt
 key: /etc/trellis/node.key
+api_cert: /etc/trellis/api.crt
+api_key: /etc/trellis/api.key
 ```
 
 Generate the administrator key on the operator workstation, keep the private key in a password manager, and put only its unpadded base64 PKIX public key in node configuration:
@@ -145,7 +163,7 @@ openssl genpkey -algorithm ED25519 -out trellis-administrator.pem
 openssl pkey -in trellis-administrator.pem -pubout -outform DER | base64 | tr -d '=\n'
 ```
 
-For another pre-issued node, omit `administrator_public_key` and add `join: node-a:8128`; its authenticated node certificate authorizes only that certificate's UUID as the Raft member ID. In external mode the CA itself decides which machines may join, so issue node certificates only for machines that should become members. Its advertised control-plane and Raft hosts must match certificate SANs. Loss of the external signer prevents issuing certificates for new nodes but does not affect operation or leader failover among nodes that already have certificates. A certificate from any other CA, or one whose node ID differs from `<data_dir>/node-id`, is rejected.
+For another pre-issued node, omit `administrator_public_key`, add `join: node-a:8128`, and set its role. Before starting an external worker, enroll its public identity explicitly with `trellisctl --administrator-key ./trellis-administrator.pem nodes enroll --cert node.crt --role worker`; set `control_plane: false` and omit `api_cert` and `api_key`. Control-plane nodes require the separate API key pair and its renewal is the external operator's responsibility. Only administrator-approved control-plane identities may join Raft. Loss of the external signer prevents issuing certificates for new nodes and renewing API certificates. A certificate from any other CA, one whose node ID differs from `<data_dir>/node-id`, or a worker identity containing `trellis` is rejected.
 
 ## Try it locally with Vagrant
 

@@ -6,6 +6,88 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 go build -o "$tmp/real-trellisctl" "$script_dir/../orchestrator/cmd/trellisctl"
 export REAL_CTL="$tmp/real-trellisctl"
+
+# Execute the complete worker install against temporary paths. A deliberately
+# unreadable/nonexistent secrets file and ambient secrets prove the worker path
+# neither consumes control-plane key inputs nor creates private cluster material.
+mkdir -p "$tmp/worker-installer" "$tmp/worker-bin" "$tmp/worker/home/.config/trellis"
+cp "$script_dir/install-core.sh" "$tmp/worker-installer/install-core.sh"
+cat >"$tmp/worker-installer/common.sh" <<EOF
+source "$script_dir/common.sh"
+require_root_linux_amd64() { :; }
+require_commands() { :; }
+detect_advertise_ipv4() { printf '192.0.2.20\\n'; }
+fetch_latest_release() { RELEASE_TAG=v-worker-test; }
+networking_tools_present() { return 0; }
+download_release() {
+    for binary in trellis trellisctl trellis-health-probe; do
+        printf '#!/bin/sh\\nexit 0\\n' >"\$1/\$binary"
+    done
+}
+write_service() { printf 'worker service\\n' >"\$SERVICE_FILE"; }
+wait_for_service() { printf 'relayed-local-api\\n' >>"\$CALL_LOG"; }
+wait_for_local_node() { printf 'registered-worker %s\\n' "\$2" >>"\$CALL_LOG"; }
+EOF
+cat >"$tmp/worker-bin/systemctl" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+cat >"$tmp/worker-bin/containerd" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+cat >"$tmp/worker-bin/openssl" <<'EOF'
+#!/bin/sh
+echo 'worker installer invoked openssl' >&2
+exit 97
+EOF
+cat >"$tmp/worker-bin/getent" <<EOF
+#!/bin/sh
+printf 'test-operator:x:1000:1000::${tmp}/worker/home:/bin/sh\\n'
+EOF
+cat >"$tmp/worker-bin/id" <<'EOF'
+#!/bin/sh
+printf 'test-operator\n'
+EOF
+cat >"$tmp/worker-bin/chown" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod +x "$tmp/worker-bin/"*
+cat >"$tmp/worker/home/.config/trellis/config.yaml" <<'EOF'
+current_context: local
+contexts:
+  local:
+    token: existing-operator-token
+EOF
+printf 'join-token-value\n' >"$tmp/worker/join-token"
+printf 'public-ca-certificate\n' >"$tmp/worker/cluster-ca.crt"
+(
+    export PATH="$tmp/worker-bin:$PATH" HOME="$tmp/worker/home" SUDO_USER=test-operator
+    export INSTALL_DIR="$tmp/worker/install" STATE_ROOT="$tmp/worker/state"
+    export CONFIG_DIR="$tmp/worker/etc" RUN_DIR="$tmp/worker/run"
+    export SERVICE_FILE="$tmp/worker/trellis.service" CALL_LOG="$tmp/worker.calls"
+    export TRELLIS_SECRETS_KEY='ambient-secret-must-not-be-read'
+    export TRELLIS_SECRETS_KEY_ID='ambient-key-id-must-not-be-written'
+    bash "$tmp/worker-installer/install-core.sh" --yes --worker --runs-workloads false \
+        --advertise 192.0.2.20 --join control.example:8128 \
+        --join-token-file "$tmp/worker/join-token" --ca-cert-file "$tmp/worker/cluster-ca.crt" \
+        --secrets-key-file "$tmp/worker/does-not-exist"
+) >"$tmp/worker.output" 2>&1
+worker_config="$tmp/worker/etc/trellis.yaml"
+grep -qx 'control_plane: false' "$worker_config"
+grep -qx 'runs_workloads: false' "$worker_config"
+grep -qx 'join: control.example:8128' "$worker_config"
+grep -qx 'ca_cert: .*node-ca.crt' "$worker_config"
+! grep -Eq '^(raft_advertise|secrets_key|secrets_key_id|ca_key|administrator_public_key):' "$worker_config"
+! grep -Rq 'ambient-secret-must-not-be-read\|ambient-key-id-must-not-be-written' "$tmp/worker" "$tmp/worker.calls"
+test ! -e "$tmp/worker/etc/secrets.key"
+test ! -e "$tmp/worker/etc/ca.key"
+test ! -e "$tmp/worker/state/data/raft"
+! grep -q '^join_token:' "$worker_config"
+grep -qx 'relayed-local-api' "$tmp/worker.calls"
+grep -qx 'registered-worker 192.0.2.20:8127' "$tmp/worker.calls"
+printf 'PASS executable worker install is keyless, joins, and verifies registration\n'
 awk '/^ui_section "Operator access"/ {copy=1} /^unset administrator_private_key administrator_public_key/ {copy=0} copy' \
     "$script_dir/install-core.sh" >"$tmp/operator-access.sh"
 mkdir "$tmp/bin"
@@ -81,7 +163,6 @@ CONFIG
         grep -q 'token: remote-token' "$config"
         grep -q 'ca_cert: remote-ca' "$config"
         if [ "$scenario" = resume ] || [ "$scenario" = join ]; then
-            if [ "$scenario" = join ]; then test ! -e "$CALL_LOG"; fi
             grep -q 'token: old-operator-token' "$config"
         else
             grep -q 'current_context: local' "$config"
@@ -93,9 +174,7 @@ CONFIG
             grep -q "CA: file: $RUN_DIR/ca.crt" <<<"$shown"
             ! grep -q 'new-operator-token' <<<"$shown"
         fi
-        if [ "$scenario" != join ]; then
-            grep -q -- '--context local --server-addr https://127.0.0.1:8128.*nodes status 192.0.2.10:8127 --output table' "$CALL_LOG"
-        fi
+        grep -q -- '--context local --server-addr https://127.0.0.1:8128.*nodes status 192.0.2.10:8127 --output table' "$CALL_LOG"
         printf 'PASS operator access: %s\n' "$scenario"
     )
 done

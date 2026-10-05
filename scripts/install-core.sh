@@ -45,7 +45,10 @@ Options:
   --join HOST:8128              Join an existing cluster instead of creating one
   --join-token-file FILE        Read the node join token from FILE
   --ca-cert-file FILE           Pin the existing cluster node CA certificate
-  --secrets-key-file FILE       Read the existing cluster secrets key from FILE
+  --control-plane BOOL          Join the control plane (default: true)
+  --worker                      Alias for --control-plane false
+  --runs-workloads BOOL         Allow workload placement (default: true)
+  --secrets-key-file FILE       Read the cluster secrets key (control-plane nodes only)
   --secrets-key-id ID           Existing cluster key ID when it was explicitly configured
   --with-gvisor                 Install gVisor/runsc
   -y, --yes                     Apply the displayed plan without confirmation
@@ -64,6 +67,8 @@ join_token_file=""
 ca_cert_file=""
 join_secrets_file=""
 join_secrets_key_id="${TRELLIS_SECRETS_KEY_ID:-}"
+control_plane=true
+runs_workloads=true
 with_gvisor=false
 assume_yes=false
 administrator_private_key="${TRELLIS_ADMINISTRATOR_KEY:-}"
@@ -74,6 +79,9 @@ while [ "$#" -gt 0 ]; do
         --join) [ "$#" -ge 2 ] || ui_die "--join requires a host:port"; join_addr="$2"; shift 2 ;;
         --join-token-file) [ "$#" -ge 2 ] || ui_die "--join-token-file requires a path"; join_token_file="$2"; shift 2 ;;
         --ca-cert-file) [ "$#" -ge 2 ] || ui_die "--ca-cert-file requires a path"; ca_cert_file="$2"; shift 2 ;;
+        --control-plane) [ "$#" -ge 2 ] || ui_die "--control-plane requires true or false"; control_plane="$2"; shift 2 ;;
+        --worker) control_plane=false; shift ;;
+        --runs-workloads) [ "$#" -ge 2 ] || ui_die "--runs-workloads requires true or false"; runs_workloads="$2"; shift 2 ;;
         --secrets-key-file) [ "$#" -ge 2 ] || ui_die "--secrets-key-file requires a path"; join_secrets_file="$2"; shift 2 ;;
         --secrets-key-id) [ "$#" -ge 2 ] || ui_die "--secrets-key-id requires a value"; join_secrets_key_id="$2"; shift 2 ;;
         --with-gvisor) with_gvisor=true; shift ;;
@@ -82,6 +90,10 @@ while [ "$#" -gt 0 ]; do
         *) ui_die "Unknown option: $1" ;;
     esac
 done
+
+case "$control_plane" in true|false) ;; *) ui_die "--control-plane requires true or false" ;; esac
+case "$runs_workloads" in true|false) ;; *) ui_die "--runs-workloads requires true or false" ;; esac
+[ "$control_plane" = true ] || [ -n "$join_addr" ] || ui_die "A worker must join an existing cluster; pass --join HOST:8128."
 
 require_root_linux_amd64
 require_commands curl tar systemctl openssl awk grep install mktemp
@@ -133,7 +145,7 @@ if [ -n "$join_addr" ] && [[ "$join_addr" != *:* ]]; then
 fi
 if [ -n "$join_token_file" ] && [ ! -r "$join_token_file" ]; then ui_die "Cannot read $join_token_file"; fi
 if [ -n "$ca_cert_file" ] && [ ! -r "$ca_cert_file" ]; then ui_die "Cannot read $ca_cert_file"; fi
-if [ -n "$join_secrets_file" ] && [ ! -r "$join_secrets_file" ]; then ui_die "Cannot read $join_secrets_file"; fi
+if [ "$control_plane" = true ] && [ -n "$join_secrets_file" ] && [ ! -r "$join_secrets_file" ]; then ui_die "Cannot read $join_secrets_file"; fi
 
 fetch_latest_release
 
@@ -159,6 +171,8 @@ ui_section "Plan"
 ui_detail "Version       ${RELEASE_TAG}"
 ui_detail "Node address  ${advertise_host}"
 ui_detail "Cluster       ${cluster_action}"
+ui_detail "Control plane ${control_plane}"
+ui_detail "Runs workloads ${runs_workloads}"
 ui_detail "containerd    ${containerd_action}"
 ui_detail "WireGuard     ${networking_action}"
 ui_detail "gVisor        $([ "$with_gvisor" = true ] && printf 'enabled' || printf 'disabled')"
@@ -227,9 +241,11 @@ if [ ! -f "$CONFIG_FILE" ]; then
         join_token="$(read_secret "Node join token" "$join_token_file" "${TRELLIS_JOIN_TOKEN:-}")"
         [ -n "$ca_cert_file" ] || ui_die "--ca-cert-file is required when joining so enrollment uses the pinned cluster CA."
         install -m 0644 "$ca_cert_file" "${CONFIG_DIR}/node-ca.crt"
-        secrets_value="$(read_secret "Existing cluster secrets key" "$join_secrets_file" "${TRELLIS_SECRETS_KEY:-}")"
-        printf '%s\n' "$secrets_value" >"$SECRETS_KEY_FILE"
-        unset secrets_value
+        if [ "$control_plane" = true ]; then
+            secrets_value="$(read_secret "Existing cluster secrets key" "$join_secrets_file" "${TRELLIS_SECRETS_KEY:-}")"
+            printf '%s\n' "$secrets_value" >"$SECRETS_KEY_FILE"
+            unset secrets_value
+        fi
     else
         administrator_key_pem="$(openssl genpkey -algorithm ED25519)"
         administrator_private_key="$(printf '%s\n' "$administrator_key_pem" | openssl pkey -outform DER | base64 | tr -d '=\n')"
@@ -238,22 +254,28 @@ if [ ! -f "$CONFIG_FILE" ]; then
         admin_public_key_config="administrator_public_key: ${administrator_public_key}"
         openssl rand -base64 32 >"$SECRETS_KEY_FILE"
     fi
-    chmod 600 "$SECRETS_KEY_FILE"
+    [ ! -f "$SECRETS_KEY_FILE" ] || chmod 600 "$SECRETS_KEY_FILE"
     cat >"$CONFIG_FILE" <<EOF_CONFIG
 cluster: default
 ${admin_public_key_config}
 node_signing_mode: managed
+control_plane: ${control_plane}
+runs_workloads: ${runs_workloads}
 data_dir: ${DATA_DIR}
 agent_advertise: ${advertise_host}:8127
 server_advertise: ${advertise_host}:8128
-raft_advertise: ${advertise_host}:8129
-secrets_key: ${SECRETS_KEY_FILE}
 EOF_CONFIG
+    if [ "$control_plane" = true ]; then
+        printf 'raft_advertise: %s:8129\n' "$advertise_host" >>"$CONFIG_FILE"
+        printf 'secrets_key: %s\n' "$SECRETS_KEY_FILE" >>"$CONFIG_FILE"
+    fi
     if [ -n "$join_addr" ]; then
         printf 'join: %s\n' "$join_addr" >>"$CONFIG_FILE"
         printf 'join_token: %s\n' "$join_token" >>"$CONFIG_FILE"
         printf 'ca_cert: %s\n' "${CONFIG_DIR}/node-ca.crt" >>"$CONFIG_FILE"
-        [ -z "$join_secrets_key_id" ] || printf 'secrets_key_id: %s\n' "$join_secrets_key_id" >>"$CONFIG_FILE"
+        if [ "$control_plane" = true ]; then
+            [ -z "$join_secrets_key_id" ] || printf 'secrets_key_id: %s\n' "$join_secrets_key_id" >>"$CONFIG_FILE"
+        fi
     fi
     chmod 600 "$CONFIG_FILE"
     ui_step "Created node configuration"
@@ -261,8 +283,10 @@ EOF_CONFIG
         ui_warn "Save this base64 PKCS#8 administrator private key in an operator password manager; Trellis does not retain it: ${administrator_private_key}"
     fi
 else
-    [ -f "$SECRETS_KEY_FILE" ] || ui_die "${CONFIG_FILE} exists but ${SECRETS_KEY_FILE} is missing; restore the matching key and rerun install."
-    chmod 600 "$CONFIG_FILE" "$SECRETS_KEY_FILE"
+    configured_control_plane="$(awk -F': ' '$1 == "control_plane" {print $2; exit}' "$CONFIG_FILE")"
+    [ "${configured_control_plane:-true}" != true ] || [ -f "$SECRETS_KEY_FILE" ] || ui_die "${CONFIG_FILE} exists but ${SECRETS_KEY_FILE} is missing; restore the matching key and rerun install."
+    chmod 600 "$CONFIG_FILE"
+    [ ! -f "$SECRETS_KEY_FILE" ] || chmod 600 "$SECRETS_KEY_FILE"
     ui_step "Reusing existing node configuration"
 fi
 
@@ -326,7 +350,7 @@ else
         ui_step "Saved local cluster/write context for ${operator_user}"
     fi
 fi
-if [ -z "$join_addr" ] && [ -z "$existing_join" ] && [ -f "$operator_config" ]; then
+if [ -f "$operator_config" ]; then
     ui_detail "Waiting for the local worker to register and become healthy."
     wait_for_local_node "$operator_config" "${advertise_host}:8127" || \
         ui_die "The control-plane API is healthy, but the local worker is not ready. Check 'journalctl -u trellis -n 200' and rerun install."

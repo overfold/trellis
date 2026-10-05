@@ -33,6 +33,10 @@ type jobLimitsConfig struct {
 }
 
 type nodeConfigFile struct {
+	ControlPlane       *bool                `yaml:"control_plane"`
+	RunsWorkloads      *bool                `yaml:"runs_workloads"`
+	APICert            *string              `yaml:"api_cert"`
+	APIKey             *string              `yaml:"api_key"`
 	AgentListen        *string              `yaml:"agent_listen"`
 	AgentAdvertise     *string              `yaml:"agent_advertise"`
 	ServerListen       *string              `yaml:"server_listen"`
@@ -82,6 +86,14 @@ func loadNodeConfig(path string, cfg *config, flags *pflag.FlagSet) error {
 			*target = *value
 		}
 	}
+	if parsed.ControlPlane != nil && !flags.Changed("control-plane") {
+		cfg.ControlPlane = parsed.ControlPlane
+	}
+	if parsed.RunsWorkloads != nil && !flags.Changed("runs-workloads") {
+		cfg.RunsWorkloads = parsed.RunsWorkloads
+	}
+	setString("api-cert", parsed.APICert, &cfg.APICert)
+	setString("api-key", parsed.APIKey, &cfg.APIKey)
 	setString("agent-listen", parsed.AgentListen, &cfg.AgentListen)
 	setString("agent-advertise", parsed.AgentAdvertise, &cfg.AgentAdvertise)
 	setString("server-listen", parsed.ServerListen, &cfg.ServerListen)

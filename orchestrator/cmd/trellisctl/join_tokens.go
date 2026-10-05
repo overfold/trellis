@@ -27,12 +27,26 @@ func NewNodesJoinTokenCmd() *cobra.Command {
 func newJoinTokenCreateCmd() *cobra.Command {
 	var ttl time.Duration
 	var maxUses int
+	var role string
 	cmd := &cobra.Command{
 		Use:   "create",
 		Short: "Create a node join token",
-		Long:  "Create a join token for enrolling new nodes. It expires after --ttl (default 1h, at most 168h) and, with --max-uses, after that many enrollments. The token is printed once; the cluster stores only its hash.",
+		Long:  "Create a role-bound join token for enrolling new nodes. Control-plane tokens (the default) are single-use and expire within 1h. Worker tokens may use --max-uses and expire after at most 168h. The token is printed once; the cluster stores only its hash.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			nodeRole := api.NodeRole(role)
+			if nodeRole != api.NodeRoleControlPlane && nodeRole != api.NodeRoleWorker {
+				return fmt.Errorf("--role must be control-plane or worker")
+			}
+			if nodeRole == api.NodeRoleControlPlane {
+				if ttl > time.Hour {
+					return fmt.Errorf("control-plane token --ttl must not exceed 1h")
+				}
+				if maxUses != 0 && maxUses != 1 {
+					return fmt.Errorf("control-plane token --max-uses must be 1")
+				}
+				maxUses = 1
+			}
 			seconds, err := ttlSeconds(ttl)
 			if err != nil {
 				return err
@@ -44,7 +58,7 @@ func newJoinTokenCreateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			response, err := serverClient.CreateJoinToken(cmd.Context(), &api.JoinTokenCreateRequest{TTLSeconds: seconds, MaxUses: maxUses})
+			response, err := serverClient.CreateJoinToken(cmd.Context(), &api.JoinTokenCreateRequest{TTLSeconds: seconds, MaxUses: maxUses, Role: nodeRole})
 			if err != nil {
 				return err
 			}
@@ -60,6 +74,7 @@ func newJoinTokenCreateCmd() *cobra.Command {
 	}
 	cmd.Flags().DurationVar(&ttl, "ttl", 0, "Token lifetime, such as 30m or 24h (default 1h, maximum 168h)")
 	cmd.Flags().IntVar(&maxUses, "max-uses", 0, "Maximum number of nodes that may enroll with the token (default: unlimited until expiry)")
+	cmd.Flags().StringVar(&role, "role", string(api.NodeRoleControlPlane), "Node role: control-plane or worker")
 	return cmd
 }
 
@@ -86,11 +101,11 @@ func newJoinTokenListCmd() *cobra.Command {
 				return err
 			}
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
-			if _, err := fmt.Fprintln(w, "ID\tCreated\tExpires\tUses"); err != nil {
+			if _, err := fmt.Fprintln(w, "ID\tRole\tCreated\tExpires\tUses"); err != nil {
 				return err
 			}
 			for _, token := range tokens {
-				if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", token.ID, token.CreatedAt.Format(time.RFC3339), token.ExpiresAt.Format(time.RFC3339), formatJoinTokenUses(token)); err != nil {
+				if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", token.ID, token.Role, token.CreatedAt.Format(time.RFC3339), token.ExpiresAt.Format(time.RFC3339), formatJoinTokenUses(token)); err != nil {
 					return err
 				}
 			}

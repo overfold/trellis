@@ -197,11 +197,192 @@ func TestMultiNodeRemovedNodeIsRevoked(t *testing.T) {
 	if err := os.MkdirAll(h.nodes[victim].dir, 0o750); err != nil {
 		t.Fatal(err)
 	}
+	h.setJoinToken(victim, h.createJoinToken(api.NodeRoleControlPlane))
 	h.start(victim)
 	h.waitHTTP(victim)
 	membership = h.waitVoters(3, 3)
 	if newID := h.nodeID(victim); newID == victimID || membership[newID] != api.ControlPlaneVoter {
 		t.Fatalf("rejoined node identity %s (removed %s) has role %q, want a new voter", newID, victimID, membership[newID])
+	}
+}
+
+// TestWorkerRelayAndIsolation exercises a worker as a real daemon process. It
+// must register and run allocations without receiving control-plane private
+// state, while its public listener relays each authentication mechanism to the
+// current leader, including after an election.
+func TestWorkerRelayAndIsolation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("multi-process integration test")
+	}
+	t.Parallel()
+	h := newHarness(t, 3)
+	defer h.close()
+	h.waitNodes(3)
+	h.waitVoters(3, 3)
+
+	worker := h.addWorker(h.createJoinToken(api.NodeRoleWorker))
+	h.start(worker)
+	h.waitHTTP(worker)
+	h.waitNodes(4)
+
+	workerID := h.nodeID(worker)
+	var listed api.NodeResponse
+	h.eventually(30*time.Second, func() bool {
+		nodes, err := h.administrator().ListNodes(context.Background())
+		if err != nil {
+			return false
+		}
+		for _, candidate := range nodes {
+			if candidate.ID.String() == workerID {
+				listed = candidate
+				return candidate.ControlPlane == ""
+			}
+		}
+		return false
+	}, "worker registration did not preserve its role and workload setting")
+	if listed.ControlPlane != "" {
+		t.Fatalf("worker unexpectedly joined Raft as %q", listed.ControlPlane)
+	}
+	workerJob := job("worker-only", "v1", 1, "rolling")
+	spec := workerJob["spec"].(map[string]any)
+	groups := spec["task_groups"].([]any)
+	groups[0].(map[string]any)["constraints"] = []any{map[string]any{"attribute": "integration-role", "value": "worker"}}
+	h.submit(workerJob)
+	h.waitJob("worker-only", 1, 1)
+	if containers := h.runtimeState(worker); len(containers) != 1 {
+		t.Fatalf("worker injected runtime contains %d allocations, want 1", len(containers))
+	}
+	for _, path := range []string{"raft", "tls/ca-key", "secrets-key", "secrets.key"} {
+		if _, err := os.Stat(filepath.Join(h.nodes[worker].dir, path)); !os.IsNotExist(err) {
+			t.Fatalf("worker contains control-plane private state %q: %v", path, err)
+		}
+	}
+
+	// Bearer credentials and administrator signatures are verified by the
+	// leader, not consumed or rewritten by the worker relay.
+	resp, err := h.request(worker, http.MethodGet, "/v1/nodes", nil)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		t.Fatalf("bearer request through worker = %v, %v", status(resp), err)
+	}
+	_ = resp.Body.Close()
+	admin, err := client.New(client.Config{Address: addr(h.nodes[worker].ports[1]), AdministratorKey: h.adminKey, TLSConfig: &tls.Config{InsecureSkipVerify: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.ListNodes(context.Background()); err != nil {
+		t.Fatalf("administrator request through worker: %v", err)
+	}
+
+	// The relay is byte-transparent, so the leader receives the original node
+	// certificate rather than a worker-owned replacement identity.
+	nodeHTTP := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: h.nodeClientTLS(worker)}}
+	resp, err = nodeHTTP.Get("https://" + addr(h.nodes[worker].ports[1]) + "/v1/internal/discovery")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		t.Fatalf("node-certificate request through worker = %v, %v", status(resp), err)
+	}
+	_ = resp.Body.Close()
+
+	oldLeader := h.leader()
+	h.stop(oldLeader)
+	_ = h.leader()
+	h.eventually(45*time.Second, func() bool {
+		response, err := h.request(worker, http.MethodGet, "/v1/nodes", nil)
+		if response != nil {
+			defer func() { _ = response.Body.Close() }()
+		}
+		return err == nil && response.StatusCode == http.StatusOK
+	}, "new worker relay connections did not follow leader failover")
+}
+
+func status(response *http.Response) any {
+	if response == nil {
+		return nil
+	}
+	return response.Status
+}
+
+// This verifies real leader decryption, mTLS delivery, memory-backed secret
+// materialization, and workload token authentication. The injected runtime
+// does not execute a container process, so it is not containerd verification.
+func TestWorkerSecretsAndWorkloadAPIAccess(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, 1)
+	defer h.close()
+	h.stop(0)
+	keyPath := filepath.Join(h.base, "cluster-secrets.key")
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, key, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	clear(key)
+	h.nodes[0].args = append(h.nodes[0].args, "--secrets-key", keyPath, "--runs-workloads=false")
+	h.start(0)
+	h.waitHTTP(0)
+	h.waitNodes(1)
+	worker := h.addWorker(h.createJoinToken(api.NodeRoleWorker))
+	h.start(worker)
+	h.waitHTTP(worker)
+	h.waitNodes(2)
+	admin, err := client.New(client.Config{Address: addr(h.nodes[0].ports[1]), Namespace: "default", AdministratorKey: h.adminKey, TLSConfig: &tls.Config{InsecureSkipVerify: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.SetSecret(t.Context(), "worker-secret", []byte("allocation-only-value"), nil); err != nil {
+		t.Fatal(err)
+	}
+	work := job("worker-secret-job", "v1", 1, "rolling")
+	group := work["spec"].(map[string]any)["task_groups"].([]any)[0].(map[string]any)
+	group["api_access"] = map[string]any{"scope": "cluster", "access": "read"}
+	group["constraints"] = []any{map[string]any{"attribute": "integration-role", "value": "worker"}}
+	group["tasks"].([]any)[0].(map[string]any)["secrets"] = []any{map[string]any{"name": "worker-secret", "target": "env", "env": "WORKER_SECRET"}}
+	h.submit(work)
+	h.waitJob("worker-secret-job", 1, 1)
+	var root string
+	local := storage.NewLocalStorage(h.nodes[worker].dir)
+	if err := local.Get("agent/secret-root", &root); err != nil {
+		t.Fatal(err)
+	}
+	// The agent owns this test-only root; close daemons before cleaning it.
+	t.Cleanup(func() { h.close(); _ = os.RemoveAll(root) })
+	values, err := filepath.Glob(filepath.Join(root, "*", "env", "WORKER_SECRET"))
+	if err != nil || len(values) != 1 {
+		t.Fatalf("worker secret files=%v err=%v", values, err)
+	}
+	value, err := os.ReadFile(values[0])
+	if err != nil || string(value) != "allocation-only-value" {
+		t.Fatal("worker did not receive allocation secret")
+	}
+	clear(value)
+	tokens, err := filepath.Glob(filepath.Join(root, "*", "env", "TRELLIS_TOKEN"))
+	if err != nil || len(tokens) != 1 {
+		t.Fatalf("workload token files=%v err=%v", tokens, err)
+	}
+	token, err := os.ReadFile(tokens[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(token)
+	workload, err := client.New(client.Config{Address: addr(h.nodes[worker].ports[1]), Token: string(token), TLSConfig: &tls.Config{InsecureSkipVerify: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := workload.CredentialInfo(t.Context())
+	if err != nil || identity.Subject == nil || identity.Subject.Job != "worker-secret-job" || identity.Access != "read" {
+		t.Fatalf("workload identity=%+v err=%v", identity, err)
+	}
+	for _, name := range []string{"raft", "tls/ca-key", "cluster-secrets.key"} {
+		if _, err := os.Stat(filepath.Join(h.nodes[worker].dir, name)); !os.IsNotExist(err) {
+			t.Fatalf("worker holds %s: %v", name, err)
+		}
 	}
 }
 
@@ -276,14 +457,22 @@ func newHarness(t *testing.T, count int) *harness {
 				t.Fatalf("mint integration operator credential: %v", err)
 			}
 			h.token = credential.Token
-			joinToken, err := administrator.CreateJoinToken(t.Context(), &api.JoinTokenCreateRequest{})
-			if err != nil {
-				t.Fatalf("mint integration join token: %v", err)
-			}
-			h.joinToken = joinToken.Token
+			h.joinToken = h.createJoinToken(api.NodeRoleControlPlane)
+		}
+		if i > 0 && i+1 < count {
+			h.joinToken = h.createJoinToken(api.NodeRoleControlPlane)
 		}
 	}
 	return h
+}
+
+func (h *harness) createJoinToken(role api.NodeRole) string {
+	h.t.Helper()
+	joinToken, err := h.administrator().CreateJoinToken(h.t.Context(), &api.JoinTokenCreateRequest{Role: role})
+	if err != nil {
+		h.t.Fatalf("mint %s integration join token: %v", role, err)
+	}
+	return joinToken.Token
 }
 
 // addNode prepares, without starting, a node that bootstraps the cluster when
@@ -308,6 +497,33 @@ func (h *harness) addNode(joinToken string) int {
 	}
 	h.nodes = append(h.nodes, n)
 	return i
+}
+
+func (h *harness) addWorker(joinToken string) int {
+	h.t.Helper()
+	i := h.addNode(joinToken)
+	// Omit the count so workers must adopt the cluster's nondefault range.
+	args := h.nodes[i].args
+	for index, arg := range args {
+		if arg == "--wireguard-port-count" {
+			h.nodes[i].args = append(args[:index], args[index+2:]...)
+			break
+		}
+	}
+	h.nodes[i].args = append(h.nodes[i].args, "--control-plane=false", "--label", "integration-role=worker")
+	return i
+}
+
+func (h *harness) setJoinToken(i int, token string) {
+	h.t.Helper()
+	args := h.nodes[i].args
+	for index := range args {
+		if args[index] == "--join-token" && index+1 < len(args) {
+			args[index+1] = token
+			return
+		}
+	}
+	h.t.Fatalf("node %d has no join token argument", i)
 }
 
 func (h *harness) administrator() *client.Client {

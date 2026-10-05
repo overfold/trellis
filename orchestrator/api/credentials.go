@@ -2,6 +2,16 @@ package api
 
 import "time"
 
+// NodeRole is the durable authority assigned to a node at enrollment.
+type NodeRole string
+
+const (
+	// NodeRoleControlPlane permits Raft participation and cluster key custody.
+	NodeRoleControlPlane NodeRole = "control-plane"
+	// NodeRoleWorker permits allocation execution without control-plane authority.
+	NodeRoleWorker NodeRole = "worker"
+)
+
 // CredentialCreateRequest asks the administrator to mint a scoped API credential.
 // A positive TTLSeconds makes the credential expire that many seconds after
 // creation; zero or absent means it does not expire.
@@ -50,12 +60,12 @@ type CredentialInfoResponse struct {
 }
 
 // JoinTokenCreateRequest asks the administrator to mint a node join token.
-// TTLSeconds defaults to one hour and may not exceed seven days. A positive
-// MaxUses limits how many nodes may enroll with the token; zero or absent
-// allows any number until it expires.
+// Role defaults to control-plane: single-use with TTLSeconds at most one hour.
+// Worker tokens may last up to seven days; MaxUses zero permits unlimited uses.
 type JoinTokenCreateRequest struct {
-	TTLSeconds int64 `json:"ttl_seconds,omitempty"`
-	MaxUses    int   `json:"max_uses,omitempty"`
+	TTLSeconds int64    `json:"ttl_seconds,omitempty"`
+	MaxUses    int      `json:"max_uses,omitempty"`
+	Role       NodeRole `json:"role,omitempty"`
 }
 
 // JoinTokenResponse is the listable metadata of a node join token. It never
@@ -66,6 +76,7 @@ type JoinTokenResponse struct {
 	ExpiresAt time.Time `json:"expires_at"`
 	MaxUses   int       `json:"max_uses,omitempty"`
 	Uses      int       `json:"uses"`
+	Role      NodeRole  `json:"role"`
 }
 
 // JoinTokenCreateResponse returns a newly minted join token exactly once,

@@ -1,13 +1,16 @@
 package tlsutil
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"io"
-	"net"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -22,7 +25,11 @@ func generateTestMaterials(t *testing.T) *Materials {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &Materials{CACert: caCert, CAKey: caKey, Cert: nodeCert, Key: nodeKey}
+	apiCert, apiKey, err := GenerateAPICert(caCert, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &Materials{CACert: caCert, CAKey: caKey, Cert: nodeCert, Key: nodeKey, APICert: apiCert, APIKey: apiKey}
 }
 
 func TestGenerateCA(t *testing.T) {
@@ -62,7 +69,7 @@ func TestGenerateNodeCert(t *testing.T) {
 func TestMutualTLSHandshake(t *testing.T) {
 	m := generateTestMaterials(t)
 
-	serverCfg, err := ServerTLSConfig(m)
+	serverCfg, err := LeaderTLSConfig(m)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,24 +223,98 @@ func TestGenerateNodeCertExtraSANs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	foundIP := false
-	for _, ip := range cert.IPAddresses {
-		if ip.Equal(net.ParseIP("10.19.0.5")) {
-			foundIP = true
-		}
+	if len(cert.IPAddresses) != 0 {
+		t.Errorf("cert IPAddresses = %v, want none", cert.IPAddresses)
 	}
-	if !foundIP {
-		t.Errorf("cert IPAddresses %v does not contain 10.19.0.5", cert.IPAddresses)
+	if len(cert.DNSNames) != 1 || cert.DNSNames[0] == ServerName || cert.DNSNames[0] == "myhost" {
+		t.Errorf("cert DNSNames = %v, want only UUID node name", cert.DNSNames)
 	}
-	foundDNS := false
-	for _, name := range cert.DNSNames {
-		if name == "myhost" {
-			foundDNS = true
-		}
+}
+
+func TestSigningIgnoresMaliciousCSRNames(t *testing.T) {
+	caCert, caKey, err := GenerateCA()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !foundDNS {
-		t.Errorf("cert DNSNames %v does not contain myhost", cert.DNSNames)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
 	}
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		DNSNames: []string{ServerName, "attacker.example"},
+	}, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	csr := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
+	nodeID := uuid.New()
+	nodePEM, err := SignNodeCSR(caCert, caKey, csr, nodeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := parseTestCertificate(t, nodePEM)
+	if len(node.DNSNames) != 1 || node.DNSNames[0] != NodeServerName(nodeID) {
+		t.Fatalf("node DNS names = %v", node.DNSNames)
+	}
+	apiPEM, err := SignAPICSR(caCert, caKey, csr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := parseTestCertificate(t, apiPEM)
+	if len(api.DNSNames) != 1 || api.DNSNames[0] != ServerName {
+		t.Fatalf("API DNS names = %v", api.DNSNames)
+	}
+}
+
+func TestAPICertificateLifetimeAndUsages(t *testing.T) {
+	caCert, caKey, err := GenerateCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM, _, err := GenerateAPICert(caCert, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert := parseTestCertificate(t, certPEM)
+	if got := cert.NotAfter.Sub(cert.NotBefore); got != APICertificateLifetime {
+		t.Fatalf("API certificate lifetime = %v, want %v", got, APICertificateLifetime)
+	}
+	if len(cert.ExtKeyUsage) != 1 || cert.ExtKeyUsage[0] != x509.ExtKeyUsageServerAuth {
+		t.Fatalf("API extended usages = %v, want server auth only", cert.ExtKeyUsage)
+	}
+	if cert.NotAfter.After(time.Now().Add(APICertificateLifetime)) {
+		t.Fatalf("API certificate expires too late: %v", cert.NotAfter)
+	}
+}
+
+func TestNodeCertificateCannotServeAPIName(t *testing.T) {
+	caCert, caKey, err := GenerateCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM, _, err := GenerateNodeCert(caCert, caKey, uuid.New(), ServerName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(caCert)
+	cert := parseTestCertificate(t, certPEM)
+	if _, err := cert.Verify(x509.VerifyOptions{Roots: pool, DNSName: ServerName, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}); err == nil {
+		t.Fatal("node certificate unexpectedly verifies for API name")
+	}
+}
+
+func parseTestCertificate(t *testing.T, certPEM []byte) *x509.Certificate {
+	t.Helper()
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		t.Fatal("failed to decode certificate")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cert
 }
 
 func TestLeaderTLSConfigAllowsNoClientCert(t *testing.T) {

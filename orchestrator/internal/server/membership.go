@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/overfold/trellis/orchestrator/api"
 	"github.com/overfold/trellis/orchestrator/internal/state"
 )
 
@@ -196,7 +197,8 @@ func (s *Server) memberStates(members []state.RaftMember) []memberState {
 		heartbeat := s.liveness.lastHeartbeat(id)
 		caughtUp := reported && now.Sub(progress.at) <= recentHeartbeat && progress.leaderApplied <= progress.applied+raftCatchUpLag
 		current.Live = heartbeatLive(heartbeat, now)
-		current.Eligible = livenessStatus(node.Status, heartbeat, now) == NodeStatusHealthy && caughtUp
+		role, roleBound, roleErr := s.state.NodeRole(context.Background(), member.ID)
+		current.Eligible = roleErr == nil && roleBound && role == api.NodeRoleControlPlane && livenessStatus(node.Status, heartbeat, now) == NodeStatusHealthy && caughtUp
 		// Silence is measured from no earlier than this leader's election.
 		current.Gone = now.Sub(silentSince(heartbeat, s.leaderSince)) >= voterLossTimeout
 		result = append(result, current)
@@ -225,6 +227,11 @@ func (s *Server) JoinMember(ctx context.Context, id uuid.UUID, raftAddress strin
 		return nil, err
 	} else if removed {
 		return nil, fmt.Errorf("node %s: %w", id, ErrNodeRemoved)
+	}
+	if role, found, err := s.state.NodeRole(ctx, id.String()); err != nil {
+		return nil, err
+	} else if !found || role != api.NodeRoleControlPlane {
+		return nil, fmt.Errorf("node %s is not control-plane eligible", id)
 	}
 	if err := s.joiner.AddNonvoter(id.String(), raftAddress); err != nil {
 		return nil, err

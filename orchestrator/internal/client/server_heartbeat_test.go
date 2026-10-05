@@ -18,7 +18,8 @@ func TestSendHeartbeatCarriesFailureReason(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 			t.Error(err)
 		}
-		w.WriteHeader(http.StatusNoContent)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"leader_id":"00000000-0000-0000-0000-000000000000","addresses":[]}`))
 	}))
 	defer server.Close()
 

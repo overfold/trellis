@@ -17,9 +17,10 @@ import (
 // ServerClient sends a node's requests to the Trellis control plane:
 // registration, heartbeats, and internal service discovery.
 type ServerClient struct {
-	baseURL string
-	client  *transport.Client
-	mu      sync.RWMutex
+	baseURL      string
+	client       *transport.Client
+	mu           sync.RWMutex
+	controlPlane nodeapi.ControlPlaneResponse
 }
 
 // NodeInfo contains the identity and capacity used to register a node.
@@ -40,6 +41,7 @@ type NodeInfo struct {
 	WireGuardEndpoint  string
 	WireGuardPortBase  int
 	WireGuardPortCount int
+	RunsWorkloads      bool
 }
 
 // Heartbeat contains the state periodically reported by a node.
@@ -108,6 +110,7 @@ func (s *ServerClient) RegisterNode(ctx context.Context, nodeInfo *NodeInfo) (*n
 		WireGuardEndpoint:  nodeInfo.WireGuardEndpoint,
 		WireGuardPortBase:  nodeInfo.WireGuardPortBase,
 		WireGuardPortCount: nodeInfo.WireGuardPortCount,
+		RunsWorkloads:      &nodeInfo.RunsWorkloads,
 	}
 	var responseData nodeapi.NodeRegistrationResponse
 
@@ -115,6 +118,7 @@ func (s *ServerClient) RegisterNode(ctx context.Context, nodeInfo *NodeInfo) (*n
 	if err != nil {
 		return nil, fmt.Errorf("register node: %w", err)
 	}
+	s.storeControlPlane(responseData.ControlPlaneResponse)
 
 	return &responseData, nil
 }
@@ -148,8 +152,23 @@ func (s *ServerClient) SendHeartbeat(ctx context.Context, id uuid.UUID, heartbea
 		RaftAppliedIndex:  heartbeat.RaftAppliedIndex,
 	}
 	url := fmt.Sprintf("%s/v1/nodes/%s/heartbeat", s.address(), id)
-	if err := s.client.Request(ctx, http.MethodPost, url, requestData, nil); err != nil {
+	var response nodeapi.HeartbeatResponse
+	if err := s.client.Request(ctx, http.MethodPost, url, requestData, &response); err != nil {
 		return fmt.Errorf("send heartbeat: %w", err)
 	}
+	s.storeControlPlane(response.ControlPlaneResponse)
 	return nil
+}
+
+func (s *ServerClient) storeControlPlane(topology nodeapi.ControlPlaneResponse) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.controlPlane = topology
+}
+
+// ControlPlane returns the latest topology received from registration or heartbeat.
+func (s *ServerClient) ControlPlane() nodeapi.ControlPlaneResponse {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.controlPlane
 }

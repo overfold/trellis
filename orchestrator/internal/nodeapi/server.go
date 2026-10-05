@@ -29,12 +29,31 @@ type NodeRegistrationRequest struct {
 	WireGuardEndpoint  string                `json:"wireguard_endpoint,omitempty"`
 	WireGuardPortBase  int                   `json:"wireguard_port_base,omitempty"`
 	WireGuardPortCount int                   `json:"wireguard_port_count,omitempty"`
+	// RunsWorkloads is nil when the caller does not specify workload eligibility.
+	RunsWorkloads *bool `json:"runs_workloads,omitempty"`
+}
+
+// ControlPlaneResponse is public routing information for node clients.
+type ControlPlaneResponse struct {
+	LeaderID           uuid.UUID `json:"leader_id"`
+	LeaderAddress      string    `json:"leader_address"`
+	Addresses          []string  `json:"addresses"`
+	WireGuardPortCount int       `json:"wireguard_port_count"`
+}
+
+// NodeRoleResponse reports the caller's administrator-assigned authority.
+type NodeRoleResponse struct {
+	Role api.NodeRole `json:"role"`
 }
 
 // NodeRegistrationResponse confirms the registered node identity.
 type NodeRegistrationResponse struct {
 	ID uuid.UUID `json:"id"`
+	ControlPlaneResponse
 }
+
+// HeartbeatResponse confirms observation receipt and reports API topology.
+type HeartbeatResponse struct{ ControlPlaneResponse }
 
 // HeartbeatRequest reports a node and its current allocations.
 type HeartbeatRequest struct {
@@ -125,17 +144,29 @@ type RaftJoinResponse struct {
 // NodeEnrollmentRequest asks a managed cluster to issue one node identity. The
 // request authenticates with a join token as its bearer credential.
 type NodeEnrollmentRequest struct {
-	ServerAdvertise string `json:"server_advertise"`
-	AgentAdvertise  string `json:"agent_advertise"`
-	RaftAdvertise   string `json:"raft_advertise"`
+	ServerAdvertise string       `json:"server_advertise"`
+	AgentAdvertise  string       `json:"agent_advertise"`
+	RaftAdvertise   string       `json:"raft_advertise"`
+	Role            api.NodeRole `json:"role,omitempty"`
+	CSR             string       `json:"csr"`
 }
 
 // NodeEnrollmentResponse returns managed node signing materials.
 type NodeEnrollmentResponse struct {
-	NodeID uuid.UUID `json:"node_id"`
-	CACert string    `json:"ca_cert"`
-	Cert   string    `json:"cert"`
-	Key    string    `json:"key"`
+	NodeID uuid.UUID    `json:"node_id"`
+	CACert string       `json:"ca_cert"`
+	Cert   string       `json:"cert"`
+	Role   api.NodeRole `json:"role"`
+}
+
+// APICertificateRequest contains a locally generated API public key request.
+type APICertificateRequest struct {
+	CSR string `json:"csr"`
+}
+
+// APICertificateResponse returns the short-lived API certificate, never a key.
+type APICertificateResponse struct {
+	Cert string `json:"cert"`
 }
 
 // AgentExecRequest is an ExecRequest forwarded by the leader to an agent.

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -201,6 +202,52 @@ func TestHandleRaftJoinBindsMembershipToCertificateIdentity(t *testing.T) {
 	}
 }
 
+func TestHandleRaftJoinRejectsWorkerWithoutPersistingAddressesOrCAKey(t *testing.T) {
+	caCert, caKey, err := tlsutil.GenerateCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerID := uuid.New()
+	certPEM, _, err := tlsutil.GenerateNodeCert(caCert, caKey, workerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate := parseCertificatePEM(t, certPEM)
+	local := storage.NewLocalStorage(t.TempDir())
+	if err := local.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := local.Put("tls/ca-cert", string(caCert)); err != nil {
+		t.Fatal(err)
+	}
+	if err := local.Put("tls/ca-key", string(caKey)); err != nil {
+		t.Fatal(err)
+	}
+	joiner := newFakeMembership(fakeMember(uuid.New(), true))
+	control := &Server{storage: local, joiner: joiner, state: NewStateController(memoryStore{}, "test")}
+	if err := control.BindNodeCertificateRole(context.Background(), workerID, certificate, api.NodeRoleWorker); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(nodeapi.RaftJoinRequest{RaftAddress: "worker:8129", ServerAddress: "worker:8128"})
+	req := httptest.NewRequest(http.MethodPost, "/v1/raft/join", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{certificate}}
+	req = req.WithContext(context.WithValue(req.Context(), NodeContextKey, workerID))
+	rec := httptest.NewRecorder()
+	e := echo.New()
+	NewHandler(control).Register(e)
+	e.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden || strings.Contains(rec.Body.String(), "ca_key") {
+		t.Fatalf("worker join = status %d body %s, want 403 without CA key", rec.Code, rec.Body.String())
+	}
+	if got := joiner.operations(); len(got) != 0 {
+		t.Fatalf("rejected worker changed membership: %v", got)
+	}
+	if address, _ := control.NodeServerAddress(context.Background(), workerID.String()); address != "" {
+		t.Fatalf("rejected worker stored address %q", address)
+	}
+}
+
 func TestManagedNodeEnrollmentIssuesCertificateForServerAssignedIdentity(t *testing.T) {
 	local := storage.NewLocalStorage(t.TempDir())
 	if err := local.Init(); err != nil {
@@ -217,19 +264,21 @@ func TestManagedNodeEnrollmentIssuesCertificateForServerAssignedIdentity(t *test
 		t.Fatal(err)
 	}
 	control := &Server{storage: local, state: NewStateController(memoryStore{}, "test"), now: time.Now}
-	token, _, err := control.CreateJoinToken(context.Background(), 0, 0)
+	token, _, err := control.CreateJoinToken(context.Background(), 0, 0, api.NodeRoleWorker)
 	if err != nil {
 		t.Fatal(err)
 	}
-	response, err := control.EnrollNode(context.Background(), token, "node-b:8128", "node-b:8127")
+	csr, key := testCSR(t)
+	response, err := control.EnrollNodeCSR(context.Background(), token, csr, api.NodeRoleWorker)
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := &tlsutil.Materials{CACert: []byte(response.CACert), Cert: []byte(response.Cert), Key: []byte(response.Key)}
+	m := &tlsutil.Materials{CACert: []byte(response.CACert), Cert: []byte(response.Cert), Key: []byte(key)}
 	if err := tlsutil.ValidateMaterials(m, response.NodeID); err != nil {
 		t.Fatalf("enrolled certificate: %v", err)
 	}
-	second, err := control.EnrollNode(context.Background(), token, "node-b:8128", "node-b:8127")
+	secondCSR, _ := testCSR(t)
+	second, err := control.EnrollNodeCSR(context.Background(), token, secondCSR, api.NodeRoleWorker)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,12 +318,13 @@ func TestManagedEnrollmentCannotRequestExistingIdentityOrReceiveCAKey(t *testing
 		e.ServeHTTP(rec, req)
 		return rec
 	}
+	csr, _ := testCSR(t)
 	// The enrollment request has no identity field, so asking for one is
 	// rejected rather than ignored.
-	if rec := enroll(`{"node_id":"` + leaderID.String() + `","server_advertise":"node-b:8128","agent_advertise":"node-b:8127","raft_advertise":"node-b:8129"}`); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "node_id") {
+	if rec := enroll(`{"node_id":"` + leaderID.String() + `","role":"control-plane","csr":` + strconv.Quote(csr) + `}`); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "node_id") {
 		t.Fatalf("identity request status = %d, want 400 naming node_id; body: %s", rec.Code, rec.Body.String())
 	}
-	rec := enroll(`{"server_advertise":"node-b:8128","agent_advertise":"node-b:8127","raft_advertise":"node-b:8129"}`)
+	rec := enroll(`{"role":"control-plane","csr":` + strconv.Quote(csr) + `}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusCreated, rec.Body.String())
 	}
@@ -350,7 +400,8 @@ func TestExternalSigningCannotEnrollWithoutCAKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := control.EnrollNode(context.Background(), token); err == nil {
+	csr, _ := testCSR(t)
+	if _, err := control.EnrollNodeCSR(context.Background(), token, csr, api.NodeRoleControlPlane); err == nil {
 		t.Fatal("external-signing node unexpectedly enrolled another node")
 	}
 }

@@ -19,7 +19,10 @@ Options:
   --join HOST:8128              Join an existing cluster
   --join-token-file FILE        Read the node join token from FILE
   --ca-cert-file FILE           Pin the existing cluster node CA certificate
-  --secrets-key-file FILE       Read the existing cluster secrets key from FILE
+  --control-plane BOOL          Join the control plane (default: true)
+  --worker                      Alias for --control-plane false
+  --runs-workloads BOOL         Allow workload placement (default: true)
+  --secrets-key-file FILE       Read the cluster secrets key (control-plane nodes only)
   --secrets-key-id ID           Existing cluster key ID, when explicitly configured
   --with-gvisor                 Install gVisor/runsc (default)
   --without-gvisor              Skip gVisor/runsc
@@ -76,13 +79,16 @@ source "$TMP/common-real.sh"
 require_root_linux_amd64
 
 advertise=""; join=""; join_token_file=""; ca_file=""; key_file=""; key_id=""
-gvisor=true; assume_yes=false
+gvisor=true; assume_yes=false; control_plane=true; runs_workloads=true
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --advertise) [ "$#" -ge 2 ] || ui_die "--advertise requires a value"; advertise="$2"; shift 2 ;;
         --join) [ "$#" -ge 2 ] || ui_die "--join requires HOST:8128"; join="$2"; shift 2 ;;
         --join-token-file) [ "$#" -ge 2 ] || ui_die "--join-token-file requires a path"; join_token_file="$2"; shift 2 ;;
         --ca-cert-file) [ "$#" -ge 2 ] || ui_die "--ca-cert-file requires a path"; ca_file="$2"; shift 2 ;;
+        --control-plane) [ "$#" -ge 2 ] || ui_die "--control-plane requires true or false"; control_plane="$2"; shift 2 ;;
+        --worker) control_plane=false; shift ;;
+        --runs-workloads) [ "$#" -ge 2 ] || ui_die "--runs-workloads requires true or false"; runs_workloads="$2"; shift 2 ;;
         --secrets-key-file) [ "$#" -ge 2 ] || ui_die "--secrets-key-file requires a path"; key_file="$2"; shift 2 ;;
         --secrets-key-id) [ "$#" -ge 2 ] || ui_die "--secrets-key-id requires a value"; key_id="$2"; shift 2 ;;
         --with-gvisor) gvisor=true; shift ;;
@@ -91,6 +97,8 @@ while [ "$#" -gt 0 ]; do
         *) ui_die "Unknown option: $1" ;;
     esac
 done
+case "$control_plane" in true|false) ;; *) ui_die "--control-plane requires true or false" ;; esac
+case "$runs_workloads" in true|false) ;; *) ui_die "--runs-workloads requires true or false" ;; esac
 
 load_install_state
 if [ "$GVISOR_ENABLED" = true ]; then gvisor=true; fi
@@ -107,8 +115,12 @@ if [ -f "$CONFIG_FILE" ]; then
     existing_config=true
     configured="$(awk -F': ' '$1 == "agent_advertise" {sub(/:8127$/, "", $2); print $2; exit}' "$CONFIG_FILE")"
     configured_join="$(awk -F': ' '$1 == "join" {print $2; exit}' "$CONFIG_FILE")"
+    configured_control_plane="$(awk -F': ' '$1 == "control_plane" {print $2; exit}' "$CONFIG_FILE")"
+    configured_runs_workloads="$(awk -F': ' '$1 == "runs_workloads" {print $2; exit}' "$CONFIG_FILE")"
     [ -z "$configured" ] || advertise="$configured"
     [ -z "$configured_join" ] || join="$configured_join"
+    control_plane="${configured_control_plane:-true}"
+    runs_workloads="${configured_runs_workloads:-true}"
 fi
 [ -n "$advertise" ] || advertise="$(detect_advertise_ipv4 2>/dev/null || true)"
 [ -n "$advertise" ] || ui_die "Could not determine a routable IPv4 advertise address. Pass --advertise HOST explicitly."
@@ -122,6 +134,8 @@ show_plan() {
     ui_detail "Version       $RELEASE_TAG"
     ui_detail "Node address  $advertise"
     ui_detail "Cluster       $(cluster_label)"
+    ui_detail "Control plane $control_plane"
+    ui_detail "Runs workloads $runs_workloads"
     ui_detail "gVisor        $([ "$gvisor" = true ] && printf installed || printf 'not installed')"
 }
 
@@ -132,6 +146,8 @@ customize() {
         ui_detail "1. Cluster              $(cluster_label)"
         ui_detail "2. Node address         $advertise"
         ui_detail "3. Runtime sandbox      $([ "$gvisor" = true ] && printf 'gVisor installed' || printf 'gVisor not installed')"
+        ui_detail "4. Control plane        $control_plane"
+        ui_detail "5. Runs workloads       $runs_workloads"
         printf '\nSelect a setting to change, or press Enter when done: '
         read -r choice </dev/tty
         case "$choice" in
@@ -149,7 +165,15 @@ customize() {
                 printf 'Node address [%s]: ' "$advertise"; read -r value </dev/tty; [ -z "$value" ] || advertise="$value"
                 ;;
             3) [ "$GVISOR_ENABLED" != true ] || { ui_warn "gVisor was already installed and will be kept."; continue; }; [ "$gvisor" = true ] && gvisor=false || gvisor=true ;;
-            *) ui_warn "Choose 1-3, or press Enter when done." ;;
+            4)
+                [ "$existing_config" = false ] || { ui_warn "Node role is fixed while resuming installation."; continue; }
+                [ "$control_plane" = true ] && control_plane=false || control_plane=true
+                ;;
+            5)
+                [ "$existing_config" = false ] || { ui_warn "Workload eligibility is fixed while resuming installation."; continue; }
+                [ "$runs_workloads" = true ] && runs_workloads=false || runs_workloads=true
+                ;;
+            *) ui_warn "Choose 1-5, or press Enter when done." ;;
         esac
     done
 }
@@ -171,6 +195,7 @@ if [ "$assume_yes" = false ]; then
 fi
 
 args=(--yes --advertise "$advertise")
+args+=(--control-plane "$control_plane" --runs-workloads "$runs_workloads")
 [ -z "$join" ] || args+=(--join "$join")
 [ -z "$join_token_file" ] || args+=(--join-token-file "$join_token_file")
 [ -z "$ca_file" ] || args+=(--ca-cert-file "$ca_file")

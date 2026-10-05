@@ -13,7 +13,7 @@ Trellis places containers across your machines, keeps them healthy, and rolls ou
 - **Safe updates.** Rolling or recreate strategies, watched until the new version is healthy.
 - **Networking.** A private WireGuard network per namespace, with DNS discovery and published ports.
 - **Storage and secrets.** Persistent local volumes, and encrypted, write-only secrets.
-- **High availability.** The same `trellis` daemon on every machine, with a leader elected through Raft.
+- **High availability.** Control-plane nodes elect a leader through Raft; worker-only nodes add capacity without receiving replicated state or cluster keys.
 
 ## Quick start
 
@@ -43,7 +43,7 @@ You need a systemd-based Debian or Ubuntu x86-64 host with `sudo`, `curl`, and o
 
 ## How it works
 
-Every machine runs the same `trellis` daemon. Raft elects one as the leader, which serves the API and schedules work, while every node, the leader included, runs workloads.
+Every machine runs the same `trellis` daemon. Control-plane eligibility and workload placement are independent node settings, both enabled by default. Raft elects a control-plane leader to serve the API and schedule work; workers register and heartbeat without joining Raft or storing the secrets-encryption or CA private keys.
 
 Jobs live in **namespaces** and contain **task groups**: sets of containers that Trellis places and scales together. Each running copy of a task group is an **allocation**. When you apply a job, the leader plans the change, places allocations on nodes with capacity, and replaces any that fail or whose node stops responding. The [user model](docs/public/user-model.md) defines every term.
 

@@ -45,6 +45,7 @@ type NodeRegistration struct {
 	WireGuardEndpoint  string
 	WireGuardPortBase  int
 	WireGuardPortCount int
+	RunsWorkloads      bool
 }
 
 // nodeResourceObservation is the latest renewable whole-host resource sample.
@@ -87,6 +88,7 @@ type Node struct {
 	WireGuardPortBase   int
 	WireGuardPortCount  int
 	Version             string
+	RunsWorkloads       *bool
 	observedAllocations []observedAllocation
 	// observedAt is when the leader recorded observedAllocations.
 	observedAt time.Time
@@ -138,6 +140,7 @@ type NodeSummary struct {
 	WireGuardPortBase  int    `json:"WireGuardPortBase"`
 	WireGuardPortCount int    `json:"WireGuardPortCount"`
 	Version            string `json:"version,omitempty"`
+	RunsWorkloads      *bool  `json:"runs_workloads,omitempty"`
 }
 
 // Job contains a persisted job specification and revision.
@@ -252,7 +255,8 @@ func (a *Allocation) UnmarshalJSON(raw []byte) error {
 }
 
 func nodeSummary(node *Node) *NodeSummary {
-	return &NodeSummary{ID: node.ID, Host: node.Host, Port: node.Port, CPUCapacity: node.CPUCapacity, MemoryCapacity: node.MemoryCapacity, CPUAllocatable: node.CPUAllocatable, MemoryAllocatable: node.MemoryAllocatable, OS: node.OS, Arch: node.Arch, Labels: node.Labels, Volumes: node.Volumes, Capabilities: node.Capabilities, Draining: node.Status == NodeStatusDraining, WireGuardPublicKey: node.WireGuardPublicKey, WireGuardEndpoint: node.WireGuardEndpoint, WireGuardPortBase: node.WireGuardPortBase, WireGuardPortCount: node.WireGuardPortCount, Version: node.Version}
+	runs := nodeRunsWorkloads(node)
+	return &NodeSummary{ID: node.ID, Host: node.Host, Port: node.Port, CPUCapacity: node.CPUCapacity, MemoryCapacity: node.MemoryCapacity, CPUAllocatable: node.CPUAllocatable, MemoryAllocatable: node.MemoryAllocatable, OS: node.OS, Arch: node.Arch, Labels: node.Labels, Volumes: node.Volumes, Capabilities: node.Capabilities, Draining: node.Status == NodeStatusDraining, WireGuardPublicKey: node.WireGuardPublicKey, WireGuardEndpoint: node.WireGuardEndpoint, WireGuardPortBase: node.WireGuardPortBase, WireGuardPortCount: node.WireGuardPortCount, Version: node.Version, RunsWorkloads: &runs}
 }
 
 func applyNodeSnapshot(node, snapshot *Node) {

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/hashicorp/go-hclog"
 )
 
@@ -246,13 +247,14 @@ func TestRaftLoggerSuppressesPerPeer(t *testing.T) {
 func TestRaftTransportErrorsAreLoggedAndBounded(t *testing.T) {
 	out, buf := newBufferLogger()
 	bind := fmt.Sprintf("127.0.0.1:%d", freePort(t))
+	id := uuid.New()
 	store, err := NewRaftStore(RaftConfig{
 		DataDir:       t.TempDir(),
 		BindAddr:      bind,
 		Advertise:     bind,
-		ServerID:      bind,
+		ServerID:      id.String(),
 		Bootstrap:     true,
-		TLS:           testTLSConfig(t),
+		TLS:           testTLSConfig(t, id),
 		AuthorizePeer: allowAnyRaftPeer,
 		Logger:        out,
 	})

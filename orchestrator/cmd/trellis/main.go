@@ -51,6 +51,7 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/state"
 	"github.com/overfold/trellis/orchestrator/internal/storage"
 	"github.com/overfold/trellis/orchestrator/internal/tlsutil"
+	"github.com/overfold/trellis/orchestrator/internal/transport"
 	"github.com/overfold/trellis/orchestrator/internal/version"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/cobra"
@@ -61,6 +62,8 @@ const shutdownTime = 10 * time.Second
 
 type config struct {
 	ConfigFile                                                                     string
+	ControlPlane, RunsWorkloads                                                    *bool
+	APICert, APIKey                                                                string
 	AgentListen, AgentAdvertise, ServerListen, ServerAdvertise                     string
 	RaftListen, RaftAdvertise, Join                                                string
 	DataDir, Cluster, AdminPublicKey, JoinToken, SigningMode, ContainerdSock       string
@@ -108,6 +111,10 @@ func main() {
 	})
 	root.AddCommand(newLocalCleanupCommand())
 	f := root.Flags()
+	cfg.ControlPlane = f.Bool("control-plane", true, "Participate in Raft and hold cluster keys (false for workers)")
+	cfg.RunsWorkloads = f.Bool("runs-workloads", true, "Allow workloads to be scheduled on this node")
+	f.StringVar(&cfg.APICert, "api-cert", "", "External API certificate with the trellis DNS name")
+	f.StringVar(&cfg.APIKey, "api-key", "", "External API certificate private key")
 	f.StringVar(&cfg.ConfigFile, "config", "", "Path to Trellis node configuration YAML")
 	f.StringVar(&cfg.AgentListen, "agent-listen", ":8127", "Agent API listen address")
 	f.StringVar(&cfg.AgentAdvertise, "agent-advertise", "", "Agent address advertised to the cluster")
@@ -155,6 +162,9 @@ func main() {
 }
 
 func run(parent context.Context, cfg *config) error {
+	if !cfg.controlPlane() && (cfg.Join == "" || cfg.CAKey != "" || cfg.SecretsKey != "" || cfg.APICert != "" || cfg.APIKey != "") {
+		return fmt.Errorf("workers require join and must not configure CA, secrets, or API private keys")
+	}
 	if !spec.ValidIdentifier(cfg.Cluster) {
 		return fmt.Errorf("cluster or --cluster must be a safe identifier (1-63 ASCII letters, digits, dots, underscores, or hyphens; must start with a letter or digit)")
 	}
@@ -266,110 +276,127 @@ func run(parent context.Context, cfg *config) error {
 	if err != nil {
 		return fmt.Errorf("agent server TLS config: %w", err)
 	}
-	leaderServerTLS, err := tlsutil.LeaderTLSConfig(tlsMaterials)
-	if err != nil {
-		return fmt.Errorf("leader server TLS config: %w", err)
-	}
 	clientTLS, err := tlsutil.ClientTLSConfig(tlsMaterials)
 	if err != nil {
 		return fmt.Errorf("client TLS config: %w", err)
 	}
 
-	raftPeers := server.NewRaftPeerAuthorizer()
-	raftStore, err := state.NewRaftStore(state.RaftConfig{
-		DataDir:       cfg.DataDir,
-		BindAddr:      cfg.RaftListen,
-		Advertise:     cfg.RaftAdvertise,
-		ServerID:      id.String(),
-		Bootstrap:     cfg.Join == "",
-		TLS:           peerTLS,
-		AuthorizePeer: raftPeers.Authorize,
-		Logger:        log,
-	})
-	if err != nil {
-		return fmt.Errorf("init raft store: %w", err)
-	}
-	defer func() { _ = raftStore.Close() }()
-	stateCtl := server.NewStateController(raftStore, cfg.Cluster)
-	raftPeers.Bind(stateCtl, raftStore.Membership)
-
-	if cfg.Join != "" && (!raftStore.HadExistingState() || (cfg.SigningMode == "managed" && len(tlsMaterials.CAKey) == 0)) {
-		log.Info("joining cluster", "address", cfg.Join)
-		joinResponse, err := joinClusterRaft(ctx, log, cfg.Join, cfg.ServerAdvertise, raftStore.LocalAddr(), clientTLS)
+	var raftStore *state.RaftStore
+	var control *server.Server
+	var elector election.Elector
+	if cfg.controlPlane() {
+		raftPeers := server.NewRaftPeerAuthorizer()
+		raftStore, err = state.NewRaftStore(state.RaftConfig{
+			DataDir:       cfg.DataDir,
+			BindAddr:      cfg.RaftListen,
+			Advertise:     cfg.RaftAdvertise,
+			ServerID:      id.String(),
+			Bootstrap:     cfg.Join == "",
+			TLS:           peerTLS,
+			AuthorizePeer: raftPeers.Authorize,
+			Logger:        log,
+		})
 		if err != nil {
-			return fmt.Errorf("join cluster: %w", err)
+			return fmt.Errorf("init raft store: %w", err)
 		}
-		raftPeers.TrustJoinMembers(joinResponse.Members)
-		if cfg.SigningMode == "managed" {
-			if joinResponse.CAKey == "" {
-				return fmt.Errorf("join cluster: managed signing key was not returned after admission")
-			}
-			tlsMaterials.CAKey = []byte(joinResponse.CAKey)
-			if err := saveTLSToStorage(local, tlsMaterials); err != nil {
-				return fmt.Errorf("save managed signing key: %w", err)
-			}
-		}
-	}
-	// Raft construction and joining are asynchronous. Reading the local FSM
-	// before it has applied the leader's committed log can make an existing
-	// cluster look uninitialized, causing a follower to attempt a write that can
-	// never succeed. Do not initialize the control plane (or advertise readiness)
-	// until this member has heard from a leader and applied its local log.
-	if err := waitForRaftSync(ctx, raftStore); err != nil {
-		return fmt.Errorf("wait for raft synchronization: %w", err)
-	}
+		defer func() { _ = raftStore.Close() }()
+		stateCtl := server.NewStateController(raftStore, cfg.Cluster)
+		raftPeers.Bind(stateCtl, raftStore.Membership)
 
-	control := server.NewServer(log, local, stateCtl, raftStore, cfg.Cluster, cfg.ServerAdvertise)
-	if buildTestRuntime != nil && cfg.Runtime == buildTestRuntime.name {
-		control.SetImageResolver(buildTestRuntime.resolveImage)
-	}
-	if cfg.SecretsKey != "" {
-		key, keyID, err := loadSecretsKey(cfg.SecretsKey, cfg.SecretsKeyID)
-		if err != nil {
+		if cfg.Join != "" && (!raftStore.HadExistingState() || (cfg.SigningMode == "managed" && len(tlsMaterials.CAKey) == 0)) {
+			log.Info("joining cluster", "address", cfg.Join)
+			joinResponse, err := joinClusterRaft(ctx, log, cfg.Join, cfg.ServerAdvertise, raftStore.LocalAddr(), clientTLS)
+			if err != nil {
+				return fmt.Errorf("join cluster: %w", err)
+			}
+			raftPeers.TrustJoinMembers(joinResponse.Members)
+			if cfg.SigningMode == "managed" {
+				if joinResponse.CAKey == "" {
+					return fmt.Errorf("join cluster: managed signing key was not returned after admission")
+				}
+				tlsMaterials.CAKey = []byte(joinResponse.CAKey)
+				if err := saveTLSToStorage(local, tlsMaterials); err != nil {
+					return fmt.Errorf("save managed signing key: %w", err)
+				}
+			}
+		}
+		// Raft construction and joining are asynchronous. Reading the local FSM
+		// before it has applied the leader's committed log can make an existing
+		// cluster look uninitialized, causing a follower to attempt a write that can
+		// never succeed. Do not initialize the control plane (or advertise readiness)
+		// until this member has heard from a leader and applied its local log.
+		if err := waitForRaftSync(ctx, raftStore); err != nil {
+			return fmt.Errorf("wait for raft synchronization: %w", err)
+		}
+
+		control = server.NewServer(log, local, stateCtl, raftStore, cfg.Cluster, cfg.ServerAdvertise)
+		if buildTestRuntime != nil && cfg.Runtime == buildTestRuntime.name {
+			control.SetImageResolver(buildTestRuntime.resolveImage)
+		}
+		if cfg.SecretsKey != "" {
+			key, keyID, err := loadSecretsKey(cfg.SecretsKey, cfg.SecretsKeyID)
+			if err != nil {
+				return err
+			}
+			store, err := secretstore.NewStore(raftStore, cfg.Cluster, keyID, key)
+			clear(key)
+			if err != nil {
+				return fmt.Errorf("configure secrets: %w", err)
+			}
+			control.SetSecretStore(store)
+			log.Info("secrets enabled", "key_id", keyID)
+		}
+		control.SetClusterJoiner(raftStore)
+		control.SetNodeID(id)
+		control.SetClientTLS(clientTLS)
+
+		server.RegisterMetrics(control, prometheus.DefaultRegisterer)
+
+		for i := 0; ; i++ {
+			if err := control.Init(ctx, server.ClusterBootstrap{AdministratorPublicKey: cfg.AdminPublicKey, Settings: bootstrapSettings}); err == nil {
+				break
+			} else if i >= 30 {
+				return fmt.Errorf("initialize control plane: %w", err)
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(500 * time.Millisecond):
+			}
+		}
+		if err := applyClusterSettings(log, cfg, bootstrapSettings, control.ClusterSettings()); err != nil {
 			return err
 		}
-		store, err := secretstore.NewStore(raftStore, cfg.Cluster, keyID, key)
-		clear(key)
-		if err != nil {
-			return fmt.Errorf("configure secrets: %w", err)
-		}
-		control.SetSecretStore(store)
-		log.Info("secrets enabled", "key_id", keyID)
-	}
-	control.SetClusterJoiner(raftStore)
-	control.SetNodeID(id)
-	control.SetClientTLS(clientTLS)
-
-	server.RegisterMetrics(control, prometheus.DefaultRegisterer)
-
-	for i := 0; ; i++ {
-		if err := control.Init(ctx, server.ClusterBootstrap{AdministratorPublicKey: cfg.AdminPublicKey, Settings: bootstrapSettings}); err == nil {
-			break
-		} else if i >= 30 {
-			return fmt.Errorf("initialize control plane: %w", err)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(500 * time.Millisecond):
-		}
-	}
-	if err := applyClusterSettings(log, cfg, bootstrapSettings, control.ClusterSettings()); err != nil {
-		return err
-	}
-	if cfg.Join == "" {
-		localCertificate, err := x509.ParseCertificate(peerTLS.Certificates[0].Certificate[0])
-		if err != nil {
-			return fmt.Errorf("parse local node certificate: %w", err)
-		}
-		if err := control.BindNodeCertificate(ctx, id, localCertificate); err != nil {
-			return fmt.Errorf("bind local node certificate: %w", err)
-		}
-		if _, err := control.NodeServerAddress(ctx, id.String()); err != nil {
-			if err := control.RecordNodeServerAddress(ctx, id, cfg.ServerAdvertise); err != nil {
-				return fmt.Errorf("record local control-plane address: %w", err)
+		if cfg.Join == "" {
+			localCertificate, err := x509.ParseCertificate(peerTLS.Certificates[0].Certificate[0])
+			if err != nil {
+				return fmt.Errorf("parse local node certificate: %w", err)
+			}
+			if err := control.BindNodeCertificate(ctx, id, localCertificate); err != nil {
+				return fmt.Errorf("bind local node certificate: %w", err)
+			}
+			if _, err := control.NodeServerAddress(ctx, id.String()); err != nil {
+				if err := control.RecordNodeServerAddress(ctx, id, cfg.ServerAdvertise); err != nil {
+					return fmt.Errorf("record local control-plane address: %w", err)
+				}
 			}
 		}
+		if err := configureAPICertificate(ctx, cfg, tlsMaterials, control, id); err != nil {
+			return fmt.Errorf("API certificate: %w", err)
+		}
+		elector = election.NewRaftElector(raftStore.Raft(), election.Leader{NodeID: id, Address: cfg.ServerAdvertise}, control.NodeServerAddress)
+	} else {
+		client := &transport.Client{HTTP: transport.NewHTTPClient(clientTLS, 10*time.Second)}
+		var topology nodeapi.ControlPlaneResponse
+		if err := client.Request(ctx, http.MethodGet, normalizeAPIAddress(cfg.Join)+"/v1/internal/control-plane", nil, &topology); err != nil {
+			return fmt.Errorf("read worker cluster settings: %w", err)
+		}
+		replicated := bootstrapSettings
+		replicated.WireGuardPortCount = topology.WireGuardPortCount
+		if err := applyClusterSettings(log, cfg, bootstrapSettings, replicated); err != nil {
+			return err
+		}
+		elector = newWorkerElector(cfg.Join, clientTLS, local)
 	}
 
 	runtimeClient, runtimeCloser, capabilities, err := openRuntime(cfg)
@@ -387,7 +414,10 @@ func run(parent context.Context, cfg *config) error {
 	volumeManager := agent.NewVolumeManager(cfg.DataDir)
 	ag := agent.NewAgent(log, runtimeClient, healthMgr, restartCtl, agent.NewPortManager(runtimeClient, 0, 0, 0), volumeManager, leaderClient, id)
 	ag.SetVersion(version.Current())
-	ag.SetRaftAppliedIndex(raftStore.AppliedIndex)
+	ag.SetRunsWorkloads(cfg.runsWorkloads())
+	if raftStore != nil {
+		ag.SetRaftAppliedIndex(raftStore.AppliedIndex)
+	}
 	if err := ag.SetTaskPidsLimit(cfg.TaskPidsLimit); err != nil {
 		return fmt.Errorf("resources.task_pids_limit or --task-pids-limit: %w", err)
 	}
@@ -496,9 +526,12 @@ func run(parent context.Context, cfg *config) error {
 		}
 	}()
 
-	elector := election.NewRaftElector(raftStore.Raft(), election.Leader{NodeID: id, Address: cfg.ServerAdvertise}, control.NodeServerAddress)
 	agentHTTP := echo.New()
-	agentHTTP.Use(middleware.Recover(), nodeAuthMiddleware(currentLeaderAuthorizer(elector, control.AuthorizeNodeCertificate)))
+	var authorizeCertificate func(context.Context, uuid.UUID, *x509.Certificate) bool
+	if control != nil {
+		authorizeCertificate = control.AuthorizeNodeCertificate
+	}
+	agentHTTP.Use(middleware.Recover(), nodeAuthMiddleware(currentLeaderAuthorizer(elector, authorizeCertificate)))
 	agent.NewHandler(ag).Register(agentHTTP)
 	go func() {
 		if err := (echo.StartConfig{Address: cfg.AgentListen, TLSConfig: agentServerTLS, GracefulTimeout: shutdownTime}).Start(ctx, agentHTTP); err != nil && ctx.Err() == nil {
@@ -507,17 +540,38 @@ func run(parent context.Context, cfg *config) error {
 		}
 	}()
 
-	leaderHTTP := echo.New()
-	leaderHTTP.Use(middleware.Recover(), leaderAuthMiddleware(auth.NewAdministratorAuthenticator(), control.AdministratorVerification, control.TokenManager(), control.AuthorizeNodeCertificate))
-	leaderHTTP.GET("/v1/auth/whoami", server.HandleWhoAmI)
-	server.NewHandler(control).Register(leaderHTTP)
-	apiProxy := newControlPlaneProxy(elector, cfg.ServerAdvertise, leaderHTTP, newHTTPTransport(clientTLS), log)
-	go func() {
-		if err := (echo.StartConfig{Address: cfg.ServerListen, TLSConfig: leaderServerTLS, GracefulTimeout: shutdownTime}).Start(ctx, apiProxy); err != nil && ctx.Err() == nil {
-			log.Error("control-plane API stopped", "error", err)
-			stop()
+	var apiProxy *controlPlaneProxy
+	if control != nil {
+		leaderServerTLS, err := tlsutil.LeaderTLSConfig(tlsMaterials)
+		if err != nil {
+			return fmt.Errorf("leader server TLS config: %w", err)
 		}
-	}()
+		if cfg.SigningMode == "managed" {
+			var certificate atomic.Pointer[tls.Certificate]
+			certificate.Store(&leaderServerTLS.Certificates[0])
+			leaderServerTLS.Certificates = nil
+			leaderServerTLS.GetCertificate = func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return certificate.Load(), nil }
+			go renewAPICertificate(ctx, log, clientTLS, elector, &certificate)
+		}
+		leaderHTTP := echo.New()
+		leaderHTTP.Use(middleware.Recover(), leaderAuthMiddleware(auth.NewAdministratorAuthenticator(), control.AdministratorVerification, control.TokenManager(), control.AuthorizeNodeCertificate))
+		leaderHTTP.GET("/v1/auth/whoami", server.HandleWhoAmI)
+		server.NewHandler(control).Register(leaderHTTP)
+		apiProxy = newControlPlaneProxy(elector, cfg.ServerAdvertise, leaderHTTP, newHTTPTransport(clientTLS), log)
+		go func() {
+			if err := (echo.StartConfig{Address: cfg.ServerListen, TLSConfig: leaderServerTLS, GracefulTimeout: shutdownTime}).Start(ctx, apiProxy); err != nil && ctx.Err() == nil {
+				log.Error("control-plane API stopped", "error", err)
+				stop()
+			}
+		}()
+	} else {
+		go func() {
+			if err := runWorkerRelay(ctx, cfg.ServerListen, elector); err != nil && ctx.Err() == nil {
+				log.Error("worker API relay stopped", "error", err)
+				stop()
+			}
+		}()
+	}
 
 	events := make(chan election.Event)
 	go func() {
@@ -739,6 +793,26 @@ func decodeSecretsKey(raw []byte) ([]byte, error) {
 }
 
 func loadOrBootstrapTLS(ctx context.Context, log *slog.Logger, cfg *config, local *storage.LocalStorage, nodeID uuid.UUID) (*tlsutil.Materials, uuid.UUID, error) {
+	var storedRole api.NodeRole
+	if err := local.Get("tls/role", &storedRole); err == nil && storedRole != cfg.nodeRole() {
+		if storedRole != api.NodeRoleWorker || !cfg.controlPlane() {
+			return nil, uuid.Nil, fmt.Errorf("control-plane demotion requires removal and fresh enrollment; retained cluster keys remain exposed")
+		}
+		m, err := loadTLSFromStorage(local)
+		if err != nil {
+			return nil, uuid.Nil, err
+		}
+		clientTLS, err := tlsutil.ClientTLSConfig(m)
+		if err != nil {
+			return nil, uuid.Nil, err
+		}
+		if err := confirmNodeRole(ctx, cfg.Join, clientTLS, api.NodeRoleControlPlane); err != nil {
+			return nil, uuid.Nil, err
+		}
+		if err := local.Put("tls/role", api.NodeRoleControlPlane); err != nil {
+			return nil, uuid.Nil, err
+		}
+	}
 	if cfg.Cert != "" || cfg.Key != "" || cfg.SigningMode == "external" {
 		m, err := loadTLSFromFiles(cfg)
 		if err != nil {
@@ -747,16 +821,34 @@ func loadOrBootstrapTLS(ctx context.Context, log *slog.Logger, cfg *config, loca
 		if cfg.SigningMode == "external" && len(m.CAKey) != 0 {
 			return nil, uuid.Nil, fmt.Errorf("external signing mode must not configure a CA private key")
 		}
+		if err := validateWorkerMaterials(cfg, m); err != nil {
+			return nil, uuid.Nil, err
+		}
 		if err := tlsutil.ValidateMaterials(m, nodeID); err != nil {
 			return nil, uuid.Nil, err
 		}
 		if err := saveTLSToStorage(local, m); err != nil {
 			return nil, uuid.Nil, fmt.Errorf("save TLS materials: %w", err)
 		}
+		if cfg.SigningMode == "external" && !cfg.controlPlane() {
+			clientTLS, err := tlsutil.ClientTLSConfig(m)
+			if err != nil {
+				return nil, uuid.Nil, err
+			}
+			if err := confirmNodeRole(ctx, cfg.Join, clientTLS, api.NodeRoleWorker); err != nil {
+				return nil, uuid.Nil, err
+			}
+		}
+		if err := local.Put("tls/role", cfg.nodeRole()); err != nil {
+			return nil, uuid.Nil, err
+		}
 		return m, nodeID, nil
 	}
 	m, err := loadTLSFromStorage(local)
 	if err == nil {
+		if err := validateWorkerMaterials(cfg, m); err != nil {
+			return nil, uuid.Nil, err
+		}
 		if cfg.SigningMode == "managed" && len(m.CAKey) == 0 && cfg.Join == "" {
 			return nil, uuid.Nil, fmt.Errorf("managed signing mode requires the stored CA private key")
 		}
@@ -776,11 +868,16 @@ func loadOrBootstrapTLS(ctx context.Context, log *slog.Logger, cfg *config, loca
 		if err != nil {
 			return nil, uuid.Nil, fmt.Errorf("read pinned CA cert: %w", err)
 		}
-		resp, err := joinClusterTLS(ctx, log, cfg.Join, cfg.JoinToken, caCert, cfg.ServerAdvertise, cfg.AgentAdvertise, cfg.RaftAdvertise)
+		csr, key, err := tlsutil.GenerateCSR()
 		if err != nil {
+			return nil, uuid.Nil, err
+		}
+		resp, err := joinClusterTLS(ctx, log, cfg.Join, cfg.JoinToken, caCert, cfg.ServerAdvertise, cfg.AgentAdvertise, cfg.RaftAdvertise, cfg.nodeRole(), csr)
+		if err != nil {
+			clear(key)
 			return nil, uuid.Nil, fmt.Errorf("join cluster for TLS: %w", err)
 		}
-		m := &tlsutil.Materials{CACert: []byte(resp.CACert), Cert: []byte(resp.Cert), Key: []byte(resp.Key)}
+		m := &tlsutil.Materials{CACert: caCert, Cert: []byte(resp.Cert), Key: key}
 		if err := tlsutil.ValidateMaterials(m, resp.NodeID); err != nil {
 			return nil, uuid.Nil, fmt.Errorf("validate enrolled node certificate: %w", err)
 		}
@@ -789,6 +886,9 @@ func loadOrBootstrapTLS(ctx context.Context, log *slog.Logger, cfg *config, loca
 		}
 		if err := saveTLSToStorage(local, m); err != nil {
 			return nil, uuid.Nil, fmt.Errorf("save TLS materials: %w", err)
+		}
+		if err := local.Put("tls/role", cfg.nodeRole()); err != nil {
+			return nil, uuid.Nil, fmt.Errorf("save enrolled role: %w", err)
 		}
 		log.Info("TLS materials received from cluster and stored")
 		return m, resp.NodeID, nil
@@ -804,6 +904,9 @@ func loadOrBootstrapTLS(ctx context.Context, log *slog.Logger, cfg *config, loca
 	m = &tlsutil.Materials{CACert: caCert, CAKey: caKey, Cert: nodeCert, Key: nodeKey}
 	if err := saveTLSToStorage(local, m); err != nil {
 		return nil, uuid.Nil, fmt.Errorf("save TLS materials: %w", err)
+	}
+	if err := local.Put("tls/role", cfg.nodeRole()); err != nil {
+		return nil, uuid.Nil, err
 	}
 	log.Info("cluster CA and node certificate generated")
 	return m, nodeID, nil
@@ -872,8 +975,8 @@ func saveTLSToStorage(local *storage.LocalStorage, m *tlsutil.Materials) error {
 	return local.Put("tls/node-key", string(m.Key))
 }
 
-func joinClusterTLS(ctx context.Context, log *slog.Logger, joinAddr, joinToken string, caCert []byte, serverAdvertise, agentAdvertise, raftAdvertise string) (*nodeapi.NodeEnrollmentResponse, error) {
-	body, _ := json.Marshal(nodeapi.NodeEnrollmentRequest{ServerAdvertise: serverAdvertise, AgentAdvertise: agentAdvertise, RaftAdvertise: raftAdvertise})
+func joinClusterTLS(ctx context.Context, log *slog.Logger, joinAddr, joinToken string, caCert []byte, serverAdvertise, agentAdvertise, raftAdvertise string, role api.NodeRole, csr []byte) (*nodeapi.NodeEnrollmentResponse, error) {
+	body, _ := json.Marshal(nodeapi.NodeEnrollmentRequest{ServerAdvertise: serverAdvertise, AgentAdvertise: agentAdvertise, RaftAdvertise: raftAdvertise, Role: role, CSR: string(csr)})
 	base := joinAddr
 	if !strings.Contains(base, "://") {
 		base = "https://" + base
@@ -895,6 +998,9 @@ func joinClusterTLS(ctx context.Context, log *slog.Logger, joinAddr, joinToken s
 				var joinResp nodeapi.NodeEnrollmentResponse
 				if err := json.Unmarshal(respBody, &joinResp); err != nil {
 					return nil, fmt.Errorf("decode join response: %w", err)
+				}
+				if joinResp.Role != role {
+					return nil, fmt.Errorf("enrolled role %q does not match configured role %q", joinResp.Role, role)
 				}
 				log.Info("received TLS materials from cluster")
 				return &joinResp, nil
@@ -1091,6 +1197,9 @@ func nodeControlPlaneRoute(r *http.Request) bool {
 	return (r.Method == http.MethodPost && path == "/v1/nodes") ||
 		(r.Method == http.MethodPost && strings.HasPrefix(path, "/v1/nodes/") && strings.HasSuffix(path, "/heartbeat")) ||
 		(r.Method == http.MethodGet && path == "/v1/internal/discovery") ||
+		(r.Method == http.MethodGet && path == "/v1/internal/control-plane") ||
+		(r.Method == http.MethodGet && path == "/v1/internal/node-role") ||
+		(r.Method == http.MethodPost && path == "/v1/nodes/api-certificate") ||
 		(r.Method == http.MethodPost && path == "/v1/raft/join")
 }
 

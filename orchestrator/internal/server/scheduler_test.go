@@ -27,6 +27,15 @@ func TestScheduleBalancesAndSkipsUnhealthyNodes(t *testing.T) {
 	}
 }
 
+func TestScheduleExcludesNodeThatDoesNotRunWorkloads(t *testing.T) {
+	controlPlane := &Node{ID: uuid.New(), Status: NodeStatusHealthy, CPUAllocatable: 10000, MemoryAllocatable: 10000, RunsWorkloads: new(false)}
+	worker := &Node{ID: uuid.New(), Status: NodeStatusHealthy, CPUAllocatable: 1000, MemoryAllocatable: 1000, RunsWorkloads: new(true)}
+	placements := Schedule(&PlacementIntent{Count: 1, Nodes: []*Node{controlPlane, worker}, Tasks: []spec.TaskSpec{{Resources: &spec.ResourcesSpec{CPU: 100, Memory: 100}}}})
+	if len(placements) != 1 || placements[0].NodeID != worker.ID {
+		t.Fatalf("placements = %#v, want workload-running worker despite more attractive control-plane capacity", placements)
+	}
+}
+
 func TestScheduleRequiresNodeCapabilities(t *testing.T) {
 	runsc := &Node{ID: uuid.New(), Status: NodeStatusHealthy, Capabilities: []spec.NodeCapability{spec.CapabilityRunsc}}
 	plain := &Node{ID: uuid.New(), Status: NodeStatusHealthy}

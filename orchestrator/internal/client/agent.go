@@ -107,6 +107,7 @@ func (s *AgentClient) clientFor(expectedNodeID uuid.UUID, responseHeaderTimeout 
 	if s.tlsConfig != nil {
 		tlsConfig = s.tlsConfig.Clone()
 	}
+	tlsConfig.ServerName = tlsutil.NodeServerName(expectedNodeID)
 	previousVerify := tlsConfig.VerifyConnection
 	tlsConfig.VerifyConnection = func(state tls.ConnectionState) error {
 		if previousVerify != nil {

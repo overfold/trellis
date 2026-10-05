@@ -11,10 +11,13 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
+	"github.com/overfold/trellis/orchestrator/internal/tlsutil"
 )
 
 var _ Store = (*RaftStore)(nil)
@@ -118,6 +121,7 @@ type tlsStreamLayer struct {
 	net.Listener
 	advertise net.Addr
 	tlsCfg    *tls.Config
+	targetID  func(raft.ServerAddress) (uuid.UUID, error)
 }
 
 func (t *tlsStreamLayer) Addr() net.Addr {
@@ -128,25 +132,41 @@ func (t *tlsStreamLayer) Addr() net.Addr {
 }
 
 func (t *tlsStreamLayer) Dial(address raft.ServerAddress, timeout time.Duration) (net.Conn, error) {
+	targetID, err := t.targetID(address)
+	if err != nil {
+		return nil, fmt.Errorf("resolve Raft peer %q: %w", address, err)
+	}
 	// Raft's StreamLayer contract supplies a timeout, but no caller context.
 	conn, err := (&net.Dialer{Timeout: timeout}).DialContext(context.Background(), "tcp", string(address))
 	if err != nil {
 		return nil, err
 	}
-	host, _, err := net.SplitHostPort(string(address))
-	if err != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("parse Raft peer address %q: %w", address, err)
-	}
-	if host == "" {
-		_ = conn.Close()
-		return nil, fmt.Errorf("parse Raft peer address %q: host is required", address)
-	}
 	peerTLS := t.tlsCfg.Clone()
-	// Raft join already proves that this advertised host is a SAN of the
-	// joining node certificate. Recheck that binding on every new stream rather
-	// than accepting any cluster certificate through the shared trellis SAN.
-	peerTLS.ServerName = host
+	// Membership binds each advertised address to an immutable node UUID. Use
+	// that UUID's DNS identity so the normal TLS verifier checks both the chain
+	// and the exact node SAN; PeerTLSConfig's verifier additionally checks the
+	// certificate's URI identity.
+	peerTLS.InsecureSkipVerify = false
+	peerTLS.ServerName = tlsutil.NodeServerName(targetID)
+	previousVerify := peerTLS.VerifyConnection
+	peerTLS.VerifyConnection = func(state tls.ConnectionState) error {
+		if previousVerify != nil {
+			if err := previousVerify(state); err != nil {
+				return err
+			}
+		}
+		if len(state.PeerCertificates) == 0 {
+			return fmt.Errorf("Raft peer certificate is missing")
+		}
+		actualID, err := tlsutil.NodeID(state.PeerCertificates[0])
+		if err != nil {
+			return fmt.Errorf("verify Raft peer identity: %w", err)
+		}
+		if actualID != targetID {
+			return fmt.Errorf("Raft peer certificate identifies node %s, expected %s", actualID, targetID)
+		}
+		return nil
+	}
 	tlsConn := tls.Client(conn, peerTLS)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -191,6 +211,11 @@ func inboundPeerTLS(peer *tls.Config, authorize func(*x509.Certificate) error) (
 
 // NewRaftStore creates a Raft-backed state store.
 func NewRaftStore(cfg RaftConfig) (*RaftStore, error) {
+	if cfg.TLS != nil {
+		if _, err := uuid.Parse(cfg.ServerID); err != nil {
+			return nil, fmt.Errorf("Raft TLS server ID must be a UUID: %w", err)
+		}
+	}
 	raftDir := filepath.Join(cfg.DataDir, "raft")
 	if err := os.MkdirAll(raftDir, 0o750); err != nil {
 		return nil, fmt.Errorf("create raft dir: %w", err)
@@ -228,6 +253,29 @@ func NewRaftStore(cfg RaftConfig) (*RaftStore, error) {
 		return nil, fmt.Errorf("resolve raft advertise address: %w", err)
 	}
 
+	var raftRef atomic.Pointer[raft.Raft]
+	resolveTargetID := func(address raft.ServerAddress) (uuid.UUID, error) {
+		r := raftRef.Load()
+		if r == nil {
+			return uuid.Nil, fmt.Errorf("Raft is not initialized")
+		}
+		future := r.GetConfiguration()
+		if err := future.Error(); err != nil {
+			return uuid.Nil, fmt.Errorf("read Raft membership: %w", err)
+		}
+		for _, server := range future.Configuration().Servers {
+			if server.Address != address {
+				continue
+			}
+			id, err := uuid.Parse(string(server.ID))
+			if err != nil {
+				return uuid.Nil, fmt.Errorf("member %q has non-UUID server ID: %w", server.ID, err)
+			}
+			return id, nil
+		}
+		return uuid.Nil, fmt.Errorf("address is not in Raft membership")
+	}
+
 	var transport raft.Transport
 	if cfg.TLS != nil {
 		listenTLS, err := inboundPeerTLS(cfg.TLS, cfg.AuthorizePeer)
@@ -238,7 +286,7 @@ func NewRaftStore(cfg RaftConfig) (*RaftStore, error) {
 		if err != nil {
 			return nil, fmt.Errorf("create TLS listener: %w", err)
 		}
-		stream := &tlsStreamLayer{Listener: ln, advertise: advAddr, tlsCfg: cfg.TLS}
+		stream := &tlsStreamLayer{Listener: ln, advertise: advAddr, tlsCfg: cfg.TLS, targetID: resolveTargetID}
 		transport = raft.NewNetworkTransportWithConfig(&raft.NetworkTransportConfig{
 			Stream:  stream,
 			MaxPool: 3,
@@ -265,6 +313,7 @@ func NewRaftStore(cfg RaftConfig) (*RaftStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create raft: %w", err)
 	}
+	raftRef.Store(r)
 
 	if cfg.Bootstrap && !hadState {
 		config := raft.Configuration{

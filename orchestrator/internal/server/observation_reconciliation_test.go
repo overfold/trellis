@@ -16,7 +16,7 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
-func TestHeartbeatReturnsNoContent(t *testing.T) {
+func TestHeartbeatReturnsControlPlaneTopology(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()
 	node := &Node{ID: uuid.New(), Status: NodeStatusHealthy}
@@ -40,8 +40,8 @@ func TestHeartbeatReturnsNoContent(t *testing.T) {
 	request = request.WithContext(context.WithValue(request.Context(), NodeContextKey, node.ID))
 	recorder := httptest.NewRecorder()
 	e.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusNoContent || recorder.Body.Len() != 0 {
-		t.Fatalf("heartbeat response = status %d body %q, want empty 204", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusOK || recorder.Body.Len() == 0 {
+		t.Fatalf("heartbeat response = status %d body %q, want topology JSON with 200", recorder.Code, recorder.Body.String())
 	}
 	applyTestObservations(s)
 	if node.CPUCapacity != 2000 || node.CPUAllocatable != 1900 || node.CPUUsage == nil || *node.CPUUsage != usage {

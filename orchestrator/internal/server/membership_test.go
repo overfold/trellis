@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/overfold/trellis/orchestrator/api"
 	"github.com/overfold/trellis/orchestrator/internal/state"
 )
 
@@ -111,6 +112,12 @@ func (f *fakeMembership) voters() []string {
 func membershipTestServer(joiner *fakeMembership, leader uuid.UUID, healthy ...uuid.UUID) *Server {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	s := &Server{joiner: joiner, nodeID: leader, now: func() time.Time { return now }, leaderSince: now.Add(-time.Hour), nodes: map[uuid.UUID]*Node{}, state: NewStateController(memoryStore{}, "test")}
+	members, _ := joiner.Membership()
+	for _, member := range members {
+		if err := s.state.put(context.Background(), s.state.nodeRoleKey(member.ID), api.NodeRoleControlPlane); err != nil {
+			panic(err)
+		}
+	}
 	for _, id := range healthy {
 		addTestNode(s, &Node{ID: id, Status: NodeStatusHealthy}, now)
 		s.RecordRaftProgress(id, joiner.AppliedIndex())
@@ -194,6 +201,9 @@ func TestJoinMemberAddsNonvoter(t *testing.T) {
 	leader, joining := uuid.New(), uuid.New()
 	joiner := newFakeMembership(fakeMember(leader, true))
 	s := membershipTestServer(joiner, leader)
+	if err := s.state.put(context.Background(), s.state.nodeRoleKey(joining.String()), api.NodeRoleControlPlane); err != nil {
+		t.Fatal(err)
+	}
 	members, err := s.JoinMember(context.Background(), joining, "joining:8129")
 	if err != nil {
 		t.Fatal(err)
@@ -204,6 +214,21 @@ func TestJoinMemberAddsNonvoter(t *testing.T) {
 	configuration, _ := joiner.Membership()
 	if len(configuration) != 2 || configuration[1].ID != joining.String() || configuration[1].Voter {
 		t.Fatalf("membership = %+v, want the joining node as a non-voter", configuration)
+	}
+}
+
+func TestWorkerCannotJoinRaft(t *testing.T) {
+	leader, worker := uuid.New(), uuid.New()
+	joiner := newFakeMembership(fakeMember(leader, true))
+	s := membershipTestServer(joiner, leader)
+	if err := s.state.put(context.Background(), s.state.nodeRoleKey(worker.String()), api.NodeRoleWorker); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.JoinMember(context.Background(), worker, "worker:8129"); err == nil {
+		t.Fatal("worker joined Raft")
+	}
+	if got := joiner.operations(); len(got) != 0 {
+		t.Fatalf("rejected worker changed membership: %v", got)
 	}
 }
 

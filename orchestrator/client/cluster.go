@@ -95,6 +95,25 @@ func (c *Client) ListNodes(ctx context.Context) (api.NodeListResponse, error) {
 	return response, nil
 }
 
+// PromoteNode grants control-plane eligibility to an enrolled worker. It
+// requires administrator signing and does not reconfigure the node daemon.
+func (c *Client) PromoteNode(ctx context.Context, id uuid.UUID) error {
+	if err := c.request(ctx, http.MethodPost, c.clusterPath("/v1/nodes/%s/promote", id), nil, nil); err != nil {
+		return fmt.Errorf("promote node: %w", err)
+	}
+	return nil
+}
+
+// EnrollNodeIdentity binds an externally signed node certificate and role.
+// It requires administrator signing and is available only in external mode.
+func (c *Client) EnrollNodeIdentity(ctx context.Context, request *api.NodeIdentityCreateRequest) (*api.NodeIdentityCreateResponse, error) {
+	var response api.NodeIdentityCreateResponse
+	if err := c.request(ctx, http.MethodPost, c.clusterPath("/v1/nodes/identities"), request, &response); err != nil {
+		return nil, fmt.Errorf("enroll external node: %w", err)
+	}
+	return &response, nil
+}
+
 // DrainNode stops scheduling onto a node and evacuates its allocations.
 func (c *Client) DrainNode(ctx context.Context, id uuid.UUID) error {
 	if err := c.request(ctx, http.MethodPost, c.clusterPath("/v1/nodes/%s/drain", id), nil, nil); err != nil {

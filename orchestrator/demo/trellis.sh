@@ -6,7 +6,7 @@ DATA_DIR="/var/lib/trellis/data"
 CONFIG_FILE="/etc/trellis/trellis.yaml"
 ADMIN_KEY_FILE="${SHARE_DIR}/administrator-key.pem"
 ADMIN_PUBLIC_KEY_FILE="${SHARE_DIR}/administrator-public-key"
-JOIN_TOKEN_FILE="${SHARE_DIR}/join-token"
+JOIN_TOKEN_FILE="${SHARE_DIR}/join-token-$(hostname -s)"
 CA_CERT_FILE="${SHARE_DIR}/node-ca.crt"
 
 # Generate the administrator signing key. The control node later uses it to
@@ -38,7 +38,7 @@ raft_advertise: ${ADVERTISE_HOST}:8129
 EOF
 if [ "${HOSTNAME}" = "control" ]; then
     printf 'administrator_public_key: %s\n' "$(cat "${ADMIN_PUBLIC_KEY_FILE}")" >> "$CONFIG_FILE"
-    rm -f "${CA_CERT_FILE}" "${JOIN_TOKEN_FILE}"
+    rm -f "${CA_CERT_FILE}" "${SHARE_DIR}/join-token-worker-1" "${SHARE_DIR}/join-token-worker-2"
 else
     for _ in $(seq 1 60); do [ -s "${CA_CERT_FILE}" ] && [ -s "${JOIN_TOKEN_FILE}" ] && break; sleep 1; done
     [ -s "${CA_CERT_FILE}" ] || { echo "cluster CA certificate unavailable" >&2; exit 1; }
@@ -70,15 +70,18 @@ systemctl enable trellis
 systemctl start trellis
 if [ "${HOSTNAME}" = "control" ]; then
     for _ in $(seq 1 60); do [ -s "${DATA_DIR}/node-ca.crt" ] && break; sleep 1; done
-    # Mint one join token for the two demo workers. It expires within the
-    # hour whether or not it is used.
+    # All three demo nodes participate in Raft. Each joining identity needs
+    # its own single-use control-plane token.
     umask 077
-    for _ in $(seq 1 60); do
-        trellisctl --server-addr localhost:8128 --ca-cert "${DATA_DIR}/node-ca.crt" --administrator-key "${ADMIN_KEY_FILE}" \
-            nodes join-token create --ttl 1h --max-uses 2 >"${JOIN_TOKEN_FILE}.tmp" 2>/dev/null && break
-        sleep 1
+    for node in worker-1 worker-2; do
+        token_file="${SHARE_DIR}/join-token-${node}"
+        for _ in $(seq 1 60); do
+            trellisctl --server-addr localhost:8128 --ca-cert "${DATA_DIR}/node-ca.crt" --administrator-key "${ADMIN_KEY_FILE}" \
+                nodes join-token create --role control-plane --ttl 1h >"${token_file}.tmp" 2>/dev/null && break
+            sleep 1
+        done
+        [ -s "${token_file}.tmp" ] || { echo "could not mint a join token" >&2; exit 1; }
+        mv "${token_file}.tmp" "${token_file}"
     done
-    [ -s "${JOIN_TOKEN_FILE}.tmp" ] || { echo "could not mint a join token" >&2; exit 1; }
-    mv "${JOIN_TOKEN_FILE}.tmp" "${JOIN_TOKEN_FILE}"
     install -m 0644 "${DATA_DIR}/node-ca.crt" "${CA_CERT_FILE}"
 fi

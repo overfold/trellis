@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/overfold/trellis/orchestrator/api"
 	"github.com/overfold/trellis/orchestrator/internal/state"
 	"github.com/overfold/trellis/orchestrator/internal/storage"
 	"github.com/overfold/trellis/orchestrator/internal/tlsutil"
@@ -68,6 +70,15 @@ func parseCertificatePEM(t *testing.T, certPEM []byte) *x509.Certificate {
 	return certificate
 }
 
+func testCSR(t *testing.T) (string, string) {
+	t.Helper()
+	csr, key, err := tlsutil.GenerateCSR()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(csr), string(key)
+}
+
 func TestJoinTokenBounds(t *testing.T) {
 	f := newNodeTrustFixture(t)
 	ctx := context.Background()
@@ -100,17 +111,107 @@ func TestJoinTokenBounds(t *testing.T) {
 			t.Fatal("replicated state contains the join token itself")
 		}
 	}
+	if _, _, err := f.server.CreateJoinToken(ctx, time.Hour, 2, api.NodeRoleControlPlane); !errors.Is(err, ErrInvalidJoinTokenRequest) {
+		t.Fatalf("repeatable control-plane token error = %v, want ErrInvalidJoinTokenRequest", err)
+	}
+}
+
+func TestWorkerEnrollmentIgnoresRequestedNamesAndReturnsNoPrivateKey(t *testing.T) {
+	f := newNodeTrustFixture(t)
+	ctx := context.Background()
+	token, _, err := f.server.CreateJoinToken(ctx, time.Hour, 1, api.NodeRoleWorker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	csr, _ := testCSR(t)
+	response, err := f.server.EnrollNodeCSR(ctx, token, csr, api.NodeRoleWorker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate := parseCertificatePEM(t, []byte(response.Cert))
+	if len(certificate.DNSNames) != 1 || certificate.DNSNames[0] != response.NodeID.String()+".node.trellis" {
+		t.Fatalf("certificate names = %v, want only assigned UUID identity", certificate.DNSNames)
+	}
+	raw, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, found := fields["key"]; found {
+		t.Fatal("worker enrollment returned a private key")
+	}
+}
+
+func TestWorkerTokenCannotEnrollControlPlaneAndIsNotConsumed(t *testing.T) {
+	f := newNodeTrustFixture(t)
+	ctx := context.Background()
+	token, record, err := f.server.CreateJoinToken(ctx, time.Hour, 1, api.NodeRoleWorker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	csr, _ := testCSR(t)
+	if _, err := f.server.EnrollNodeCSR(ctx, token, csr, api.NodeRoleControlPlane); !errors.Is(err, ErrInvalidJoinToken) {
+		t.Fatalf("role escalation error = %v, want ErrInvalidJoinToken", err)
+	}
+	stored, found, err := f.server.state.GetJoinToken(ctx, record.ID)
+	if err != nil || !found || stored.Uses != 0 {
+		t.Fatalf("worker token after rejected enrollment = %+v, found %v, error %v", stored, found, err)
+	}
+}
+
+func TestAPICertificateExpiryAndRemovalAuthorization(t *testing.T) {
+	f := newNodeTrustFixture(t)
+	ctx := context.Background()
+	id := uuid.New()
+	certificate := f.certificateFor(id)
+	if err := f.server.BindNodeCertificate(ctx, id, certificate); err != nil {
+		t.Fatal(err)
+	}
+	f.server.joiner = newFakeMembership(fakeMember(id, true))
+	csr, _ := testCSR(t)
+	certPEM, err := f.server.IssueAPICertificate(ctx, id, csr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiCertificate := parseCertificatePEM(t, certPEM)
+	if got := apiCertificate.NotAfter.Sub(apiCertificate.NotBefore); got != tlsutil.APICertificateLifetime {
+		t.Fatalf("API certificate lifetime = %v, want %v", got, tlsutil.APICertificateLifetime)
+	}
+	if err := f.server.state.PutNodeTombstone(ctx, id.String(), NodeTombstone{RemovedAt: f.now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.server.IssueAPICertificate(ctx, id, csr); err == nil {
+		t.Fatal("removed node received an API certificate")
+	}
+}
+
+func TestWorkerCannotReceiveAPICertificate(t *testing.T) {
+	f := newNodeTrustFixture(t)
+	ctx := context.Background()
+	id := uuid.New()
+	if err := f.server.BindNodeCertificateRole(ctx, id, f.certificateFor(id), api.NodeRoleWorker); err != nil {
+		t.Fatal(err)
+	}
+	f.server.joiner = newFakeMembership(fakeMember(id, true))
+	csr, _ := testCSR(t)
+	if _, err := f.server.IssueAPICertificate(ctx, id, csr); err == nil {
+		t.Fatal("worker received an API certificate")
+	}
 }
 
 func TestEnrollmentConsumesJoinToken(t *testing.T) {
 	f := newNodeTrustFixture(t)
 	ctx := context.Background()
-	token, record, err := f.server.CreateJoinToken(ctx, time.Hour, 2)
+	token, record, err := f.server.CreateJoinToken(ctx, time.Hour, 2, api.NodeRoleWorker)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for range 2 {
-		response, err := f.server.EnrollNode(ctx, token, "node:8128")
+		csr, _ := testCSR(t)
+		response, err := f.server.EnrollNodeCSR(ctx, token, csr, api.NodeRoleWorker)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -119,7 +220,8 @@ func TestEnrollmentConsumesJoinToken(t *testing.T) {
 			t.Fatal("enrolled certificate is not bound to its identity")
 		}
 	}
-	if _, err := f.server.EnrollNode(ctx, token, "node:8128"); !errors.Is(err, ErrInvalidJoinToken) {
+	csr, _ := testCSR(t)
+	if _, err := f.server.EnrollNodeCSR(ctx, token, csr, api.NodeRoleWorker); !errors.Is(err, ErrInvalidJoinToken) {
 		t.Fatalf("third enrollment error = %v, want an exhausted token rejected", err)
 	}
 	listed, err := f.server.ListJoinTokens(ctx)
@@ -143,12 +245,14 @@ func TestEnrollmentRejectsInvalidJoinTokens(t *testing.T) {
 	}
 	forged := token[:strings.Index(token, ".")+1] + "forged"
 	for _, candidate := range []string{"", "trls_join_", "not-a-token", forged, "trls_join_ffffffffffffffff.secret"} {
-		if _, err := f.server.EnrollNode(ctx, candidate); !errors.Is(err, ErrInvalidJoinToken) {
+		csr, _ := testCSR(t)
+		if _, err := f.server.EnrollNodeCSR(ctx, candidate, csr, api.NodeRoleControlPlane); !errors.Is(err, ErrInvalidJoinToken) {
 			t.Errorf("EnrollNode(%q) error = %v, want ErrInvalidJoinToken", candidate, err)
 		}
 	}
 	f.now = record.ExpiresAt
-	if _, err := f.server.EnrollNode(ctx, token); !errors.Is(err, ErrInvalidJoinToken) {
+	csr, _ := testCSR(t)
+	if _, err := f.server.EnrollNodeCSR(ctx, token, csr, api.NodeRoleControlPlane); !errors.Is(err, ErrInvalidJoinToken) {
 		t.Fatalf("expired token error = %v, want ErrInvalidJoinToken", err)
 	}
 	if listed, _ := f.server.ListJoinTokens(ctx); len(listed) != 0 {
@@ -173,7 +277,8 @@ func TestRevokedJoinTokenCannotEnroll(t *testing.T) {
 	if err := f.server.RevokeJoinToken(ctx, record.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.server.EnrollNode(ctx, token); !errors.Is(err, ErrInvalidJoinToken) {
+	csr, _ := testCSR(t)
+	if _, err := f.server.EnrollNodeCSR(ctx, token, csr, api.NodeRoleControlPlane); !errors.Is(err, ErrInvalidJoinToken) {
 		t.Fatalf("revoked token error = %v, want ErrInvalidJoinToken", err)
 	}
 	if err := f.server.RevokeJoinToken(ctx, record.ID); !errors.Is(err, ErrJoinTokenNotFound) {
@@ -196,7 +301,8 @@ func TestSingleUseJoinTokenEnrollsOnceUnderConcurrency(t *testing.T) {
 	enrolled := 0
 	for range 8 {
 		wg.Go(func() {
-			if _, err := f.server.EnrollNode(ctx, token); err == nil {
+			csr, _ := testCSR(t)
+			if _, err := f.server.EnrollNodeCSR(ctx, token, csr, api.NodeRoleControlPlane); err == nil {
 				mu.Lock()
 				enrolled++
 				mu.Unlock()
@@ -252,7 +358,8 @@ func TestRemovingUnknownNodeStillRevokesIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	// An enrolled node that never joined Raft can still be removed.
-	response, err := f.server.EnrollNode(ctx, token)
+	csr, _ := testCSR(t)
+	response, err := f.server.EnrollNodeCSR(ctx, token, csr, api.NodeRoleControlPlane)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -332,6 +439,15 @@ func TestRaftPeerAuthorizerTrustsAdmittingMembersBeforeReplication(t *testing.T)
 	}
 	if err := authorizer.Authorize(f.certificateFor(outsider)); err == nil {
 		t.Fatal("peer outside the admitting membership was admitted")
+	}
+	worker := uuid.New()
+	workerCertificate := f.certificateFor(worker)
+	authorizer.TrustJoinMembers([]string{worker.String()})
+	if err := f.server.BindNodeCertificateRole(ctx, worker, workerCertificate, api.NodeRoleWorker); err != nil {
+		t.Fatal(err)
+	}
+	if err := authorizer.Authorize(workerCertificate); err == nil {
+		t.Fatal("bootstrap trust admitted a worker peer")
 	}
 	// Once replicated, the leader's binding pins its certificate.
 	if err := f.server.BindNodeCertificate(ctx, leader, leaderCertificate); err != nil {

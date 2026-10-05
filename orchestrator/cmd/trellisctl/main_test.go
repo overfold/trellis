@@ -11,7 +11,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/google/uuid"
 	"github.com/overfold/trellis/orchestrator/internal/tlsutil"
 	"github.com/spf13/cobra"
 )
@@ -30,7 +29,7 @@ func TestContextCAFileTracksReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	certPEM, _, err := tlsutil.GenerateNodeCert(newCA, newKey, uuid.New())
+	certPEM, _, err := tlsutil.GenerateAPICert(newCA, newKey)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -147,12 +147,17 @@ func (h *Handler) Register(e *echo.Echo) {
 	v1.GET("/credentials", h.handleListCredentials)
 	v1.DELETE("/credentials/:id", h.handleRevokeCredential)
 	v1.GET("/nodes", h.handleListNodes)
+	v1.POST("/nodes/identities", h.handleEnrollExternalNode)
+	v1.POST("/nodes/:id/promote", h.handlePromoteNode)
 	v1.POST("/nodes/enroll", h.handleEnrollNode)
 	v1.POST("/nodes/join-tokens", h.handleCreateJoinToken)
 	v1.GET("/nodes/join-tokens", h.handleListJoinTokens)
 	v1.DELETE("/nodes/join-tokens/:id", h.handleRevokeJoinToken)
 	v1.POST("/nodes", h.handleRegisterNode)
+	v1.POST("/nodes/api-certificate", h.handleAPICertificate)
 	v1.POST("/nodes/:id/heartbeat", h.handleHeartbeat)
+	v1.GET("/internal/control-plane", h.handleControlPlane)
+	v1.GET("/internal/node-role", h.handleNodeRole)
 	v1.POST("/nodes/:id/drain", h.handleDrainNode)
 	v1.DELETE("/nodes/:id/drain", h.handleUndrainNode)
 	v1.GET("/namespaces", h.handleListNamespaces)
@@ -279,7 +284,7 @@ func (h *Handler) handleCreateJoinToken(c *echo.Context) error {
 	if request.TTLSeconds < 0 || request.TTLSeconds > maxTTLSeconds {
 		return echo.NewHTTPError(http.StatusBadRequest, "ttl_seconds is out of range")
 	}
-	token, record, err := h.server.CreateJoinToken(c.Request().Context(), time.Duration(request.TTLSeconds)*time.Second, request.MaxUses)
+	token, record, err := h.server.CreateJoinToken(c.Request().Context(), time.Duration(request.TTLSeconds)*time.Second, request.MaxUses, request.Role)
 	if errors.Is(err, ErrInvalidJoinTokenRequest) {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
@@ -592,6 +597,10 @@ func (h *Handler) handleRegisterNode(c *echo.Context) error {
 	if memoryAllocatable == 0 {
 		memoryAllocatable = request.Memory
 	}
+	runsWorkloads := true
+	if request.RunsWorkloads != nil {
+		runsWorkloads = *request.RunsWorkloads
+	}
 	if err := h.server.RegisterNode(c.Request().Context(), &NodeRegistration{
 		ID: request.ID, Host: request.Host, Port: request.Port,
 		CPUCapacity: cpuCapacity, MemoryCapacity: memoryCapacity,
@@ -599,10 +608,52 @@ func (h *Handler) handleRegisterNode(c *echo.Context) error {
 		OS: request.OS, Arch: request.Arch, Labels: request.Labels, Volumes: request.Volumes, Capabilities: request.Capabilities,
 		WireGuardPublicKey: request.WireGuardPublicKey, WireGuardEndpoint: request.WireGuardEndpoint,
 		WireGuardPortBase: request.WireGuardPortBase, WireGuardPortCount: request.WireGuardPortCount,
+		RunsWorkloads: runsWorkloads,
 	}); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "unable to register node")
 	}
-	return c.JSON(http.StatusCreated, nodeapi.NodeRegistrationResponse{ID: request.ID})
+	return c.JSON(http.StatusCreated, nodeapi.NodeRegistrationResponse{ID: request.ID, ControlPlaneResponse: h.server.ControlPlane(c.Request().Context())})
+}
+
+func (h *Handler) handlePromoteNode(c *echo.Context) error {
+	if err := requireRoot(c, "node promotion requires the administrator credential"); err != nil {
+		return err
+	}
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid node ID")
+	}
+	if err := h.server.PromoteNode(c.Request().Context(), id); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
+func (h *Handler) handleNodeRole(c *echo.Context) error {
+	id, err := authenticatedNodeID(c, "node role requires an authenticated node")
+	if err != nil {
+		return err
+	}
+	role, found, err := h.server.state.NodeRole(c.Request().Context(), id.String())
+	if err != nil || !found {
+		return echo.NewHTTPError(http.StatusForbidden, "node role is not enrolled")
+	}
+	return c.JSON(http.StatusOK, nodeapi.NodeRoleResponse{Role: role})
+}
+
+func (h *Handler) handleEnrollExternalNode(c *echo.Context) error {
+	if err := requireRoot(c, "external node enrollment requires the administrator credential"); err != nil {
+		return err
+	}
+	var request api.NodeIdentityCreateRequest
+	if err := decodeJSON(c, &request, maxSmallRequestBytes); err != nil {
+		return err
+	}
+	id, err := h.server.EnrollExternalNode(c.Request().Context(), request.Certificate, request.Role)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+	return c.JSON(http.StatusCreated, api.NodeIdentityCreateResponse{ID: id})
 }
 
 func (h *Handler) handleHeartbeat(c *echo.Context) error {
@@ -630,7 +681,34 @@ func (h *Handler) handleHeartbeat(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "unable to process heartbeat")
 	}
 	h.server.RecordRaftProgress(id, request.RaftAppliedIndex)
-	return c.NoContent(http.StatusNoContent)
+	return c.JSON(http.StatusOK, nodeapi.HeartbeatResponse{ControlPlaneResponse: h.server.ControlPlane(c.Request().Context())})
+}
+
+func (h *Handler) handleControlPlane(c *echo.Context) error {
+	if _, err := authenticatedNodeID(c, "control-plane discovery requires an authenticated node"); err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, h.server.ControlPlane(c.Request().Context()))
+}
+
+func (h *Handler) handleAPICertificate(c *echo.Context) error {
+	id, err := authenticatedNodeID(c, "API certificate issuance requires an authenticated node")
+	if err != nil {
+		return err
+	}
+	var request nodeapi.APICertificateRequest
+	if err := decodeJSON(c, &request, maxSmallRequestBytes); err != nil {
+		return err
+	}
+	if request.CSR == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "csr is required")
+	}
+	cert, err := h.server.IssueAPICertificate(c.Request().Context(), id, request.CSR)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusForbidden, err.Error())
+	}
+	c.Response().Header().Set("Cache-Control", "no-store")
+	return c.JSON(http.StatusOK, nodeapi.APICertificateResponse{Cert: string(cert)})
 }
 
 func (h *Handler) handleListJobs(c *echo.Context) error {
@@ -819,6 +897,17 @@ func (h *Handler) handleRaftJoin(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusForbidden, "Raft join identity does not match certificate")
 	}
 	nodeID = certificateNodeID
+	for _, address := range []string{request.RaftAddress, request.ServerAddress} {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil || host == "" || port == "" {
+			return echo.NewHTTPError(http.StatusBadRequest, "advertised addresses must be host:port")
+		}
+	}
+	if role, found, err := h.server.state.NodeRole(c.Request().Context(), nodeID.String()); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "load node role")
+	} else if found && role != api.NodeRoleControlPlane {
+		return echo.NewHTTPError(http.StatusForbidden, "Raft join requires a control-plane node")
+	}
 	// In managed signing mode every member holds the CA key and could mint a
 	// certificate for a new UUID. Only identities bound by join-token
 	// enrollment (or the bootstrap node) may join; external mode lets the
@@ -830,15 +919,6 @@ func (h *Handler) handleRaftJoin(c *echo.Context) error {
 	}
 	if err := h.server.BindNodeCertificate(c.Request().Context(), nodeID, certificate); err != nil {
 		return echo.NewHTTPError(http.StatusForbidden, err.Error())
-	}
-	for _, address := range []string{request.RaftAddress, request.ServerAddress} {
-		host, _, err := net.SplitHostPort(address)
-		if err != nil || host == "" {
-			return echo.NewHTTPError(http.StatusBadRequest, "advertised addresses must be host:port")
-		}
-		if err := certificate.VerifyHostname(host); err != nil {
-			return echo.NewHTTPError(http.StatusForbidden, "advertised address is not bound to the authenticated node certificate")
-		}
 	}
 	if h.server.joiner == nil {
 		return echo.NewHTTPError(http.StatusServiceUnavailable, "cluster join not available")
@@ -870,7 +950,10 @@ func (h *Handler) handleEnrollNode(c *echo.Context) error {
 	if err := decodeJSON(c, &request, maxSmallRequestBytes); err != nil {
 		return err
 	}
-	response, err := h.server.EnrollNode(c.Request().Context(), joinToken, request.ServerAdvertise, request.AgentAdvertise, request.RaftAdvertise)
+	if request.CSR == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "csr is required")
+	}
+	response, err := h.server.EnrollNodeCSR(c.Request().Context(), joinToken, request.CSR, request.Role)
 	if errors.Is(err, ErrInvalidJoinToken) {
 		return echo.NewHTTPError(http.StatusUnauthorized, err.Error())
 	}

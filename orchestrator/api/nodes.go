@@ -62,3 +62,15 @@ const (
 
 // NodeListResponse is the response returned when listing nodes.
 type NodeListResponse = []NodeResponse
+
+// NodeIdentityCreateRequest enrolls an externally signed node identity with
+// administrator authorization. It contains no private key material.
+type NodeIdentityCreateRequest struct {
+	Certificate string   `json:"certificate"`
+	Role        NodeRole `json:"role"`
+}
+
+// NodeIdentityCreateResponse identifies the enrolled external node.
+type NodeIdentityCreateResponse struct {
+	ID uuid.UUID `json:"id"`
+}

@@ -2,7 +2,7 @@
 
 ## Process topology
 
-`trellis` composes the control plane and worker agent. The control plane owns desired state, scheduling, service catalog, health-derived status, HTTP endpoints, Prometheus metrics, and reconciliation. The agent owns actual containers, ports, volumes, logs, secrets materialization, and local restart/health loops. `trellisctl` is the human CLI. Consumers such as reverse-proxy controllers are ordinary workloads outside this repository; [`trellis-proxy-sync`](https://github.com/overfold/trellis-proxy-sync), for example, turns labelled allocations into a proxy configuration.
+`trellis` composes the control plane and worker agent. Each responsibility can be enabled independently: worker-only nodes run no Raft/state/CA/secrets-key components, while control-plane-only nodes may opt out of workloads. The control plane owns desired state, scheduling, service catalog, HTTP endpoints, metrics, and reconciliation. The agent owns containers, ports, volumes, logs, secrets materialization, and local health loops.
 
 The design is leader-driven. A Raft-backed state store persists jobs, secrets, allocation records, membership-related desired state, and a monotonically meaningful control epoch. Followers serve as cluster members, but only the elected leader reconciles. At most five members vote; the rest replicate as non-voters that the leader promotes to keep an odd voter set (see [control-plane membership](control-plane.md#control-plane-membership)). The server-to-agent protocol includes epoch, allocation generation, job revision, and execution hash to make repeat requests safe and reject stale control traffic.
 

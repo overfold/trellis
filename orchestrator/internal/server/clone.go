@@ -30,6 +30,7 @@ func (n *Node) Clone() *Node {
 	clone.MemoryUsed = clonePointer(n.MemoryUsed)
 	clone.MemoryAvailable = clonePointer(n.MemoryAvailable)
 	clone.MetricsAt = clonePointer(n.MetricsAt)
+	clone.RunsWorkloads = clonePointer(n.RunsWorkloads)
 	clone.Labels = maps.Clone(n.Labels)
 	clone.Volumes = slices.Clone(n.Volumes)
 	clone.Capabilities = slices.Clone(n.Capabilities)
@@ -165,5 +166,6 @@ func (s *NodeSummary) equal(other *NodeSummary) bool {
 		s.WireGuardEndpoint == other.WireGuardEndpoint &&
 		s.WireGuardPortBase == other.WireGuardPortBase &&
 		s.WireGuardPortCount == other.WireGuardPortCount &&
-		s.Version == other.Version
+		s.Version == other.Version &&
+		((s.RunsWorkloads == nil && other.RunsWorkloads == nil) || (s.RunsWorkloads != nil && other.RunsWorkloads != nil && *s.RunsWorkloads == *other.RunsWorkloads))
 }

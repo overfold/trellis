@@ -332,7 +332,7 @@ func NewAgent(log *slog.Logger, runtime runtime.ContainerRuntime, health *health
 		ports:      ports,
 		volumes:    volumes,
 		server:     server,
-		nodeInfo:   client.NodeInfo{ID: nodeID, Host: "127.0.0.1", Port: 8127},
+		nodeInfo:   client.NodeInfo{ID: nodeID, Host: "127.0.0.1", Port: 8127, RunsWorkloads: true},
 		failed:     make(chan error, 1),
 	}
 
@@ -418,6 +418,9 @@ func (a *Agent) SetLabels(labels map[string]string) {
 
 // SetVersion configures the reported agent version.
 func (a *Agent) SetVersion(version string) { a.version = version }
+
+// SetRunsWorkloads controls whether the scheduler may place allocations here.
+func (a *Agent) SetRunsWorkloads(runs bool) { a.nodeInfo.RunsWorkloads = runs }
 
 // SetRaftAppliedIndex configures how heartbeats read the local Raft applied
 // index.

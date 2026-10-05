@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -26,7 +27,56 @@ func NewNodesCmd() *cobra.Command {
 	cmd.AddCommand(NewNodesUndrainCmd())
 	cmd.AddCommand(NewNodesRemoveCmd())
 	cmd.AddCommand(NewNodesJoinTokenCmd())
+	cmd.AddCommand(newNodesPromoteCmd())
+	cmd.AddCommand(newNodesEnrollCmd())
 	cmd.AddCommand(NewNodesLeadershipTransferCmd())
+	return cmd
+}
+
+func newNodesPromoteCmd() *cobra.Command {
+	return &cobra.Command{Use: "promote NODE", Args: cobra.ExactArgs(1), Short: "Authorize a worker to join the control plane", RunE: func(cmd *cobra.Command, args []string) error {
+		c, err := administratorServerClient()
+		if err != nil {
+			return err
+		}
+		node, err := resolveNodeWithClient(cmd, c, args[0])
+		if err != nil {
+			return err
+		}
+		if err := c.PromoteNode(cmd.Context(), node.ID); err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(cmd.OutOrStdout(), "Node %s authorized for control-plane participation. Set control_plane: true, configure the cluster secrets key if used, and restart its daemon.\n", nodeDisplay(node))
+		return err
+	}}
+}
+
+func newNodesEnrollCmd() *cobra.Command {
+	var path, role string
+	cmd := &cobra.Command{Use: "enroll", Args: cobra.NoArgs, Short: "Enroll an externally signed node certificate", RunE: func(cmd *cobra.Command, _ []string) error {
+		if path == "" {
+			return fmt.Errorf("--cert is required")
+		}
+		if role != string(api.NodeRoleWorker) && role != string(api.NodeRoleControlPlane) {
+			return fmt.Errorf("--role must be worker or control-plane")
+		}
+		cert, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		c, err := administratorServerClient()
+		if err != nil {
+			return err
+		}
+		response, err := c.EnrollNodeIdentity(cmd.Context(), &api.NodeIdentityCreateRequest{Certificate: string(cert), Role: api.NodeRole(role)})
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(cmd.OutOrStdout(), "Node %s enrolled as %s.\n", response.ID, role)
+		return err
+	}}
+	cmd.Flags().StringVar(&path, "cert", "", "Externally signed node certificate PEM file")
+	cmd.Flags().StringVar(&role, "role", string(api.NodeRoleControlPlane), "Node authority: control-plane or worker")
 	return cmd
 }
 
@@ -185,7 +235,7 @@ func NewNodesStatusCmd() *cobra.Command {
 // controlPlaneDisplay shows whether a node votes in the control plane.
 func controlPlaneDisplay(node api.NodeResponse) string {
 	if node.ControlPlane == "" {
-		return "-"
+		return "not-member"
 	}
 	return string(node.ControlPlane)
 }

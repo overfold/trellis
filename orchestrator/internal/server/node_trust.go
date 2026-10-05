@@ -12,6 +12,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -62,13 +63,14 @@ type JoinToken struct {
 	CreatedAt time.Time `json:"created_at"`
 	ExpiresAt time.Time `json:"expires_at"`
 	// MaxUses limits enrollments with the token; zero means unlimited.
-	MaxUses int `json:"max_uses,omitempty"`
-	Uses    int `json:"uses"`
+	MaxUses int          `json:"max_uses,omitempty"`
+	Uses    int          `json:"uses"`
+	Role    api.NodeRole `json:"role"`
 }
 
 // API returns the listable metadata of the token.
 func (t *JoinToken) API() api.JoinTokenResponse {
-	return api.JoinTokenResponse{ID: t.ID, CreatedAt: t.CreatedAt, ExpiresAt: t.ExpiresAt, MaxUses: t.MaxUses, Uses: t.Uses}
+	return api.JoinTokenResponse{ID: t.ID, CreatedAt: t.CreatedAt, ExpiresAt: t.ExpiresAt, MaxUses: t.MaxUses, Uses: t.Uses, Role: normalizedNodeRole(t.Role)}
 }
 
 func (t *JoinToken) expired(now time.Time) bool { return !now.Before(t.ExpiresAt) }
@@ -124,6 +126,29 @@ func (s *StateController) nodeTombstoneKey(id string) string {
 
 func (s *StateController) nodeCertificateFingerprintKey(id string) string {
 	return fmt.Sprintf("%s/%s/node-certificate-fingerprints/%s", trellisNamespace, s.cluster, id)
+}
+
+func (s *StateController) nodeRoleKey(id string) string {
+	return fmt.Sprintf("%s/%s/node-roles/%s", trellisNamespace, s.cluster, id)
+}
+
+func normalizedNodeRole(role api.NodeRole) api.NodeRole {
+	if role == "" {
+		return api.NodeRoleControlPlane
+	}
+	return role
+}
+
+func validNodeRole(role api.NodeRole) bool {
+	role = normalizedNodeRole(role)
+	return role == api.NodeRoleControlPlane || role == api.NodeRoleWorker
+}
+
+// NodeRole reads the durable administrator-assigned authority of a node.
+func (s *StateController) NodeRole(ctx context.Context, id string) (api.NodeRole, bool, error) {
+	var role api.NodeRole
+	found, err := s.get(ctx, s.nodeRoleKey(id), &role)
+	return normalizedNodeRole(role), found, err
 }
 
 // GetJoinToken loads one join token record.
@@ -193,15 +218,30 @@ func jsonMutation(key string, value any) (state.Mutation, error) {
 // DefaultJoinTokenTTL; maxUses zero allows unlimited enrollments until expiry.
 // The token is returned exactly once; replicated state keeps only its hash.
 // Expired token records are pruned in the same transaction.
-func (s *Server) CreateJoinToken(ctx context.Context, ttl time.Duration, maxUses int) (string, *JoinToken, error) {
+func (s *Server) CreateJoinToken(ctx context.Context, ttl time.Duration, maxUses int, requestedRole ...api.NodeRole) (string, *JoinToken, error) {
+	role := api.NodeRoleControlPlane
+	if len(requestedRole) > 0 {
+		role = normalizedNodeRole(requestedRole[0])
+	}
+	if !validNodeRole(role) {
+		return "", nil, fmt.Errorf("%w: invalid role", ErrInvalidJoinTokenRequest)
+	}
 	if ttl == 0 {
 		ttl = DefaultJoinTokenTTL
 	}
-	if ttl < time.Second || ttl > MaxJoinTokenTTL {
-		return "", nil, fmt.Errorf("%w: ttl must be between 1s and %s", ErrInvalidJoinTokenRequest, MaxJoinTokenTTL)
-	}
 	if maxUses < 0 || maxUses > MaxJoinTokenUses {
 		return "", nil, fmt.Errorf("%w: max_uses must be between 0 and %d", ErrInvalidJoinTokenRequest, MaxJoinTokenUses)
+	}
+	maxTTL := MaxJoinTokenTTL
+	if role == api.NodeRoleControlPlane {
+		maxTTL = time.Hour
+		if maxUses > 1 {
+			return "", nil, fmt.Errorf("%w: control-plane max_uses must be 0 or 1", ErrInvalidJoinTokenRequest)
+		}
+		maxUses = 1
+	}
+	if ttl < time.Second || ttl > maxTTL {
+		return "", nil, fmt.Errorf("%w: ttl must be between 1s and %s", ErrInvalidJoinTokenRequest, maxTTL)
 	}
 	idBytes := make([]byte, joinTokenIDLength/2)
 	secret := make([]byte, 32)
@@ -215,7 +255,7 @@ func (s *Server) CreateJoinToken(ctx context.Context, ttl time.Duration, maxUses
 	token := joinTokenPrefix + id + "." + base64.RawURLEncoding.EncodeToString(secret)
 	clear(secret)
 	now := s.now().UTC()
-	record := &JoinToken{ID: id, Hash: joinTokenHash(token), CreatedAt: now, ExpiresAt: now.Add(ttl), MaxUses: maxUses}
+	record := &JoinToken{ID: id, Hash: joinTokenHash(token), CreatedAt: now, ExpiresAt: now.Add(ttl), MaxUses: maxUses, Role: role}
 
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
@@ -279,13 +319,8 @@ func (s *Server) RevokeJoinToken(ctx context.Context, id string) error {
 	return nil
 }
 
-// EnrollNode issues a server-assigned node identity and certificate in managed
-// signing mode to a caller presenting a usable join token. The token's use
-// and the new identity's certificate binding commit in one transaction, so a
-// use limit holds however many enrollments race. The CA key is withheld until
-// the identity joins Raft, so a join token alone cannot mint or duplicate an
-// existing identity.
-func (s *Server) EnrollNode(ctx context.Context, joinToken string, advertised ...string) (*nodeapi.NodeEnrollmentResponse, error) {
+// EnrollNodeCSR enrolls a node without ever generating or receiving its private key.
+func (s *Server) EnrollNodeCSR(ctx context.Context, joinToken, csr string, requestedRole api.NodeRole) (*nodeapi.NodeEnrollmentResponse, error) {
 	id, ok := parseJoinTokenID(joinToken)
 	if !ok {
 		return nil, ErrInvalidJoinToken
@@ -318,8 +353,11 @@ func (s *Server) EnrollNode(ctx context.Context, joinToken string, advertised ..
 	if err != nil {
 		return nil, err
 	}
+	if normalizedNodeRole(requestedRole) != normalizedNodeRole(record.Role) {
+		return nil, ErrInvalidJoinToken
+	}
 	nodeID := uuid.New()
-	cert, key, err := tlsutil.GenerateNodeCert([]byte(caCert), []byte(caKey), nodeID, advertised...)
+	cert, err := tlsutil.SignNodeCSR([]byte(caCert), []byte(caKey), []byte(csr), nodeID)
 	if err != nil {
 		return nil, fmt.Errorf("sign node certificate: %w", err)
 	}
@@ -343,14 +381,18 @@ func (s *Server) EnrollNode(ctx context.Context, joinToken string, advertised ..
 	if err != nil {
 		return nil, err
 	}
-	if err := s.state.batch(ctx, []state.Mutation{useToken, bind}); err != nil {
+	roleBind, err := jsonMutation(s.state.nodeRoleKey(nodeID.String()), normalizedNodeRole(record.Role))
+	if err != nil {
+		return nil, err
+	}
+	if err := s.state.batch(ctx, []state.Mutation{useToken, bind, roleBind}); err != nil {
 		return nil, fmt.Errorf("reserve node identity: %w", err)
 	}
 	return &nodeapi.NodeEnrollmentResponse{
 		NodeID: nodeID,
 		CACert: caCert,
 		Cert:   string(cert),
-		Key:    string(key),
+		Role:   normalizedNodeRole(record.Role),
 	}, nil
 }
 
@@ -418,6 +460,13 @@ func (a *RaftPeerAuthorizer) Authorize(certificate *x509.Certificate) error {
 	if removed {
 		return fmt.Errorf("node %s: %w", id, ErrNodeRemoved)
 	}
+	role, boundRole, err := stateCtl.NodeRole(ctx, id.String())
+	if err != nil {
+		return err
+	}
+	if boundRole && role != api.NodeRoleControlPlane {
+		return fmt.Errorf("node %s is not control-plane eligible", id)
+	}
 	fingerprint, bound, err := stateCtl.GetNodeCertificateFingerprint(ctx, id.String())
 	if err != nil {
 		return err
@@ -426,7 +475,13 @@ func (a *RaftPeerAuthorizer) Authorize(certificate *x509.Certificate) error {
 		return fmt.Errorf("node %s presented a certificate other than its bound certificate", id)
 	}
 	if trusted {
+		if boundRole && role != api.NodeRoleControlPlane {
+			return fmt.Errorf("node %s is not control-plane eligible", id)
+		}
 		return nil
+	}
+	if !boundRole {
+		return fmt.Errorf("node %s has no role binding", id)
 	}
 	if !bound {
 		return fmt.Errorf("node %s has no certificate binding", id)
@@ -454,9 +509,64 @@ func (s *Server) NodeServerAddress(ctx context.Context, id string) (string, erro
 	return s.state.GetNodeServerAddress(ctx, id)
 }
 
+// ControlPlane returns the leader and current member API addresses.
+func (s *Server) ControlPlane(ctx context.Context) nodeapi.ControlPlaneResponse {
+	result := nodeapi.ControlPlaneResponse{LeaderID: s.nodeID, WireGuardPortCount: s.ClusterSettings().WireGuardPortCount}
+	if s.joiner == nil {
+		return result
+	}
+	members, err := s.joiner.Membership()
+	if err != nil {
+		return result
+	}
+	for _, member := range members {
+		address, err := s.NodeServerAddress(ctx, member.ID)
+		if err != nil || address == "" {
+			continue
+		}
+		result.Addresses = append(result.Addresses, address)
+		if member.ID == s.nodeID.String() {
+			result.LeaderAddress = address
+		}
+	}
+	sort.Strings(result.Addresses)
+	return result
+}
+
+// IssueAPICertificate signs a short-lived API identity only for a currently
+// admitted, non-removed control-plane node.
+func (s *Server) IssueAPICertificate(ctx context.Context, id uuid.UUID, csr string) ([]byte, error) {
+	if removed, err := s.state.NodeRemoved(ctx, id.String()); err != nil || removed {
+		return nil, fmt.Errorf("node is removed")
+	}
+	if role, found, err := s.state.NodeRole(ctx, id.String()); err != nil || !found || role != api.NodeRoleControlPlane {
+		return nil, fmt.Errorf("node is not control-plane eligible")
+	}
+	if s.joiner == nil {
+		return nil, fmt.Errorf("cluster membership unavailable")
+	}
+	members, err := s.joiner.Membership()
+	if err != nil {
+		return nil, err
+	}
+	if !slices.ContainsFunc(members, func(member state.RaftMember) bool { return member.ID == id.String() }) {
+		return nil, fmt.Errorf("node is not a current Raft member")
+	}
+	caCert, caKey, err := s.ClusterCA()
+	if err != nil || caKey == "" {
+		return nil, fmt.Errorf("managed node signer is unavailable")
+	}
+	return tlsutil.SignAPICSR([]byte(caCert), []byte(caKey), []byte(csr))
+}
+
 // BindNodeCertificate durably associates a node UUID with exactly one
 // certificate. Repeating the same binding is safe; replacing it is forbidden.
 func (s *Server) BindNodeCertificate(ctx context.Context, id uuid.UUID, certificate *x509.Certificate) error {
+	return s.BindNodeCertificateRole(ctx, id, certificate, api.NodeRoleControlPlane)
+}
+
+// BindNodeCertificateRole atomically binds externally issued identity and authority.
+func (s *Server) BindNodeCertificateRole(ctx context.Context, id uuid.UUID, certificate *x509.Certificate, role api.NodeRole) error {
 	if id == uuid.Nil || certificate == nil {
 		return fmt.Errorf("node ID and certificate are required")
 	}
@@ -472,6 +582,10 @@ func (s *Server) BindNodeCertificate(ctx context.Context, id uuid.UUID, certific
 		return fmt.Errorf("node %s: %w", id, ErrNodeRemoved)
 	}
 	fingerprint := nodeCertificateFingerprint(certificate)
+	role = normalizedNodeRole(role)
+	if !validNodeRole(role) {
+		return fmt.Errorf("invalid node role %q", role)
+	}
 	existing, found, err := s.state.GetNodeCertificateFingerprint(ctx, id.String())
 	if err != nil {
 		return err
@@ -480,9 +594,15 @@ func (s *Server) BindNodeCertificate(ctx context.Context, id uuid.UUID, certific
 		if subtle.ConstantTimeCompare([]byte(existing), []byte(fingerprint)) != 1 {
 			return fmt.Errorf("node identity %s is already bound to another certificate", id)
 		}
+		boundRole, _, err := s.state.NodeRole(ctx, id.String())
+		if err != nil || boundRole != role {
+			return fmt.Errorf("node identity %s role does not match", id)
+		}
 		return nil
 	}
-	return s.state.PutNodeCertificateFingerprint(ctx, id.String(), fingerprint)
+	fp, _ := jsonMutation(s.state.nodeCertificateFingerprintKey(id.String()), fingerprint)
+	rm, _ := jsonMutation(s.state.nodeRoleKey(id.String()), role)
+	return s.state.batch(ctx, []state.Mutation{fp, rm})
 }
 
 // AuthorizeNodeCertificate checks the durable UUID-to-certificate binding and
@@ -496,6 +616,82 @@ func (s *Server) AuthorizeNodeCertificate(ctx context.Context, id uuid.UUID, cer
 	}
 	existing, found, err := s.state.GetNodeCertificateFingerprint(ctx, id.String())
 	return err == nil && found && subtle.ConstantTimeCompare([]byte(existing), []byte(nodeCertificateFingerprint(certificate))) == 1
+}
+
+// PromoteNode grants control-plane authority to an enrolled worker. The
+// operator handler requires an administrator signature; Raft join alone
+// never grants this authority. The daemon must be reconfigured and restarted.
+func (s *Server) PromoteNode(ctx context.Context, id uuid.UUID) error {
+	s.mutationMu.Lock()
+	defer s.mutationMu.Unlock()
+	if id == uuid.Nil {
+		return ErrInvalidNodeID
+	}
+	if removed, err := s.state.NodeRemoved(ctx, id.String()); err != nil {
+		return err
+	} else if removed {
+		return ErrNodeRemoved
+	}
+	if _, found, err := s.state.GetNodeCertificateFingerprint(ctx, id.String()); err != nil {
+		return err
+	} else if !found {
+		return fmt.Errorf("node identity is not enrolled")
+	}
+	role, found, err := s.state.NodeRole(ctx, id.String())
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("node role is not bound")
+	}
+	if role == api.NodeRoleControlPlane {
+		return nil
+	}
+	mutation, err := jsonMutation(s.state.nodeRoleKey(id.String()), api.NodeRoleControlPlane)
+	if err != nil {
+		return err
+	}
+	return s.state.batch(ctx, []state.Mutation{mutation})
+}
+
+// EnrollExternalNode binds an administrator-approved, externally signed node
+// certificate without taking custody of either the node or the CA private key.
+func (s *Server) EnrollExternalNode(ctx context.Context, certificatePEM string, role api.NodeRole) (uuid.UUID, error) {
+	ca, key, err := s.ClusterCA()
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if key != "" {
+		return uuid.Nil, fmt.Errorf("external identity enrollment requires external signing mode")
+	}
+	block, _ := pem.Decode([]byte(certificatePEM))
+	if block == nil {
+		return uuid.Nil, fmt.Errorf("certificate PEM is required")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if cert.IsCA {
+		return uuid.Nil, fmt.Errorf("node certificate must not be a CA")
+	}
+	id, err := tlsutil.NodeID(cert)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM([]byte(ca)) {
+		return uuid.Nil, fmt.Errorf("invalid cluster CA")
+	}
+	for _, usage := range []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth} {
+		if _, err := cert.Verify(x509.VerifyOptions{Roots: pool, DNSName: tlsutil.NodeServerName(id), KeyUsages: []x509.ExtKeyUsage{usage}}); err != nil {
+			return uuid.Nil, err
+		}
+	}
+	if normalizedNodeRole(role) == api.NodeRoleWorker && cert.VerifyHostname(tlsutil.ServerName) == nil {
+		return uuid.Nil, fmt.Errorf("worker certificate must not authenticate as trellis")
+	}
+	return id, s.BindNodeCertificateRole(ctx, id, cert, role)
 }
 
 func nodeCertificateFingerprint(certificate *x509.Certificate) string {

@@ -79,6 +79,7 @@ func (s *Server) RegisterNode(ctx context.Context, nodeRegistration *NodeRegistr
 	next.Volumes, next.Capabilities = append([]string(nil), nodeRegistration.Volumes...), append([]spec.NodeCapability(nil), nodeRegistration.Capabilities...)
 	next.WireGuardPublicKey, next.WireGuardEndpoint = nodeRegistration.WireGuardPublicKey, nodeRegistration.WireGuardEndpoint
 	next.WireGuardPortBase, next.WireGuardPortCount = nodeRegistration.WireGuardPortBase, nodeRegistration.WireGuardPortCount
+	next.RunsWorkloads = new(nodeRegistration.RunsWorkloads)
 	registeredAt := s.now().UTC()
 	if err := s.state.PutNode(ctx, nodeRegistration.ID.String(), nodeSummary(next)); err != nil {
 		return fmt.Errorf("save node remotely: %w", err)

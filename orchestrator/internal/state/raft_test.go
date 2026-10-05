@@ -29,9 +29,9 @@ func init() {
 	}
 }
 
-func testTLSConfig(t *testing.T) *tls.Config {
+func testTLSConfig(t *testing.T, id uuid.UUID) *tls.Config {
 	t.Helper()
-	cert, key, err := tlsutil.GenerateNodeCert(testCACert, testCAKey, uuid.New())
+	cert, key, err := tlsutil.GenerateNodeCert(testCACert, testCAKey, id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,13 +59,14 @@ func newTestRaftStore(t *testing.T) *RaftStore {
 	dir := t.TempDir()
 	port := freePort(t)
 	bind := fmt.Sprintf("127.0.0.1:%d", port)
+	id := uuid.New()
 	store, err := NewRaftStore(RaftConfig{
 		DataDir:       dir,
 		BindAddr:      bind,
 		Advertise:     bind,
-		ServerID:      bind,
+		ServerID:      id.String(),
 		Bootstrap:     true,
-		TLS:           testTLSConfig(t),
+		TLS:           testTLSConfig(t, id),
 		AuthorizePeer: allowAnyRaftPeer,
 	})
 	if err != nil {
@@ -75,8 +76,9 @@ func newTestRaftStore(t *testing.T) *RaftStore {
 	return store
 }
 
-func TestRaftTLSStreamBindsPeerToAdvertisedAddress(t *testing.T) {
-	clientCert, clientKey, err := tlsutil.GenerateNodeCert(testCACert, testCAKey, uuid.New(), "client.example")
+func TestRaftTLSStreamBindsPeerToTargetNodeID(t *testing.T) {
+	clientID := uuid.New()
+	clientCert, clientKey, err := tlsutil.GenerateNodeCert(testCACert, testCAKey, clientID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,9 +87,9 @@ func TestRaftTLSStreamBindsPeerToAdvertisedAddress(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dial := func(t *testing.T, serverSAN string) error {
+	dial := func(t *testing.T, serverID, targetID uuid.UUID) error {
 		t.Helper()
-		serverCert, serverKey, err := tlsutil.GenerateNodeCert(testCACert, testCAKey, uuid.New(), serverSAN)
+		serverCert, serverKey, err := tlsutil.GenerateNodeCert(testCACert, testCAKey, serverID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -115,7 +117,7 @@ func TestRaftTLSStreamBindsPeerToAdvertisedAddress(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		stream := &tlsStreamLayer{tlsCfg: clientTLS}
+		stream := &tlsStreamLayer{tlsCfg: clientTLS, targetID: func(raft.ServerAddress) (uuid.UUID, error) { return targetID, nil }}
 		conn, dialErr := stream.Dial(raft.ServerAddress(net.JoinHostPort("localhost", port)), time.Second)
 		if conn != nil {
 			_ = conn.Close()
@@ -124,11 +126,12 @@ func TestRaftTLSStreamBindsPeerToAdvertisedAddress(t *testing.T) {
 		return dialErr
 	}
 
-	if err := dial(t, "localhost"); err != nil {
-		t.Fatalf("certificate for advertised host was rejected: %v", err)
+	targetID := uuid.New()
+	if err := dial(t, targetID, targetID); err != nil {
+		t.Fatalf("certificate for target node was rejected: %v", err)
 	}
-	if err := dial(t, "other.example"); err == nil {
-		t.Fatal("Raft stream accepted a cluster certificate not bound to the advertised host")
+	if err := dial(t, uuid.New(), targetID); err == nil {
+		t.Fatal("Raft stream accepted a CA-signed certificate for a different node UUID")
 	}
 }
 
@@ -136,7 +139,8 @@ func allowAnyRaftPeer(*x509.Certificate) error { return nil }
 
 func TestRaftListenerRequiresPeerAuthorizer(t *testing.T) {
 	bind := fmt.Sprintf("127.0.0.1:%d", freePort(t))
-	if _, err := NewRaftStore(RaftConfig{DataDir: t.TempDir(), BindAddr: bind, Advertise: bind, ServerID: bind, Bootstrap: true, TLS: testTLSConfig(t)}); err == nil {
+	id := uuid.New()
+	if _, err := NewRaftStore(RaftConfig{DataDir: t.TempDir(), BindAddr: bind, Advertise: bind, ServerID: id.String(), Bootstrap: true, TLS: testTLSConfig(t, id)}); err == nil {
 		t.Fatal("Raft TLS listener started without a peer authorizer")
 	}
 }
@@ -147,8 +151,9 @@ func TestRaftListenerRejectsUnauthorizedPeers(t *testing.T) {
 	allowed := uuid.New()
 	var seen atomic.Int32
 	bind := fmt.Sprintf("127.0.0.1:%d", freePort(t))
+	serverID := uuid.New()
 	store, err := NewRaftStore(RaftConfig{
-		DataDir: t.TempDir(), BindAddr: bind, Advertise: bind, ServerID: bind, Bootstrap: true, TLS: testTLSConfig(t),
+		DataDir: t.TempDir(), BindAddr: bind, Advertise: bind, ServerID: serverID.String(), Bootstrap: true, TLS: testTLSConfig(t, serverID),
 		AuthorizePeer: func(certificate *x509.Certificate) error {
 			id, err := tlsutil.NodeID(certificate)
 			if err != nil {
@@ -318,13 +323,14 @@ func TestRaftStore_Replication(t *testing.T) {
 	followerDir := t.TempDir()
 	followerPort := freePort(t)
 	followerBind := fmt.Sprintf("127.0.0.1:%d", followerPort)
+	followerID := uuid.New()
 	follower, err := NewRaftStore(RaftConfig{
 		DataDir:       followerDir,
 		BindAddr:      followerBind,
 		Advertise:     followerBind,
-		ServerID:      followerBind,
+		ServerID:      followerID.String(),
 		Bootstrap:     false,
-		TLS:           testTLSConfig(t),
+		TLS:           testTLSConfig(t, followerID),
 		AuthorizePeer: allowAnyRaftPeer,
 	})
 	if err != nil {
@@ -332,7 +338,7 @@ func TestRaftStore_Replication(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = follower.Close() })
 
-	if err := leader.AddNonvoter(followerBind, follower.LocalAddr()); err != nil {
+	if err := leader.AddNonvoter(followerID.String(), follower.LocalAddr()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -371,13 +377,14 @@ func TestRaftStore_Snapshot(t *testing.T) {
 	followerDir := t.TempDir()
 	followerPort := freePort(t)
 	followerBind := fmt.Sprintf("127.0.0.1:%d", followerPort)
+	followerID := uuid.New()
 	follower, err := NewRaftStore(RaftConfig{
 		DataDir:       followerDir,
 		BindAddr:      followerBind,
 		Advertise:     followerBind,
-		ServerID:      followerBind,
+		ServerID:      followerID.String(),
 		Bootstrap:     false,
-		TLS:           testTLSConfig(t),
+		TLS:           testTLSConfig(t, followerID),
 		AuthorizePeer: allowAnyRaftPeer,
 	})
 	if err != nil {
@@ -385,7 +392,7 @@ func TestRaftStore_Snapshot(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = follower.Close() })
 
-	if err := store.AddNonvoter(followerBind, follower.LocalAddr()); err != nil {
+	if err := store.AddNonvoter(followerID.String(), follower.LocalAddr()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -406,9 +413,10 @@ func TestRaftStore_RejoinExistingState(t *testing.T) {
 	dir := t.TempDir()
 	port := freePort(t)
 	bind := fmt.Sprintf("127.0.0.1:%d", port)
-	tlsCfg := testTLSConfig(t)
+	id := uuid.New()
+	tlsCfg := testTLSConfig(t, id)
 
-	store1, err := NewRaftStore(RaftConfig{DataDir: dir, BindAddr: bind, Advertise: bind, ServerID: bind, Bootstrap: true, TLS: tlsCfg, AuthorizePeer: allowAnyRaftPeer})
+	store1, err := NewRaftStore(RaftConfig{DataDir: dir, BindAddr: bind, Advertise: bind, ServerID: id.String(), Bootstrap: true, TLS: tlsCfg, AuthorizePeer: allowAnyRaftPeer})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -416,7 +424,7 @@ func TestRaftStore_RejoinExistingState(t *testing.T) {
 	_ = store1.Put(context.Background(), "persist", []byte("yes"))
 	_ = store1.Close()
 
-	store2, err := NewRaftStore(RaftConfig{DataDir: dir, BindAddr: bind, Advertise: bind, ServerID: bind, Bootstrap: true, TLS: tlsCfg, AuthorizePeer: allowAnyRaftPeer})
+	store2, err := NewRaftStore(RaftConfig{DataDir: dir, BindAddr: bind, Advertise: bind, ServerID: id.String(), Bootstrap: true, TLS: tlsCfg, AuthorizePeer: allowAnyRaftPeer})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -442,12 +450,13 @@ func TestRaftStore_RejoinExistingState(t *testing.T) {
 func newTestRaftFollower(t *testing.T) (*RaftStore, string) {
 	t.Helper()
 	bind := fmt.Sprintf("127.0.0.1:%d", freePort(t))
-	follower, err := NewRaftStore(RaftConfig{DataDir: t.TempDir(), BindAddr: bind, Advertise: bind, ServerID: bind, TLS: testTLSConfig(t), AuthorizePeer: allowAnyRaftPeer})
+	id := uuid.New()
+	follower, err := NewRaftStore(RaftConfig{DataDir: t.TempDir(), BindAddr: bind, Advertise: bind, ServerID: id.String(), TLS: testTLSConfig(t, id), AuthorizePeer: allowAnyRaftPeer})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = follower.Close() })
-	return follower, bind
+	return follower, id.String()
 }
 
 func memberVoter(t *testing.T, store *RaftStore, id string) (voter, found bool) {

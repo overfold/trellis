@@ -56,8 +56,8 @@ func TestHeartbeatRecordsReportedFailureReason(t *testing.T) {
 	running := nodeapi.AllocationStatus{ID: "demo-web-1", Generation: 1, Task: "sidecar", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
 	for _, actual := range [][]nodeapi.AllocationStatus{{failed, running}, {running, failed}} {
 		s, node, allocation := heartbeatReasonTestServer(lifecycle.PhaseRunning)
-		if code := postHeartbeat(t, s, node.ID, actual); code != http.StatusNoContent {
-			t.Fatalf("heartbeat status = %d, want 204", code)
+		if code := postHeartbeat(t, s, node.ID, actual); code != http.StatusOK {
+			t.Fatalf("heartbeat status = %d, want 200", code)
 		}
 		if allocation.Phase != lifecycle.PhaseFailed || allocation.Reason != string(nodeapi.OperationRestartExhausted) {
 			t.Fatalf("allocation = %s reason %q, want failed with %q", allocation.Phase, allocation.Reason, nodeapi.OperationRestartExhausted)
@@ -76,8 +76,8 @@ func TestHeartbeatKeepsExistingFailureReason(t *testing.T) {
 	s, node, allocation := heartbeatReasonTestServer(lifecycle.PhaseFailed)
 	allocation.Reason, allocation.Message = "retry_limit", "agent unavailable"
 	actual := []nodeapi.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseFailed, Health: lifecycle.HealthUnhealthy, Reason: nodeapi.OperationRestartExhausted}}
-	if code := postHeartbeat(t, s, node.ID, actual); code != http.StatusNoContent {
-		t.Fatalf("heartbeat status = %d, want 204", code)
+	if code := postHeartbeat(t, s, node.ID, actual); code != http.StatusOK {
+		t.Fatalf("heartbeat status = %d, want 200", code)
 	}
 	if allocation.Reason != "retry_limit" || allocation.Message != "agent unavailable" {
 		t.Fatalf("failed allocation reason = %q/%q, want the recorded failure kept", allocation.Reason, allocation.Message)

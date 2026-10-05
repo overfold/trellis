@@ -145,7 +145,7 @@ func schedule(intent *PlacementIntent) ([]Placement, *placementDiagnostic) {
 	for i := 0; i < intent.Count; i++ {
 		var target *Node
 		for _, node := range nodes {
-			if node.Status != NodeStatusHealthy || !nodeMatchesConstraints(node, intent.Constraints) || !nodeHasTaskVolumes(node.ID, intent.Namespace, intent.Tasks, volumeOwners) || !nodeHasCapabilities(node, intent.RequiredCapabilities) {
+			if node.Status != NodeStatusHealthy || !nodeRunsWorkloads(node) || !nodeMatchesConstraints(node, intent.Constraints) || !nodeHasTaskVolumes(node.ID, intent.Namespace, intent.Tasks, volumeOwners) || !nodeHasCapabilities(node, intent.RequiredCapabilities) {
 				continue
 			}
 			portsAvailable := true
@@ -214,7 +214,7 @@ func schedule(intent *PlacementIntent) ([]Placement, *placementDiagnostic) {
 func diagnosePlacement(nodes []*Node, intent *PlacementIntent, volumeOwners map[string]uuid.UUID, usedPorts map[uuid.UUID]map[int]bool, usedCPU map[uuid.UUID]int, usedCPUOverflow map[uuid.UUID]bool, usedMemory map[uuid.UUID]int64, usedMemoryOverflow map[uuid.UUID]bool, requestedPorts map[int]bool, reqCPU int, reqCPUOverflow bool, reqMemory int64, reqMemoryOverflow bool) *placementDiagnostic {
 	candidates := make([]*Node, 0, len(nodes))
 	for _, node := range nodes {
-		if node.Status == NodeStatusHealthy {
+		if node.Status == NodeStatusHealthy && nodeRunsWorkloads(node) {
 			candidates = append(candidates, node)
 		}
 	}
@@ -264,6 +264,8 @@ func diagnosePlacement(nodes []*Node, intent *PlacementIntent, volumeOwners map[
 	}
 	panic("placement diagnosis found an eligible node")
 }
+
+func nodeRunsWorkloads(node *Node) bool { return node.RunsWorkloads == nil || *node.RunsWorkloads }
 
 func filterNodes(nodes []*Node, keep func(*Node) bool) []*Node {
 	result := make([]*Node, 0, len(nodes))
