@@ -43,20 +43,24 @@ func (s *Server) ListNodes() []NodeView {
 	return result
 }
 
+// ErrInvalidNodeRegistration indicates that a node registration request was
+// rejected as malformed or inconsistent.
+var ErrInvalidNodeRegistration = errors.New("invalid node registration")
+
 // RegisterNode adds or updates a cluster node.
 func (s *Server) RegisterNode(ctx context.Context, nodeRegistration *NodeRegistration) error {
 	if err := validateNodeCapacity(nodeRegistration.CPUCapacity, nodeRegistration.MemoryCapacity, nodeRegistration.CPUAllocatable, nodeRegistration.MemoryAllocatable); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrInvalidNodeRegistration, err)
 	}
 	if nodeRegistration.WireGuardPublicKey != "" || nodeRegistration.WireGuardEndpoint != "" || nodeRegistration.WireGuardPortBase != 0 || nodeRegistration.WireGuardPortCount != 0 {
 		if nodeRegistration.WireGuardPublicKey == "" || nodeRegistration.WireGuardEndpoint == "" {
-			return fmt.Errorf("WireGuard registration requires a public key and endpoint")
+			return fmt.Errorf("%w: WireGuard registration requires a public key and endpoint", ErrInvalidNodeRegistration)
 		}
 		if nodeRegistration.WireGuardPortCount != s.wireGuardPortCount {
-			return fmt.Errorf("WireGuard port count %d does not match cluster count %d", nodeRegistration.WireGuardPortCount, s.wireGuardPortCount)
+			return fmt.Errorf("%w: WireGuard port count %d does not match cluster count %d", ErrInvalidNodeRegistration, nodeRegistration.WireGuardPortCount, s.wireGuardPortCount)
 		}
 		if nodeRegistration.WireGuardPortBase < 1 || nodeRegistration.WireGuardPortBase+nodeRegistration.WireGuardPortCount-1 > 65535 {
-			return fmt.Errorf("WireGuard port range is outside 1-65535")
+			return fmt.Errorf("%w: WireGuard port range is outside 1-65535", ErrInvalidNodeRegistration)
 		}
 	}
 	s.mutationMu.Lock()
@@ -82,7 +86,7 @@ func (s *Server) RegisterNode(ctx context.Context, nodeRegistration *NodeRegistr
 	next.RunsWorkloads = new(nodeRegistration.RunsWorkloads)
 	registeredAt := s.now().UTC()
 	if err := s.state.PutNode(ctx, nodeRegistration.ID.String(), nodeSummary(next)); err != nil {
-		return fmt.Errorf("save node remotely: %w", err)
+		return fmt.Errorf("save node remotely: %w", stateUnavailable(err))
 	}
 
 	s.mu.Lock()
@@ -129,14 +133,14 @@ func (s *Server) DrainNode(ctx context.Context, id uuid.UUID) error {
 	if node == nil {
 		s.mu.RUnlock()
 		s.mutationMu.Unlock()
-		return fmt.Errorf("node not found")
+		return ErrNodeNotFound
 	}
 	next := node.Clone()
 	next.Status = NodeStatusDraining
 	s.mu.RUnlock()
 	if err := s.state.PutNode(ctx, id.String(), nodeSummary(next)); err != nil {
 		s.mutationMu.Unlock()
-		return err
+		return stateUnavailable(err)
 	}
 	s.mu.Lock()
 	applyNodeSnapshot(node, next)
@@ -211,7 +215,7 @@ func (s *Server) resumeNodeAllocations(ctx context.Context, id uuid.UUID) error 
 	}
 	s.mu.RUnlock()
 	if err := s.state.PutNodeAndAllocations(ctx, nodeSummary(nextNode), updates); err != nil {
-		return err
+		return stateUnavailable(err)
 	}
 	s.mu.Lock()
 	applyNodeSnapshot(node, nextNode)

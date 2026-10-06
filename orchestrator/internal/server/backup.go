@@ -195,7 +195,7 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 	defer s.mutationMu.Unlock()
 	cluster, err := s.state.GetCluster(ctx)
 	if err != nil {
-		return fmt.Errorf("load cluster settings: %w", err)
+		return fmt.Errorf("load cluster settings: %w", stateUnavailable(err))
 	}
 	if cluster == nil {
 		return fmt.Errorf("load cluster settings: cluster is not initialized")
@@ -210,12 +210,12 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 		return fmt.Errorf("encode restored cluster record: %w", err)
 	}
 	if err := s.backupStore.RestoreDesired(s.clusterName, snapshot); err != nil {
-		return err
+		return stateUnavailable(err)
 	}
 	s.mu.Lock()
 	s.loadClusterLocked(cluster)
 	s.mu.Unlock()
-	return s.Reload(ctx)
+	return stateUnavailable(s.Reload(ctx))
 }
 
 func retainedJobRevisionEntries(jobs, revisions map[string][]byte) (map[string][]byte, error) {

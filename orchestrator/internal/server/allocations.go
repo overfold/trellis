@@ -230,7 +230,7 @@ func (s *Server) StopAllocationByID(ctx context.Context, namespace, id string) e
 	}
 	if found == nil || found.Node == nil {
 		s.mu.RUnlock()
-		return fmt.Errorf("allocation not found")
+		return ErrAllocationNotFound
 	}
 	nodeID := found.Node.ID
 	s.mu.RUnlock()

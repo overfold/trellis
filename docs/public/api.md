@@ -24,6 +24,8 @@ The API uses the same resource vocabulary as the [Trellis user model](user-model
 
 ## Public/operator endpoints
 
+Status codes separate what the client may fix from what it may retry. `4xx` responses describe the request: `404` means the named job, allocation, or node does not exist, `409` a conflicting precondition or state, and `422` an invalid job specification. A valid request that the control plane could not durably commit or complete, such as when leadership changes or a Raft write times out, a request that was cancelled before it finished, or a node agent that cannot be reached, returns `503` (or `502` when the agent fails the request) and may be retried unchanged. Mutations that return `503` may or may not have been committed; retry them idempotently or re-read the resource first.
+
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/metrics` | Prometheus metrics of the leader; requires cluster scope. |
