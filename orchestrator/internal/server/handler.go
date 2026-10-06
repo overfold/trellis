@@ -705,6 +705,11 @@ func (h *Handler) handleHeartbeat(c *echo.Context) error {
 		CPUAllocatable: request.CPUAllocatable, MemoryAllocatable: request.MemoryAllocatable,
 		CPUUsage: request.CPUUsage, MemoryUsed: request.MemoryUsed,
 		MemoryAvailable: request.MemoryAvailable, MetricsAt: request.MetricsAt,
+		taskLogUsage: taskLogUsage{
+			TaskLogBytes:               request.TaskLogBytes,
+			TaskLogFilesystemAvailable: request.TaskLogFilesystemAvailable,
+			TaskLogFilesystemCapacity:  request.TaskLogFilesystemCapacity,
+		},
 	}
 	if err := h.server.Heartbeat(c.Request().Context(), id, request.Allocations, request.Version, request.Volumes, request.Capabilities, resources); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "unable to process heartbeat")
@@ -1072,6 +1077,7 @@ func (h *Handler) convertNode(node *NodeView) *api.NodeResponse {
 		CPUCapacity: node.CPUCapacity, MemoryCapacity: node.MemoryCapacity,
 		CPUAllocatable: node.CPUAllocatable, MemoryAllocatable: node.MemoryAllocatable,
 		CPUUsage: node.CPUUsage, MemoryUsed: node.MemoryUsed, MemoryAvailable: node.MemoryAvailable, MetricsAt: node.MetricsAt,
+		TaskLogBytes: node.TaskLogBytes, TaskLogFilesystemAvailable: node.TaskLogFilesystemAvailable, TaskLogFilesystemCapacity: node.TaskLogFilesystemCapacity,
 		OS: node.OS, Arch: node.Arch, Labels: node.Labels,
 		Volumes: node.Volumes, Capabilities: capabilities, Version: node.Version,
 	}

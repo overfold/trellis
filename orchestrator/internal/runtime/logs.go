@@ -3,8 +3,13 @@ package runtime
 import (
 	"bufio"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
 )
 
@@ -79,4 +84,51 @@ func tailOffset(file *os.File, tail int) (int64, error) {
 		position = start
 	}
 	return 0, nil
+}
+
+// LogUsage reports the total size of the task logs in the runtime log
+// directory and the space on its filesystem. Before the first task creates
+// the directory, it reports the filesystem of the nearest existing ancestor.
+// Logs still written to the legacy temporary directory are not counted.
+func (c *ContainerdRuntime) LogUsage() (LogUsage, error) {
+	usage, err := logDirUsage(c.logDir)
+	if err != nil {
+		return LogUsage{}, fmt.Errorf("measure task logs in %s: %w", c.logDir, err)
+	}
+	return usage, nil
+}
+
+func logDirUsage(dir string) (LogUsage, error) {
+	var usage LogUsage
+	entries, err := os.ReadDir(dir)
+	if err != nil && !os.IsNotExist(err) {
+		return LogUsage{}, err
+	}
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".log") {
+			continue
+		}
+		info, err := entry.Info()
+		if os.IsNotExist(err) {
+			continue // Removed since the directory was read.
+		}
+		if err != nil {
+			return LogUsage{}, err
+		}
+		usage.Bytes += info.Size()
+	}
+	var stat syscall.Statfs_t
+	for path := dir; ; path = filepath.Dir(path) {
+		err := syscall.Statfs(path, &stat)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, syscall.ENOENT) || filepath.Dir(path) == path {
+			return LogUsage{}, err
+		}
+	}
+	blockSize := int64(stat.Bsize)                             //nolint:unconvert // Bsize is a small positive block size; its type differs by architecture.
+	usage.FilesystemAvailable = int64(stat.Bavail) * blockSize //nolint:gosec // Block counts of a real filesystem fit in int64.
+	usage.FilesystemCapacity = int64(stat.Blocks) * blockSize  //nolint:gosec // Block counts of a real filesystem fit in int64.
+	return usage, nil
 }

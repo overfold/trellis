@@ -58,6 +58,15 @@ type nodeResourceObservation struct {
 	MemoryUsed        *int64
 	MemoryAvailable   *int64
 	MetricsAt         *time.Time
+	taskLogUsage
+}
+
+// taskLogUsage is the latest renewable report of the disk consumed by a
+// node's task logs. Each field is nil until the node reports it.
+type taskLogUsage struct {
+	TaskLogBytes               *int64
+	TaskLogFilesystemAvailable *int64
+	TaskLogFilesystemCapacity  *int64
 }
 
 // Node contains the in-memory state of a registered node.
@@ -92,6 +101,8 @@ type Node struct {
 	observedAllocations []observedAllocation
 	// observedAt is when the leader recorded observedAllocations.
 	observedAt time.Time
+	// taskLogUsage is renewable like the host metrics above.
+	taskLogUsage
 }
 
 type observedAllocation struct {

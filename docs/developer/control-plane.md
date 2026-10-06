@@ -13,7 +13,7 @@ Each reconciliation pass derives node status from one liveness view taken at its
 
 ### What a heartbeat persists
 
-Heartbeat observations that are not durable live in the leader's memory: the last heartbeat time, healthy/unhealthy liveness, host metrics (`cpu_usage`, `memory_used`, `memory_available`, `metrics_at`), and the observed allocation generations. The applier writes to Raft only when a report changes durable state, so a steady-state heartbeat is not a Raft entry:
+Heartbeat observations that are not durable live in the leader's memory: the last heartbeat time, healthy/unhealthy liveness, host metrics (`cpu_usage`, `memory_used`, `memory_available`, `metrics_at`), task log usage (`task_log_bytes`, `task_log_filesystem_available`, `task_log_filesystem_capacity`), and the observed allocation generations. The applier writes to Raft only when a report changes durable state, so a steady-state heartbeat is not a Raft entry:
 
 - the node record is rewritten only when a durable node fact changes: address, capacity or allocatable resources, platform, labels, volume inventory, capabilities, agent version, WireGuard identity, or drain intent. The persisted node record has no heartbeat time, liveness, or metrics; `draining` is its only status;
 - an allocation record is rewritten only when the heartbeat changes it: a phase transition with its reason and transition time, health, or the task endpoints and ports. Health and endpoints are observations, but they change only with the workload, not with every heartbeat, and keeping the last known value lets a new leader serve discovery and allocation health without waiting for every node to report;

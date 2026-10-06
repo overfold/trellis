@@ -2310,6 +2310,7 @@ func (a *Agent) runHeartbeatLoop(ctx context.Context) {
 				}
 				heartbeat.MetricsAt = &metrics.CollectedAt
 			}
+			a.addTaskLogUsage(heartbeat)
 			err := a.server.SendHeartbeat(ctx, a.nodeID, heartbeat)
 			if err != nil {
 				a.log.Error("send heartbeat failed", "error", err)
@@ -2317,6 +2318,24 @@ func (a *Agent) runHeartbeatLoop(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// addTaskLogUsage reports the disk consumed by task logs, which have no size
+// limit, so operators can alert before the node's disk fills. The fields are
+// omitted when the runtime cannot measure them.
+func (a *Agent) addTaskLogUsage(heartbeat *client.Heartbeat) {
+	measurer, ok := a.runtime.(runtime.LogUsageRuntime)
+	if !ok {
+		return
+	}
+	usage, err := measurer.LogUsage()
+	if err != nil {
+		a.log.Warn("measure task log usage failed", "error", err)
+		return
+	}
+	heartbeat.TaskLogBytes = &usage.Bytes
+	heartbeat.TaskLogFilesystemAvailable = &usage.FilesystemAvailable
+	heartbeat.TaskLogFilesystemCapacity = &usage.FilesystemCapacity
 }
 
 func (a *Agent) allocationStatuses() []nodeapi.AllocationStatus {
