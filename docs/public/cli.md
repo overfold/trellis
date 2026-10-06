@@ -191,7 +191,7 @@ For non-following output, a job name is enough. Trellis prints every matching ta
 trellisctl jobs logs web --tail 200
 ```
 
-The default is the last 100 lines per selected task stream. Use `--tail 0` for all retained output. Logs are node-local and are not rotated or size-limited; plan disk capacity accordingly.
+The default is the last 100 lines per selected task stream. Use `--tail 0` for all retained output. Logs are node-local and bounded: each task keeps about the node's `task_log_limit` (64 MiB by default) of its newest output, and older output is discarded (see [Task log limit](operations.md#task-log-limit)).
 
 Narrow the streams by task group or task when appropriate:
 
