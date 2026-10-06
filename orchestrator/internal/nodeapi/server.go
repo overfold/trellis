@@ -71,6 +71,13 @@ type HeartbeatRequest struct {
 	MemoryUsed        *int64                `json:"memory_used,omitempty"`
 	MemoryAvailable   *int64                `json:"memory_available,omitempty"`
 	MetricsAt         *time.Time            `json:"metrics_at,omitempty"`
+	// TaskLogBytes is the size of the node's task logs, running and retained.
+	// TaskLogFilesystemAvailable and TaskLogFilesystemCapacity describe the
+	// filesystem that holds them. All three are omitted when the runtime
+	// cannot measure them.
+	TaskLogBytes               *int64 `json:"task_log_bytes,omitempty"`
+	TaskLogFilesystemAvailable *int64 `json:"task_log_filesystem_available,omitempty"`
+	TaskLogFilesystemCapacity  *int64 `json:"task_log_filesystem_capacity,omitempty"`
 	// RaftAppliedIndex is the node's last applied Raft log index. The leader
 	// promotes only non-voters that are caught up.
 	RaftAppliedIndex uint64 `json:"raft_applied_index,omitempty"`

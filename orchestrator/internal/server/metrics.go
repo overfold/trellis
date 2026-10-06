@@ -60,6 +60,10 @@ type metricsCollector struct {
 	nodeMemAllocatedDesc *prometheus.Desc
 	nodeHeartbeatAgeDesc *prometheus.Desc
 
+	nodeTaskLogBytesDesc       *prometheus.Desc
+	nodeTaskLogFSAvailableDesc *prometheus.Desc
+	nodeTaskLogFSCapacityDesc  *prometheus.Desc
+
 	replacementFailuresDesc *prometheus.Desc
 	replacementDelayDesc    *prometheus.Desc
 }
@@ -118,6 +122,21 @@ func (c *metricsCollector) init() {
 		c.nodeCPUCapacityDesc, c.nodeMemCapacityDesc,
 		c.nodeCPUAllocatedDesc, c.nodeMemAllocatedDesc,
 		c.nodeHeartbeatAgeDesc = newDescriptors()
+	c.nodeTaskLogBytesDesc = prometheus.NewDesc(
+		"trellis_node_task_log_bytes",
+		"Size of the task logs on a node, for running tasks and retained terminal allocations, in bytes.",
+		[]string{"node_id"}, nil,
+	)
+	c.nodeTaskLogFSAvailableDesc = prometheus.NewDesc(
+		"trellis_node_task_log_filesystem_available_bytes",
+		"Space available to unprivileged writers on the filesystem that holds a node's task logs, in bytes.",
+		[]string{"node_id"}, nil,
+	)
+	c.nodeTaskLogFSCapacityDesc = prometheus.NewDesc(
+		"trellis_node_task_log_filesystem_capacity_bytes",
+		"Size of the filesystem that holds a node's task logs, in bytes.",
+		[]string{"node_id"}, nil,
+	)
 	c.replacementFailuresDesc = prometheus.NewDesc(
 		"trellis_replacement_backoff_failures",
 		"Consecutive failed allocations counted toward a task group's replacement backoff.",
@@ -140,6 +159,9 @@ func (c *metricsCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.nodeCPUAllocatedDesc
 	ch <- c.nodeMemAllocatedDesc
 	ch <- c.nodeHeartbeatAgeDesc
+	ch <- c.nodeTaskLogBytesDesc
+	ch <- c.nodeTaskLogFSAvailableDesc
+	ch <- c.nodeTaskLogFSCapacityDesc
 	ch <- c.replacementFailuresDesc
 	ch <- c.replacementDelayDesc
 }
@@ -218,6 +240,15 @@ func (c *metricsCollector) Collect(ch chan<- prometheus.Metric) {
 
 		if !heartbeat.IsZero() {
 			ch <- prometheus.MustNewConstMetric(c.nodeHeartbeatAgeDesc, prometheus.GaugeValue, now.Sub(heartbeat).Seconds(), nodeID)
+		}
+		for desc, value := range map[*prometheus.Desc]*int64{
+			c.nodeTaskLogBytesDesc:       node.TaskLogBytes,
+			c.nodeTaskLogFSAvailableDesc: node.TaskLogFilesystemAvailable,
+			c.nodeTaskLogFSCapacityDesc:  node.TaskLogFilesystemCapacity,
+		} {
+			if value != nil {
+				ch <- prometheus.MustNewConstMetric(desc, prometheus.GaugeValue, float64(*value), nodeID)
+			}
 		}
 	}
 

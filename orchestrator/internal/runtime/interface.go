@@ -61,6 +61,24 @@ type RetainedLogRuntime interface {
 	RemoveRetainedLogs(containerID string) error
 }
 
+// LogUsage is a point-in-time view of the disk consumed by task logs.
+type LogUsage struct {
+	// Bytes is the total size of the task log files the runtime stores,
+	// whether their tasks are running or retained after cleanup.
+	Bytes int64
+	// FilesystemAvailable and FilesystemCapacity describe the filesystem that
+	// holds the task logs, in bytes. Available counts only space usable by
+	// unprivileged writers.
+	FilesystemAvailable int64
+	FilesystemCapacity  int64
+}
+
+// LogUsageRuntime is implemented by runtimes that can measure the disk
+// consumed by task logs, so operators can alert before it fills.
+type LogUsageRuntime interface {
+	LogUsage() (LogUsage, error)
+}
+
 // ContainerMetrics holds a point-in-time resource usage snapshot for a container.
 type ContainerMetrics struct {
 	// CPUUsageNanoseconds is the cumulative CPU time consumed by the container.

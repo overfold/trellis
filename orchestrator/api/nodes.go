@@ -41,6 +41,14 @@ type NodeResponse struct {
 	Arch              string            `json:"arch,omitempty"`
 	Labels            map[string]string `json:"labels,omitempty"`
 	Volumes           []string          `json:"volumes,omitempty"`
+	// TaskLogBytes is the size of the node's task logs, for running tasks
+	// and terminal allocations whose logs are retained. Task logs have no
+	// size limit. TaskLogFilesystemAvailable and TaskLogFilesystemCapacity
+	// describe the filesystem that holds them. Each is omitted until the
+	// node reports it.
+	TaskLogBytes               *int64 `json:"task_log_bytes,omitempty"`
+	TaskLogFilesystemAvailable *int64 `json:"task_log_filesystem_available,omitempty"`
+	TaskLogFilesystemCapacity  *int64 `json:"task_log_filesystem_capacity,omitempty"`
 	// Capabilities lists the node's optional features, such as
 	// runtime.runsc or network.namespace.
 	Capabilities []string `json:"capabilities,omitempty"`

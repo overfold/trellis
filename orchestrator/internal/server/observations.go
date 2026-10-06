@@ -264,6 +264,7 @@ func (s *Server) planObservation(observation *nodeObservation, appliedAt time.Ti
 	next.CPUAllocatable, next.MemoryAllocatable = resources.CPUAllocatable, resources.MemoryAllocatable
 	next.CPUUsage, next.MemoryUsed = resources.CPUUsage, resources.MemoryUsed
 	next.MemoryAvailable, next.MetricsAt = resources.MemoryAvailable, resources.MetricsAt
+	next.taskLogUsage = resources.taskLogUsage
 	next.observedAllocations = observation.observed
 	next.observedAt = observation.at
 	if summary := nodeSummary(next); !summary.equal(previous) {
@@ -417,6 +418,7 @@ func applyNodeObservation(node, next *Node) {
 	node.CPUAllocatable, node.MemoryAllocatable = next.CPUAllocatable, next.MemoryAllocatable
 	node.CPUUsage, node.MemoryUsed = next.CPUUsage, next.MemoryUsed
 	node.MemoryAvailable, node.MetricsAt = next.MemoryAvailable, next.MetricsAt
+	node.taskLogUsage = next.taskLogUsage
 	node.observedAllocations, node.observedAt = next.observedAllocations, next.observedAt
 }
 
@@ -440,6 +442,10 @@ func newNodeObservation(nodeID uuid.UUID, at time.Time, actual []nodeapi.Allocat
 	}
 	if (resources.MemoryUsed != nil && *resources.MemoryUsed < 0) || (resources.MemoryAvailable != nil && *resources.MemoryAvailable < 0) {
 		return nil, fmt.Errorf("node memory observations must be non-negative")
+	}
+	logs := resources.taskLogUsage
+	if negative(logs.TaskLogBytes) || negative(logs.TaskLogFilesystemAvailable) || negative(logs.TaskLogFilesystemCapacity) {
+		return nil, fmt.Errorf("node task log observations must be non-negative")
 	}
 	statuses := make(map[allocationGeneration]allocationObservation, len(actual))
 	for _, a := range actual {
@@ -519,3 +525,5 @@ func newNodeObservation(nodeID uuid.UUID, at time.Time, actual []nodeapi.Allocat
 		observed:     observed,
 	}, nil
 }
+
+func negative(value *int64) bool { return value != nil && *value < 0 }

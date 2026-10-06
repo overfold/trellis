@@ -61,6 +61,10 @@ type Heartbeat struct {
 	MemoryAvailable   *int64
 	MetricsAt         *time.Time
 	RaftAppliedIndex  uint64
+	// Task log usage is omitted when the runtime cannot measure it.
+	TaskLogBytes               *int64
+	TaskLogFilesystemAvailable *int64
+	TaskLogFilesystemCapacity  *int64
 }
 
 // NewServerClient creates a node client for the control plane at addr.
@@ -150,6 +154,10 @@ func (s *ServerClient) SendHeartbeat(ctx context.Context, id uuid.UUID, heartbea
 		MemoryAvailable:   heartbeat.MemoryAvailable,
 		MetricsAt:         heartbeat.MetricsAt,
 		RaftAppliedIndex:  heartbeat.RaftAppliedIndex,
+		// Task log usage is omitted when the runtime cannot measure it.
+		TaskLogBytes:               heartbeat.TaskLogBytes,
+		TaskLogFilesystemAvailable: heartbeat.TaskLogFilesystemAvailable,
+		TaskLogFilesystemCapacity:  heartbeat.TaskLogFilesystemCapacity,
 	}
 	url := fmt.Sprintf("%s/v1/nodes/%s/heartbeat", s.address(), id)
 	var response nodeapi.HeartbeatResponse
