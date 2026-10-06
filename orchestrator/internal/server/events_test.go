@@ -172,7 +172,7 @@ func waitForSubscriberCount(t *testing.T, bus *EventBus, want int) {
 func TestEventStreamSendsHeadersBeforeTheFirstEvent(t *testing.T) {
 	s, _ := newTestServerWithAgent()
 	s.events = newEventBus()
-	server := httptest.NewServer(authenticatedHandler(s, auth.AccessCluster, auth.AccessRead))
+	server := httptest.NewServer(authenticatedHandler(s, auth.AccessRead))
 	defer server.Close()
 	ctx := t.Context()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/v1/namespaces/default/events", nil)
@@ -199,7 +199,7 @@ func TestEventStreamWritesKeepalives(t *testing.T) {
 
 	s, _ := newTestServerWithAgent()
 	s.events = newEventBus()
-	server := httptest.NewServer(authenticatedHandler(s, auth.AccessCluster, auth.AccessRead))
+	server := httptest.NewServer(authenticatedHandler(s, auth.AccessRead))
 	defer server.Close()
 	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL+"/v1/namespaces/default/events", nil)
 	if err != nil {

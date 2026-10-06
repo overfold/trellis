@@ -73,7 +73,7 @@ func TestCopyStreamEndsWhenClientStopsReading(t *testing.T) {
 		result <- CopyStream(w, endlessReader{chunk}, 100*time.Millisecond)
 	}))
 	defer server.Close()
-	response, err := http.Get(server.URL) //nolint:noctx // test client; the body is never read
+	response, err := http.Get(server.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
