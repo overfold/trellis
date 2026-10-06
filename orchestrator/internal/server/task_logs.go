@@ -24,7 +24,7 @@ func (s *Server) AllocationTaskLogsForNamespace(ctx context.Context, namespace, 
 	}
 	if found == nil || found.Node == nil {
 		s.mu.RUnlock()
-		return nil, fmt.Errorf("allocation not found")
+		return nil, ErrAllocationNotFound
 	}
 	nodeID := found.Node.ID
 	address := fmt.Sprintf("%s:%d", found.Node.Host, found.Node.Port)

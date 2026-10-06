@@ -389,6 +389,9 @@ func (h *Handler) handleBackupRestore(c *echo.Context) error {
 		return err
 	}
 	if err := h.server.Restore(c.Request().Context(), &backup); err != nil {
+		if isUnavailable(err) {
+			return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error())
+		}
 		return echo.NewHTTPError(http.StatusConflict, err.Error())
 	}
 	return c.NoContent(http.StatusNoContent)
@@ -511,7 +514,7 @@ func (h *Handler) handleAllocationLogs(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
 	if err != nil {
-		return echo.NewHTTPError(http.StatusNotFound, "allocation or task logs not found")
+		return h.agentRequestError(err, "")
 	}
 	defer func() { _ = logs.Close() }()
 	c.Response().Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -531,7 +534,13 @@ func (h *Handler) handleDrainNode(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid node ID")
 	}
 	if err := h.server.DrainNode(c.Request().Context(), id); err != nil {
-		return echo.NewHTTPError(http.StatusNotFound, "node not found")
+		switch {
+		case errors.Is(err, ErrNodeNotFound):
+			return echo.NewHTTPError(http.StatusNotFound, "node not found")
+		case isUnavailable(err):
+			return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error())
+		}
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 	return c.NoContent(http.StatusAccepted)
 }
@@ -610,6 +619,12 @@ func (h *Handler) handleRegisterNode(c *echo.Context) error {
 		WireGuardPortBase: request.WireGuardPortBase, WireGuardPortCount: request.WireGuardPortCount,
 		RunsWorkloads: runsWorkloads,
 	}); err != nil {
+		switch {
+		case errors.Is(err, ErrInvalidNodeRegistration):
+			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+		case isUnavailable(err):
+			return echo.NewHTTPError(http.StatusServiceUnavailable, "unable to register node")
+		}
 		return echo.NewHTTPError(http.StatusInternalServerError, "unable to register node")
 	}
 	return c.JSON(http.StatusCreated, nodeapi.NodeRegistrationResponse{ID: request.ID, ControlPlaneResponse: h.server.ControlPlane(c.Request().Context())})
@@ -624,6 +639,9 @@ func (h *Handler) handlePromoteNode(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid node ID")
 	}
 	if err := h.server.PromoteNode(c.Request().Context(), id); err != nil {
+		if isUnavailable(err) {
+			return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error())
+		}
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
 	return c.NoContent(http.StatusNoContent)
@@ -741,9 +759,23 @@ func (h *Handler) handleDeleteJob(c *echo.Context) error {
 		return err
 	}
 	if err := h.server.DeleteJob(c.Request().Context(), ns, c.Param("name")); err != nil {
-		return echo.NewHTTPError(http.StatusNotFound, "job not found")
+		return h.jobError(err, ns, c.Param("name"), "delete job")
 	}
 	return c.NoContent(http.StatusNoContent)
+}
+
+// jobError maps a failed job mutation or history read to its public status:
+// a missing job is 404, a transient control-plane failure is 503, and
+// anything else is a logged 500.
+func (h *Handler) jobError(err error, ns, name, op string) error {
+	switch {
+	case errors.Is(err, ErrJobNotFound):
+		return echo.NewHTTPError(http.StatusNotFound, "job not found")
+	case isUnavailable(err):
+		return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error())
+	}
+	h.server.log.Error(op, "namespace", ns, "job", name, "error", err)
+	return echo.NewHTTPError(http.StatusInternalServerError, "unable to "+op)
 }
 
 func validationResponse(c *echo.Context, err error) error {
@@ -822,6 +854,8 @@ func (h *Handler) handleRegisterJob(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusConflict, err.Error())
 	case errors.Is(err, ErrInvalidJobPreconditions):
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	case isUnavailable(err):
+		return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error())
 	}
 	if err != nil {
 		return validationResponse(c, err)
@@ -1038,7 +1072,7 @@ func (h *Handler) handleRestartJob(c *echo.Context) error {
 		return err
 	}
 	if err := h.server.RestartJob(c.Request().Context(), ns, c.Param("name")); err != nil {
-		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+		return h.jobError(err, ns, c.Param("name"), "restart job")
 	}
 	return c.NoContent(http.StatusAccepted)
 }
@@ -1068,7 +1102,7 @@ func (h *Handler) handleListJobVersions(c *echo.Context) error {
 	}
 	versions, err := h.server.ListJobVersions(c.Request().Context(), ns, c.Param("name"))
 	if err != nil {
-		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+		return h.jobError(err, ns, c.Param("name"), "list job versions")
 	}
 	return c.JSON(http.StatusOK, versions)
 }
@@ -1079,7 +1113,10 @@ func (h *Handler) handleStopAllocation(c *echo.Context) error {
 		return err
 	}
 	if err := h.server.StopAllocationByID(c.Request().Context(), ns, c.Param("id")); err != nil {
-		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+		if isUnavailable(err) {
+			return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error())
+		}
+		return h.agentRequestError(err, "")
 	}
 	return c.NoContent(http.StatusNoContent)
 }

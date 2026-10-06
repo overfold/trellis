@@ -58,7 +58,9 @@ func (c *Client) PlanJob(ctx context.Context, spec json.RawMessage) (*api.JobPla
 // afresh; with the complete plan/history pins it uses those artifacts.
 // A failed precondition returns an
 // *HTTPError with status 409 Conflict; an invalid specification returns
-// status 422 Unprocessable Entity.
+// status 422 Unprocessable Entity. A valid specification that could not be
+// committed, for example during a leadership change, returns status 503
+// Service Unavailable and may be retried.
 func (c *Client) ApplyJob(ctx context.Context, request *api.JobRegistrationRequest) (*api.JobRegistrationResponse, error) {
 	path, err := c.namespacedPath("/jobs")
 	if err != nil {

@@ -628,18 +628,18 @@ func (s *Server) PromoteNode(ctx context.Context, id uuid.UUID) error {
 		return ErrInvalidNodeID
 	}
 	if removed, err := s.state.NodeRemoved(ctx, id.String()); err != nil {
-		return err
+		return stateUnavailable(err)
 	} else if removed {
 		return ErrNodeRemoved
 	}
 	if _, found, err := s.state.GetNodeCertificateFingerprint(ctx, id.String()); err != nil {
-		return err
+		return stateUnavailable(err)
 	} else if !found {
 		return fmt.Errorf("node identity is not enrolled")
 	}
 	role, found, err := s.state.NodeRole(ctx, id.String())
 	if err != nil {
-		return err
+		return stateUnavailable(err)
 	}
 	if !found {
 		return fmt.Errorf("node role is not bound")
@@ -651,7 +651,7 @@ func (s *Server) PromoteNode(ctx context.Context, id uuid.UUID) error {
 	if err != nil {
 		return err
 	}
-	return s.state.batch(ctx, []state.Mutation{mutation})
+	return stateUnavailable(s.state.batch(ctx, []state.Mutation{mutation}))
 }
 
 // EnrollExternalNode binds an administrator-approved, externally signed node

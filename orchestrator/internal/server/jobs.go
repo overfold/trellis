@@ -114,7 +114,7 @@ func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spe
 	}
 	revisionRecord := &JobRevisionRecord{Version: version, Revision: revision, Spec: jobSpec, ResolvedImages: images, CreatedAt: s.now().UTC()}
 	if err := s.state.PutJobWithRevision(ctx, key, job, revisionRecord); err != nil {
-		return nil, fmt.Errorf("save job remotely: %w", err)
+		return nil, fmt.Errorf("save job remotely: %w", stateUnavailable(err))
 	}
 	s.mu.Lock()
 	s.jobs[key] = job
@@ -404,11 +404,11 @@ func (s *Server) DeleteJob(ctx context.Context, namespace, name string) error {
 	s.mu.RUnlock()
 	if !ok {
 		s.mutationMu.Unlock()
-		return fmt.Errorf("job %s not found", name)
+		return fmt.Errorf("%w: %s", ErrJobNotFound, name)
 	}
 	if err := s.state.DeleteJob(ctx, key); err != nil {
 		s.mutationMu.Unlock()
-		return err
+		return stateUnavailable(err)
 	}
 	s.mu.Lock()
 	delete(s.jobs, key)
@@ -445,7 +445,7 @@ func (s *Server) persistJobRestart(ctx context.Context, namespace, name string) 
 	job := s.jobs[key]
 	if job == nil {
 		s.mu.RUnlock()
-		return fmt.Errorf("job %s not found", name)
+		return fmt.Errorf("%w: %s", ErrJobNotFound, name)
 	}
 	incarnation := job.Incarnation
 	allocations := append([]*Allocation(nil), s.allocations...)
@@ -467,7 +467,7 @@ func (s *Server) persistJobRestart(ctx context.Context, namespace, name string) 
 	}
 	s.mu.RUnlock()
 	if err := s.state.PutAllocations(ctx, updates); err != nil {
-		return fmt.Errorf("persist restart intent: %w", err)
+		return fmt.Errorf("persist restart intent: %w", stateUnavailable(err))
 	}
 	for _, update := range updates {
 		for _, alloc := range allocations {
@@ -495,11 +495,11 @@ func (s *Server) ListJobVersions(ctx context.Context, namespace, name string) (a
 	_, ok := s.jobs[key]
 	s.mu.RUnlock()
 	if !ok {
-		return nil, fmt.Errorf("job not found")
+		return nil, ErrJobNotFound
 	}
 	records, err := s.state.ListJobRevisions(ctx, key)
 	if err != nil {
-		return nil, err
+		return nil, stateUnavailable(err)
 	}
 	result := make(api.JobVersionListResponse, 0, len(records))
 	for _, r := range records {
