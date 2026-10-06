@@ -179,3 +179,13 @@ func TestStateUnavailableKeepsMessage(t *testing.T) {
 }
 
 var _ state.Store = undrainFailingStore{}
+
+func TestUndrainNodeStateFailureIsUnavailable(t *testing.T) {
+	s, agent, node, _ := newDrainedNodeFixture(t)
+	defer agent.server.Close()
+	failStateWrites(s)
+	rec := requestAdmin(t, s, context.Background(), http.MethodDelete, "/v1/nodes/"+node.ID.String()+"/drain", nil)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("undrain with failed save status = %d, want 503; body %s", rec.Code, rec.Body.String())
+	}
+}

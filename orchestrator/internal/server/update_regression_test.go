@@ -85,7 +85,7 @@ func TestHandleUndrainNodeReportsResumeFailure(t *testing.T) {
 	req = req.WithContext(context.WithValue(req.Context(), AdminContextKey, true))
 	rec = httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
-	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "put nodes and allocations") {
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "put nodes and allocations") {
 		t.Fatalf("persistence failure: status %d, body %s", rec.Code, rec.Body.String())
 	}
 	// Once the undrain is durable, an agent delivery failure is retried by

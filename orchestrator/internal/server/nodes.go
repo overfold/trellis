@@ -215,7 +215,7 @@ func (s *Server) resumeNodeAllocations(ctx context.Context, id uuid.UUID) error 
 	}
 	s.mu.RUnlock()
 	if err := s.state.PutNodeAndAllocations(ctx, nodeSummary(nextNode), updates); err != nil {
-		return err
+		return stateUnavailable(err)
 	}
 	s.mu.Lock()
 	applyNodeSnapshot(node, nextNode)
