@@ -178,3 +178,44 @@ func TestValidateConstraints(t *testing.T) {
 		t.Fatal("expected duplicate constraint to be rejected")
 	}
 }
+
+func TestValidateVolumeAndEnvConflicts(t *testing.T) {
+	secret := SecretRefSpec{Name: "key", Target: SecretTargetFile, Path: "/run/trellis-secrets/key"}
+	vol := func(name, path string) VolumeSpec {
+		return VolumeSpec{Name: name, HostPath: "/srv/" + name, ContainerPath: path}
+	}
+	tests := []struct {
+		name   string
+		mutate func(*TaskSpec)
+	}{
+		{"duplicate container path", func(t *TaskSpec) { t.Volumes = []VolumeSpec{vol("a", "/data"), vol("b", "/data")} }},
+		{"volume over secret dir", func(t *TaskSpec) {
+			t.Secrets = []SecretRefSpec{secret}
+			t.Volumes = []VolumeSpec{vol("a", "/run/trellis-secrets")}
+		}},
+		{"volume under secret dir", func(t *TaskSpec) { t.Volumes = []VolumeSpec{vol("a", "/run/trellis-secrets/sub")} }},
+		{"volume equals secret path", func(t *TaskSpec) {
+			t.Secrets = []SecretRefSpec{secret}
+			t.Volumes = []VolumeSpec{vol("a", "/run/trellis-secrets/key")}
+		}},
+		{"empty env key", func(t *TaskSpec) { t.Env = map[string]string{"": "x"} }},
+		{"env key with space", func(t *TaskSpec) { t.Env = map[string]string{"BAD KEY": "x"} }},
+		{"env key with equals", func(t *TaskSpec) { t.Env = map[string]string{"A=B": "x"} }},
+		{"env key leading digit", func(t *TaskSpec) { t.Env = map[string]string{"1A": "x"} }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			job := validJob()
+			test.mutate(&job.TaskGroups[0].Tasks[0])
+			if err := Validate(job); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
+	}
+	job := validJob()
+	job.TaskGroups[0].Tasks[0].Env = map[string]string{"GOOD_1": "x"}
+	job.TaskGroups[0].Tasks[0].Volumes = []VolumeSpec{vol("a", "/data"), vol("b", "/cache")}
+	if err := Validate(job); err != nil {
+		t.Fatalf("valid job rejected: %v", err)
+	}
+}

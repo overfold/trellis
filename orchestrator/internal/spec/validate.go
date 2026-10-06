@@ -236,7 +236,14 @@ func Validate(job *JobSpec) error {
 				}
 			}
 
+			for key := range task.Env {
+				if !envPattern.MatchString(key) {
+					add(taskPath+".env", "invalid_identifier", fmt.Sprintf("invalid env name %q", key))
+				}
+			}
+
 			volumes := make(map[string]struct{})
+			volumePaths := make(map[string]struct{})
 			for k, volume := range task.Volumes {
 				path := fmt.Sprintf("%s.volumes[%d]", taskPath, k)
 				if !identifierPattern.MatchString(volume.Name) {
@@ -244,8 +251,16 @@ func Validate(job *JobSpec) error {
 				}
 				if strings.TrimSpace(volume.ContainerPath) == "" || !filepath.IsAbs(volume.ContainerPath) || filepath.Clean(volume.ContainerPath) != volume.ContainerPath {
 					add(path+".container_path", "invalid", "clean absolute container path is required")
-				} else if volume.ContainerPath == "/" || volume.ContainerPath == "/run" || volume.ContainerPath == "/run/trellis" || strings.HasPrefix(volume.ContainerPath, "/run/trellis/") {
-					add(path+".container_path", "reserved", "volume path must not contain or use the reserved /run/trellis path")
+				} else if volume.ContainerPath == "/" || volume.ContainerPath == "/run" ||
+					volume.ContainerPath == "/run/trellis" || strings.HasPrefix(volume.ContainerPath, "/run/trellis/") ||
+					volume.ContainerPath == "/run/trellis-secrets" || strings.HasPrefix(volume.ContainerPath, "/run/trellis-secrets/") {
+					// File secrets are bind-mounted below /run/trellis-secrets, so any
+					// volume at, above, or below it would shadow or corrupt them.
+					add(path+".container_path", "reserved", "volume path must not contain or use the reserved /run/trellis or /run/trellis-secrets paths")
+				} else if _, exists := volumePaths[volume.ContainerPath]; exists {
+					add(path+".container_path", "duplicate", fmt.Sprintf("duplicate volume container path %q", volume.ContainerPath))
+				} else {
+					volumePaths[volume.ContainerPath] = struct{}{}
 				}
 				if after, ok := strings.CutPrefix(volume.HostPath, "@/"); ok {
 					rel := after

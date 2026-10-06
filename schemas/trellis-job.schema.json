@@ -214,7 +214,7 @@
               "type": "integer"
             },
             {
-              "pattern": "^[0-9]+(?:\\.[0-9]+)?\\s*(?:[Bb]|[KkMmGgTt][Bb]?|[KkMmGgTt]i[Bb]?)?$",
+              "pattern": "^[0-9]+(?:\\.[0-9]+)?\\s*(?:[Bb]|[KkMmGgTt][Bb]|[KkMmGgTt]i[Bb]?)?$",
               "type": "string"
             }
           ]

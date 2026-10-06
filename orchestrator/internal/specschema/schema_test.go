@@ -3,6 +3,8 @@ package specschema
 import (
 	"bytes"
 	"encoding/json"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
+	"regexp"
 	"testing"
 
 	"github.com/overfold/trellis/orchestrator/internal/probepath"
@@ -116,4 +118,29 @@ func TestHTTPHealthCheckPathUsesProbePathRules(t *testing.T) {
 		return
 	}
 	t.Fatal("HTTP health-check path condition missing")
+}
+
+func TestByteSizeSchemaMatchesParser(t *testing.T) {
+	_, yamlRaw, err := Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`"pattern":\s*"(\^\[0-9\]\+\(\?:\\\\\.\[0-9\]\+\)\?\\\\s\*[^"]*)"`).FindSubmatch(yamlRaw)
+	if m == nil {
+		t.Fatal("byte-size pattern not found in schema")
+	}
+	var pattern string
+	if err := json.Unmarshal([]byte(`"`+string(m[1])+`"`), &pattern); err != nil {
+		t.Fatal(err)
+	}
+	re := regexp.MustCompile(pattern)
+	for _, v := range []string{"64", "1B", "7K", "7KB", "7Ki", "7KiB", "64M", "64MB", "64Mi", "64MiB", "5G", "5GB", "2T", "2TB", "0.5GB", "64 MB", "1x", "64MBB", "64kk"} {
+		_, err := spec.ParseByteSize(v)
+		if re.MatchString(v) && err != nil {
+			t.Errorf("schema accepts %q but parser rejects it: %v", v, err)
+		}
+		if !re.MatchString(v) && err == nil {
+			t.Errorf("parser accepts %q but schema rejects it", v)
+		}
+	}
 }

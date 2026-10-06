@@ -374,7 +374,7 @@ func humanByteSize(base schema) schema {
 		"description": "A byte count or human-readable decimal/binary size such as 64MB or 64MiB.",
 		"oneOf": []schema{
 			cloneSchema(base),
-			{"type": "string", "pattern": `^[0-9]+(?:\.[0-9]+)?\s*(?:[Bb]|[KkMmGgTt][Bb]?|[KkMmGgTt]i[Bb]?)?$`},
+			{"type": "string", "pattern": `^[0-9]+(?:\.[0-9]+)?\s*(?:[Bb]|[KkMmGgTt][Bb]|[KkMmGgTt]i[Bb]?)?$`},
 		},
 	}
 }
