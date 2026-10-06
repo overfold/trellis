@@ -4,14 +4,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/labstack/echo/v5"
 	"github.com/overfold/trellis/orchestrator/internal/execstream"
 	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/transport"
 )
 
 // Handler exposes agent operations through HTTP.
@@ -94,6 +95,10 @@ func (h *Handler) handleResume(c *echo.Context) error {
 	return c.JSON(http.StatusOK, nodeapi.OperationResponse{Code: nodeapi.OperationOK, Generation: request.Generation, Epoch: request.Epoch})
 }
 
+// logStreamWriteTimeout bounds each write of a log stream: a client that stops
+// reading ends the stream instead of pinning its goroutine and log file.
+const logStreamWriteTimeout = time.Minute
+
 func (h *Handler) handleLogs(c *echo.Context) error {
 	tail, err := strconv.Atoi(c.QueryParam("tail"))
 	if c.QueryParam("tail") == "" {
@@ -113,6 +118,10 @@ func (h *Handler) handleLogs(c *echo.Context) error {
 		if errors.Is(err, ErrAllocationNotFound) {
 			return echo.NewHTTPError(http.StatusNotFound, err.Error())
 		}
+		if errors.Is(err, ErrLogStreamLimit) {
+			c.Response().Header().Set("Retry-After", "1")
+			return echo.NewHTTPError(http.StatusTooManyRequests, err.Error())
+		}
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
 	defer func() { _ = logs.Close() }()
@@ -120,8 +129,7 @@ func (h *Handler) handleLogs(c *echo.Context) error {
 	c.Response().WriteHeader(http.StatusOK)
 	// Send the headers now: a followed task may not log for a long time.
 	_ = http.NewResponseController(c.Response()).Flush()
-	_, err = io.Copy(c.Response(), logs)
-	return err
+	return transport.CopyStream(c.Response(), logs, logStreamWriteTimeout)
 }
 
 func (h *Handler) handleList(c *echo.Context) error {

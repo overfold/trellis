@@ -7,7 +7,37 @@ import (
 	"io"
 
 	"github.com/overfold/trellis/orchestrator/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/transport"
 )
+
+// ErrLogStreamLimit indicates that followed log stream admission is full.
+var ErrLogStreamLimit = errors.New("log stream limit reached")
+
+const (
+	// Each followed stream holds a client connection and a leader-to-agent
+	// connection for as long as the client keeps reading, so admission is
+	// bounded cluster-wide and per allocation.
+	logFollowGlobalLimit        = 256
+	logFollowPerAllocationLimit = 8
+)
+
+// openLogs opens a log stream through open. A followed stream is admitted
+// against the stream limits and releases its slot when closed.
+func (s *Server) openLogs(allocationID string, follow bool, open func() (io.ReadCloser, error)) (io.ReadCloser, error) {
+	if !follow {
+		return open()
+	}
+	release, ok := s.logStreams.Acquire(allocationID)
+	if !ok {
+		return nil, fmt.Errorf("%w: followed log streams for allocation %s or the cluster are at their maximum (%d per allocation, %d cluster-wide)", ErrLogStreamLimit, allocationID, logFollowPerAllocationLimit, logFollowGlobalLimit)
+	}
+	logs, err := open()
+	if err != nil {
+		release()
+		return nil, err
+	}
+	return transport.ReleaseOnClose(logs, release), nil
+}
 
 // ErrTaskSelection indicates that a log request needs a valid task selector.
 var ErrTaskSelection = errors.New("invalid task selection")
@@ -54,7 +84,9 @@ func (s *Server) AllocationTaskLogsForNamespace(ctx context.Context, namespace, 
 		}
 	}
 
-	return s.client.TaskLogs(ctx, nodeID, address, id, task, follow, tail)
+	return s.openLogs(id, follow, func() (io.ReadCloser, error) {
+		return s.client.TaskLogs(ctx, nodeID, address, id, task, follow, tail)
+	})
 }
 
 // AllocationLogs opens logs for an allocation.
@@ -79,5 +111,7 @@ func (s *Server) AllocationLogsForNamespace(ctx context.Context, namespace, id s
 	nodeID := found.Node.ID
 	address := fmt.Sprintf("%s:%d", found.Node.Host, found.Node.Port)
 	s.mu.RUnlock()
-	return s.client.Logs(ctx, nodeID, address, id, follow, tail)
+	return s.openLogs(id, follow, func() (io.ReadCloser, error) {
+		return s.client.Logs(ctx, nodeID, address, id, follow, tail)
+	})
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 	"github.com/overfold/trellis/orchestrator/internal/state"
 	"github.com/overfold/trellis/orchestrator/internal/storage"
+	"github.com/overfold/trellis/orchestrator/internal/transport"
 
 	"github.com/google/uuid"
 )
@@ -114,6 +115,7 @@ type Server struct {
 	metrics            *Metrics
 	secrets            *secretstore.Store
 	events             *EventBus
+	logStreams         *transport.StreamLimiter
 
 	// resumeMu guards the per-term record of acknowledged allocation
 	// resumes. It is a leaf lock: nothing else is acquired while it is held.
@@ -175,6 +177,7 @@ func NewServer(log *slog.Logger, storage *storage.LocalStorage, state *StateCont
 	}
 	s.backupStore, _ = store.(desiredStore)
 	s.events = newEventBus()
+	s.logStreams = transport.NewStreamLimiter(logFollowGlobalLimit, logFollowPerAllocationLimit)
 	s.tokenManager.SetClock(func() time.Time { return s.now() })
 	return s
 }

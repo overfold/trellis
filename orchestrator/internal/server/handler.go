@@ -497,6 +497,11 @@ func (h *Handler) handleAllocationEvents(c *echo.Context) error {
 	return c.JSON(http.StatusOK, events)
 }
 
+// logStreamWriteTimeout bounds each write of a log stream: a client that stops
+// reading ends the stream instead of pinning the leader and agent resources
+// behind it.
+const logStreamWriteTimeout = time.Minute
+
 func (h *Handler) handleAllocationLogs(c *echo.Context) error {
 	ns, err := namespaceParam(c)
 	if err != nil {
@@ -513,6 +518,10 @@ func (h *Handler) handleAllocationLogs(c *echo.Context) error {
 	if errors.Is(err, ErrTaskSelection) {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
+	if errors.Is(err, ErrLogStreamLimit) {
+		c.Response().Header().Set("Retry-After", "1")
+		return echo.NewHTTPError(http.StatusTooManyRequests, err.Error())
+	}
 	if err != nil {
 		return h.agentRequestError(err, "")
 	}
@@ -521,8 +530,7 @@ func (h *Handler) handleAllocationLogs(c *echo.Context) error {
 	c.Response().WriteHeader(http.StatusOK)
 	// Send the headers now: a followed task may not log for a long time.
 	_ = http.NewResponseController(c.Response()).Flush()
-	_, err = io.Copy(c.Response(), logs)
-	return err
+	return transport.CopyStream(c.Response(), logs, logStreamWriteTimeout)
 }
 
 func (h *Handler) handleDrainNode(c *echo.Context) error {
@@ -1229,6 +1237,16 @@ func (h *Handler) handleClusterEvents(c *echo.Context) error {
 	return h.streamEvents(c, "")
 }
 
+const (
+	eventKeepaliveIntervalDefault = 20 * time.Second
+	// eventWriteTimeout bounds each write to an event stream client.
+	eventWriteTimeout = 30 * time.Second
+)
+
+// eventKeepaliveInterval is how often an event stream writes when no event is
+// pending.
+var eventKeepaliveInterval = eventKeepaliveIntervalDefault
+
 func (h *Handler) streamEvents(c *echo.Context, ns string) error {
 	ch, ok := h.server.events.subscribe(ns)
 	if !ok {
@@ -1248,10 +1266,26 @@ func (h *Handler) streamEvents(c *echo.Context, ns string) error {
 	// time.
 	_ = rc.Flush()
 
+	// A quiet stream still writes a comment periodically. The write fails on
+	// a peer that died silently, freeing its subscriber slot, and keeps idle
+	// intermediaries from dropping a healthy stream.
+	keepalive := time.NewTicker(eventKeepaliveInterval)
+	defer keepalive.Stop()
+	write := func(frame string) error {
+		_ = rc.SetWriteDeadline(time.Now().Add(eventWriteTimeout))
+		if _, err := io.WriteString(c.Response(), frame); err != nil {
+			return err
+		}
+		return rc.Flush()
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-keepalive.C:
+			if err := write(": keepalive\n\n"); err != nil {
+				return err
+			}
 		case event, ok := <-ch:
 			if !ok {
 				return nil
@@ -1260,10 +1294,9 @@ func (h *Handler) streamEvents(c *echo.Context, ns string) error {
 			if err != nil {
 				continue
 			}
-			if _, err := fmt.Fprintf(c.Response(), "data: %s\n\n", data); err != nil {
+			if err := write("data: " + string(data) + "\n\n"); err != nil {
 				return err
 			}
-			_ = rc.Flush()
 		}
 	}
 }

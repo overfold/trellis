@@ -411,3 +411,15 @@ func TestNetworkPlanDispatcherIsolatesBlockedNodeAndRotatesNamespaces(t *testing
 	}
 	slowRelease <- struct{}{}
 }
+
+func TestNetworkPlanOperationTimeoutIsCappedAcrossFailures(t *testing.T) {
+	limit := networkPlanOperationTimeout(&network.Plan{}, networkPlanMaxBackoffDoublings)
+	if limit != networkPlanBaseTimeout<<networkPlanMaxBackoffDoublings {
+		t.Fatalf("capped timeout = %s", limit)
+	}
+	for _, attempt := range []int{networkPlanMaxBackoffDoublings + 1, 20, 1000, 1 << 30} {
+		if got := networkPlanOperationTimeout(&network.Plan{}, attempt); got != limit {
+			t.Fatalf("attempt %d timeout = %s, want %s", attempt, got, limit)
+		}
+	}
+}

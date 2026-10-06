@@ -115,7 +115,7 @@ Malformed preconditions (a negative version, or the combinations above) return `
 
 For allocation logs, `task` selects the task name from the allocation's task group. It may be omitted when the allocation has exactly one task; a multi-task allocation returns `400` until the caller selects one. The allocation ID is the Trellis allocation identity, not an agent/container runtime ID.
 
-Logs for terminal allocations remain available after container cleanup while their control-plane history is retained. Requests still require the allocation to belong to the route's namespace. Retained task logs are node-local and survive agent restarts; `follow=true` on a cleaned-up task returns the remaining output and closes at EOF. History pruning makes the allocation unavailable through this API and causes eventual node-side log deletion. Nodes report retained log inventory in heartbeats, allowing cleanup to be retried after node or leader downtime. There is no log rotation or size limit.
+Logs for terminal allocations remain available after container cleanup while their control-plane history is retained. Requests still require the allocation to belong to the route's namespace. Retained task logs are node-local and survive agent restarts; `follow=true` on a cleaned-up task returns the remaining output and closes at EOF. History pruning makes the allocation unavailable through this API and causes eventual node-side log deletion. Nodes report retained log inventory in heartbeats, allowing cleanup to be retried after node or leader downtime. There is no log rotation or size limit. Followed streams (`follow=true` on a running task) are limited to 8 per allocation and 256 per leader, and 8 per allocation and 64 per node; further requests receive `429 Too Many Requests` with `Retry-After: 1`. Each write to a log stream must complete within one minute, so a client that stops reading is disconnected.
 
 ### Exec streams
 
@@ -178,7 +178,7 @@ The control plane admits 256 simultaneous event subscribers per
 process. Additional requests receive `503 Service Unavailable` and
 `Retry-After: 1` without allocating a stream buffer. Subscriber admission does
 not alter authorization: `GET /v1/namespaces/{ns}/events` receives only that
-namespace's events, and only `GET /v1/events` spans namespaces. Clients should reconnect with
+namespace's events, and only `GET /v1/events` spans namespaces. A stream with no events receives a `: keepalive` comment every 20 seconds, which clients should ignore; a client that stops reading is disconnected after 30 seconds, releasing its subscriber slot. Clients should reconnect with
 backoff after overload or a leader change.
 
 ## Cluster settings

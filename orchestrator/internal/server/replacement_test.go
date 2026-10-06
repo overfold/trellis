@@ -838,12 +838,13 @@ func TestReconcileDropsDelayedReplacementsWithoutMissingCapacity(t *testing.T) {
 }
 
 // authenticatedHandler serves the control-plane handler as a caller with the
-// given authority, standing in for the authentication middleware.
-func authenticatedHandler(s *Server, scope auth.AccessScope, access auth.AccessLevel) http.Handler {
+// cluster scope and the given access level, standing in for the
+// authentication middleware.
+func authenticatedHandler(s *Server, access auth.AccessLevel) http.Handler {
 	e := echo.New()
 	NewHandler(s).Register(e)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := context.WithValue(r.Context(), NamespaceContextKey, auth.EncodeScope(scope, access))
+		ctx := context.WithValue(r.Context(), NamespaceContextKey, auth.EncodeScope(auth.AccessCluster, access))
 		e.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -871,7 +872,7 @@ func TestResetReplacementBackoffThroughClientAndRaft(t *testing.T) {
 		t.Fatal("subscribe rejected")
 	}
 
-	httpServer := httptest.NewServer(authenticatedHandler(s, auth.AccessCluster, auth.AccessWrite))
+	httpServer := httptest.NewServer(authenticatedHandler(s, auth.AccessWrite))
 	defer httpServer.Close()
 	serverClient, err := client.New(client.Config{Address: httpServer.URL, Token: "token", Namespace: "default"})
 	if err != nil {
@@ -940,7 +941,7 @@ func TestResetReplacementBackoffRequiresWriteAccess(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodPost, "/v1/namespaces/default/jobs/web/groups/api/replacement-backoff/reset", nil)
-			authenticatedHandler(s, auth.AccessCluster, tt.access).ServeHTTP(rec, req)
+			authenticatedHandler(s, tt.access).ServeHTTP(rec, req)
 			if rec.Code != tt.want {
 				t.Fatalf("status = %d, want %d; body: %s", rec.Code, tt.want, rec.Body.String())
 			}

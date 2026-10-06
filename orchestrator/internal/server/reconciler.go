@@ -52,13 +52,16 @@ type Action struct {
 }
 
 const (
-	leaderRecoveryGrace           = 30 * time.Second
-	maxExecutionAttempts          = 8
-	networkPlanBaseTimeout        = 15 * time.Second
-	networkPlanPeerTimeoutBudget  = 25 * time.Millisecond
-	networkPlanRouteTimeoutBudget = 100 * time.Millisecond
-	networkPlanRepairInterval     = 5 * time.Minute
-	maxConcurrentReconcileActions = 32
+	leaderRecoveryGrace    = 30 * time.Second
+	maxExecutionAttempts   = 8
+	networkPlanBaseTimeout = 15 * time.Second
+	// networkPlanMaxBackoffDoublings caps the per-failure timeout doubling at
+	// 32x the plan's base budget.
+	networkPlanMaxBackoffDoublings = 5
+	networkPlanPeerTimeoutBudget   = 25 * time.Millisecond
+	networkPlanRouteTimeoutBudget  = 100 * time.Millisecond
+	networkPlanRepairInterval      = 5 * time.Minute
+	maxConcurrentReconcileActions  = 32
 )
 
 func networkPlanOperationTimeout(plan *network.Plan, attempt int) time.Duration {
@@ -69,11 +72,10 @@ func networkPlanOperationTimeout(plan *network.Plan, attempt int) time.Duration 
 			timeout += time.Duration(len(peer.AllowedIPs)) * networkPlanRouteTimeoutBudget
 		}
 	}
-	const maxDuration = time.Duration(1<<63 - 1)
-	for range attempt {
-		if timeout > maxDuration/2 {
-			return maxDuration
-		}
+	// The timeout is the only bound on a request to a wedged agent, and a
+	// request in flight keeps that node's plan worker busy, so it must stay
+	// finite however many attempts have failed.
+	for range min(attempt, networkPlanMaxBackoffDoublings) {
 		timeout *= 2
 	}
 	return timeout

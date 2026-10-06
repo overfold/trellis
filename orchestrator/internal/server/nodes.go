@@ -153,16 +153,22 @@ func (s *Server) DrainNode(ctx context.Context, id uuid.UUID) error {
 // UndrainNode makes a drained node schedulable.
 func (s *Server) UndrainNode(ctx context.Context, id uuid.UUID) error {
 	s.reconcileMu.Lock()
-	err := s.resumeNodeAllocations(ctx, id)
+	resumes, err := s.resumeNodeAllocations(ctx, id)
 	s.reconcileMu.Unlock()
 	if err != nil {
 		return err
 	}
+	// Deliver outside reconcileMu: an unreachable agent costs a full request
+	// timeout per allocation and must not stall cluster-wide planning.
+	s.deliverResumes(ctx, id, resumes)
 	s.Reconcile(ctx)
 	return nil
 }
 
-func (s *Server) resumeNodeAllocations(ctx context.Context, id uuid.UUID) error {
+// resumeNodeAllocations durably undrains the node and its node-drained
+// allocations and returns the resumes to deliver to the agent. The caller
+// holds reconcileMu.
+func (s *Server) resumeNodeAllocations(ctx context.Context, id uuid.UUID) ([]resumeDelivery, error) {
 	s.mutationMu.Lock()
 	mutationLocked := true
 	defer func() {
@@ -174,7 +180,7 @@ func (s *Server) resumeNodeAllocations(ctx context.Context, id uuid.UUID) error 
 	node := s.nodes[id]
 	if node == nil {
 		s.mu.RUnlock()
-		return fmt.Errorf("%w: %s", ErrNodeNotFound, id)
+		return nil, fmt.Errorf("%w: %s", ErrNodeNotFound, id)
 	}
 	nextNode := node.Clone()
 	nextNode.Status = livenessStatus(NodeStatusHealthy, s.liveness.lastHeartbeat(id), s.now())
@@ -215,7 +221,7 @@ func (s *Server) resumeNodeAllocations(ctx context.Context, id uuid.UUID) error 
 	}
 	s.mu.RUnlock()
 	if err := s.state.PutNodeAndAllocations(ctx, nodeSummary(nextNode), updates); err != nil {
-		return stateUnavailable(err)
+		return nil, stateUnavailable(err)
 	}
 	s.mu.Lock()
 	applyNodeSnapshot(node, nextNode)
@@ -227,13 +233,20 @@ func (s *Server) resumeNodeAllocations(ctx context.Context, id uuid.UUID) error 
 	s.mu.Unlock()
 	s.mutationMu.Unlock()
 	mutationLocked = false
-	// The undrain is durable. A resume the agent does not acknowledge now is
-	// redelivered by reconciliation.
+	return resumes, nil
+}
+
+// deliverResumes sends durable resumes to the agent without holding any state
+// lock. A resume the agent does not acknowledge now is redelivered by
+// reconciliation, and the agent rejects a resume that a later drain has
+// superseded by its sequence, so a drain racing with delivery stays correct.
+func (s *Server) deliverResumes(ctx context.Context, id uuid.UUID, resumes []resumeDelivery) {
 	for _, resume := range resumes {
 		allocation := resume.allocation
 		allocation.mu.Lock()
-		if allocation.Draining || allocation.DrainSequence != resume.request.Sequence {
-			allocation.mu.Unlock()
+		superseded := allocation.Draining || allocation.DrainSequence != resume.request.Sequence
+		allocation.mu.Unlock()
+		if superseded {
 			continue
 		}
 		if err := s.client.ResumeAllocation(ctx, id, resume.address, resume.request); err != nil {
@@ -241,9 +254,7 @@ func (s *Server) resumeNodeAllocations(ctx context.Context, id uuid.UUID) error 
 		} else {
 			s.recordResumeDelivered(resume.request)
 		}
-		allocation.mu.Unlock()
 	}
-	return nil
 }
 
 type resumeDelivery struct {
