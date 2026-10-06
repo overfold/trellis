@@ -172,10 +172,24 @@ func pickDemotion(sorted []memberState) (memberState, bool) {
 // memberStates combines a Raft configuration with the leader's node
 // observations.
 func (s *Server) memberStates(members []state.RaftMember) []memberState {
+	local := s.nodeID.String()
+	// Roles come from storage, which must not be read under mu.
+	type memberRole struct {
+		role  api.NodeRole
+		bound bool
+		err   error
+	}
+	roles := make(map[string]memberRole, len(members))
+	for _, member := range members {
+		if member.ID == local {
+			continue
+		}
+		role, bound, err := s.state.NodeRole(context.Background(), member.ID)
+		roles[member.ID] = memberRole{role: role, bound: bound, err: err}
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	now := s.now()
-	local := s.nodeID.String()
 	result := make([]memberState, 0, len(members))
 	for _, member := range members {
 		current := memberState{ID: member.ID, Address: member.Address, Voter: member.Voter, Leader: member.ID == local}
@@ -197,8 +211,8 @@ func (s *Server) memberStates(members []state.RaftMember) []memberState {
 		heartbeat := s.liveness.lastHeartbeat(id)
 		caughtUp := reported && now.Sub(progress.at) <= recentHeartbeat && progress.leaderApplied <= progress.applied+raftCatchUpLag
 		current.Live = heartbeatLive(heartbeat, now)
-		role, roleBound, roleErr := s.state.NodeRole(context.Background(), member.ID)
-		current.Eligible = roleErr == nil && roleBound && role == api.NodeRoleControlPlane && livenessStatus(node.Status, heartbeat, now) == NodeStatusHealthy && caughtUp
+		role := roles[member.ID]
+		current.Eligible = role.err == nil && role.bound && role.role == api.NodeRoleControlPlane && livenessStatus(node.Status, heartbeat, now) == NodeStatusHealthy && caughtUp
 		// Silence is measured from no earlier than this leader's election.
 		current.Gone = now.Sub(silentSince(heartbeat, s.leaderSince)) >= voterLossTimeout
 		result = append(result, current)

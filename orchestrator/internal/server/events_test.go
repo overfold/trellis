@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -186,5 +187,31 @@ func TestEventStreamSendsHeadersBeforeTheFirstEvent(t *testing.T) {
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "text/event-stream" {
 		t.Fatalf("event stream response = %d %q", response.StatusCode, response.Header.Get("Content-Type"))
+	}
+}
+
+// TestEventStreamWritesKeepalives lets a quiet stream detect a dead peer, and
+// keeps intermediaries from dropping it.
+func TestEventStreamWritesKeepalives(t *testing.T) {
+	previous := eventKeepaliveInterval
+	eventKeepaliveInterval = 10 * time.Millisecond
+	t.Cleanup(func() { eventKeepaliveInterval = previous })
+
+	s, _ := newTestServerWithAgent()
+	s.events = newEventBus()
+	server := httptest.NewServer(authenticatedHandler(s, auth.AccessCluster, auth.AccessRead))
+	defer server.Close()
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL+"/v1/namespaces/default/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	line := make([]byte, len(": keepalive\n\n"))
+	if _, err := io.ReadFull(response.Body, line); err != nil || string(line) != ": keepalive\n\n" {
+		t.Fatalf("quiet stream wrote %q, err=%v; want a keepalive comment", line, err)
 	}
 }

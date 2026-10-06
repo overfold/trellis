@@ -31,6 +31,7 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/runtime"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 	"github.com/overfold/trellis/orchestrator/internal/storage"
+	"github.com/overfold/trellis/orchestrator/internal/transport"
 )
 
 // Agent manages allocation lifecycle on a node.
@@ -44,6 +45,9 @@ type Agent struct {
 	// failed kill cannot free admission capacity.
 	execSessionCount         int
 	execSessionsByAllocation map[string]int
+	// logStreams bounds followed log streams; each holds a goroutine, a pipe,
+	// and an open log file for as long as its client keeps reading.
+	logStreams *transport.StreamLimiter
 	// execSessionsClosed refuses new exec sessions once the agent shuts down.
 	execSessionsClosed bool
 	execTiming         execTiming
@@ -216,6 +220,8 @@ var (
 	ErrInvalidGeneration = errors.New("generation must be greater than zero")
 	// ErrExecutionConflict indicates conflicting allocation execution metadata.
 	ErrExecutionConflict = errors.New("allocation execution metadata conflict")
+	// ErrLogStreamLimit indicates that followed log stream admission is full.
+	ErrLogStreamLimit = errors.New("log stream limit reached")
 	// ErrExecSessionLimit indicates that exec session admission is full.
 	ErrExecSessionLimit = errors.New("exec session limit reached")
 	// ErrAgentShuttingDown indicates that the agent refuses new work while it shuts down.
@@ -319,6 +325,7 @@ func NewAgent(log *slog.Logger, runtime runtime.ContainerRuntime, health *health
 		retainedLogs:             make(map[string]*retainedTaskLog),
 		execSessions:             make(map[string]*execSession),
 		execSessionsByAllocation: make(map[string]int),
+		logStreams:               transport.NewStreamLimiter(logFollowGlobalLimit, logFollowPerAllocationLimit),
 		execTiming:               defaultExecTiming,
 		healthProbe:              filepath.Join(filepath.Dir(executable), "trellis-health-probe"),
 		operations:               make(map[string]*allocationOperation),
