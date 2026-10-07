@@ -136,3 +136,65 @@ func TestHeartbeatRejectsZeroPathID(t *testing.T) {
 		t.Fatalf("rejected heartbeat updated zero-ID node: version=%q heartbeat=%s", zeroNode.Version, heartbeat)
 	}
 }
+
+func TestHeartbeatBodyIdentity(t *testing.T) {
+	id, other := uuid.New(), uuid.New()
+	for _, tc := range []struct {
+		name, path, body string
+		certificate      uuid.UUID
+		admin            bool
+		status           int
+	}{
+		{"matching", id.String(), `{"id":"` + id.String() + `","version":"after"}`, id, false, 200},
+		{"missing", id.String(), `{"version":"after"}`, id, false, 200},
+		{"zero", id.String(), `{"id":"` + uuid.Nil.String() + `","version":"after"}`, id, false, 200},
+		{"null", id.String(), `{"id":null,"version":"after"}`, id, false, 200},
+		{"mismatching", id.String(), `{"id":"` + other.String() + `","version":"after"}`, id, false, 400},
+		{"malformed ID", id.String(), `{"id":"not-a-uuid","version":"after"}`, id, false, 400},
+		{"malformed JSON", id.String(), `{"id":`, id, false, 400},
+		{"malformed path", "not-a-uuid", `{}`, id, false, 400},
+		{"body matches certificate not path", other.String(), `{"id":"` + id.String() + `"}`, id, false, 403},
+		{"body matches path not certificate", other.String(), `{"id":"` + other.String() + `"}`, id, false, 403},
+		{"unauthorized missing body ID", other.String(), `{}`, id, false, 403},
+		{"authorization before decoding", other.String(), `{"id":`, id, false, 403},
+		{"no certificate", id.String(), `{"id":"` + id.String() + `"}`, uuid.Nil, false, 403},
+		{"administrator is not node", id.String(), `{"id":"` + id.String() + `"}`, uuid.Nil, true, 403},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, agent := newTestServerWithAgent()
+			defer agent.server.Close()
+			initial := time.Date(2026, 9, 30, 11, 0, 0, 0, time.UTC)
+			s.now = func() time.Time { return initial.Add(time.Minute) }
+			node, otherNode := &Node{ID: id, Version: "before"}, &Node{ID: other, Version: "other"}
+			addTestNode(s, node, initial)
+			addTestNode(s, otherNode, initial)
+			e := echo.New()
+			NewHandler(s).Register(e)
+			req := httptest.NewRequest(http.MethodPost, "/v1/nodes/"+tc.path+"/heartbeat", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			ctx := req.Context()
+			if tc.certificate != uuid.Nil {
+				ctx = context.WithValue(ctx, NodeContextKey, tc.certificate)
+			}
+			if tc.admin {
+				ctx = context.WithValue(ctx, AdminContextKey, true)
+			}
+			rec := httptest.NewRecorder()
+			e.ServeHTTP(rec, req.WithContext(ctx))
+			if rec.Code != tc.status {
+				t.Fatalf("status = %d, want %d: %s", rec.Code, tc.status, rec.Body.String())
+			}
+			applyTestObservations(s)
+			if tc.status == http.StatusOK {
+				if node.Version != "after" || !s.liveness.lastHeartbeat(id).After(initial) {
+					t.Fatal("accepted heartbeat did not update path node")
+				}
+			} else if node.Version != "before" || !s.liveness.lastHeartbeat(id).Equal(initial) {
+				t.Fatal("rejected heartbeat changed path node")
+			}
+			if otherNode.Version != "other" || !s.liveness.lastHeartbeat(other).Equal(initial) {
+				t.Fatal("heartbeat changed other node")
+			}
+		})
+	}
+}

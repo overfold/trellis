@@ -8,6 +8,7 @@ package execwebsocket
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -94,8 +95,8 @@ func (s *Stream) Read(p []byte) (int, error) {
 	if len(s.readBuf) == 0 {
 		messageType, message, err := s.conn.Read(context.Background())
 		if err != nil {
-			if websocket.CloseStatus(err) == websocket.StatusMessageTooBig {
-				return 0, fmt.Errorf("%w: exec WebSocket payload exceeds %d bytes", execstream.ErrInvalidFrame, execstream.MaxPayload)
+			if errors.Is(err, websocket.ErrMessageTooBig) || websocket.CloseStatus(err) == websocket.StatusMessageTooBig {
+				return 0, fmt.Errorf("%w: exec WebSocket payload exceeds %d bytes: %w", execstream.ErrInvalidFrame, execstream.MaxPayload, err)
 			}
 			return 0, err
 		}

@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/overfold/trellis/orchestrator/api"
@@ -203,5 +204,58 @@ func TestClientExecErrorExposesStatusAndMessage(t *testing.T) {
 	}
 	if httpErr.Status != http.StatusServiceUnavailable || httpErr.Message() != "node agent unavailable: agent is shutting down" {
 		t.Fatalf("status = %d, message = %q", httpErr.Status, httpErr.Message())
+	}
+}
+
+func TestExecWaitTruncatedFrames(t *testing.T) {
+	for _, data := range [][]byte{
+		{4},                  // Truncated header.
+		{4, 0, 0, 0, 2},      // Missing payload.
+		{4, 0, 0, 0, 2, 'x'}, // Partial payload.
+		{4, 0, 0, 128, 1},    // Oversized payload.
+	} {
+		stream := newExecStream(struct {
+			io.Reader
+			io.Writer
+			io.Closer
+		}{bytes.NewReader(data), io.Discard, io.NopCloser(strings.NewReader(""))})
+		_, err := stream.Wait(io.Discard, io.Discard)
+		if !errors.Is(err, ErrInvalidExecFrame) {
+			t.Fatalf("frame %v: error = %v, want public invalid-frame sentinel", data, err)
+		}
+		if len(data) < 5 || data[3] == 0 {
+			if !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Fatalf("frame %v: lost truncation cause: %v", data, err)
+			}
+		}
+	}
+}
+
+func TestExecWaitPreservesIOErrors(t *testing.T) {
+	cause := errors.New("I/O failed")
+	stream := newExecStream(struct {
+		io.Reader
+		io.Writer
+		io.Closer
+	}{iotest.ErrReader(cause), io.Discard, io.NopCloser(strings.NewReader(""))})
+	if _, err := stream.Wait(io.Discard, io.Discard); !errors.Is(err, cause) || errors.Is(err, ErrInvalidExecFrame) {
+		t.Fatalf("read error = %v", err)
+	}
+	for _, frameType := range []execstream.FrameType{execstream.FrameStdout, execstream.FrameStderr} {
+		server := serveExecTestStream(t, nil, func(_ *execstream.Reader, w *execstream.Writer) {
+			_ = w.WriteData(frameType, []byte("output"))
+		})
+		stream, err := mustNew(t, Config{Address: server.URL, Token: "token", Namespace: "default"}).Exec(context.Background(), "alloc-1", api.ExecRequest{Command: []string{"true"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		reader, writer := io.Pipe()
+		_ = reader.CloseWithError(cause)
+		_, err = stream.Wait(writer, writer)
+		_ = writer.Close()
+		_ = stream.Close()
+		if !errors.Is(err, cause) || errors.Is(err, ErrInvalidExecFrame) {
+			t.Fatalf("output error = %v", err)
+		}
 	}
 }

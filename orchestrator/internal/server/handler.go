@@ -697,6 +697,9 @@ func (h *Handler) handleHeartbeat(c *echo.Context) error {
 	if err := decodeJSON(c, &request, maxHeartbeatBodyBytes); err != nil {
 		return err
 	}
+	if request.NodeID != uuid.Nil && request.NodeID != id {
+		return echo.NewHTTPError(http.StatusBadRequest, "heartbeat body ID does not match path node ID")
+	}
 	if len(request.Allocations) > maxHeartbeatAllocationStatuses {
 		return echo.NewHTTPError(http.StatusRequestEntityTooLarge, "heartbeat contains too many allocation status reports")
 	}

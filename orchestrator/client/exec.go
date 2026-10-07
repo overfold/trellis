@@ -10,6 +10,10 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/execstream"
 )
 
+// ErrInvalidExecFrame reports a malformed or wrong-direction exec frame.
+// Wait wraps this sentinel and preserves underlying read or JSON decode errors.
+var ErrInvalidExecFrame = errors.New("invalid exec stream frame")
+
 // ExecError reports a stream that the server ended with an error frame
 // instead of an exit status.
 type ExecError struct {
@@ -57,13 +61,18 @@ func (s *ExecStream) Resize(cols, rows uint32) error {
 
 // Wait copies process output to stdout and stderr until the stream ends and
 // returns the process's exit status. An error frame returns an *ExecError; a
-// stream that ends without an exit status returns an error.
+// stream that ends without an exit status returns an error. Malformed frames
+// wrap ErrInvalidExecFrame, except error frames with invalid or empty messages,
+// which retain the generic *ExecError fallback.
 func (s *ExecStream) Wait(stdout, stderr io.Writer) (int, error) {
 	for {
 		frame, err := s.reader.Next()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return 0, errors.New("exec stream ended without an exit status")
+			}
+			if errors.Is(err, execstream.ErrInvalidFrame) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return 0, fmt.Errorf("read exec stream: %w: %w", ErrInvalidExecFrame, err)
 			}
 			return 0, fmt.Errorf("read exec stream: %w", err)
 		}
@@ -79,7 +88,7 @@ func (s *ExecStream) Wait(stdout, stderr io.Writer) (int, error) {
 		case execstream.FrameExit:
 			var exit api.ExecExit
 			if err := json.Unmarshal(frame.Payload, &exit); err != nil {
-				return 0, fmt.Errorf("decode exec exit status: %w", err)
+				return 0, fmt.Errorf("decode exec exit status: %w: %w", ErrInvalidExecFrame, err)
 			}
 			return exit.ExitCode, nil
 		case execstream.FrameError:
@@ -89,7 +98,7 @@ func (s *ExecStream) Wait(stdout, stderr io.Writer) (int, error) {
 			}
 			return 0, &ExecError{Message: streamErr.Message}
 		default:
-			return 0, fmt.Errorf("%w: unexpected type %d from server", execstream.ErrInvalidFrame, frame.Type)
+			return 0, fmt.Errorf("%w: unexpected type %d from server", ErrInvalidExecFrame, frame.Type)
 		}
 	}
 }
