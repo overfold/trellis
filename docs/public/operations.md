@@ -45,6 +45,8 @@ job_limits:
 
 A node joining a managed-mode cluster also sets `join` and `ca_cert`, plus `join_token` until it has enrolled; see [Multi-node clusters](multi-node.md#add-a-node). The join token is used once, at first start, and the installer removes it afterwards.
 
+New installer config and secrets-key files are staged with mode 0600 from creation and atomically renamed into place, including custom paths in traversable directories. New files belong to the installing user (root); replacing a key preserves its existing owner/group. Resuming an existing config keeps its contents and ownership and tightens config/key modes to 0600; upgrading does the same without regenerating keys.
+
 `job_limits` is operator-only admission policy. Jobs cannot override it. The
 defaults shown above are used when the section is omitted. Every task without a
 `resources` block receives the default CPU and memory requests current when the
@@ -293,6 +295,8 @@ curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/upgra
 It downloads and verifies the new release before touching the running daemon, then swaps the binaries, refreshes the installer-owned systemd unit, and starts the daemon. Verification checks that systemd reports the service active and the local API can serve authentication requests; it does not verify worker registration or workload readiness. If this check fails, the previous binaries and unit are restored. Afterward, inspect `trellisctl nodes status NODE` and affected jobs for workload health.
 
 A service that was already stopped remains stopped. On a multi-node cluster the script also evacuates the node first; see [Multi-node clusters](multi-node.md#maintain-a-multi-node-cluster).
+
+Upgrade and graceful uninstall require `jq` for structural parsing of the CLI's node-list JSON (on Debian/Ubuntu, `sudo apt-get install jq`). Membership must be a single nonempty JSON array of node objects with nonempty IDs; malformed, empty, or unexpected output stops maintenance before draining, replacing binaries, or deleting local state. Labels and pretty/compact formatting do not affect the count. Only a validated one-node list selects the single-node flow. Uninstall's explicit `--force` bypasses cluster inspection, not local resource cleanup.
 
 Node checks, drain, and undrain use the invoking user's saved `local` context from `~/.config/trellis/config.yaml` (the user identified by `SUDO_USER` when run through `sudo`, or root's home when run directly as root). This context needs a valid cluster/write operator credential. Maintenance connects to the node's local API and uses `/run/trellis/ca.crt`, regardless of the currently selected context. On a worker this local API is relayed to the control plane; the upgrade does not require local Raft state or keys. A missing context or rejected credential stops the upgrade before binaries are changed and reports the underlying CLI error.
 

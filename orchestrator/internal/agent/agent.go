@@ -1768,15 +1768,10 @@ func (a *Agent) launchTask(ctx context.Context, launch *taskLaunch) error {
 	taskSecrets := task.Secrets
 	for k, v := range task.EnvOverrides {
 		if k == "TRELLIS_TOKEN" {
-			overridden := false
-			for _, secret := range task.Secrets {
-				overridden = overridden || secret.Task == ts.Name && secret.Target == spec.SecretTargetEnv && secret.Env == k
-			}
-			if !overridden {
-				value := []byte(v)
-				defer clear(value)
-				taskSecrets = append(taskSecrets, nodeapi.DeliveredSecret{Task: ts.Name, Name: "api-access-token", Target: spec.SecretTargetEnv, Env: k, Value: value})
-			}
+			// Canonical admission reserves this name for API-enabled groups.
+			value := []byte(v)
+			defer clear(value)
+			taskSecrets = append(taskSecrets, nodeapi.DeliveredSecret{Task: ts.Name, Name: "api-access-token", Target: spec.SecretTargetEnv, Env: k, Value: value})
 			continue
 		}
 		env[k] = v

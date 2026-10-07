@@ -42,6 +42,24 @@ require_commands() {
     done
 }
 
+# Stage in the destination directory: mktemp creates mode 0600 before any
+# secret bytes are written, and rename publishes the completed file atomically.
+write_private_file() (
+    local target="$1" staged
+    staged="$(mktemp "${target}.XXXXXX")" || exit 1
+    trap 'rm -f "$staged"' EXIT
+    cat >"$staged" || exit 1
+    if [ -e "$target" ]; then chown --reference="$target" "$staged" || exit 1; fi
+    mv -f "$staged" "$target"
+)
+
+count_nodes_json() {
+    require_commands jq
+    jq -es 'if length == 1 and (.[0] | type == "array" and length > 0 and
+        all(.[]; type == "object" and (.id | type == "string" and length > 0)))
+        then .[0] | length else error("invalid node list") end'
+}
+
 state_get() {
     local key="$1" default="${2:-}" value
     [ -f "$STATE_FILE" ] || { printf '%s' "$default"; return; }

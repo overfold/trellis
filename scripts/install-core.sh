@@ -243,7 +243,7 @@ if [ ! -f "$CONFIG_FILE" ]; then
         install -m 0644 "$ca_cert_file" "${CONFIG_DIR}/node-ca.crt"
         if [ "$control_plane" = true ]; then
             secrets_value="$(read_secret "Existing cluster secrets key" "$join_secrets_file" "${TRELLIS_SECRETS_KEY:-}")"
-            printf '%s\n' "$secrets_value" >"$SECRETS_KEY_FILE"
+            printf '%s\n' "$secrets_value" | write_private_file "$SECRETS_KEY_FILE"
             unset secrets_value
         fi
     else
@@ -252,10 +252,10 @@ if [ ! -f "$CONFIG_FILE" ]; then
         administrator_public_key="$(printf '%s\n' "$administrator_key_pem" | openssl pkey -pubout -outform DER | base64 | tr -d '=\n')"
         unset administrator_key_pem
         admin_public_key_config="administrator_public_key: ${administrator_public_key}"
-        openssl rand -base64 32 >"$SECRETS_KEY_FILE"
+        openssl rand -base64 32 | write_private_file "$SECRETS_KEY_FILE"
     fi
-    [ ! -f "$SECRETS_KEY_FILE" ] || chmod 600 "$SECRETS_KEY_FILE"
-    cat >"$CONFIG_FILE" <<EOF_CONFIG
+    {
+        cat <<EOF_CONFIG
 cluster: default
 ${admin_public_key_config}
 node_signing_mode: managed
@@ -265,19 +265,19 @@ data_dir: ${DATA_DIR}
 agent_advertise: ${advertise_host}:8127
 server_advertise: ${advertise_host}:8128
 EOF_CONFIG
-    if [ "$control_plane" = true ]; then
-        printf 'raft_advertise: %s:8129\n' "$advertise_host" >>"$CONFIG_FILE"
-        printf 'secrets_key: %s\n' "$SECRETS_KEY_FILE" >>"$CONFIG_FILE"
-    fi
-    if [ -n "$join_addr" ]; then
-        printf 'join: %s\n' "$join_addr" >>"$CONFIG_FILE"
-        printf 'join_token: %s\n' "$join_token" >>"$CONFIG_FILE"
-        printf 'ca_cert: %s\n' "${CONFIG_DIR}/node-ca.crt" >>"$CONFIG_FILE"
         if [ "$control_plane" = true ]; then
-            [ -z "$join_secrets_key_id" ] || printf 'secrets_key_id: %s\n' "$join_secrets_key_id" >>"$CONFIG_FILE"
+            printf 'raft_advertise: %s:8129\n' "$advertise_host"
+            printf 'secrets_key: %s\n' "$SECRETS_KEY_FILE"
         fi
-    fi
-    chmod 600 "$CONFIG_FILE"
+        if [ -n "$join_addr" ]; then
+            printf 'join: %s\n' "$join_addr"
+            printf 'join_token: %s\n' "$join_token"
+            printf 'ca_cert: %s\n' "${CONFIG_DIR}/node-ca.crt"
+            if [ "$control_plane" = true ]; then
+                [ -z "$join_secrets_key_id" ] || printf 'secrets_key_id: %s\n' "$join_secrets_key_id"
+            fi
+        fi
+    } | write_private_file "$CONFIG_FILE"
     ui_step "Created node configuration"
     if [ -n "${administrator_private_key:-}" ]; then
         ui_warn "Save this base64 PKCS#8 administrator private key in an operator password manager; Trellis does not retain it: ${administrator_private_key}"

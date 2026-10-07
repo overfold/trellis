@@ -34,7 +34,7 @@ Normal builds reject `--runtime injected`.
 
 Tests beside each package document state-machine invariants, Raft persistence, scheduler behavior, network planning, durability, update regressions, and security validation.
 
-From the repository root, `bash scripts/install-core_test.sh` exercises the installer's operator-access phase for first installs, replacement clusters, resumes, and joins. It uses the real CLI for context saving and mocks credential creation and host ownership operations; it does not install packages or start services.
+From the repository root, `bash scripts/install-core_test.sh` checks secret/config permissions before initial writes and atomic publication on traversable custom paths, resume behavior, and Vagrant control/worker provisioning with mocked host operations. It also exercises the installer's operator-access phase for first installs, replacement clusters, resumes, and joins, using the real CLI for context saving. It does not install packages or start services. Maintenance shell tests require `jq` and cover pretty/compact node-list JSON, labels named `id`, and fail-closed malformed-output handling.
 
 `bash scripts/upgrade_test.sh` exercises the full upgrade script with mocked releases, CLI calls, and host services. It checks local-context selection, single- and multi-node maintenance, explicit configuration paths, missing or rejected credentials, drain timeouts, and rollback without changing host services.
 

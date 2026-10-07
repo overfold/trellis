@@ -147,7 +147,7 @@ func TestRunAllocationKeepsManagedEnvironmentSecretsOutOfRuntimeEnvironment(t *t
 	agent := newOperationTestAgent(t, rt)
 	request := operationTestRequest()
 	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image"}}
-	request.EnvOverrides = map[string]string{"TRELLIS_TOKEN": "api-token-sentinel", "TRELLIS_NAMESPACE": "default"}
+	request.EnvOverrides = map[string]string{"TRELLIS_TOKEN": "api-token-sentinel", "TRELLIS_NAMESPACE": "default", "TRELLIS_ADDR": "https://node:8128", "TRELLIS_CA_CERT": "ca-pem"}
 	request.Secrets = []nodeapi.DeliveredSecret{{Task: "first", Name: "password", Target: spec.SecretTargetEnv, Env: "PASSWORD", Value: []byte("secret-sentinel")}}
 	if err := runGroup(context.Background(), agent, request); err != nil {
 		t.Fatal(err)
@@ -158,7 +158,7 @@ func TestRunAllocationKeepsManagedEnvironmentSecretsOutOfRuntimeEnvironment(t *t
 	if _, ok := rt.options.Env["TRELLIS_TOKEN"]; ok {
 		t.Fatal("API access token entered runtime environment")
 	}
-	if rt.options.Env["TRELLIS_NAMESPACE"] != "default" {
+	if rt.options.Env["TRELLIS_NAMESPACE"] != "default" || rt.options.Env["TRELLIS_ADDR"] != "https://node:8128" || rt.options.Env["TRELLIS_CA_CERT"] != "ca-pem" {
 		t.Fatalf("ordinary environment override missing: %#v", rt.options.Env)
 	}
 	foundSecretEnv := false
@@ -167,10 +167,47 @@ func TestRunAllocationKeepsManagedEnvironmentSecretsOutOfRuntimeEnvironment(t *t
 		if mount.SecretEnv {
 			dir := filepath.Dir(mount.HostPath)
 			t.Cleanup(func() { _ = removeSecretDir(dir) })
+			value, err := os.ReadFile(filepath.Join(mount.HostPath, "TRELLIS_TOKEN"))
+			if err != nil || string(value) != "api-token-sentinel" {
+				t.Fatalf("managed token secret = %q, %v", value, err)
+			}
 		}
 	}
 	if !foundSecretEnv {
 		t.Fatalf("environment secret mount missing: %#v", rt.options.Mounts)
+	}
+}
+
+func TestRunAllocationAllowsAuthoredTokenSecretWithoutAPIAccess(t *testing.T) {
+	rt := &captureCreateRuntime{reconcilerRuntime: &reconcilerRuntime{}}
+	agent := newOperationTestAgent(t, rt)
+	request := operationTestRequest()
+	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image", Env: map[string]string{
+		"TRELLIS_ADDR": "custom:8128", "TRELLIS_NAMESPACE": "custom", "TRELLIS_CA_CERT": "custom-ca",
+	}}}
+	request.Secrets = []nodeapi.DeliveredSecret{{Task: "first", Name: "operator-token", Target: spec.SecretTargetEnv, Env: "TRELLIS_TOKEN", Value: []byte("authored-token")}}
+	if err := runGroup(context.Background(), agent, request); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := rt.options.Env["TRELLIS_TOKEN"]; ok {
+		t.Fatal("authored token secret entered runtime environment")
+	}
+	if rt.options.Env["TRELLIS_ADDR"] != "custom:8128" || rt.options.Env["TRELLIS_NAMESPACE"] != "custom" || rt.options.Env["TRELLIS_CA_CERT"] != "custom-ca" {
+		t.Fatalf("authored environment without API access = %#v", rt.options.Env)
+	}
+	found := false
+	for _, mount := range rt.options.Mounts {
+		if mount.SecretEnv {
+			found = true
+			t.Cleanup(func() { _ = removeSecretDir(filepath.Dir(mount.HostPath)) })
+			value, err := os.ReadFile(filepath.Join(mount.HostPath, "TRELLIS_TOKEN"))
+			if err != nil || string(value) != "authored-token" {
+				t.Fatalf("authored token secret = %q, %v", value, err)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("missing authored token secret mount")
 	}
 }
 

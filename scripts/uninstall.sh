@@ -111,7 +111,9 @@ elif [ "$was_running" = true ] && [ -x "${INSTALL_DIR}/trellisctl" ] && [ -n "$n
     if ! node_json="$(local_ctl "$WORK_TMP" nodes list --output json 2>/dev/null)"; then
         ui_die "Could not inspect cluster membership. Nothing local has been deleted. To uninstall without draining or changing membership, rerun with --force."
     fi
-    node_count="$(printf '%s' "$node_json" | grep -c '"id"' || true)"
+    if ! node_count="$(printf '%s' "$node_json" | count_nodes_json)"; then
+        ui_die "Invalid cluster membership output. Nothing local has been deleted. Use --force only to skip cluster operations explicitly."
+    fi
     if [ "${node_count:-0}" -gt 1 ]; then
         local_ctl "$WORK_TMP" nodes drain "$node_id" >/dev/null
         ui_step "Drain started"

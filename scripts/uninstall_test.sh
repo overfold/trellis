@@ -21,7 +21,7 @@ printf 'ctr %s\n' "$*" >>"$CALL_LOG"
 case "$*" in
     '-n trellis tasks ls -q')
         [ "$SCENARIO" != task-inspect-failure ] || { echo 'socket unavailable' >&2; exit 1; }
-        if [ "$SCENARIO" != taskless ] && [ "$SCENARIO" != graceful ]; then printf 'test-container\n'; fi
+        if [ "$SCENARIO" != taskless ] && [[ "$SCENARIO" != graceful* ]]; then printf 'test-container\n'; fi
         ;;
     '-n trellis tasks delete --force test-container')
         [ "$SCENARIO" != task-delete-failure ] || { echo 'shim did not respond' >&2; exit 1; }
@@ -29,7 +29,7 @@ case "$*" in
         ;;
     '-n trellis containers rm test-container')
         # An active task must be synchronously removed before its container.
-        [ "$SCENARIO" = taskless ] || [ "$SCENARIO" = graceful ] || test -e "${CTR_LISTED}.task-deleted" || exit 1
+        [ "$SCENARIO" = taskless ] || [[ "$SCENARIO" = graceful* ]] || test -e "${CTR_LISTED}.task-deleted" || exit 1
         [ "$SCENARIO" != container-delete-failure ] || { echo 'snapshot is busy' >&2; exit 1; }
         ;;
     *'tasks kill'*|*'tasks delete'*) echo 'unsafe task cleanup' >&2; exit 1 ;;
@@ -50,7 +50,13 @@ printf 'trellisctl %s\n' "$*" >>"$CALL_LOG"
 if [ "$*" = 'nodes list --output json' ]; then
     case "$SCENARIO" in
         graceful) printf '[\n{"id":"test-node"},\n{"id":"other-node"}\n]\n' ;;
+        graceful-compact) printf '[{"id":"test-node"},{"id":"other-node"}]\n' ;;
         single-node) printf '[{"id":"test-node"}]\n' ;;
+        single-label) printf '[\n{"id":"test-node",\n"labels":{"id":"rack-a"}}\n]\n' ;;
+        single-pretty) printf '[\n{"id":"test-node"}\n]\n' ;;
+        malformed) printf '[{"id":' ;;
+        wrong-shape) printf '{"id":"test-node"}\n' ;;
+        empty) printf '[]\n' ;;
         *) exit 1 ;;
     esac
 fi
@@ -80,7 +86,7 @@ exec /bin/mv "$@"
 MOCK
 chmod +x "$tmp/mocks/"*
 
-for scenario in membership-failure cleanup-failure stop-failure task-inspect-failure task-delete-failure container-delete-failure inspect-failure verify-failure containers-remain purge-failure archive-failure taskless force force-purge graceful single-node; do
+for scenario in membership-failure malformed wrong-shape empty cleanup-failure stop-failure task-inspect-failure task-delete-failure container-delete-failure inspect-failure verify-failure containers-remain purge-failure archive-failure taskless force force-purge graceful graceful-compact single-node single-label single-pretty; do
     (
         export SCENARIO="$scenario" CALL_LOG="$tmp/$scenario.calls" CTR_LISTED="$tmp/$scenario.ctr-listed"
         export PATH="$tmp/mocks:$PATH"
@@ -106,11 +112,16 @@ for scenario in membership-failure cleanup-failure stop-failure task-inspect-fai
             force-purge) args+=(--force --purge) ;;
             archive-failure) args+=(--force) ;;
         esac
-        if [ "$scenario" = membership-failure ]; then
+        if [ "$scenario" = membership-failure ] || [[ "$scenario" = malformed || "$scenario" = wrong-shape || "$scenario" = empty ]]; then
             if bash "$tmp/scripts/uninstall.sh" "${args[@]}" >"$root/output" 2>&1; then
                 echo 'Expected membership inspection failure' >&2; exit 1
             fi
-            grep -q -- 'rerun with --force' "$root/output"
+            if [ "$scenario" = membership-failure ]; then
+                grep -q -- 'rerun with --force' "$root/output"
+            else
+                grep -q 'Invalid cluster membership output' "$root/output"
+                ! grep -q 'trellisctl nodes drain\|trellisctl nodes remove' "$CALL_LOG"
+            fi
             test -f "$SERVICE_FILE" && test -f "$INSTALL_DIR/trellisctl"
             test -f "$DATA_DIR/state" && test -f "$SECRETS_KEY_FILE"
             ! grep -q 'systemctl stop\|ctr ' "$CALL_LOG"
@@ -162,7 +173,7 @@ for scenario in membership-failure cleanup-failure stop-failure task-inspect-fai
             test ! -e "$INSTALL_DIR/trellis" && test ! -e "$INSTALL_DIR/trellis-health-probe"
             test ! -e "$RUN_DIR" && test ! -e "$CONFIG_DIR" && test ! -e "$DATA_DIR"
             grep -q 'systemctl stop trellis' "$CALL_LOG"
-            if [ "$scenario" = taskless ] || [ "$scenario" = graceful ]; then
+            if [ "$scenario" = taskless ] || [[ "$scenario" = graceful* ]]; then
                 ! grep -q 'ctr -n trellis tasks delete' "$CALL_LOG"
             else
                 grep -q 'ctr -n trellis tasks delete --force test-container' "$CALL_LOG"
@@ -175,10 +186,10 @@ for scenario in membership-failure cleanup-failure stop-failure task-inspect-fai
             dependencies_line="$(grep -n '^dependencies' "$CALL_LOG" | cut -d: -f1)"
             test "$dependencies_line" -gt "$data_line"
             test "$data_line" -gt "$cleanup_line"
-            if [ "$scenario" = graceful ]; then
+            if [[ "$scenario" = graceful* ]]; then
                 grep -q 'trellisctl nodes drain test-node' "$CALL_LOG"
                 grep -q 'trellisctl nodes remove test-node' "$CALL_LOG"
-            elif [ "$scenario" = single-node ]; then
+            elif [[ "$scenario" = single* ]]; then
                 ! grep -q 'trellisctl nodes drain\|trellisctl nodes remove' "$CALL_LOG"
                 grep -q 'Single-node cluster' "$root/output"
             else

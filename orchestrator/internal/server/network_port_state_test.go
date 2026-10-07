@@ -68,6 +68,8 @@ func TestRegisterNodeRejectsMismatchedWireGuardPortCount(t *testing.T) {
 	}
 	err := s.RegisterNode(context.Background(), &NodeRegistration{
 		ID:                 uuid.New(),
+		Host:               "node-a",
+		Port:               8127,
 		WireGuardPublicKey: "public-key",
 		WireGuardEndpoint:  "node-a:51820",
 		WireGuardPortBase:  51820,

@@ -15,6 +15,15 @@ var identifierPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$`)
 var labelKeyPattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9._/-]{0,62}$`)
 var envPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+func managedAPIEnv(name string) bool {
+	switch name {
+	case "TRELLIS_TOKEN", "TRELLIS_ADDR", "TRELLIS_NAMESPACE", "TRELLIS_CA_CERT":
+		return true
+	default:
+		return false
+	}
+}
+
 // ValidationIssue describes one independently actionable manifest error.
 type ValidationIssue struct {
 	Path    string `json:"path"`
@@ -207,6 +216,9 @@ func Validate(job *JobSpec) error {
 						add(path, "invalid_target", "env secret requires only a valid env name")
 					}
 					if secret.Env != "" {
+						if group.APIAccess != nil && managedAPIEnv(secret.Env) {
+							add(path+".env", "reserved", "environment name is managed by api_access")
+						}
 						if _, ok := secretEnvs[secret.Env]; ok {
 							add(path+".env", "duplicate", fmt.Sprintf("duplicate secret env %q", secret.Env))
 						} else {
@@ -237,6 +249,9 @@ func Validate(job *JobSpec) error {
 			}
 
 			for key := range task.Env {
+				if group.APIAccess != nil && managedAPIEnv(key) {
+					add(taskPath+".env."+key, "reserved", "environment name is managed by api_access")
+				}
 				if !envPattern.MatchString(key) {
 					add(taskPath+".env", "invalid_identifier", fmt.Sprintf("invalid env name %q", key))
 				}

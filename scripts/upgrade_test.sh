@@ -4,6 +4,13 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
+source "$script_dir/common.sh"
+for invalid in '' 'null' '{}' '[{}]' '[{"id":0}]' '[{"id":""}]' '[{"id":"node-a"}] []'; do
+    if printf '%s' "$invalid" | count_nodes_json >"$tmp/count" 2>/dev/null; then
+        echo "Accepted invalid membership: $invalid" >&2; exit 1
+    fi
+done
+printf 'PASS structural membership shape validation\n'
 cp "$script_dir/upgrade.sh" "$tmp/upgrade.sh"
 printf 'source %q\nsource %q\n' "$script_dir/common.sh" "$tmp/mocks.sh" >"$tmp/common.sh"
 cat >"$tmp/mocks.sh" <<'MOCKS'
@@ -24,7 +31,7 @@ wait_for_local_allocations_to_stop() { [ "$SCENARIO" != timeout ]; }
 journalctl() { :; }
 sleep() { :; }
 MOCKS
-for scenario in single multi explicit missing unauthorized timeout rollback root; do
+for scenario in single single-label single-pretty multi multi-compact malformed wrong-shape empty explicit missing unauthorized timeout rollback root; do
     (
         export SCENARIO="$scenario"
         export INSTALL_DIR="$tmp/$scenario/bin" CONFIG_DIR="$tmp/$scenario/etc"
@@ -66,6 +73,14 @@ case "$*" in
             printf 'status 401: invalid credential\n' >&2
             exit 1
         fi
+        case "$SCENARIO" in
+            single-label) printf '[\n{"id":"node-a",\n"labels":{"id":"rack-a"}}\n]\n'; exit 0 ;;
+            single-pretty) printf '[\n{"id":"node-a"}\n]\n'; exit 0 ;;
+            multi-compact) printf '[{"id":"node-a"},{"id":"node-b"}]\n'; exit 0 ;;
+            malformed) printf '[{"id":'; exit 0 ;;
+            wrong-shape) printf '{"id":"node-a"}\n'; exit 0 ;;
+            empty) printf '[]\n'; exit 0 ;;
+        esac
         if [ "$SCENARIO" = single ] || [ "$SCENARIO" = root ]; then
             printf '[{"id":"node-a"}]\n'
         else
@@ -80,9 +95,9 @@ CTL
         printf '#!/bin/sh\necho v-old\n' >"$INSTALL_DIR/trellis"
         chmod +x "$INSTALL_DIR/trellis"
         if bash "$tmp/upgrade.sh" >"$tmp/$scenario.output" 2>&1; then
-            case "$scenario" in single|multi|explicit|root) ;; *) exit 1 ;; esac
+            case "$scenario" in single*|multi*|explicit|root) ;; *) exit 1 ;; esac
             [ "$(cat "$VERSION_LOG")" = v-new ]
-            if [ "$scenario" = single ] || [ "$scenario" = root ]; then
+            if [[ "$scenario" = single* ]] || [ "$scenario" = root ]; then
                 ! grep -q 'nodes drain' "$CALL_LOG"
                 grep -q 'Single-node cluster' "$tmp/$scenario.output"
             else
@@ -90,7 +105,7 @@ CTL
                 grep -qx 'nodes undrain node-a' "$CALL_LOG"
             fi
         else
-            case "$scenario" in missing|unauthorized|timeout|rollback) ;; *) cat "$tmp/$scenario.output"; exit 1 ;; esac
+            case "$scenario" in missing|unauthorized|timeout|rollback|malformed|wrong-shape|empty) ;; *) cat "$tmp/$scenario.output"; exit 1 ;; esac
             [ "$("$INSTALL_DIR/trellis" --version)" = v-old ]
             test ! -e "$VERSION_LOG"
             if [ "$scenario" = rollback ]; then
@@ -102,6 +117,10 @@ CTL
             case "$scenario" in
                 missing) grep -q 'Operator config missing' "$tmp/$scenario.output" ;;
                 unauthorized) grep -q 'status 401: invalid credential' "$tmp/$scenario.output" ;;
+                malformed|wrong-shape|empty)
+                    grep -q 'Invalid cluster membership output' "$tmp/$scenario.output"
+                    ! grep -q 'nodes drain' "$CALL_LOG"
+                    ;;
                 timeout) grep -qx 'nodes undrain node-a' "$CALL_LOG" ;;
             esac
         fi

@@ -152,7 +152,7 @@ func TestDrainNodeFailureStatuses(t *testing.T) {
 func TestRegisterNodeRejectsInvalidCapacityAsBadRequest(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()
-	err := s.RegisterNode(context.Background(), &NodeRegistration{ID: uuid.New(), CPUCapacity: 1000, MemoryCapacity: 1 << 30, CPUAllocatable: 2000, MemoryAllocatable: 1 << 30})
+	err := s.RegisterNode(context.Background(), &NodeRegistration{ID: uuid.New(), Host: "node", Port: 8127, CPUCapacity: 1000, MemoryCapacity: 1 << 30, CPUAllocatable: 2000, MemoryAllocatable: 1 << 30})
 	if !errors.Is(err, ErrInvalidNodeRegistration) {
 		t.Fatalf("RegisterNode error = %v, want ErrInvalidNodeRegistration", err)
 	}

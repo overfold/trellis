@@ -106,7 +106,9 @@ if [ "$was_running" = true ] && [ -n "$node_id" ]; then
     if ! node_json="$(upgrade_ctl nodes list --output json)"; then
         ui_die "Could not inspect cluster membership; no binaries were changed."
     fi
-    node_count="$(printf '%s' "$node_json" | grep -c '"id"' || true)"
+    if ! node_count="$(printf '%s' "$node_json" | count_nodes_json)"; then
+        ui_die "Invalid cluster membership output; no binaries were changed."
+    fi
     if [ "${node_count:-0}" -gt 1 ]; then
         upgrade_ctl nodes drain "$node_id" >/dev/null
         drained=true

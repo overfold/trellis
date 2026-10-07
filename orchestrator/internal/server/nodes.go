@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/netip"
+	"regexp"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
@@ -14,6 +17,30 @@ import (
 
 // ErrNodeNotFound indicates that a requested node is absent.
 var ErrNodeNotFound = errors.New("node not found")
+
+var nodeHostLabel = regexp.MustCompile(`^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$`)
+
+func validateNodeEndpoint(host string, port int) error {
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("node port must be in 1-65535")
+	}
+	if addr, err := netip.ParseAddr(host); err == nil {
+		if strings.Trim(addr.Zone(), "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_.-") != "" {
+			return fmt.Errorf("node IPv6 zone must be an interface name or index")
+		}
+		return nil
+	}
+	name := strings.TrimSuffix(host, ".")
+	if name == "" || len(name) > 253 || strings.Contains(name, ".") && strings.Trim(name, "0123456789.") == "" {
+		return fmt.Errorf("node host must be an IP address or DNS hostname")
+	}
+	for label := range strings.SplitSeq(name, ".") {
+		if !nodeHostLabel.MatchString(label) {
+			return fmt.Errorf("node host must be an IP address or DNS hostname")
+		}
+	}
+	return nil
+}
 
 func validateNodeCapacity(cpuCapacity int, memoryCapacity int64, cpuAllocatable int, memoryAllocatable int64) error {
 	if cpuCapacity < 0 || memoryCapacity < 0 || cpuAllocatable < 0 || memoryAllocatable < 0 {
@@ -49,6 +76,9 @@ var ErrInvalidNodeRegistration = errors.New("invalid node registration")
 
 // RegisterNode adds or updates a cluster node.
 func (s *Server) RegisterNode(ctx context.Context, nodeRegistration *NodeRegistration) error {
+	if err := validateNodeEndpoint(nodeRegistration.Host, nodeRegistration.Port); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidNodeRegistration, err)
+	}
 	if err := validateNodeCapacity(nodeRegistration.CPUCapacity, nodeRegistration.MemoryCapacity, nodeRegistration.CPUAllocatable, nodeRegistration.MemoryAllocatable); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidNodeRegistration, err)
 	}

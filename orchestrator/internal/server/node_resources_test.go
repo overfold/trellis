@@ -15,7 +15,7 @@ func TestRegisterNodeRejectsAllocatableResourcesAboveCapacity(t *testing.T) {
 		now:   time.Now,
 	}
 	err := s.RegisterNode(context.Background(), &NodeRegistration{
-		ID: uuid.New(), CPUCapacity: 1000, CPUAllocatable: 1001,
+		ID: uuid.New(), Host: "node", Port: 8127, CPUCapacity: 1000, CPUAllocatable: 1001,
 		MemoryCapacity: 1 << 30, MemoryAllocatable: 1 << 30,
 	})
 	if err == nil {

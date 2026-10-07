@@ -398,7 +398,7 @@ func TestRegisterAndDrainSerializeDurableNodeSnapshots(t *testing.T) {
 	store.startOnce = sync.Once{}
 	registerDone := make(chan error, 1)
 	go func() {
-		registerDone <- s.RegisterNode(context.Background(), &NodeRegistration{ID: nodeID, Host: "new"})
+		registerDone <- s.RegisterNode(context.Background(), &NodeRegistration{ID: nodeID, Host: "new", Port: 8127})
 	}()
 	<-store.putStarted
 	drainDone := make(chan error, 1)
