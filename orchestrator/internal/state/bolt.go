@@ -3,6 +3,7 @@ package state
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -133,13 +134,13 @@ func (b *BoltStore) Delete(_ context.Context, key string) error {
 
 // Batch applies mutations in one Bolt write transaction.
 func (b *BoltStore) Batch(_ context.Context, mutations []Mutation) error {
+	if err := validateMutations(mutations); err != nil {
+		return err
+	}
 	if err := b.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(bucketName)
 		for _, mutation := range mutations {
 			if mutation.DeletePrefix != "" {
-				if mutation.Key != "" || mutation.Value != nil {
-					return fmt.Errorf("batch prefix deletion also contains a key or value")
-				}
 				cursor := bucket.Cursor()
 				prefix := []byte(mutation.DeletePrefix)
 				for key, _ := cursor.Seek(prefix); key != nil && strings.HasPrefix(string(key), mutation.DeletePrefix); key, _ = cursor.Next() {
@@ -148,9 +149,6 @@ func (b *BoltStore) Batch(_ context.Context, mutations []Mutation) error {
 					}
 				}
 				continue
-			}
-			if mutation.Key == "" {
-				return fmt.Errorf("batch contains an empty key")
 			}
 			var err error
 			if mutation.Value == nil {
@@ -165,6 +163,24 @@ func (b *BoltStore) Batch(_ context.Context, mutations []Mutation) error {
 		return nil
 	}); err != nil {
 		return fmt.Errorf("apply batch: %w", err)
+	}
+	return nil
+}
+
+func validateMutations(mutations []Mutation) error {
+	for _, mutation := range mutations {
+		if mutation.DeletePrefix != "" {
+			if mutation.Key != "" || mutation.Value != nil {
+				return fmt.Errorf("batch prefix deletion also contains a key or value")
+			}
+			continue
+		}
+		if mutation.Key == "" {
+			return fmt.Errorf("batch contains an empty key")
+		}
+		if len(mutation.Key) > bolt.MaxKeySize || len(mutation.Value) > bolt.MaxValueSize {
+			return fmt.Errorf("mutation exceeds storage key or value size limit")
+		}
 	}
 	return nil
 }
@@ -334,6 +350,9 @@ func (b *BoltStore) RestoreDesired(cluster string, snapshot *DesiredSnapshot) er
 		return err
 	}
 	return b.db.Update(func(tx *bolt.Tx) error {
+		if err := checkRestoreFresh(tx, cluster); err != nil {
+			return err
+		}
 		bucket := tx.Bucket(bucketName)
 		jobsPrefix := fmt.Appendf(nil, "trellis/%s/jobs/", cluster)
 		revisionsPrefix := fmt.Appendf(nil, "trellis/%s/job-revisions/", cluster)
@@ -341,13 +360,6 @@ func (b *BoltStore) RestoreDesired(cluster string, snapshot *DesiredSnapshot) er
 		volumesPrefix := fmt.Appendf(nil, "trellis/%s/volume-registrations/", cluster)
 		networkPortsPrefix := fmt.Appendf(nil, "trellis/%s/network-port-registrations/", cluster)
 		networkSubnetsPrefix := fmt.Appendf(nil, "trellis/%s/network-subnet-registrations/", cluster)
-		allocationsPrefix := fmt.Appendf(nil, "trellis/%s/allocations/", cluster)
-		for _, prefix := range [][]byte{jobsPrefix, revisionsPrefix, secretsPrefix, volumesPrefix, networkPortsPrefix, networkSubnetsPrefix, allocationsPrefix} {
-			key, _ := bucket.Cursor().Seek(prefix)
-			if key != nil && len(key) >= len(prefix) && string(key[:len(prefix)]) == string(prefix) {
-				return fmt.Errorf("restore requires a fresh cluster with no jobs, secrets, volume registrations, network port or subnet registrations, or allocations")
-			}
-		}
 		if len(snapshot.Cluster) > 0 {
 			if err := bucket.Put(fmt.Appendf(nil, "trellis/%s/meta", cluster), snapshot.Cluster); err != nil {
 				return err
@@ -400,6 +412,24 @@ func (b *BoltStore) RestoreDesired(cluster string, snapshot *DesiredSnapshot) er
 		}
 		return nil
 	})
+}
+
+// checkRestoreFresh is shared by leader preflight and atomic FSM installation.
+// Backoffs are scheduling state, not portable desired state; a target retaining
+// them is not fresh, even after its jobs and allocations have been deleted.
+func (b *BoltStore) checkRestoreFresh(cluster string) error {
+	return b.db.View(func(tx *bolt.Tx) error { return checkRestoreFresh(tx, cluster) })
+}
+
+func checkRestoreFresh(tx *bolt.Tx, cluster string) error {
+	for _, resource := range []string{"jobs", "job-revisions", "secrets", "volume-registrations", "network-port-registrations", "network-subnet-registrations", "allocations", "replacement-backoffs"} {
+		prefix := fmt.Appendf(nil, "trellis/%s/%s/", cluster, resource)
+		key, _ := tx.Bucket(bucketName).Cursor().Seek(prefix)
+		if bytes.HasPrefix(key, prefix) {
+			return fmt.Errorf("restore requires a fresh cluster with no jobs, job revisions, secrets, volume registrations, network port or subnet registrations, allocations, or replacement backoffs")
+		}
+	}
+	return nil
 }
 
 type persistedJob struct {

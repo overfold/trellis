@@ -295,13 +295,21 @@ func (s *Server) ClusterCA() (certPEM, keyPEM string, err error) {
 	return certPEM, keyPEM, nil
 }
 
-// Run starts background reconciliation until the context ends.
-func (s *Server) Run(ctx context.Context) {
+// Run starts background reconciliation until the context ends. The returned
+// channel closes after all leader-owned loops stop; callers must join the old
+// term before reloading state or starting another one.
+func (s *Server) Run(ctx context.Context) <-chan struct{} {
 	s.exec.startTerm(ctx)
-	go s.runReconcileLoop(ctx)
-	go s.runNetworkPlanLoop(ctx)
-	go s.runMembershipLoop(ctx)
-	go s.runObservationApplier(ctx)
+	var group sync.WaitGroup
+	for _, run := range []func(context.Context){s.runReconcileLoop, s.runNetworkPlanLoop, s.runMembershipLoop, s.runObservationApplier} {
+		group.Go(func() { run(ctx) })
+	}
+	done := make(chan struct{})
+	go func() {
+		group.Wait()
+		close(done)
+	}()
+	return done
 }
 
 // Reload reconstructs the durable control-plane state before a leadership term starts.

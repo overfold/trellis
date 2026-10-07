@@ -60,6 +60,29 @@ import (
 
 const shutdownTime = 10 * time.Second
 
+// leaderTerm owns cancellation and joining of a single set of leader loops.
+// Raft notifications are hints, not paired acquire/loss edges: even another
+// true must end the previous term before a new epoch or state reload.
+type leaderTerm struct {
+	cancel context.CancelFunc
+	done   <-chan struct{}
+}
+
+func (t *leaderTerm) stop() {
+	if t.cancel != nil {
+		t.cancel()
+		<-t.done
+		t.cancel, t.done = nil, nil
+	}
+}
+
+func (t *leaderTerm) start(ctx context.Context, run func(context.Context) <-chan struct{}) {
+	t.stop()
+	termCtx, cancel := context.WithCancel(ctx)
+	t.cancel = cancel
+	t.done = run(termCtx)
+}
+
 type config struct {
 	ConfigFile                                                                     string
 	ControlPlane, RunsWorkloads                                                    *bool
@@ -594,23 +617,20 @@ func run(parent context.Context, cfg *config) error {
 	}()
 	go watchLeader(ctx, log, elector, leaderClient)
 
-	var leaderCancel context.CancelFunc
+	var term leaderTerm
+	defer term.stop()
 	for {
 		select {
 		case <-ctx.Done():
-			if leaderCancel != nil {
-				leaderCancel()
-			}
 			return nil
 		case err := <-ag.Failed():
-			if leaderCancel != nil {
-				leaderCancel()
-			}
 			return fmt.Errorf("allocation agent: %w", err)
 		case event, ok := <-events:
 			if !ok {
 				return fmt.Errorf("leader election event stream closed")
 			}
+			apiProxy.SetLeaderActive(false)
+			term.stop()
 			if event.Elected {
 				// LeaderCh can fire before this node's FSM has applied every
 				// committed entry inherited from the previous leader. Reloading at
@@ -631,16 +651,11 @@ func run(parent context.Context, cfg *config) error {
 					stop()
 					continue
 				}
-				termCtx, cancel := context.WithCancel(ctx)
-				leaderCancel = cancel
 				log.Info("leadership acquired", "node_id", id, "address", cfg.ServerAdvertise)
-				control.Run(termCtx)
+				term.start(ctx, control.Run)
 				apiProxy.SetLeaderActive(true)
-			} else if leaderCancel != nil {
+			} else {
 				log.Warn("leadership lost", "node_id", id)
-				apiProxy.SetLeaderActive(false)
-				leaderCancel()
-				leaderCancel = nil
 			}
 		}
 	}

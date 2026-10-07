@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -26,6 +27,8 @@ var _ PrefixIterator = (*RaftStore)(nil)
 
 // RaftStore replicates state through a Raft cluster.
 type RaftStore struct {
+	// submitMu keeps restore preflight and commit ordered with all local writes.
+	submitMu         sync.RWMutex
 	raft             *raft.Raft
 	fsm              *fsm
 	transport        raft.Transport
@@ -61,10 +64,19 @@ func (r *RaftStore) BackupDesired(cluster string) (*DesiredSnapshot, error) {
 	return r.fsm.store.DesiredSnapshot(cluster)
 }
 
-// RestoreDesired installs a backup as one Raft log entry. The FSM rejects the
-// operation unless the target desired-state prefixes are empty.
+// RestoreDesired installs a backup as one Raft log entry. Ordinary validation
+// and freshness rejections happen before replication; a committed installation
+// failing on any replica is a fatal state-machine failure.
 func (r *RaftStore) RestoreDesired(cluster string, snapshot *DesiredSnapshot) error {
 	if err := ValidateDesiredSnapshot(snapshot, nil); err != nil {
+		return err
+	}
+	r.submitMu.Lock()
+	defer r.submitMu.Unlock()
+	if err := r.raft.Barrier(10 * time.Second).Error(); err != nil {
+		return err
+	}
+	if err := r.fsm.store.checkRestoreFresh(cluster); err != nil {
 		return err
 	}
 	cmd := fsmCommand{Op: "restore_desired", Cluster: cluster, Snapshot: snapshot}
@@ -81,6 +93,11 @@ func (r *RaftStore) RestoreDesired(cluster string, snapshot *DesiredSnapshot) er
 
 // Batch applies mutations as one Raft log entry and one Bolt transaction.
 func (r *RaftStore) Batch(_ context.Context, mutations []Mutation) error {
+	if err := validateMutations(mutations); err != nil {
+		return err
+	}
+	r.submitMu.RLock()
+	defer r.submitMu.RUnlock()
 	cmd := fsmCommand{Op: "batch", Mutations: mutations}
 	data, _ := json.Marshal(cmd)
 	fut := r.raft.Apply(data, 10*time.Second)
@@ -357,6 +374,11 @@ func (r *RaftStore) List(ctx context.Context, prefix string) (map[string][]byte,
 
 // Put applies a replicated value update.
 func (r *RaftStore) Put(_ context.Context, key string, value []byte) error {
+	if err := validateMutations([]Mutation{{Key: key, Value: value}}); err != nil {
+		return err
+	}
+	r.submitMu.RLock()
+	defer r.submitMu.RUnlock()
 	cmd := fsmCommand{Op: "put", Key: key, Value: value}
 	data, _ := json.Marshal(cmd)
 	fut := r.raft.Apply(data, 10*time.Second)
@@ -371,6 +393,8 @@ func (r *RaftStore) Put(_ context.Context, key string, value []byte) error {
 
 // Delete applies a replicated key deletion.
 func (r *RaftStore) Delete(_ context.Context, key string) error {
+	r.submitMu.RLock()
+	defer r.submitMu.RUnlock()
 	cmd := fsmCommand{Op: "delete", Key: key}
 	data, _ := json.Marshal(cmd)
 	fut := r.raft.Apply(data, 10*time.Second)
@@ -464,6 +488,17 @@ type fsmCommand struct {
 }
 
 func (f *fsm) Apply(log *raft.Log) any {
+	if err := f.apply(log); err != nil {
+		// Raft discards follower responses and advances its applied index even
+		// on error. Never let a replica serve, vote, or snapshot after skipping
+		// a committed mutation. A panic on the Raft FSM goroutine terminates
+		// the process; include identity, not command contents (possibly secrets).
+		panic(fmt.Sprintf("fatal Raft FSM apply at index %d term %d: %v", log.Index, log.Term, err))
+	}
+	return nil
+}
+
+func (f *fsm) apply(log *raft.Log) error {
 	var cmd fsmCommand
 	if err := json.Unmarshal(log.Data, &cmd); err != nil {
 		return err

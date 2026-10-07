@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -22,6 +24,64 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 	"github.com/overfold/trellis/orchestrator/internal/state"
 )
+
+func TestRestoreReloadDoesNotWithholdPlacementsForOldBackoffs(t *testing.T) {
+	for _, incarnation := range []string{"same", "different"} {
+		for _, revision := range []int{3, 4} {
+			t.Run(fmt.Sprintf("incarnation=%s/revision=%d", incarnation, revision), func(t *testing.T) {
+				store, err := state.NewBoltStore(filepath.Join(t.TempDir(), "state.db"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = store.Close() })
+				controller := NewStateController(store, "test")
+				job := planTestJob("web", 1, 3, "")
+				job.Incarnation, job.Version = "same", 3
+				value, err := json.Marshal(job)
+				if err != nil {
+					t.Fatal(err)
+				}
+				snapshot := &state.DesiredSnapshot{Jobs: map[string][]byte{url.QueryEscape(jobKey("default", "web")): value}}
+				old := &ReplacementBackoff{Namespace: "default", JobName: "web", TaskGroupName: "app", JobIncarnation: incarnation, JobRevision: revision, Failures: 7, DelayedReplacements: 1, NextReplacementAt: planNow.Add(time.Hour)}
+				if err := controller.PutReplacementBackoff(t.Context(), old); err != nil {
+					t.Fatal(err)
+				}
+				// This demonstrates why a matching stale record is dangerous even
+				// with no allocations, while a changed incarnation/revision resets.
+				planned := planReplacementBackoff(DefaultReplacementPolicy(), old, "default", "web", "app", 3, nil, planNow, "same")
+				wantWithheld := 0
+				if incarnation == "same" && revision == 3 {
+					wantWithheld = 1
+				}
+				if got := planned.withheld(1, planNow); got != wantWithheld {
+					t.Fatalf("old backoff withheld %d, want %d", got, wantWithheld)
+				}
+				if err := store.RestoreDesired("test", snapshot); err == nil {
+					t.Fatal("restore accepted stale scheduling state")
+				}
+				if err := store.Batch(t.Context(), []state.Mutation{{DeletePrefix: "trellis/test/replacement-backoffs/"}}); err != nil {
+					t.Fatal(err)
+				}
+				if err := store.RestoreDesired("test", snapshot); err != nil {
+					t.Fatal(err)
+				}
+				s := NewServer(slog.Default(), nil, controller, store, "test", "")
+				if err := s.Reload(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+				input := planTestInput(s.jobs, []*Node{planTestNode(1, NodeStatusHealthy)})
+				input.Backoffs = s.replacementBackoffs
+				plan, err := planReconciliation(input)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(plan.NewAllocations) != 1 || len(s.replacementBackoffs) != 0 {
+					t.Fatalf("restored placements=%d backoffs=%#v, want one clean placement", len(plan.NewAllocations), s.replacementBackoffs)
+				}
+			})
+		}
+	}
+}
 
 func TestReplacementBackoffDelaySchedule(t *testing.T) {
 	policy := DefaultReplacementPolicy()

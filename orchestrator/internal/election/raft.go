@@ -28,7 +28,11 @@ func (e *RaftElector) Run(ctx context.Context, events chan<- Event) error {
 	for {
 		select {
 		case isLeader := <-ch:
-			events <- Event{Leader: e.self, Elected: isLeader}
+			select {
+			case events <- Event{Leader: e.self, Elected: isLeader}:
+			case <-ctx.Done():
+				return nil
+			}
 		case <-ctx.Done():
 			return nil
 		}

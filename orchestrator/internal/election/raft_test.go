@@ -103,6 +103,38 @@ func TestRaftElector_ElectedEvent(t *testing.T) {
 	}
 }
 
+func TestRaftElectorCancellationWhileForwarding(t *testing.T) {
+	r, bind, nodeID := newTestRaft(t)
+	deadline := time.Now().Add(5 * time.Second)
+	for len(r.LeaderCh()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(r.LeaderCh()) == 0 {
+		t.Fatal("no leadership notification")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	elector := NewRaftElector(r, Leader{NodeID: nodeID, Address: bind}, nil)
+	go func() { done <- elector.Run(ctx, make(chan Event)) }()
+	for len(r.LeaderCh()) != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(r.LeaderCh()) != 0 {
+		t.Fatal("elector did not drain notification")
+	}
+	// No consumer will ever receive the forwarded event.
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("elector stuck forwarding after shutdown")
+	}
+}
+
 func TestRaftElector_Current(t *testing.T) {
 	r, bind, nodeID := newTestRaft(t)
 	elector := NewRaftElector(r, Leader{NodeID: nodeID, Address: bind}, nil)
