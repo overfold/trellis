@@ -63,29 +63,15 @@ func (vm *VolumeManager) AvailableHostVolumes() []string {
 // operator-managed and must already exist. Once prepared, the namespace/name is
 // persistently registered to this node; later path changes keep the same identity.
 func (vm *VolumeManager) Create(namespace string, _ string, allocationID string, volume spec.VolumeSpec) (*runtime.Mount, error) {
-	hostPath, managed, err := vm.resolveHostPath(namespace, volume.HostPath)
+	vm.mu.RLock()
+	stagingErr := vm.stagingErr
+	vm.mu.RUnlock()
+	if stagingErr != nil {
+		return nil, fmt.Errorf("cleaning stale volume staging mounts: %w", stagingErr)
+	}
+	hostPath, err := vm.prepareDirectory(namespace, allocationID, volume.Name, volume.HostPath)
 	if err != nil {
 		return nil, err
-	}
-	if managed {
-		vm.mu.RLock()
-		stagingErr := vm.stagingErr
-		vm.mu.RUnlock()
-		if stagingErr != nil {
-			return nil, fmt.Errorf("cleaning stale volume staging mounts: %w", stagingErr)
-		}
-		hostPath, err = vm.prepareManagedDirectory(namespace, allocationID, volume.Name, volume.HostPath)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		info, err := os.Stat(hostPath)
-		if err != nil {
-			return nil, fmt.Errorf("checking host path %s: %w", hostPath, err)
-		}
-		if !info.IsDir() {
-			return nil, fmt.Errorf("host path %s is not a directory", hostPath)
-		}
 	}
 	if err := vm.register(namespace, volume.Name, hostPath); err != nil {
 		return nil, err
@@ -95,21 +81,11 @@ func (vm *VolumeManager) Create(namespace string, _ string, allocationID string,
 
 // Check reports whether a volume backing directory is available.
 func (vm *VolumeManager) Check(namespace string, _ string, _ string, volume spec.VolumeSpec) (bool, error) {
-	hostPath, managed, err := vm.resolveHostPath(namespace, volume.HostPath)
+	fd, err := vm.openVolumeDirectory(namespace, volume.HostPath, false)
 	if err != nil {
 		return false, err
 	}
-	if managed {
-		if err := vm.checkManagedDirectory(namespace, volume.HostPath); err != nil {
-			return false, err
-		}
-		return true, nil
-	}
-	info, err := os.Stat(hostPath)
-	if err != nil {
-		return false, fmt.Errorf("checking volume dir %s: %w", hostPath, err)
-	}
-	return info.IsDir(), nil
+	return true, unix.Close(fd)
 }
 
 // Delete intentionally does not remove a registration or its data. A named
@@ -136,18 +112,18 @@ func (vm *VolumeManager) resolveHostPath(namespace, hostPath string) (string, bo
 	return filepath.Join(vm.dataRootPath, "volumes", "namespaces", namespace, filepath.FromSlash(rel)), true, nil
 }
 
-// prepareManagedDirectory creates each managed-volume component through a
-// descriptor rooted at the namespace directory, then bind-mounts the resolved
+// prepareDirectory resolves each volume component without following symlinks,
+// creating missing components only for managed volumes, then bind-mounts the resolved
 // inode at a Trellis-controlled staging path. This preserves the resolved inode
 // for containerd rather than returning an attacker-writable pathname for it to
 // resolve again. The staging mount remains the container's OCI mount source,
 // so it must outlive every task started from that container, including
 // in-place restarts.
-func (vm *VolumeManager) prepareManagedDirectory(namespace, allocationID, volumeName, hostPath string) (string, error) {
+func (vm *VolumeManager) prepareDirectory(namespace, allocationID, volumeName, hostPath string) (string, error) {
 	if !spec.ValidIdentifier(volumeName) {
 		return "", fmt.Errorf("invalid volume name %q", volumeName)
 	}
-	fd, err := vm.openManagedDirectory(namespace, hostPath, true)
+	fd, err := vm.openVolumeDirectory(namespace, hostPath, true)
 	if err != nil {
 		return "", err
 	}
@@ -155,40 +131,46 @@ func (vm *VolumeManager) prepareManagedDirectory(namespace, allocationID, volume
 
 	target := vm.stagingPath(allocationID, volumeName)
 	if err := os.MkdirAll(target, 0o700); err != nil {
-		return "", fmt.Errorf("creating managed volume staging directory: %w", err)
+		return "", fmt.Errorf("creating volume staging directory: %w", err)
 	}
 	if err := vm.stage(fd, target); err != nil {
-		return "", fmt.Errorf("staging managed volume: %w", err)
+		return "", fmt.Errorf("staging volume: %w", err)
 	}
 	return target, nil
 }
 
-func (vm *VolumeManager) checkManagedDirectory(namespace, hostPath string) error {
-	fd, err := vm.openManagedDirectory(namespace, hostPath, false)
+func (vm *VolumeManager) openVolumeDirectory(namespace, hostPath string, create bool) (int, error) {
+	resolved, managed, err := vm.resolveHostPath(namespace, hostPath)
 	if err != nil {
-		return err
+		return -1, err
 	}
-	return unix.Close(fd)
-}
-
-func (vm *VolumeManager) openManagedDirectory(namespace, hostPath string, create bool) (int, error) {
-	if err := os.MkdirAll(vm.dataRootPath, 0o750); err != nil {
-		return -1, fmt.Errorf("creating data root: %w", err)
+	root := "/"
+	var components []string
+	if managed {
+		if err := os.MkdirAll(vm.dataRootPath, 0o750); err != nil {
+			return -1, fmt.Errorf("creating data root: %w", err)
+		}
+		root = vm.dataRootPath
+		components = append([]string{"volumes", "namespaces", namespace}, strings.Split(strings.TrimPrefix(hostPath, "@/"), "/")...)
+	} else {
+		create = false
+		if resolved != "/" {
+			components = strings.Split(strings.TrimPrefix(resolved, "/"), "/")
+		}
 	}
-	fd, err := unix.Open(vm.dataRootPath, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	fd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return -1, fmt.Errorf("opening data root: %w", err)
+		return -1, fmt.Errorf("opening volume root %q: %w", root, err)
 	}
-	components := append([]string{"volumes", "namespaces", namespace}, strings.Split(strings.TrimPrefix(hostPath, "@/"), "/")...)
 	for _, component := range components {
 		next, err := openDirectoryAt(fd, component, create)
 		closeErr := unix.Close(fd)
 		if err != nil {
-			return -1, fmt.Errorf("opening managed volume component %q: %w", component, err)
+			return -1, fmt.Errorf("opening volume %q component %q: %w", hostPath, component, err)
 		}
 		if closeErr != nil {
 			_ = unix.Close(next)
-			return -1, fmt.Errorf("closing managed volume component: %w", closeErr)
+			return -1, fmt.Errorf("closing volume component: %w", closeErr)
 		}
 		fd = next
 	}

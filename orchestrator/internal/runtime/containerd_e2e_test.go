@@ -5,6 +5,7 @@ package runtime_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -246,9 +247,9 @@ func TestContainerdStopsCreatedTask(t *testing.T) {
 	}
 }
 
-// A managed volume's staging mount is the container's OCI mount source, so a
-// restart that creates a new task must still find it.
-func TestContainerdRestartsTaskWithManagedVolume(t *testing.T) {
+// Staging pins the backing directory even if its pathname is replaced before
+// containerd creates a new task during an in-place restart.
+func TestContainerdRestartsTaskWithStagedVolume(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("containerd overlayfs E2E requires root; run this test with sudo")
 	}
@@ -270,37 +271,63 @@ func TestContainerdRestartsTaskWithManagedVolume(t *testing.T) {
 	if err := r.Pull(ctx, image); err != nil {
 		t.Fatal(err)
 	}
-	const id = "trellis-e2e-managed-volume-restart"
-	_ = r.Stop(ctx, id)
-	_ = r.Remove(ctx, id)
+	for _, managed := range []bool{true, false} {
+		t.Run(fmt.Sprintf("managed=%t", managed), func(t *testing.T) {
+			id := fmt.Sprintf("trellis-e2e-volume-restart-%t", managed)
+			_ = r.Stop(ctx, id)
+			_ = r.Remove(ctx, id)
 
-	dataRoot := t.TempDir()
-	volumes := agent.NewVolumeManager(dataRoot)
-	if err := volumes.CleanupStaging(nil); err != nil {
-		t.Fatal(err)
-	}
-	volume := spec.VolumeSpec{Name: "data", HostPath: "@/data", ContainerPath: "/data"}
-	mount, err := volumes.Create("e2e", "job", id, volume)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = volumes.ReleaseStaging(id) }()
-	created, err := r.Create(ctx, runtime.CreateOptions{ID: id, Image: image, Runtime: "runc", Mounts: []*runtime.Mount{mount}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = r.Stop(context.Background(), created); _ = r.Remove(context.Background(), created) }()
-	if err := r.Start(ctx, created); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	if err := r.Restart(ctx, created); err != nil {
-		t.Fatalf("restart with managed volume: %v", err)
-	}
-	if code, err := r.Exec(ctx, created, []string{"touch", "/data/after-restart"}); err != nil || code != 0 {
-		t.Fatalf("write managed volume after restart: code = %d, error = %v", code, err)
-	}
-	if _, err := os.Stat(filepath.Join(dataRoot, "volumes", "namespaces", "e2e", "data", "after-restart")); err != nil {
-		t.Fatalf("restarted task did not mount the managed volume: %v", err)
+			dataRoot := t.TempDir()
+			backing := filepath.Join(dataRoot, "volumes", "namespaces", "e2e", "data")
+			hostPath := "@/data"
+			if !managed {
+				backing = filepath.Join(dataRoot, "absolute")
+				hostPath = backing
+				if err := os.Mkdir(backing, 0o750); err != nil {
+					t.Fatal(err)
+				}
+			}
+			volumes := agent.NewVolumeManager(dataRoot)
+			if err := volumes.CleanupStaging(nil); err != nil {
+				t.Fatal(err)
+			}
+			volume := spec.VolumeSpec{Name: "data", HostPath: hostPath, ContainerPath: "/data"}
+			mount, err := volumes.Create("e2e", "job", id, volume)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = volumes.ReleaseStaging(id) }()
+			created, err := r.Create(ctx, runtime.CreateOptions{ID: id, Image: image, Runtime: "runc", Mounts: []*runtime.Mount{mount}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = r.Stop(context.Background(), created); _ = r.Remove(context.Background(), created) }()
+			if err := r.Start(ctx, created); err != nil {
+				t.Fatalf("start: %v", err)
+			}
+			original := backing + "-original"
+			if err := os.Rename(backing, original); err != nil {
+				t.Fatal(err)
+			}
+			// Use a disposable decoy rather than / so a regression cannot write to
+			// the host root. A redirected mount would write into this directory.
+			decoy := t.TempDir()
+			if err := os.Symlink(decoy, backing); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Restart(ctx, created); err != nil {
+				t.Fatalf("restart with staged volume: %v", err)
+			}
+			if code, err := r.Exec(ctx, created, []string{"touch", "/data/after-restart"}); err != nil || code != 0 {
+				t.Fatalf("write volume after restart: code = %d, error = %v", code, err)
+			}
+			if _, err := os.Stat(filepath.Join(original, "after-restart")); err != nil {
+				t.Fatalf("restarted task did not mount the original volume: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(decoy, "after-restart")); !os.IsNotExist(err) {
+				t.Fatalf("restarted task wrote into the replacement: %v", err)
+			}
+		})
 	}
 }
 

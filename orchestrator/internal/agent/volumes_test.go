@@ -51,35 +51,45 @@ func TestVolumeManagerRejectsManagedVolumeSymlinks(t *testing.T) {
 }
 
 func TestVolumeManagerStagesResolvedDirectoryBeforeRuntimeMount(t *testing.T) {
-	root := t.TempDir()
-	managedPath := filepath.Join(root, "volumes", "namespaces", "ns", "shared", "victim")
-	if err := os.MkdirAll(managedPath, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(managedPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	for _, managed := range []bool{true, false} {
+		t.Run(fmt.Sprintf("managed=%t", managed), func(t *testing.T) {
+			root := t.TempDir()
+			managedPath := filepath.Join(root, "volumes", "namespaces", "ns", "shared", "victim")
+			if err := os.MkdirAll(managedPath, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(managedPath)
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	manager := newTestVolumeManager(root)
-	var staged unix.Stat_t
-	manager.stage = func(fd int, _ string) error { return unix.Fstat(fd, &staged) }
-	mount, err := manager.Create("ns", "job", "allocation", spec.VolumeSpec{Name: "data", HostPath: "@/shared/victim", ContainerPath: "/data"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(managedPath); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink("/", managedPath); err != nil {
-		t.Fatal(err)
-	}
+			manager := newTestVolumeManager(root)
+			var staged unix.Stat_t
+			manager.stage = func(fd int, _ string) error {
+				if err := os.Remove(managedPath); err != nil {
+					return err
+				}
+				if err := os.Symlink("/", managedPath); err != nil {
+					return err
+				}
+				return unix.Fstat(fd, &staged)
+			}
+			hostPath := managedPath
+			if managed {
+				hostPath = "@/shared/victim"
+			}
+			mount, err := manager.Create("ns", "job", "allocation", spec.VolumeSpec{Name: "data", HostPath: hostPath, ContainerPath: "/data"})
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	if mount.HostPath != manager.stagingPath("allocation", "data") {
-		t.Fatalf("runtime mount still uses managed path: %q", mount.HostPath)
-	}
-	if uint64(info.Sys().(*syscall.Stat_t).Ino) != staged.Ino {
-		t.Fatalf("staged inode = %d, want %d", staged.Ino, info.Sys().(*syscall.Stat_t).Ino)
+			if mount.HostPath != manager.stagingPath("allocation", "data") {
+				t.Fatalf("runtime mount still uses replaceable path: %q", mount.HostPath)
+			}
+			if uint64(info.Sys().(*syscall.Stat_t).Ino) != staged.Ino {
+				t.Fatalf("staged inode = %d, want %d", staged.Ino, info.Sys().(*syscall.Stat_t).Ino)
+			}
+		})
 	}
 }
 
@@ -108,16 +118,56 @@ func TestVolumeManagerUsesExplicitHostPath(t *testing.T) {
 	if err := os.Mkdir(host, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	manager := NewVolumeManager(root)
+	manager := newTestVolumeManager(root)
 	mount, err := manager.Create("default", "app", "db", spec.VolumeSpec{Name: "database", HostPath: host, ContainerPath: "/data", ReadOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if mount.HostPath != host || !mount.ReadOnly {
+	if mount.HostPath != manager.stagingPath("db", "database") || !mount.ReadOnly {
 		t.Fatalf("unexpected mount: %#v", mount)
 	}
 	if got := manager.AvailableHostVolumes(); !slices.Contains(got, "default/database") {
 		t.Fatalf("explicit path registration not advertised: %v", got)
+	}
+}
+
+func TestVolumeManagerChecksAbsolutePathsWithoutSymlinks(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "directory")
+	if err := os.MkdirAll(filepath.Join(dir, "child"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatal(err)
+	}
+	dangling := filepath.Join(root, "dangling")
+	if err := os.Symlink(filepath.Join(root, "missing"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(root, "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager := newTestVolumeManager(filepath.Join(root, "agent"))
+	manager.stage = func(int, string) error { t.Fatal("unexpected staging mount"); return nil }
+	for _, path := range []string{dir, "/"} {
+		ok, err := manager.Check("ns", "job", "task", spec.VolumeSpec{HostPath: path})
+		if err != nil || !ok {
+			t.Fatalf("Check(%q) = %t, %v", path, ok, err)
+		}
+	}
+	for _, path := range []string{link, filepath.Join(link, "child"), dangling, filepath.Join(dangling, "child"), file, filepath.Join(root, "missing", "child")} {
+		volume := spec.VolumeSpec{Name: "data", HostPath: path, ContainerPath: "/data"}
+		if ok, err := manager.Check("ns", "job", "task", volume); err == nil || ok {
+			t.Errorf("Check(%q) = %t, %v; want rejection", path, ok, err)
+		}
+		if _, err := manager.Create("ns", "job", "task", volume); err == nil {
+			t.Errorf("Create(%q) succeeded", path)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "missing")); !os.IsNotExist(err) {
+		t.Fatalf("absolute volume created missing directories: %v", err)
 	}
 }
 

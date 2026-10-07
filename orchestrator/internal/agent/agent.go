@@ -1957,7 +1957,7 @@ func (a *Agent) commitTaskStart(launch *taskLaunch, mounts []*runtime.Mount) err
 			return fmt.Errorf("mark allocation healthy: %w", err)
 		}
 	}
-	// Keep managed-volume staging mounts until the container is removed: they
+	// Keep volume staging mounts until the container is removed: they
 	// are its OCI mount sources, which every restarted task resolves again.
 	launch.committed = true
 	return nil
