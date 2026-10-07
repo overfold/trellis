@@ -223,8 +223,8 @@ func TestReconcileStopsLostOriginalOnceReplacementRuns(t *testing.T) {
 			t.Fatalf("stop = %#v, want original generation 1", operation)
 		}
 	}
-	if f.original.Phase != lifecycle.PhaseLost || replacement.Phase != lifecycle.PhaseRunning {
-		t.Fatalf("phases after reconcile: original=%s replacement=%s, want lost/running", f.original.Phase, replacement.Phase)
+	if f.original.Phase != lifecycle.PhaseStopped || replacement.Phase != lifecycle.PhaseRunning {
+		t.Fatalf("phases after reconcile: original=%s replacement=%s, want stopped/running", f.original.Phase, replacement.Phase)
 	}
 }
 

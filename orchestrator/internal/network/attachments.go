@@ -54,6 +54,67 @@ func (m *WireGuardManager) netnsPath(allocationID string) string {
 	return filepath.Join(dir, allocationID)
 }
 
+// validateAttachmentCIDR checks journals (including interrupted attaches) and
+// leases before creating anything. The caller holds m.mu through reservation.
+func (m *WireGuardManager) validateAttachmentCIDR(namespace, network, cidr string) error {
+	prefix, err := netip.ParsePrefix(cidr)
+	if err != nil || !prefix.Addr().Is4() || prefix.Bits() > 29 {
+		return fmt.Errorf("CIDR %q has no IPv4 allocation space", cidr)
+	}
+	entries, err := os.ReadDir(filepath.Join(m.stateDir, attachmentJournalDir))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("inspect attachment CIDRs: %w", err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		id, ok := strings.CutSuffix(entry.Name(), ".json")
+		if !ok || !safeAllocation.MatchString(id) {
+			return fmt.Errorf("unexpected network attachment record %q", entry.Name())
+		}
+		record, err := m.readAttachmentRecord(id)
+		if err != nil {
+			return err
+		}
+		existing, err := netip.ParsePrefix(record.CIDR)
+		if err != nil {
+			return fmt.Errorf("invalid attachment CIDR for %s: %w", id, err)
+		}
+		if prefix.Overlaps(existing) && (namespace != record.Namespace || network != record.Network) {
+			return fmt.Errorf("CIDR %s overlaps attachment %s in namespace %q network %q", cidr, id, record.Namespace, record.Network)
+		}
+	}
+	// Leases can outlive a journal after interrupted or manual recovery. Their
+	// filenames retain the subnet even when no allocation record is readable.
+	networks, err := os.ReadDir(m.stateDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect network leases: %w", err)
+	}
+	for _, entry := range networks {
+		if !entry.IsDir() || !safeName.MatchString(entry.Name()) || entry.Name() == "plans" || entry.Name() == network {
+			continue
+		}
+		leases, err := os.ReadDir(filepath.Join(m.stateDir, entry.Name()))
+		if err != nil {
+			return fmt.Errorf("inspect network %q leases: %w", entry.Name(), err)
+		}
+		for _, lease := range leases {
+			existing, err := netip.ParsePrefix(strings.ReplaceAll(lease.Name(), "_", "/"))
+			if err != nil {
+				return fmt.Errorf("invalid address lease %q in network %q", lease.Name(), entry.Name())
+			}
+			if prefix.Overlaps(existing) {
+				return fmt.Errorf("CIDR %s overlaps leases in network %q", cidr, entry.Name())
+			}
+		}
+	}
+	return nil
+}
+
 // recordAttachment durably journals an attachment before any of its
 // resources exist. It refuses an allocation that already has a record, so an
 // attach never adopts, and a failed attach never removes, another attempt's
@@ -72,11 +133,9 @@ func (m *WireGuardManager) recordAttachment(record attachmentRecord) error {
 	if err := writeAtomicFile(path, raw, 0o600); err != nil {
 		return fmt.Errorf("record network attachment: %w", err)
 	}
-	if m.namespaceCIDRsLoaded {
-		if prefix, err := netip.ParsePrefix(record.CIDR); err == nil {
-			m.namespaceCIDRs[prefix.Masked()] = record.Namespace
-		}
-	}
+	m.namespaceCIDRsLoaded = false
+	m.namespaceCIDRsRetryAt = time.Time{}
+	clear(m.namespaceCIDRs)
 	return nil
 }
 
@@ -191,15 +250,20 @@ func (m *WireGuardManager) NamespaceForIP(address netip.Addr) (string, bool) {
 	if !m.namespaceCIDRsLoaded && !time.Now().Before(m.namespaceCIDRsRetryAt) {
 		m.loadNamespaceCIDRsLocked()
 	}
-	for prefix, namespace := range m.namespaceCIDRs {
+	namespace := ""
+	for prefix, owner := range m.namespaceCIDRs {
 		if prefix.Contains(address) {
-			return namespace, true
+			if namespace != "" && namespace != owner {
+				return "", false
+			}
+			namespace = owner
 		}
 	}
-	return "", false
+	return namespace, namespace != ""
 }
 
 func (m *WireGuardManager) loadNamespaceCIDRsLocked() {
+	m.namespaceCIDRsLoaded = false
 	m.namespaceCIDRs = make(map[netip.Prefix]string)
 	m.namespaceCIDRsRetryAt = time.Now().Add(time.Second)
 	cidrs := make(map[netip.Prefix]string)
@@ -225,8 +289,10 @@ func (m *WireGuardManager) loadNamespaceCIDRsLocked() {
 			return
 		}
 		prefix = prefix.Masked()
-		if namespace, exists := cidrs[prefix]; exists && namespace != record.Namespace {
-			return
+		for existing, namespace := range cidrs {
+			if existing.Overlaps(prefix) && namespace != record.Namespace {
+				return
+			}
 		}
 		cidrs[prefix] = record.Namespace
 	}
@@ -285,6 +351,9 @@ func (m *WireGuardManager) detachLocked(ctx context.Context, a Attachment) error
 	if err := os.Remove(m.journalPath(a.AllocationID)); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove network attachment record: %w", err)
 	}
+	m.namespaceCIDRsLoaded = false
+	m.namespaceCIDRsRetryAt = time.Time{}
+	clear(m.namespaceCIDRs)
 	return nil
 }
 
@@ -381,9 +450,6 @@ func (m *WireGuardManager) removeNamespacePathLocked(ctx context.Context, a Atta
 	}
 	if err := os.Remove(m.planPath(a.Namespace, a.Network)); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove applied network plan: %w", err)
-	}
-	if prefix, err := netip.ParsePrefix(a.Address); err == nil && m.namespaceCIDRsLoaded {
-		delete(m.namespaceCIDRs, prefix.Masked())
 	}
 	return nil
 }

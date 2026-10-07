@@ -3,6 +3,7 @@ package network
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -101,6 +102,132 @@ func TestNamespaceForIPUsesJournaledNamespaceCIDR(t *testing.T) {
 	}
 	if namespace, ok := manager.NamespaceForIP(netip.MustParseAddr("10.42.2.23")); ok || namespace != "" {
 		t.Fatalf("NamespaceForIP(other) = %q, %v; want empty, false", namespace, ok)
+	}
+}
+
+func TestAttachRejectsOverlappingNetworksUntilFinalDetach(t *testing.T) {
+	for _, tc := range []struct{ namespace, network, cidr string }{
+		{"other", "other", "10.42.1.9/24"},
+		{"acme", "other", "10.42.1.128/25"},
+		{"other", "acme", "10.42.0.0/23"},
+	} {
+		t.Run(tc.namespace+"/"+tc.network+"/"+tc.cidr, func(t *testing.T) {
+			manager, runner := newRecoveryTestManager(t)
+			first := attachForRecovery(t, manager, "alloc-one")
+			second := attachForRecovery(t, manager, "alloc-two")
+			plan := recoveryTestPlan()
+			plan.CIDR = tc.cidr
+			request := AttachRequest{Namespace: tc.namespace, Network: tc.network, AllocationID: "replacement", Plan: plan}
+			before := len(runner.commands)
+			if _, err := manager.Attach(context.Background(), request); err == nil || !strings.Contains(err.Error(), "overlaps") {
+				t.Fatalf("overlapping attach error = %v", err)
+			}
+			if len(runner.commands) != before {
+				t.Fatal("rejected attach ran network commands")
+			}
+			assertAttachments(t, manager, "alloc-one", "alloc-two")
+			// Warm attribution, then remove only one of two owners.
+			address := netip.MustParseAddr("10.42.1.23")
+			if ns, ok := manager.NamespaceForIP(address); !ok || ns != "acme" {
+				t.Fatalf("initial attribution = %q, %v", ns, ok)
+			}
+			if err := manager.Detach(context.Background(), first); err != nil {
+				t.Fatal(err)
+			}
+			if ns, ok := manager.NamespaceForIP(address); !ok || ns != "acme" {
+				t.Fatalf("remaining attachment attribution = %q, %v", ns, ok)
+			}
+			if _, err := manager.Attach(context.Background(), request); err == nil {
+				t.Fatal("subnet reused before final detach")
+			}
+			if err := manager.Detach(context.Background(), second); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := manager.NamespaceForIP(address); ok {
+				t.Fatal("final detach left attribution cached")
+			}
+			// Use a valid gateway for the reclaimed CIDR.
+			request.Plan = recoveryTestPlan()
+			if _, err := manager.Attach(context.Background(), request); err != nil {
+				t.Fatalf("attach after final detach: %v", err)
+			}
+			if ns, ok := manager.NamespaceForIP(address); !ok || ns != tc.namespace {
+				t.Fatalf("reclaimed attribution = %q, %v", ns, ok)
+			}
+		})
+	}
+}
+
+func TestAttachWithoutExistingStateDirectory(t *testing.T) {
+	manager, _ := newRecoveryTestManager(t)
+	manager.stateDir = filepath.Join(t.TempDir(), "network")
+	attachForRecovery(t, manager, "first")
+	assertAttachments(t, manager, "first")
+}
+
+func TestAttachRejectsOrphanedAddressLeases(t *testing.T) {
+	manager, runner := newRecoveryTestManager(t)
+	attachment := attachForRecovery(t, manager, "orphan")
+	if err := os.Remove(manager.journalPath(attachment.AllocationID)); err != nil {
+		t.Fatal(err)
+	}
+	before := len(runner.commands)
+	_, err := manager.Attach(context.Background(), AttachRequest{Namespace: "other", Network: "other", AllocationID: "replacement", Plan: recoveryTestPlan()})
+	if err == nil || !strings.Contains(err.Error(), "overlaps leases") || len(runner.commands) != before {
+		t.Fatalf("orphan lease attach: error=%v commands=%d", err, len(runner.commands)-before)
+	}
+}
+
+func TestFailedDetachKeepsSubnetReserved(t *testing.T) {
+	manager, runner := newRecoveryTestManager(t)
+	attachment := attachForRecovery(t, manager, "orphan")
+	runner.fail = []string{"ip netns del orphan"}
+	if err := os.WriteFile(manager.netnsPath("orphan"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Detach(context.Background(), attachment); err == nil {
+		t.Fatal("expected detach failure")
+	}
+	before := len(runner.commands)
+	if _, err := manager.Attach(context.Background(), AttachRequest{Namespace: "other", Network: "other", AllocationID: "replacement", Plan: recoveryTestPlan()}); err == nil || !strings.Contains(err.Error(), "overlaps") {
+		t.Fatalf("attach after failed detach = %v", err)
+	}
+	if len(runner.commands) != before {
+		t.Fatal("overlapping attach ran commands after failed detach")
+	}
+	assertAttachments(t, manager, "orphan")
+}
+
+func TestNamespaceForIPAmbiguityColdAndWarm(t *testing.T) {
+	for _, warm := range []bool{false, true} {
+		for _, cidr := range []string{"10.42.1.9/24", "10.42.1.128/25", "10.42.0.0/23"} {
+			t.Run(fmt.Sprintf("warm=%v/%s", warm, cidr), func(t *testing.T) {
+				manager, _ := newRecoveryTestManager(t)
+				attachForRecovery(t, manager, "original")
+				address := netip.MustParseAddr("10.42.1.229")
+				if warm {
+					if ns, ok := manager.NamespaceForIP(address); !ok || ns != "acme" {
+						t.Fatalf("warm attribution = %q, %v", ns, ok)
+					}
+				}
+				// Simulate conflicting state left by an older manager; Attach now
+				// rejects it, but attribution must also handle existing journals.
+				if err := manager.recordAttachment(attachmentRecord{AllocationID: "conflict", Namespace: "other", Network: "other", CIDR: cidr}); err != nil {
+					t.Fatal(err)
+				}
+				for range 2 {
+					if ns, ok := manager.NamespaceForIP(address); ok || ns != "" {
+						t.Fatalf("ambiguous attribution = %q, %v", ns, ok)
+					}
+				}
+				if err := manager.DetachAllocation(context.Background(), "conflict"); err != nil {
+					t.Fatal(err)
+				}
+				if ns, ok := manager.NamespaceForIP(address); !ok || ns != "acme" {
+					t.Fatalf("attribution after conflict detach = %q, %v", ns, ok)
+				}
+			})
+		}
 	}
 }
 

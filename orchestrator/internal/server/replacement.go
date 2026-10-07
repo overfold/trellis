@@ -251,6 +251,8 @@ func planReplacementBackoff(policy ReplacementPolicy, previous *ReplacementBacko
 // deterministic tie-breaker. A pruned allocation that later reappears in a
 // node heartbeat is no longer desired and reconciliation stops it as an
 // observed orphan, preserving fencing without retaining unbounded history.
+// Lost namespace-networked allocations are excluded until cleanup is proven:
+// their records still protect subnet reservations, not just terminal history.
 // skip excludes allocations that must not be deleted in this pass. The inputs
 // are not mutated.
 func planTerminalPruning(retain int, allocations []*Allocation, skip map[*Allocation]bool) []*Allocation {
@@ -262,6 +264,11 @@ func planTerminalPruning(retain int, allocations []*Allocation, skip map[*Alloca
 	var keys []groupKey
 	for _, allocation := range allocations {
 		if !isTerminalPhase(allocation.Phase) {
+			continue
+		}
+		// Keep the evidence that an unreachable workload may still own its
+		// namespace subnet until an acknowledged stop proves cleanup.
+		if allocation.Phase == lifecycle.PhaseLost && tasksUseWireGuard(allocation.Tasks) {
 			continue
 		}
 		key := groupKey{allocation.Namespace, allocation.JobName, allocation.TaskGroupName}

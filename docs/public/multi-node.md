@@ -63,6 +63,8 @@ Namespace networking gives each namespace one stable UDP port from the cluster's
 
 If network slots or subnets are exhausted, free registrations by removing unneeded namespace-networked jobs and waiting for their allocations to stop. Editing the pool or port count on existing nodes cannot expand the cluster. A larger range or pool requires a new cluster; a backup restore still requires matching network settings and is not a resizing mechanism.
 
+Lost allocations still reserve network slots and subnets: an unreachable node may still run their workloads. Removing the desired job or pruning terminal history does not free those reservations. They can be reclaimed after the node returns and acknowledges cleanup, but remain held if cleanup cannot be proven. See [network lifecycle internals](../developer/node-internals.md#networking) for the reservation and attachment rules.
+
 Some settings must match on control-plane nodes:
 
 - the **secrets-encryption key** (and `secrets_key_id`, if set explicitly), so every potential leader can decrypt replicated secret records;

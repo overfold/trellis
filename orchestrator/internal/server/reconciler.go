@@ -220,7 +220,8 @@ func (s *Server) reconcile(ctx context.Context, queue bool) (finished <-chan str
 	}
 	for _, allocation := range s.allocations {
 		allocation.mu.Lock()
-		if activeAllocationPhase(allocation.Phase) && tasksUseWireGuard(allocation.Tasks) {
+		// Lost is terminal for scheduling, not proof of node-side cleanup.
+		if (activeAllocationPhase(allocation.Phase) || allocation.Phase == lifecycle.PhaseLost) && tasksUseWireGuard(allocation.Tasks) {
 			addNetworkNamespace(allocation.Namespace)
 		}
 		allocation.mu.Unlock()
@@ -898,7 +899,32 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 		if nodeStatus != NodeStatusHealthy && nodeStatus != NodeStatusDraining {
 			return fmt.Errorf("node %s is unavailable for observed allocation stop", node.ID)
 		}
-		return s.client.StopAllocation(ctx, node.ID, address, &nodeapi.StopAllocationRequest{AllocationID: action.ID, Generation: action.Generation, Epoch: epoch, RetainLogs: action.RetainLogs})
+		if err := s.client.StopAllocation(ctx, node.ID, address, &nodeapi.StopAllocationRequest{AllocationID: action.ID, Generation: action.Generation, Epoch: epoch, RetainLogs: action.RetainLogs}); err != nil {
+			return err
+		}
+		// A successful stop includes network detach. Persist that proof for a
+		// lost allocation so its reservations can be reclaimed on the next pass.
+		s.mu.RLock()
+		var stopped *Allocation
+		for _, allocation := range s.allocations {
+			allocation.mu.Lock()
+			matches := allocation.ID == action.ID && allocation.Generation == action.Generation && allocation.Node != nil && allocation.Node.ID == node.ID && allocation.Phase == lifecycle.PhaseLost
+			allocation.mu.Unlock()
+			if matches {
+				stopped = allocation
+				break
+			}
+		}
+		s.mu.RUnlock()
+		if stopped != nil {
+			return s.persistAllocationUpdate(ctx, stopped, func(next *Allocation) error {
+				if next.Generation != action.Generation || next.Phase != lifecycle.PhaseLost {
+					return nil
+				}
+				return next.Transition(lifecycle.PhaseStopped, s.now().UTC(), "", "")
+			})
+		}
+		return nil
 	}
 	alloc := action.Allocation
 

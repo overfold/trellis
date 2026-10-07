@@ -215,7 +215,9 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 			}
 			for _, observed := range node.observedAllocations {
 				key := observationKey{nodeID: node.ID, allocation: observed.ID, generation: observed.Generation}
-				if desired[key] && observed.RetainedLogs {
+				// A lost record may have missed persisting a successful stop.
+				// Redeliver it even for retained logs to durably confirm cleanup.
+				if desired[key] && observed.RetainedLogs && lost[key] == nil {
 					continue
 				}
 				if active[key] && !observed.RetainedLogs {

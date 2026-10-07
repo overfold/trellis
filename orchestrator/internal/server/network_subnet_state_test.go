@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
@@ -242,5 +243,136 @@ func TestReconcileWithholdsPlacementWhenSubnetPoolIsExhausted(t *testing.T) {
 	}
 	if !reflect.DeepEqual(persisted, want) {
 		t.Fatalf("subnet registrations after release = %v, want %v", persisted, want)
+	}
+}
+
+func TestNetworkSubnetsRetainedUntilPartitionedAllocationCleanup(t *testing.T) {
+	for _, phase := range []lifecycle.Phase{lifecycle.PhaseStopping, lifecycle.PhaseLost} {
+		t.Run(string(phase), func(t *testing.T) {
+			ctx := context.Background()
+			tasks := []spec.TaskSpec{{Name: "app", Image: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard}}}
+			f := newLostReturnFixture(t, tasks, true)
+			s := f.s
+			s.wireGuardPortCount = 8
+			for _, node := range s.nodes {
+				node.WireGuardPortBase, node.WireGuardPortCount = 51820, 8
+			}
+			s.networkPool = netip.MustParsePrefix("10.64.0.0/22")
+			s.reconciliation.TerminalAllocationRetention = 0
+			s.leaderSince = s.now().Add(-time.Hour)
+			f.original.Phase = lifecycle.PhaseRunning
+			// The partition starts while the workload is running. Loss does not
+			// imply a stop was delivered; deleting desired state cannot prove it.
+			addTestNode(s, f.nodeA, s.now().Add(-2*DefaultAllocationLossTimeout))
+			if phase == lifecycle.PhaseStopping {
+				delete(s.jobs, jobKey("default", "web"))
+			}
+			s.Reconcile(ctx)
+			if f.original.Phase != phase {
+				t.Fatalf("running transition = %s, want %s", f.original.Phase, phase)
+			}
+			delete(s.jobs, jobKey("default", "web"))
+			// Discard any replacements made while the old desired job existed;
+			// they are proven stopped and cannot account for retention below.
+			for _, allocation := range s.allocations {
+				if allocation != f.original {
+					allocation.Phase = lifecycle.PhaseStopped
+				}
+			}
+			s.jobs[jobKey("globex", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{
+				Namespace: "globex", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: tasks}},
+			}), Revision: 1}
+			want := map[networkSubnetKey]int{
+				{namespace: "default", node: lostNodeAID}: 0,
+				{namespace: "default", node: lostNodeBID}: 1,
+				{namespace: "globex", node: lostNodeAID}:  2,
+				{namespace: "globex", node: lostNodeBID}:  3,
+			}
+			assertSubnets := func(expected map[networkSubnetKey]int) {
+				t.Helper()
+				got, err := s.state.listNetworkSubnetRegistrations(ctx)
+				if err != nil || !reflect.DeepEqual(got, expected) {
+					t.Fatalf("persisted subnets = %v, error=%v; want %v", got, err, expected)
+				}
+			}
+			for range 3 {
+				s.Reconcile(ctx)
+				assertSubnets(want)
+			}
+			if pruned := planTerminalPruning(0, []*Allocation{f.original}, nil); len(pruned) != 0 {
+				t.Fatal("potentially live network allocation was pruned")
+			}
+			// A returning orphan still owns its subnet while detach/stop fails.
+			f.agent.mu.Lock()
+			f.agent.failStop = true
+			f.agent.mu.Unlock()
+			if err := heartbeatAndApply(t, s, f.nodeA.ID, []nodeapi.AllocationStatus{{ID: "original", Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}, "test", nodeResourceObservation{}); err != nil {
+				t.Fatal(err)
+			}
+			s.Reconcile(ctx)
+			assertSubnets(want)
+			if f.original.Phase == lifecycle.PhaseStopped {
+				t.Fatal("failed stop was treated as cleanup proof")
+			}
+			f.agent.mu.Lock()
+			f.agent.failStop = false
+			f.agent.mu.Unlock()
+			f.original.NextRetryAt = nil
+			s.Reconcile(ctx)
+			if f.original.Phase != lifecycle.PhaseStopped {
+				t.Fatalf("acknowledged stop phase = %s", f.original.Phase)
+			}
+			persisted, err := s.state.ListAllocations(ctx)
+			if err != nil || persisted["original"] == nil || persisted["original"].Phase != lifecycle.PhaseStopped {
+				t.Fatalf("cleanup proof not persisted: allocations=%v error=%v", persisted, err)
+			}
+			// The following pass can release and reuse the proven-clean slots.
+			s.jobs[jobKey("initech", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{
+				Namespace: "initech", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: tasks}},
+			}), Revision: 1}
+			s.Reconcile(ctx)
+			assertSubnets(map[networkSubnetKey]int{
+				{namespace: "initech", node: lostNodeAID}: 0,
+				{namespace: "initech", node: lostNodeBID}: 1,
+				{namespace: "globex", node: lostNodeAID}:  2,
+				{namespace: "globex", node: lostNodeBID}:  3,
+			})
+		})
+	}
+}
+
+func TestObservedStopCleanupProofIsGenerationAndNodeFenced(t *testing.T) {
+	for _, mismatch := range []string{"generation", "node"} {
+		t.Run(mismatch, func(t *testing.T) {
+			f := newLostReturnFixture(t, []spec.TaskSpec{{Name: "app", Image: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard}}}, true)
+			action := &Action{Type: ActionStopObserved, Node: f.nodeA, ID: "original", Generation: 1}
+			if mismatch == "generation" {
+				action.Generation = 2
+			} else {
+				action.Node = f.s.nodes[lostNodeBID]
+			}
+			if err := f.s.Execute(context.Background(), action); err != nil {
+				t.Fatal(err)
+			}
+			if f.original.Phase != lifecycle.PhaseLost {
+				t.Fatal("another generation/node's stop released network ownership")
+			}
+		})
+	}
+}
+
+func TestLostNetworkAllocationConfirmsCleanupFromRetainedLogs(t *testing.T) {
+	f := newLostReturnFixture(t, []spec.TaskSpec{{Name: "app", Image: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard}}}, false)
+	f.s.wireGuardPortCount = 8
+	f.nodeA.WireGuardPortBase, f.nodeA.WireGuardPortCount = 51820, 8
+	delete(f.s.jobs, jobKey("default", "web"))
+	// The node finished cleanup, but the leader did not persist the earlier
+	// acknowledgment. Retained logs must not prevent retrying the fenced stop.
+	if err := heartbeatAndApply(t, f.s, f.nodeA.ID, []nodeapi.AllocationStatus{{ID: "original", Generation: 1, Task: "app", Phase: lifecycle.PhaseStopped, Health: lifecycle.HealthUnknown, RetainedLogs: true}}, "test", nodeResourceObservation{}); err != nil {
+		t.Fatal(err)
+	}
+	f.s.Reconcile(context.Background())
+	if f.original.Phase != lifecycle.PhaseStopped || originalStops(recordedOperations(t, f.agent)) != 1 {
+		t.Fatalf("retained-log cleanup proof: phase=%s", f.original.Phase)
 	}
 }

@@ -126,8 +126,8 @@ func TestReconcileStopsTerminalAllocationReportedByReturningNode(t *testing.T) {
 			if request.AllocationID != "old" || request.Generation != 1 {
 				t.Fatalf("stop request = %#v, want old generation 1", request)
 			}
-			if old.Phase != phase || replacement.Phase != lifecycle.PhaseRunning {
-				t.Fatalf("phases after reconcile: old=%s replacement=%s, want %s/running", old.Phase, replacement.Phase, phase)
+			if old.Phase != lifecycle.PhaseStopped || replacement.Phase != lifecycle.PhaseRunning {
+				t.Fatalf("phases after reconcile: old=%s replacement=%s, want stopped/running", old.Phase, replacement.Phase)
 			}
 		})
 	}

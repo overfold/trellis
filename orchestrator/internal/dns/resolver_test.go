@@ -3,6 +3,7 @@ package dns
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"io"
 	"net"
 	"net/netip"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/overfold/trellis/orchestrator/internal/network"
 	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 )
 
@@ -120,6 +122,50 @@ func TestHandleQueryRestrictsDiscoveryToSourceNamespace(t *testing.T) {
 	unknown := r.handleQueryNetwork(buildQuery("frontend.web.acme.trellis."), "tcp", &net.TCPAddr{IP: net.ParseIP("192.0.2.9"), Port: 53000})
 	if got := binary.BigEndian.Uint16(unknown[6:8]); got != 0 {
 		t.Fatalf("unknown-source answers = %d, want 0", got)
+	}
+}
+
+func TestDiscoveryFailsClosedWithAmbiguousAttachmentJournals(t *testing.T) {
+	for _, cidr := range []string{"10.42.1.0/24", "10.42.1.128/25", "10.42.0.0/23"} {
+		t.Run(cidr, func(t *testing.T) {
+			stateDir := t.TempDir()
+			manager, err := network.NewAutomatedWireGuardManager(stateDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			journalDir := filepath.Join(stateDir, ".attachments")
+			if err := os.MkdirAll(journalDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for _, record := range []map[string]string{
+				{"allocation_id": "orphan", "namespace": "acme", "network": "acme", "cidr": "10.42.1.0/24"},
+				{"allocation_id": "replacement", "namespace": "other", "network": "other", "cidr": cidr},
+			} {
+				raw, err := json.Marshal(record)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(journalDir, record["allocation_id"]+".json"), raw, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			services := nodeapi.ServiceListResponse{
+				{Group: "frontend", Job: "web", Namespace: "acme", Address: "10.42.1.10"},
+				{Group: "frontend", Job: "web", Namespace: "other", Address: "10.42.1.20"},
+			}
+			r := NewResolver(nil, &mockLookup{services: &services}, manager, "trellis")
+			r.refresh(context.Background())
+			for range 2 {
+				for _, ns := range []string{"acme", "other"} {
+					for _, transport := range []string{"udp", "tcp"} {
+						response := r.handleQueryNetwork(buildQuery("frontend.web."+ns+".trellis."), transport, &net.UDPAddr{IP: net.ParseIP("10.42.1.229"), Port: 53000})
+						if len(response) < 12 || binary.BigEndian.Uint16(response[6:8]) != 0 {
+							t.Fatalf("ambiguous %s source received %s records: %x", transport, ns, response)
+						}
+					}
+				}
+			}
+		})
 	}
 }
 

@@ -583,6 +583,9 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 	if !safeName.MatchString(networkName) {
 		return nil, fmt.Errorf("invalid network name %q", networkName)
 	}
+	if err := m.validateAttachmentCIDR(namespace, networkName, cfg.CIDR); err != nil {
+		return nil, err
+	}
 	wg, bridge, hostVeth, peerVeth := short("tw", namespace+"\x00"+networkName), short("tb", namespace+"\x00"+networkName), short("vh", allocation), short("vc", allocation)
 	ns := m.netnsPath(allocation)
 	// Journal the attachment before creating anything, so an agent that
