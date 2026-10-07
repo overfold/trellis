@@ -65,6 +65,7 @@ type Agent struct {
 	nodeInfo    client.NodeInfo
 	dnsServers  []string
 	pidsLimit   int64
+	logLimit    int64
 	local       *storage.LocalStorage
 	cluster     string
 	version     string
@@ -171,6 +172,10 @@ type retainedTaskLog struct {
 }
 
 const heartbeatInterval = 10 * time.Second
+
+// logLimitInterval is how often the agent checks task log sizes. A task can
+// exceed the log limit by what it writes in one interval.
+const logLimitInterval = time.Second
 
 const (
 	recoveryRetryMinDelay = time.Second
@@ -390,6 +395,39 @@ func (a *Agent) taskPidsLimit() int64 {
 	return a.pidsLimit
 }
 
+// DefaultTaskLogLimit bounds the disk each task log consumes when the
+// operator does not configure a limit.
+const DefaultTaskLogLimit int64 = 64 << 20
+
+// MinTaskLogLimit keeps a configured log limit large enough to hold useful
+// diagnostics.
+const MinTaskLogLimit int64 = 1 << 20
+
+// ValidateTaskLogLimit checks a node's per-task log size limit.
+func ValidateTaskLogLimit(limit int64) error {
+	if limit < MinTaskLogLimit {
+		return fmt.Errorf("task log limit must be at least %d bytes (1MiB)", MinTaskLogLimit)
+	}
+	return nil
+}
+
+// SetTaskLogLimit configures the approximate number of bytes each task log
+// on this node keeps. It applies to running tasks and retained logs alike.
+func (a *Agent) SetTaskLogLimit(limit int64) error {
+	if err := ValidateTaskLogLimit(limit); err != nil {
+		return err
+	}
+	a.logLimit = limit
+	return nil
+}
+
+func (a *Agent) taskLogLimit() int64 {
+	if a.logLimit == 0 {
+		return DefaultTaskLogLimit
+	}
+	return a.logLimit
+}
+
 // SetDNSServers configures allocation DNS servers.
 func (a *Agent) SetDNSServers(servers []string) {
 	a.dnsServers = servers
@@ -451,6 +489,7 @@ func (a *Agent) Init(ctx context.Context) error {
 
 	go a.runRecoveryRetry(ctx)
 	go a.runHeartbeatLoop(ctx)
+	go a.runLogLimitLoop(ctx)
 	go a.reconciler.Run(ctx)
 	return nil
 }
@@ -2336,6 +2375,36 @@ func (a *Agent) addTaskLogUsage(heartbeat *client.Heartbeat) {
 	heartbeat.TaskLogBytes = &usage.Bytes
 	heartbeat.TaskLogFilesystemAvailable = &usage.FilesystemAvailable
 	heartbeat.TaskLogFilesystemCapacity = &usage.FilesystemCapacity
+}
+
+// runLogLimitLoop rotates task logs that outgrow the node's log limit. Task
+// output keeps flowing to the log through the containerd shim while the agent
+// is stopped; the limit is enforced again once it restarts.
+func (a *Agent) runLogLimitLoop(ctx context.Context) {
+	limiter, ok := a.runtime.(runtime.LogLimitRuntime)
+	if !ok {
+		return
+	}
+	ticker := time.NewTicker(logLimitInterval)
+	defer ticker.Stop()
+	var lastErr string
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		err := limiter.EnforceLogLimit(a.taskLogLimit())
+		if err == nil {
+			lastErr = ""
+			continue
+		}
+		// Log a persistent failure once rather than every interval.
+		if err.Error() != lastErr {
+			a.log.Warn("enforce task log limit failed", "error", err)
+		}
+		lastErr = err.Error()
+	}
 }
 
 func (a *Agent) allocationStatuses() []nodeapi.AllocationStatus {

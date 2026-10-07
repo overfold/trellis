@@ -81,6 +81,7 @@ type config struct {
 	MaxTaskCPU                                                                     int
 	MaxTaskMemory                                                                  string
 	TaskPidsLimit                                                                  int64
+	TaskLogLimit                                                                   string
 	// Explicit records which cluster settings the operator set on this node,
 	// through flags or the configuration file. Cluster settings initialize a
 	// new cluster; on an existing cluster the replicated values win.
@@ -146,6 +147,7 @@ func main() {
 	f.StringVar(&cfg.SecretsKeyID, "secrets-key-id", "", "Identifier for the active secrets encryption key")
 	f.StringArrayVar(&cfg.Labels, "label", nil, "Node label in key=value form (repeatable)")
 	f.Int64Var(&cfg.TaskPidsLimit, "task-pids-limit", agent.DefaultTaskPidsLimit, "Maximum processes and threads in each task container created on this node")
+	f.StringVar(&cfg.TaskLogLimit, "task-log-limit", spec.ByteSize(agent.DefaultTaskLogLimit).String(), "Approximate disk space each task log keeps on this node, such as 64MiB")
 	defaults := spec.DefaultLimits()
 	f.IntVar(&cfg.MaxReplicasPerTaskGroup, "max-replicas-per-task-group", defaults.MaxReplicasPerTaskGroup, "Maximum replicas allowed in one task group")
 	f.IntVar(&cfg.MaxTaskGroupsPerJob, "max-task-groups-per-job", defaults.MaxTaskGroupsPerJob, "Maximum task groups allowed in one job")
@@ -190,6 +192,13 @@ func run(parent context.Context, cfg *config) error {
 	}
 	if err := agent.ValidateTaskPidsLimit(cfg.TaskPidsLimit); err != nil {
 		return fmt.Errorf("resources.task_pids_limit or --task-pids-limit: %w", err)
+	}
+	taskLogLimit, err := spec.ParseByteSize(cfg.TaskLogLimit)
+	if err == nil {
+		err = agent.ValidateTaskLogLimit(int64(taskLogLimit))
+	}
+	if err != nil {
+		return fmt.Errorf("resources.task_log_limit or --task-log-limit: %w", err)
 	}
 	defaultMemory, err := spec.ParseByteSize(cfg.DefaultTaskMemory)
 	if err != nil {
@@ -420,6 +429,9 @@ func run(parent context.Context, cfg *config) error {
 	}
 	if err := ag.SetTaskPidsLimit(cfg.TaskPidsLimit); err != nil {
 		return fmt.Errorf("resources.task_pids_limit or --task-pids-limit: %w", err)
+	}
+	if err := ag.SetTaskLogLimit(int64(taskLogLimit)); err != nil {
+		return fmt.Errorf("resources.task_log_limit or --task-log-limit: %w", err)
 	}
 	ag.ConfigureDurability(local, cfg.Cluster)
 	networkManager, err := network.NewAutomatedWireGuardManager(filepath.Join(cfg.DataDir, "network"))

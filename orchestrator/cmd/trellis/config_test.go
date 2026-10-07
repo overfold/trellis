@@ -26,6 +26,7 @@ resources:
     cpu: 500
     memory: 1GiB
   task_pids_limit: 2048
+  task_log_limit: 16MiB
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -41,6 +42,9 @@ resources:
 	}
 	if cfg.TaskPidsLimit != 2048 {
 		t.Fatalf("task pids limit = %d, want 2048", cfg.TaskPidsLimit)
+	}
+	if cfg.TaskLogLimit != "16MiB" {
+		t.Fatalf("task log limit = %q, want 16MiB", cfg.TaskLogLimit)
 	}
 	if len(cfg.Labels) != 1 || cfg.Labels[0] != "storage=fast" {
 		t.Fatalf("unexpected labels: %v", cfg.Labels)

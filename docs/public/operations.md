@@ -105,6 +105,45 @@ limit also cannot start those. Raise it for workloads that legitimately run
 many threads or processes. Keep it consistent across nodes unless you
 deliberately want different per-node bounds.
 
+### Task log limit
+
+Each task log on a node keeps about `resources.task_log_limit` of its newest
+output (default `64MiB`, minimum `1MiB`; flag `--task-log-limit`), so one chatty
+task cannot fill the node's disk:
+
+```yaml
+resources:
+  task_log_limit: 256MiB
+```
+
+The value accepts the same byte-size notation as job YAML. The agent checks
+the logs in `/var/lib/trellis/runtime` every second, for running tasks and for
+terminal allocations whose logs are retained. When a task's active log grows
+past half the limit, the agent copies its newest half into `<container>.log.1`,
+replacing the previous copy, and truncates the active log in place; the task
+keeps writing without interruption. Retained output therefore varies from half
+the limit to the limit. `--tail` reads across both files, and `--follow`
+continues across a rotation. The limit is approximate:
+
+- a task can exceed it by what it writes in about one second before the next
+  check, and by more while the agent is stopped, since output keeps flowing
+  through the containerd shim; the limit is enforced again when the agent
+  restarts;
+- output the task writes while a rotation finishes copying is lost, and very
+  fast output can make a rotation cut a line;
+- a follower that falls more than one rotation behind skips the output
+  rotation discarded in between;
+- when the filesystem is already full and the newest output cannot be copied
+  aside, the agent discards that log's retained output to free space and logs
+  a warning.
+
+This is node policy, not part of a job. It applies to existing logs as well as
+new ones, including tasks that were already running when the node gained the
+limit. Logs of allocations still read from the legacy `$TMPDIR/trellis-logs`
+location are not limited. Size the limit and the number of retained terminal
+allocations (`terminal_allocation_retention`) together: a node can hold up to
+the limit for every running task and every retained task log on it.
+
 ### Fixed service limits
 
 These limits are not configurable cluster settings. Reduce concurrent clients
@@ -145,7 +184,7 @@ Installer-created nodes also keep `/var/lib/trellis/install-state`. It records o
 
 The root-run containerd runtime stores task logs and generated DNS/hosts mount files in `/var/lib/trellis/runtime`, independently of `data_dir` and `TMPDIR`. It creates this directory with mode `0750`. The directory and its ancestors must be root-owned, must not be symlinks, and must not be group- or world-writable; the runtime directory must also deny access to other users. Unsafe existing paths cause allocation creation/start to fail rather than being repaired automatically. Do not remove these files while allocations still use them. Container cleanup removes generated mount files but preserves task logs while the control plane retains the terminal allocation record. Minimal node-local log lookup metadata survives agent restarts; logs remain readable through the ordinary allocation logs API after the container is gone.
 
-`terminal_allocation_retention` governs terminal history and its retained task logs. Once the control plane prunes an allocation, the leader asks its node to delete the logs. The agent reports retained log inventory in every heartbeat, so deletion is retried and catches up when an unavailable node returns. Logs are node-local, not replicated: they are unavailable while the node is unreachable and cannot be recovered if its disk is lost. There is currently no log rotation or log-size limit, so one chatty task can fill the node's disk. Each node reports its task log usage in heartbeats: `/metrics` exposes `trellis_node_task_log_bytes`, `trellis_node_task_log_filesystem_available_bytes`, and `trellis_node_task_log_filesystem_capacity_bytes` per `node_id`, and `GET /v1/nodes` returns the same values. Alert on the available bytes before the filesystem fills. The values come from the node's latest heartbeat to the current leader, so pair the alert with `trellis_node_heartbeat_age_seconds`; the series are absent when the agent cannot measure its log directory. Health-check error messages include namespace, job, allocation, task, and container identifiers to distinguish failures in colocated workloads.
+`terminal_allocation_retention` governs terminal history and its retained task logs. Once the control plane prunes an allocation, the leader asks its node to delete the logs. The agent reports retained log inventory in every heartbeat, so deletion is retried and catches up when an unavailable node returns. Logs are node-local, not replicated: they are unavailable while the node is unreachable and cannot be recovered if its disk is lost. Each task log is bounded by the node's [task log limit](#task-log-limit), but many running tasks and retained logs together can still fill a small disk. Each node reports its task log usage in heartbeats: `/metrics` exposes `trellis_node_task_log_bytes`, `trellis_node_task_log_filesystem_available_bytes`, and `trellis_node_task_log_filesystem_capacity_bytes` per `node_id`, and `GET /v1/nodes` returns the same values. Alert on the available bytes before the filesystem fills. The values come from the node's latest heartbeat to the current leader, so pair the alert with `trellis_node_heartbeat_age_seconds`; the series are absent when the agent cannot measure its log directory. Health-check error messages include namespace, job, allocation, task, and container identifiers to distinguish failures in colocated workloads.
 
 The runtime's retained-log lookup and cleanup mechanics, including older temporary-directory paths, are described in [runtime internals](../developer/node-internals.md#runtime-abstraction).
 

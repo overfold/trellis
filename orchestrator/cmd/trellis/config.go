@@ -18,6 +18,7 @@ type reservedResourcesConfig struct {
 type nodeResourcesConfig struct {
 	Reserved      *reservedResourcesConfig `yaml:"reserved"`
 	TaskPidsLimit *int64                   `yaml:"task_pids_limit"`
+	TaskLogLimit  *string                  `yaml:"task_log_limit"`
 }
 
 type jobLimitsConfig struct {
@@ -131,6 +132,9 @@ func loadNodeConfig(path string, cfg *config, flags *pflag.FlagSet) error {
 	}
 	if parsed.Resources != nil && parsed.Resources.TaskPidsLimit != nil && !flags.Changed("task-pids-limit") {
 		cfg.TaskPidsLimit = *parsed.Resources.TaskPidsLimit
+	}
+	if parsed.Resources != nil && parsed.Resources.TaskLogLimit != nil && !flags.Changed("task-log-limit") {
+		cfg.TaskLogLimit = *parsed.Resources.TaskLogLimit
 	}
 	if parsed.JobLimits != nil {
 		limits := parsed.JobLimits

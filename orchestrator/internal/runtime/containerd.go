@@ -44,6 +44,7 @@ type ContainerdRuntime struct {
 	client       *containerd.Client
 	logDir       string
 	legacyLogDir string
+	rotations    logRotations
 }
 
 // Port maps a host port to a container port.
@@ -431,10 +432,20 @@ func checkOwnedDir(path string, info os.FileInfo, uid uint32, private bool) erro
 
 // Logs opens the log stream for a container.
 func (c *ContainerdRuntime) Logs(ctx context.Context, containerID string, follow bool, tail int) (io.ReadCloser, error) {
-	file, err := os.Open(c.logPath(containerID))
-	if os.IsNotExist(err) {
-		file, err = c.openLegacyLog(filepath.Base(containerID) + ".log")
+	path := c.logPath(containerID)
+	// Check for the runtime log first so lookups of legacy or missing logs
+	// do not create rotation state.
+	_, err := os.Lstat(path)
+	if err == nil {
+		var reader io.ReadCloser
+		if reader, err = openRuntimeLog(ctx, path, c.rotations.get(path), follow, tail); err == nil {
+			return reader, nil
+		}
 	}
+	if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("open logs for %s: %w", containerID, err)
+	}
+	file, err := c.openLegacyLog(filepath.Base(containerID) + ".log")
 	if err != nil {
 		return nil, fmt.Errorf("open logs for %s: %w", containerID, err)
 	}
@@ -595,7 +606,12 @@ func (c *ContainerdRuntime) RemoveRetainingLogs(ctx context.Context, containerID
 // RemoveRetainedLogs removes a retained task log after its control-plane
 // allocation record has been pruned.
 func (c *ContainerdRuntime) RemoveRetainedLogs(containerID string) error {
-	return c.removeAllocationFiles(containerID, ".log")
+	path := c.logPath(containerID)
+	rotation := c.rotations.get(path)
+	rotation.mu.Lock()
+	defer rotation.mu.Unlock()
+	defer c.rotations.forget(path)
+	return c.removeAllocationFiles(containerID, ".log", ".log"+rotatedLogSuffix, ".log"+rotatedLogSuffix+".tmp")
 }
 
 func (c *ContainerdRuntime) removeAllocationFiles(containerID string, suffixes ...string) error {
