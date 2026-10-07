@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Peer describes a WireGuard peer configuration.
@@ -66,13 +67,14 @@ const WorkloadDNSAddress = "198.18.0.53"
 
 // WireGuardManager manages allocation networking with WireGuard.
 type WireGuardManager struct {
-	configDir            string
-	stateDir             string
-	run                  commandRunner
-	mu                   sync.Mutex
-	dnsAddress           string
-	namespaceCIDRs       map[netip.Prefix]string
-	namespaceCIDRsLoaded bool
+	configDir             string
+	stateDir              string
+	run                   commandRunner
+	mu                    sync.Mutex
+	dnsAddress            string
+	namespaceCIDRs        map[netip.Prefix]string
+	namespaceCIDRsLoaded  bool
+	namespaceCIDRsRetryAt time.Time
 	// netnsDir is where "ip netns" keeps named network namespaces.
 	netnsDir string
 }

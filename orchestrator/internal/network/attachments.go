@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // attachmentJournalDir holds one record per attachment below the manager's
@@ -187,7 +188,7 @@ func (m *WireGuardManager) NamespaceForIP(address netip.Addr) (string, bool) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !m.namespaceCIDRsLoaded {
+	if !m.namespaceCIDRsLoaded && !time.Now().Before(m.namespaceCIDRsRetryAt) {
 		m.loadNamespaceCIDRsLocked()
 	}
 	for prefix, namespace := range m.namespaceCIDRs {
@@ -200,8 +201,13 @@ func (m *WireGuardManager) NamespaceForIP(address netip.Addr) (string, bool) {
 
 func (m *WireGuardManager) loadNamespaceCIDRsLocked() {
 	m.namespaceCIDRs = make(map[netip.Prefix]string)
-	m.namespaceCIDRsLoaded = true
+	m.namespaceCIDRsRetryAt = time.Now().Add(time.Second)
+	cidrs := make(map[netip.Prefix]string)
 	entries, err := os.ReadDir(filepath.Join(m.stateDir, attachmentJournalDir))
+	if errors.Is(err, fs.ErrNotExist) {
+		m.namespaceCIDRsLoaded = true
+		return
+	}
 	if err != nil {
 		return
 	}
@@ -212,19 +218,20 @@ func (m *WireGuardManager) loadNamespaceCIDRsLocked() {
 		}
 		record, err := m.readAttachmentRecord(id)
 		if err != nil {
-			m.namespaceCIDRs = make(map[netip.Prefix]string)
 			return
 		}
 		prefix, err := netip.ParsePrefix(record.CIDR)
-		if err == nil {
-			prefix = prefix.Masked()
-			if namespace, exists := m.namespaceCIDRs[prefix]; exists && namespace != record.Namespace {
-				m.namespaceCIDRs = make(map[netip.Prefix]string)
-				return
-			}
-			m.namespaceCIDRs[prefix] = record.Namespace
+		if err != nil {
+			return
 		}
+		prefix = prefix.Masked()
+		if namespace, exists := cidrs[prefix]; exists && namespace != record.Namespace {
+			return
+		}
+		cidrs[prefix] = record.Namespace
 	}
+	m.namespaceCIDRs = cidrs
+	m.namespaceCIDRsLoaded = true
 }
 
 // detachLocked removes an allocation's published ports, veth, and network

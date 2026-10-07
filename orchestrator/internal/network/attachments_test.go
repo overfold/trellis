@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // absentRunner fails commands matching any fail substring, as ip does for a
@@ -100,6 +101,77 @@ func TestNamespaceForIPUsesJournaledNamespaceCIDR(t *testing.T) {
 	}
 	if namespace, ok := manager.NamespaceForIP(netip.MustParseAddr("10.42.2.23")); ok || namespace != "" {
 		t.Fatalf("NamespaceForIP(other) = %q, %v; want empty, false", namespace, ok)
+	}
+}
+
+func TestNamespaceForIPRecoversAfterJournalRepair(t *testing.T) {
+	for _, fault := range []string{"corrupt", "conflicting", "unreadable-directory"} {
+		t.Run(fault, func(t *testing.T) {
+			manager, _ := newRecoveryTestManager(t)
+			attachForRecovery(t, manager, "alloc-one")
+			path := manager.journalPath("alloc-one")
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch fault {
+			case "corrupt":
+				if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "conflicting":
+				if err := manager.recordAttachment(attachmentRecord{AllocationID: "alloc-two", Namespace: "other", Network: "other", CIDR: "10.42.1.9/24"}); err != nil {
+					t.Fatal(err)
+				}
+			case "unreadable-directory":
+				dir := filepath.Dir(path)
+				if err := os.Rename(dir, dir+"-saved"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(dir, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			address := netip.MustParseAddr("10.42.1.23")
+			if namespace, ok := manager.NamespaceForIP(address); ok || namespace != "" || manager.namespaceCIDRsLoaded {
+				t.Fatalf("bad journal did not fail closed: %q, %v", namespace, ok)
+			}
+			// New attachments must not publish a partial cache while loading failed.
+			if fault != "unreadable-directory" {
+				if err := manager.recordAttachment(attachmentRecord{AllocationID: "alloc-three", Namespace: "third", Network: "third", CIDR: "10.42.3.0/24"}); err != nil {
+					t.Fatal(err)
+				}
+				if _, ok := manager.NamespaceForIP(netip.MustParseAddr("10.42.3.9")); ok {
+					t.Fatal("partial cache became visible")
+				}
+			}
+			switch fault {
+			case "corrupt":
+				if err := os.WriteFile(path, raw, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "conflicting":
+				if err := os.Remove(manager.journalPath("alloc-two")); err != nil {
+					t.Fatal(err)
+				}
+			case "unreadable-directory":
+				dir := filepath.Dir(path)
+				if err := os.Remove(dir); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(dir+"-saved", dir); err != nil {
+					t.Fatal(err)
+				}
+			}
+			manager.namespaceCIDRsRetryAt = time.Now().Add(time.Hour)
+			if _, ok := manager.NamespaceForIP(address); ok {
+				t.Fatal("load retry ignored backoff")
+			}
+			manager.namespaceCIDRsRetryAt = time.Time{}
+			if namespace, ok := manager.NamespaceForIP(address); !ok || namespace != "acme" {
+				t.Fatalf("repaired journal did not recover: %q, %v", namespace, ok)
+			}
+		})
 	}
 }
 

@@ -45,27 +45,27 @@ func TestResolveGroupJobNamespace(t *testing.T) {
 	r := NewResolver(nil, &mockLookup{services: &services}, nil, "trellis")
 	r.refresh(context.Background())
 
-	ips := r.resolve("frontend.web.acme.trellis.")
+	ips := r.resolve("frontend.web.acme.trellis.", "")
 	if len(ips) != 2 {
 		t.Fatalf("expected 2 IPs for web.acme, got %d", len(ips))
 	}
 
-	ips = r.resolve("primary.db.acme.trellis.")
+	ips = r.resolve("primary.db.acme.trellis.", "")
 	if len(ips) != 1 {
 		t.Fatalf("expected 1 IPs for db.acme, got %d", len(ips))
 	}
 
-	ips = r.resolve("missing.web.acme.trellis.")
+	ips = r.resolve("missing.web.acme.trellis.", "")
 	if len(ips) != 0 {
 		t.Fatalf("expected 0 IPs for missing job, got %d", len(ips))
 	}
 
-	ips = r.resolve("frontend.web.other.trellis.")
+	ips = r.resolve("frontend.web.other.trellis.", "")
 	if len(ips) != 0 {
 		t.Fatalf("expected 0 IPs for wrong namespace, got %d", len(ips))
 	}
 
-	ips = r.resolve("frontend.web.acme.example.com.")
+	ips = r.resolve("frontend.web.acme.example.com.", "")
 	if len(ips) != 0 {
 		t.Fatalf("expected 0 IPs for wrong domain, got %d", len(ips))
 	}
@@ -147,12 +147,15 @@ func TestBuildResponseBoundsAnswerCount(t *testing.T) {
 		ips[i] = net.IPv4(10, 0, 0, 1)
 	}
 	response := buildResponse(1, "a.", 1, 1, ips)
-	if count := binary.BigEndian.Uint16(response[6:8]); count != 65535 {
-		t.Fatalf("answer count = %d, want 65535", count)
+	if count := binary.BigEndian.Uint16(response[6:8]); count != 4094 {
+		t.Fatalf("answer count = %d, want 4094", count)
 	}
 	// Twelve header bytes, three name bytes, four question bytes, sixteen per A record.
-	if len(response) != 19+16*65535 {
+	if len(response) != 19+16*4094 {
 		t.Fatalf("response length = %d, inconsistent with bounded answer count", len(response))
+	}
+	if binary.BigEndian.Uint16(response[2:4])&0x0200 == 0 {
+		t.Fatal("oversized TCP answer must indicate truncation")
 	}
 }
 
@@ -286,7 +289,7 @@ func TestResolveIgnoresEmptyAddresses(t *testing.T) {
 	r := NewResolver(nil, &mockLookup{services: &services}, nil, "trellis")
 	r.refresh(context.Background())
 
-	ips := r.resolve("frontend.web.acme.trellis.")
+	ips := r.resolve("frontend.web.acme.trellis.", "")
 	if len(ips) != 1 {
 		t.Fatalf("expected 1 IP (empty address skipped), got %d", len(ips))
 	}
@@ -318,12 +321,12 @@ func TestResolveMultipleNamespaces(t *testing.T) {
 	r := NewResolver(nil, &mockLookup{services: &services}, nil, "trellis")
 	r.refresh(context.Background())
 
-	ips := r.resolve("frontend.web.acme.trellis.")
+	ips := r.resolve("frontend.web.acme.trellis.", "")
 	if len(ips) != 1 || !ips[0].Equal(net.ParseIP("10.0.0.1")) {
 		t.Fatalf("expected 10.0.0.1 for acme, got %v", ips)
 	}
 
-	ips = r.resolve("frontend.web.staging.trellis.")
+	ips = r.resolve("frontend.web.staging.trellis.", "")
 	if len(ips) != 1 || !ips[0].Equal(net.ParseIP("10.0.1.1")) {
 		t.Fatalf("expected 10.0.1.1 for staging, got %v", ips)
 	}
@@ -625,5 +628,180 @@ func TestSystemResolversParsesNameservers(t *testing.T) {
 	want := []string{"127.0.0.53:53", "[2001:db8::53]:53"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("resolvers = %#v, want %#v", got, want)
+	}
+}
+
+func TestDiscoveryCaseFoldingPreservesNamespaceIsolation(t *testing.T) {
+	services := nodeapi.ServiceListResponse{
+		{Group: "Frontend", Job: "Web", Namespace: "Acme", Address: "10.0.0.7"},
+		{Group: "Frontend", Job: "Web", Namespace: "Acme", Address: "10.0.0.9"},
+	}
+	namespaces := namespaceLookup{
+		netip.MustParsePrefix("10.42.1.0/24"): "Acme",
+		netip.MustParsePrefix("10.42.2.0/24"): "acme",
+	}
+	r := NewResolver(nil, &mockLookup{services: &services}, namespaces, "TRELLIS")
+	r.refresh(t.Context())
+	query := buildQuery("fRoNtEnD.wEB.ACME.TrElLiS.")
+	for _, tc := range []struct {
+		source string
+		count  uint16
+	}{
+		{"10.42.1.8", 2},
+		{"10.42.2.8", 0},
+	} {
+		response := r.handleQueryNetwork(query, "udp", &net.UDPAddr{IP: net.ParseIP(tc.source)})
+		if got := binary.BigEndian.Uint16(response[6:8]); got != tc.count {
+			t.Fatalf("source %s: answers = %d, want %d", tc.source, got, tc.count)
+		}
+		if !reflect.DeepEqual(response[12:len(query)], query[12:]) {
+			t.Fatal("question case was not preserved")
+		}
+	}
+	// A case-distinct identity must not be merged into the existing RRset.
+	services = append(services, nodeapi.ServiceEntry{Group: "frontend", Job: "Web", Namespace: "Acme", Address: "10.0.0.11"})
+	r.refresh(t.Context())
+	if got := r.resolve("frontend.web.acme.trellis.", "Acme"); len(got) != 0 {
+		t.Fatalf("ambiguous name resolved: %v", got)
+	}
+}
+
+func TestDiscoveryUDPTruncationAndTCPFallback(t *testing.T) {
+	services := nodeapi.ServiceListResponse{}
+	for i := range 30 {
+		services = append(services, nodeapi.ServiceEntry{Group: "frontend", Job: "web", Namespace: "acme", Address: net.IPv4(10, 0, 0, byte(i+1)).String()})
+	}
+	r := NewResolver(nil, &mockLookup{services: &services}, nil, "trellis")
+	r.refresh(t.Context())
+	query := buildQuery("frontend.web.acme.trellis.")
+	for _, tc := range []struct {
+		count int
+		tc    bool
+	}{
+		{29, false}, {30, true},
+	} {
+		partial := services[:tc.count]
+		r.lookup = &mockLookup{services: &partial}
+		r.refresh(t.Context())
+		response := r.handleQuery(query)
+		if len(response) > 512 || (binary.BigEndian.Uint16(response[2:4])&0x0200 != 0) != tc.tc {
+			t.Fatalf("%d records: size = %d, flags = %x", tc.count, len(response), response[2:4])
+		}
+		if tc.tc && (len(response) != len(query) || binary.BigEndian.Uint16(response[6:8]) != 0) {
+			t.Fatal("truncated response is not question-only")
+		}
+	}
+	// Exercise a real client's UDP-to-TCP retry against both serving paths.
+	udp, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tcp, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: udp.LocalAddr().(*net.UDPAddr).Port})
+	if err != nil {
+		_ = udp.Close()
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 2)
+	go func() { done <- r.serveUDP(ctx, udp) }()
+	go func() { done <- r.serveTCP(ctx, tcp) }()
+	t.Cleanup(func() {
+		cancel()
+		_ = udp.Close()
+		_ = tcp.Close()
+		for range 2 {
+			if err := <-done; err != nil {
+				t.Error(err)
+			}
+		}
+	})
+	resolver := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, udp.LocalAddr().String())
+	}}
+	lookupCtx, stop := context.WithTimeout(ctx, 5*time.Second)
+	defer stop()
+	addresses, err := resolver.LookupIPAddr(lookupCtx, "frontend.web.acme.trellis.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(addresses) != 30 {
+		t.Fatalf("answers = %d, want 30", len(addresses))
+	}
+	seen := map[string]bool{}
+	for _, address := range addresses {
+		seen[address.IP.String()] = true
+	}
+	for _, service := range services {
+		if !seen[service.Address] {
+			t.Fatalf("missing address %s", service.Address)
+		}
+	}
+}
+
+func TestDiscoveryAAAA(t *testing.T) {
+	services := nodeapi.ServiceListResponse{
+		{Group: "db", Job: "web", Namespace: "acme", Address: "2001:db8::7"},
+		{Group: "db", Job: "web", Namespace: "acme", Address: "10.0.0.9"},
+		{Group: "db", Job: "web", Namespace: "acme", Address: "::ffff:10.0.0.11"},
+	}
+	r := NewResolver(nil, &mockLookup{services: &services}, namespaceLookup{netip.MustParsePrefix("10.42.1.0/24"): "acme"}, "trellis")
+	r.refresh(t.Context())
+	query := buildQuery("db.web.acme.trellis.")
+	binary.BigEndian.PutUint16(query[len(query)-4:], 28)
+	response := r.handleQueryNetwork(query, "udp", &net.UDPAddr{IP: net.ParseIP("10.42.1.8")})
+	if binary.BigEndian.Uint16(response[6:8]) != 1 || len(response) != len(query)+28 {
+		t.Fatalf("invalid AAAA answer: %x", response)
+	}
+	answer := response[len(query):]
+	if binary.BigEndian.Uint16(answer[2:4]) != 28 || binary.BigEndian.Uint16(answer[10:12]) != 16 || !net.IP(answer[12:]).Equal(net.ParseIP("2001:db8::7")) {
+		t.Fatalf("wrong AAAA record: %x", answer)
+	}
+}
+
+func TestMalformedNamesReturnFormerr(t *testing.T) {
+	r := NewResolver(nil, nil, nil, "trellis")
+	for _, name := range [][]byte{
+		append([]byte{64}, append([]byte(strings.Repeat("a", 64)), encodeName("web.acme.trellis.")...)...),
+		{128, 0}, {192, 255}, {192, 12}, {1, 'a'},
+	} {
+		packet := make([]byte, 12+len(name))
+		binary.BigEndian.PutUint16(packet[4:6], 1)
+		copy(packet[12:], name)
+		response := r.handleQuery(packet)
+		if len(response) != 12 || binary.BigEndian.Uint16(response[2:4])&15 != 1 || binary.BigEndian.Uint16(response[4:6]) != 0 {
+			t.Fatalf("invalid FORMERR for %x: %x", name, response)
+		}
+	}
+	if response := buildResponse(7, strings.Repeat("a", 64)+".trellis.", 1, 1, nil); len(response) != 12 || binary.BigEndian.Uint16(response[2:4])&15 != 1 {
+		t.Fatalf("encoder failure produced malformed response: %x", response)
+	}
+}
+
+func TestNameWireLengthAndCompressionBounds(t *testing.T) {
+	// Three 63-byte labels plus a 61-byte label and root occupy 255 bytes.
+	maximum := strings.Repeat(strings.Repeat("a", 63)+".", 3) + strings.Repeat("b", 61) + "."
+	encoded := encodeName(maximum)
+	if len(encoded) != 255 {
+		t.Fatalf("maximum name length = %d", len(encoded))
+	}
+	if name, offset := decodeName(encoded, 0); name != maximum || offset != 255 {
+		t.Fatalf("maximum name decode = %q, %d", name, offset)
+	}
+	oversized := append([]byte(nil), encoded...)
+	oversized[192] = 62
+	oversized = append(oversized[:254], 'b', 0)
+	if _, offset := decodeName(oversized, 0); offset != -1 {
+		t.Fatal("256-byte name accepted")
+	}
+	if encodeName(maximum[:len(maximum)-1]+"b.") != nil {
+		t.Fatal("256-byte name encoded")
+	}
+	// A compressed name must enforce expanded length, not just pointer size.
+	compressed := append(append([]byte(nil), encoded...), 0xc0, 0)
+	if name, offset := decodeName(compressed, 255); name != maximum || offset != 257 {
+		t.Fatalf("compressed name decode = %q, %d", name, offset)
+	}
+	if name, offset := decodeName([]byte{0}, 0); name != "." || offset != 1 || !reflect.DeepEqual(encodeName(name), []byte{0}) {
+		t.Fatal("root name did not roundtrip")
 	}
 }

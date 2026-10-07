@@ -41,6 +41,9 @@ type NamespaceLookup interface {
 
 type record struct {
 	addresses []net.IP
+	identity  string
+	namespace string
+	ambiguous bool
 }
 
 // Resolver serves DNS records backed by service discovery.
@@ -65,7 +68,7 @@ func NewResolver(log *slog.Logger, lookup DiscoveryLookup, namespaces NamespaceL
 	}
 	return &Resolver{
 		log:        log,
-		domain:     domain,
+		domain:     strings.ToLower(domain),
 		lookup:     lookup,
 		namespaces: namespaces,
 		upstreams:  append([]string(nil), upstreams...),
@@ -299,10 +302,14 @@ func (r *Resolver) refresh(ctx context.Context) {
 			ip = ips[0].IP
 		}
 		key := svc.Group + "." + svc.Job + "." + svc.Namespace
-		rec, ok := cache[key]
+		foldedKey := strings.ToLower(key)
+		rec, ok := cache[foldedKey]
 		if !ok {
-			rec = &record{}
-			cache[key] = rec
+			rec = &record{identity: key, namespace: svc.Namespace}
+			cache[foldedKey] = rec
+		} else if rec.identity != key {
+			// Case-distinct resource identities cannot share a DNS name.
+			rec.ambiguous = true
 		}
 		rec.addresses = append(rec.addresses, ip)
 	}
@@ -311,7 +318,8 @@ func (r *Resolver) refresh(ctx context.Context) {
 	r.mu.Unlock()
 }
 
-func (r *Resolver) resolve(name string) []net.IP {
+func (r *Resolver) resolve(name, sourceNamespace string) []net.IP {
+	name = strings.ToLower(name)
 	suffix := "." + r.domain + "."
 	if !strings.HasSuffix(name, suffix) {
 		return nil
@@ -327,7 +335,7 @@ func (r *Resolver) resolve(name string) []net.IP {
 	r.mu.RLock()
 	rec := r.cache[key]
 	r.mu.RUnlock()
-	if rec == nil {
+	if rec == nil || rec.ambiguous || (sourceNamespace != "" && rec.namespace != sourceNamespace) {
 		return nil
 	}
 	return rec.addresses
@@ -342,7 +350,21 @@ func (r *Resolver) handleQueryNetwork(packet []byte, network string, remote net.
 	return r.handleQueryNetworkContext(context.Background(), packet, network, remote)
 }
 
-func (r *Resolver) handleQueryNetworkContext(ctx context.Context, packet []byte, network string, remote net.Addr) []byte {
+func (r *Resolver) handleQueryNetworkContext(ctx context.Context, packet []byte, network string, remote net.Addr) (response []byte) {
+	authoritative := false
+	defer func() {
+		// EDNS is not negotiated; authoritative UDP replies use the classic limit.
+		if authoritative && network == "udp" && len(response) > 512 {
+			_, offset := decodeName(response, 12)
+			if offset < 0 || offset+4 > 512 {
+				response = nil
+				return
+			}
+			response = response[:offset+4]
+			binary.BigEndian.PutUint16(response[2:4], binary.BigEndian.Uint16(response[2:4])|0x0200)
+			clear(response[6:12])
+		}
+	}()
 	if len(packet) < 12 {
 		return nil
 	}
@@ -357,29 +379,33 @@ func (r *Resolver) handleQueryNetworkContext(ctx context.Context, packet []byte,
 
 	name, offset := decodeName(packet, 12)
 	if offset < 0 || offset+4 > len(packet) {
-		return nil
+		return buildErrorResponse(packet, 1)
 	}
-	if !strings.HasSuffix(name, "."+r.domain+".") {
+	foldedName := strings.ToLower(name)
+	if !strings.HasSuffix(foldedName, "."+r.domain+".") {
 		return r.forward(ctx, packet, network)
 	}
+	authoritative = true
 
 	qtype := binary.BigEndian.Uint16(packet[offset : offset+2])
 	qclass := binary.BigEndian.Uint16(packet[offset+2 : offset+4])
+	sourceNamespace := ""
 	if r.namespaces != nil {
 		remoteIP, ok := remoteAddress(remote)
 		if !ok {
 			return buildResponse(id, name, qtype, qclass, nil)
 		}
 		namespace, ok := r.namespaces.NamespaceForIP(remoteIP)
-		if !ok || queryNamespace(name, r.domain) != namespace {
+		if !ok || !strings.EqualFold(queryNamespace(foldedName, r.domain), namespace) {
 			return buildResponse(id, name, qtype, qclass, nil)
 		}
+		sourceNamespace = namespace
 	}
 
 	if qclass != 1 {
 		return buildResponse(id, name, qtype, qclass, nil)
 	}
-	ips := r.resolve(name)
+	ips := r.resolve(name, sourceNamespace)
 	return buildResponse(id, name, qtype, qclass, ips)
 }
 
@@ -467,7 +493,10 @@ func buildErrorResponse(packet []byte, rcode uint16) []byte {
 	}
 	_, offset := decodeName(packet, 12)
 	if offset < 0 || offset+4 > len(packet) {
-		return nil
+		response := append([]byte(nil), packet[:12]...)
+		binary.BigEndian.PutUint16(response[2:4], 0x8000|(binary.BigEndian.Uint16(packet[2:4])&0x0100)|(rcode&0x000f))
+		clear(response[4:12])
+		return response
 	}
 	response := append([]byte(nil), packet[:offset+4]...)
 	requestFlags := binary.BigEndian.Uint16(packet[2:4])
@@ -480,16 +509,36 @@ func buildErrorResponse(packet []byte, rcode uint16) []byte {
 }
 
 func buildResponse(id uint16, name string, qtype, qclass uint16, ips []net.IP) []byte {
+	questionName := encodeName(name)
+	if questionName == nil {
+		packet := make([]byte, 12)
+		binary.BigEndian.PutUint16(packet[:2], id)
+		return buildErrorResponse(packet, 1)
+	}
 	buf := make([]byte, 0, 512)
-	ipv4s := make([]net.IP, 0, len(ips))
-	if qtype == 1 && qclass == 1 {
+	addresses := make([]net.IP, 0, len(ips))
+	recordSize := 16
+	if qtype == 28 {
+		recordSize = 28
+	}
+	maxAnswers := (maxDNSMessageSize - 12 - len(questionName) - 4) / recordSize
+	truncated := false
+	if (qtype == 1 || qtype == 28) && qclass == 1 {
 		for _, ip := range ips {
-			if ipv4 := ip.To4(); ipv4 != nil {
-				ipv4s = append(ipv4s, ipv4)
-				if len(ipv4s) == int(^uint16(0)) {
-					break
-				}
+			var address net.IP
+			if qtype == 1 {
+				address = ip.To4()
+			} else if ip.To4() == nil {
+				address = ip.To16()
 			}
+			if address == nil {
+				continue
+			}
+			if len(addresses) == maxAnswers {
+				truncated = true
+				break
+			}
+			addresses = append(addresses, address)
 		}
 	}
 
@@ -498,56 +547,65 @@ func buildResponse(id uint16, name string, qtype, qclass uint16, ips []net.IP) [
 	binary.BigEndian.PutUint16(header[0:2], id)
 	flags := uint16(0x8000) // QR=1 (response)
 	flags |= 0x0400         // AA=1 (authoritative)
+	if truncated {
+		flags |= 0x0200
+	}
 	// A known name with no records of the requested type is NODATA, not
 	// NXDOMAIN. In particular, AAAA must not invalidate a successful A lookup.
 	if len(ips) == 0 {
 		flags |= 0x0003 // RCODE=NXDOMAIN
 	}
 	binary.BigEndian.PutUint16(header[2:4], flags)
-	binary.BigEndian.PutUint16(header[4:6], 1) // QDCOUNT
-	// ipv4s is capped at the maximum representable DNS answer count above.
-	binary.BigEndian.PutUint16(header[6:8], uint16(len(ipv4s))) //nolint:gosec // ANCOUNT
+	binary.BigEndian.PutUint16(header[4:6], 1)                      // QDCOUNT
+	binary.BigEndian.PutUint16(header[6:8], uint16(len(addresses))) //nolint:gosec // Message size bounds ANCOUNT.
 	buf = append(buf, header...)
 
 	// Question section
-	buf = append(buf, encodeName(name)...)
+	buf = append(buf, questionName...)
 	qtypeBytes := make([]byte, 4)
 	binary.BigEndian.PutUint16(qtypeBytes[0:2], qtype)
 	binary.BigEndian.PutUint16(qtypeBytes[2:4], qclass)
 	buf = append(buf, qtypeBytes...)
 
 	// Answer section
-	for _, ipv4 := range ipv4s {
+	for _, address := range addresses {
 		// Name pointer to offset 12 (start of question name)
 		buf = append(buf, 0xC0, 0x0C)
 		ans := make([]byte, 10)
-		binary.BigEndian.PutUint16(ans[0:2], 1)          // TYPE A
-		binary.BigEndian.PutUint16(ans[2:4], 1)          // CLASS IN
-		binary.BigEndian.PutUint32(ans[4:8], DefaultTTL) // TTL
-		binary.BigEndian.PutUint16(ans[8:10], 4)         // RDLENGTH
+		binary.BigEndian.PutUint16(ans[0:2], qtype)                 // TYPE A or AAAA
+		binary.BigEndian.PutUint16(ans[2:4], 1)                     // CLASS IN
+		binary.BigEndian.PutUint32(ans[4:8], DefaultTTL)            // TTL
+		binary.BigEndian.PutUint16(ans[8:10], uint16(len(address))) //nolint:gosec // Addresses are 4 or 16 bytes.
 		buf = append(buf, ans...)
-		buf = append(buf, ipv4...)
+		buf = append(buf, address...)
 	}
 
 	return buf
 }
 
 func encodeName(name string) []byte {
+	if name == "." {
+		return []byte{0}
+	}
 	name = strings.TrimSuffix(name, ".")
 	var buf []byte
 	for label := range strings.SplitSeq(name, ".") {
-		if len(label) > 63 {
+		if len(label) == 0 || len(label) > 63 {
 			return nil
 		}
 		buf = append(buf, byte(len(label))) //nolint:gosec // DNS labels are bounded to 63 bytes above.
 		buf = append(buf, []byte(label)...)
 	}
 	buf = append(buf, 0)
+	if len(buf) > 255 {
+		return nil
+	}
 	return buf
 }
 
 func decodeName(packet []byte, offset int) (string, int) {
 	var labels []string
+	nameLength := 1 // Root terminator.
 	visited := make(map[int]bool)
 	origOffset := -1
 	for offset < len(packet) {
@@ -558,7 +616,10 @@ func decodeName(packet []byte, offset int) (string, int) {
 		length := int(packet[offset])
 		if length == 0 {
 			offset++
-			break
+			if origOffset >= 0 {
+				offset = origOffset
+			}
+			return strings.Join(labels, ".") + ".", offset
 		}
 		if length&0xC0 == 0xC0 {
 			if offset+1 >= len(packet) {
@@ -571,6 +632,13 @@ func decodeName(packet []byte, offset int) (string, int) {
 			offset = ptr
 			continue
 		}
+		if length > 63 {
+			return "", -1 // Reserved label encodings.
+		}
+		nameLength += 1 + length
+		if nameLength > 255 {
+			return "", -1
+		}
 		offset++
 		if offset+length > len(packet) {
 			return "", -1
@@ -578,8 +646,5 @@ func decodeName(packet []byte, offset int) (string, int) {
 		labels = append(labels, string(packet[offset:offset+length]))
 		offset += length
 	}
-	if origOffset >= 0 {
-		offset = origOffset
-	}
-	return strings.Join(labels, ".") + ".", offset
+	return "", -1 // Missing root terminator or out-of-bounds pointer.
 }
