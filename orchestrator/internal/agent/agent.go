@@ -79,6 +79,10 @@ type Agent struct {
 	// lifetime bounds background starts; Init sets it.
 	lifetime context.Context
 
+	// planOperation serializes plan application without holding mu across I/O.
+	// It is initialized under operationMu.
+	planOperation chan struct{}
+
 	recoveryListPending bool
 	// supersededStops holds retained older generations that recovery must
 	// stop itself because the control plane rejects their stops as stale.
@@ -1234,46 +1238,69 @@ func (a *Agent) startDrainState(request *nodeapi.AllocationRequest) (bool, uint6
 
 // UpdateNetworkPlan refreshes the network shared by running allocations.
 func (a *Agent) UpdateNetworkPlan(ctx context.Context, request *nodeapi.NetworkPlanRequest) error {
+	a.operationMu.Lock()
+	if a.planOperation == nil {
+		a.planOperation = make(chan struct{}, 1)
+	}
+	operation := a.planOperation
+	a.operationMu.Unlock()
+	select {
+	case operation <- struct{}{}:
+		defer func() { <-operation }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := a.AcceptEpoch(request.Epoch); err != nil {
 		return err
 	}
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	if request.Epoch < a.epoch {
-		return fmt.Errorf("%w: received %d, highest accepted %d", ErrStaleEpoch, request.Epoch, a.epoch)
-	}
 	active := false
-	var desiredCIDR netip.Prefix
-	if request.Plan.CIDR != "" {
-		var err error
-		desiredCIDR, err = netip.ParsePrefix(request.Plan.CIDR)
-		if err != nil {
-			return fmt.Errorf("invalid network plan CIDR %q: %w", request.Plan.CIDR, err)
+	if err := func() error {
+		a.mu.RLock()
+		defer a.mu.RUnlock()
+		if request.Epoch < a.epoch {
+			return fmt.Errorf("%w: received %d, highest accepted %d", ErrStaleEpoch, request.Epoch, a.epoch)
 		}
-		desiredCIDR = desiredCIDR.Masked()
-	}
-	for _, allocation := range a.allocations {
-		if allocation.Namespace != request.Namespace || allocation.Network == nil {
-			continue
-		}
-		active = true
-		if request.Plan.Gateway != "" && allocation.Network.Gateway != "" && request.Plan.Gateway != allocation.Network.Gateway {
-			return fmt.Errorf("network plan would change active namespace gateway from %s to %s", allocation.Network.Gateway, request.Plan.Gateway)
-		}
-		if desiredCIDR.IsValid() && allocation.Network.Address != "" {
-			current, err := netip.ParsePrefix(allocation.Network.Address)
+		var desiredCIDR netip.Prefix
+		if request.Plan.CIDR != "" {
+			var err error
+			desiredCIDR, err = netip.ParsePrefix(request.Plan.CIDR)
 			if err != nil {
-				return fmt.Errorf("invalid active network address %q: %w", allocation.Network.Address, err)
+				return fmt.Errorf("invalid network plan CIDR %q: %w", request.Plan.CIDR, err)
 			}
-			if current.Masked() != desiredCIDR {
-				return fmt.Errorf("network plan would change active namespace CIDR from %s to %s", current.Masked(), desiredCIDR)
+			desiredCIDR = desiredCIDR.Masked()
+		}
+		for _, allocation := range a.allocations {
+			if allocation.Namespace != request.Namespace || allocation.Network == nil {
+				continue
+			}
+			active = true
+			if request.Plan.Gateway != "" && allocation.Network.Gateway != "" && request.Plan.Gateway != allocation.Network.Gateway {
+				return fmt.Errorf("network plan would change active namespace gateway from %s to %s", allocation.Network.Gateway, request.Plan.Gateway)
+			}
+			if desiredCIDR.IsValid() && allocation.Network.Address != "" {
+				current, err := netip.ParsePrefix(allocation.Network.Address)
+				if err != nil {
+					return fmt.Errorf("invalid active network address %q: %w", allocation.Network.Address, err)
+				}
+				if current.Masked() != desiredCIDR {
+					return fmt.Errorf("network plan would change active namespace CIDR from %s to %s", current.Masked(), desiredCIDR)
+				}
 			}
 		}
+		return nil
+	}(); err != nil {
+		return err
 	}
 	if !active {
 		return nil
 	}
-	return a.network.UpdatePlan(ctx, request.Namespace, request.Plan)
+	if err := a.network.UpdatePlan(ctx, request.Namespace, request.Plan); err != nil {
+		return err
+	}
+	return ctx.Err()
 }
 
 // StopGroup stops all tasks in an allocation group.
@@ -1423,18 +1450,18 @@ func (a *Agent) stopUnrecorded(ctx context.Context, request *nodeapi.StopAllocat
 
 // DrainGroup suppresses automatic restarts for one allocation generation until
 // the control plane delivers the normal stop operation.
-func (a *Agent) DrainGroup(request *nodeapi.DrainAllocationRequest) error {
+func (a *Agent) DrainGroup(ctx context.Context, request *nodeapi.DrainAllocationRequest) error {
 	unlock := a.lockAllocationOperation(request.AllocationID)
 	defer unlock()
 	if err := a.AcceptEpoch(request.Epoch); err != nil {
 		return err
 	}
-	return a.applyDrain(request.AllocationID, request.Generation, request.Sequence)
+	return a.applyDrain(ctx, request.AllocationID, request.Generation, request.Sequence)
 }
 
 // applyDrain marks one allocation generation draining at sequence. The caller
 // must hold the allocation operation lock.
-func (a *Agent) applyDrain(allocationID string, generation, sequence uint64) error {
+func (a *Agent) applyDrain(ctx context.Context, allocationID string, generation, sequence uint64) error {
 	a.mu.Lock()
 	if err := a.drainStartLocked(allocationID, generation, true, sequence); err != nil {
 		a.mu.Unlock()
@@ -1468,7 +1495,7 @@ func (a *Agent) applyDrain(allocationID string, generation, sequence uint64) err
 	}
 	a.mu.Unlock()
 	for _, id := range ids {
-		a.reconciler.SuppressRestarts(id)
+		persistErr = errors.Join(persistErr, a.reconciler.SuppressRestarts(ctx, id))
 	}
 	return persistErr
 }
@@ -1971,7 +1998,9 @@ func (a *Agent) abortTaskStart(ctx context.Context, launch *taskLaunch) error {
 	task, alloc := launch.task, launch.alloc
 	if launch.startAttempted {
 		if launch.tracked {
-			a.reconciler.BeginStop(task.ID)
+			if err := a.reconciler.BeginStop(ctx, task.ID); err != nil {
+				return fmt.Errorf("suppress restarts before abort: %w", err)
+			}
 		} else {
 			// Start may have succeeded even if its response was lost. Track
 			// the retained allocation as stopping from the outset so an
@@ -2124,7 +2153,9 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string, retainLogs b
 		a.retainedLogs[containerID] = record
 		a.mu.Unlock()
 	}
-	a.reconciler.BeginStop(allocID)
+	if err := a.reconciler.BeginStop(ctx, allocID); err != nil {
+		return fmt.Errorf("suppress restarts before stop: %w", err)
+	}
 	persistStopErr := a.markAllocationStopping(allocID)
 	a.closeExecSessionsForTask(ctx, allocID, containerID)
 	if !containerMissing {

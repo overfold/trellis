@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -107,6 +109,55 @@ func (r *blockingRunner) Run(_ context.Context, name string, args ...string) err
 type slowRecordingRunner struct {
 	recordingRunner
 	delay time.Duration
+}
+
+type cancelledPlanRunner struct {
+	recordingRunner
+	command string
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (r *cancelledPlanRunner) Run(ctx context.Context, name string, args ...string) error {
+	if name == r.command {
+		r.once.Do(func() { close(r.entered) })
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return r.recordingRunner.Run(ctx, name, args...)
+}
+
+func TestUpdatePlanCancelsSlowCommandsAndRetries(t *testing.T) {
+	for _, command := range []string{"ip", "wg", "iptables"} {
+		t.Run(command, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				manager, err := NewAutomatedWireGuardManager(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
+				manager.run = &recordingRunner{}
+				plan := Plan{CIDR: "10.42.1.0/24", Gateway: "10.42.1.1", WireGuardAddress: "169.254.1.1/32", ListenPort: 51917}
+				if _, err := manager.Attach(context.Background(), AttachRequest{Namespace: "acme", Network: "acme", AllocationID: "alloc", Plan: plan}); err != nil {
+					t.Fatal(err)
+				}
+				runner := &cancelledPlanRunner{command: command, entered: make(chan struct{})}
+				manager.run = runner
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				done := make(chan error, 1)
+				go func() { done <- manager.UpdatePlan(ctx, "acme", plan) }()
+				<-runner.entered
+				cancel()
+				if err := <-done; !errors.Is(err, context.Canceled) {
+					t.Fatalf("cancelled %s error = %v", command, err)
+				}
+				manager.run = &recordingRunner{}
+				if err := manager.UpdatePlan(context.Background(), "acme", plan); err != nil {
+					t.Fatalf("retry after %s cancellation: %v", command, err)
+				}
+			})
+		})
+	}
 }
 
 func (r *slowRecordingRunner) Run(ctx context.Context, name string, args ...string) error {

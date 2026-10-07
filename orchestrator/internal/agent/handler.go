@@ -72,7 +72,7 @@ func (h *Handler) handleDrain(c *echo.Context) error {
 	if request.Epoch == 0 {
 		return echo.NewHTTPError(http.StatusBadRequest, ErrInvalidEpoch.Error())
 	}
-	if err := h.agent.DrainGroup(&request); err != nil {
+	if err := h.agent.DrainGroup(c.Request().Context(), &request); err != nil {
 		return operationError(err)
 	}
 	return c.JSON(http.StatusOK, nodeapi.OperationResponse{Code: nodeapi.OperationOK, Generation: request.Generation})

@@ -11,7 +11,10 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
-const reconcileInterval = 3 * time.Second
+const (
+	reconcileInterval = 3 * time.Second
+	reconcileTimeout  = 10 * time.Second
+)
 
 // AllocationReconciler is the single authority for local allocation lifecycle
 // decisions. Runtime inspection and health checks provide observations; this
@@ -36,7 +39,8 @@ type AllocationReconcileSubscriber interface {
 }
 
 type allocationReconcileState struct {
-	operation     sync.Mutex
+	operation     chan struct{}
+	cancel        context.CancelFunc // guarded by the reconciler mutex
 	stopping      bool
 	healthManaged bool
 	restarting    bool
@@ -100,6 +104,13 @@ func advanceRestartState(attempts int, window time.Time, maxRestarts int, restar
 func (r *AllocationReconciler) track(allocID string, policy *spec.RestartPolicySpec, state *allocationReconcileState) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	state.operation = make(chan struct{}, 1)
+	if previous := r.states[allocID]; previous != nil {
+		state.operation = previous.operation
+		if previous.cancel != nil {
+			previous.cancel()
+		}
+	}
 
 	// Start requests carry the job's canonical restart policy and the
 	// handler refuses requests without one, so policy is nil only for a
@@ -118,26 +129,42 @@ func (r *AllocationReconciler) Untrack(allocID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if _, ok := r.states[allocID]; !ok {
+	state, ok := r.states[allocID]
+	if !ok {
 		return nil
+	}
+	if state.cancel != nil {
+		state.cancel()
 	}
 	delete(r.states, allocID)
 	return nil
 }
 
-// SuppressRestarts waits for an active reconciliation pass and prevents further restarts.
-func (r *AllocationReconciler) SuppressRestarts(allocID string) {
+// SuppressRestarts cancels an active pass before waiting for runtime exclusion.
+// A runtime that ignores cancellation remains fenced; callers can abandon the
+// wait without allowing cleanup to race a late restart.
+func (r *AllocationReconciler) SuppressRestarts(ctx context.Context, allocID string) error {
+	ctx, cancel := context.WithTimeout(ctx, reconcileTimeout)
+	defer cancel()
 	r.mu.Lock()
 	state := r.states[allocID]
+	if state != nil {
+		state.stopping = true
+		if state.cancel != nil {
+			state.cancel()
+		}
+	}
 	r.mu.Unlock()
 	if state == nil {
-		return
+		return nil
 	}
-	state.operation.Lock()
-	r.mu.Lock()
-	state.stopping = true
-	r.mu.Unlock()
-	state.operation.Unlock()
+	select {
+	case state.operation <- struct{}{}:
+		<-state.operation
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // ResumeRestarts restores reconciliation after a drain is cancelled.
@@ -149,16 +176,14 @@ func (r *AllocationReconciler) ResumeRestarts(allocID string, healthManaged bool
 		r.TrackRecovered(allocID, healthManaged, policy, attempts, window, exhausted)
 		return
 	}
-	state.operation.Lock()
 	r.mu.Lock()
 	state.stopping = false
 	r.mu.Unlock()
-	state.operation.Unlock()
 }
 
 // BeginStop suppresses restarts before runtime cleanup starts.
-func (r *AllocationReconciler) BeginStop(allocID string) {
-	r.SuppressRestarts(allocID)
+func (r *AllocationReconciler) BeginStop(ctx context.Context, allocID string) error {
+	return r.SuppressRestarts(ctx, allocID)
 }
 
 // ObserveHealth records a health observation. The health manager owns how an
@@ -193,8 +218,21 @@ func (r *AllocationReconciler) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			for _, allocID := range r.trackedAllocations() {
-				if err := r.Reconcile(ctx, allocID); err != nil {
-					r.log.Error("reconcile allocation", "alloc", allocID, "error", err)
+				r.mu.Lock()
+				state := r.states[allocID]
+				r.mu.Unlock()
+				if state == nil {
+					continue
+				}
+				select {
+				case state.operation <- struct{}{}:
+					go func() {
+						defer func() { <-state.operation }()
+						if err := r.reconcile(ctx, allocID, state); err != nil {
+							r.log.Error("reconcile allocation", "alloc", allocID, "error", err)
+						}
+					}()
+				default: // At most one outstanding pass per allocation.
 				}
 			}
 		}
@@ -214,42 +252,71 @@ func (r *AllocationReconciler) trackedAllocations() []string {
 
 // Reconcile performs one local desired-vs-actual pass for an allocation.
 func (r *AllocationReconciler) Reconcile(ctx context.Context, allocID string) error {
+	ctx, cancel := context.WithTimeout(ctx, reconcileTimeout)
+	defer cancel()
 	r.mu.Lock()
 	state := r.states[allocID]
 	r.mu.Unlock()
 	if state == nil {
 		return fmt.Errorf("alloc %s not tracked", allocID)
 	}
-	state.operation.Lock()
-	defer state.operation.Unlock()
+	select {
+	case state.operation <- struct{}{}:
+		defer func() { <-state.operation }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return r.reconcile(ctx, allocID, state)
+}
+
+func (r *AllocationReconciler) reconcile(ctx context.Context, allocID string, state *allocationReconcileState) error {
+	ctx, cancel := context.WithTimeout(ctx, reconcileTimeout)
+	defer cancel()
 	r.mu.Lock()
 	active := r.states[allocID] == state && !state.stopping && !state.failed
+	if active {
+		state.cancel = cancel
+	}
 	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		state.cancel = nil
+		r.mu.Unlock()
+	}()
 	if !active {
 		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	containerState, err := r.runtime.Inspect(ctx, allocID)
 	if err != nil {
 		return fmt.Errorf("inspect alloc %s: %w", allocID, err)
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	if containerState.Status != runtime.StatusStopped {
 		return nil
 	}
-	return r.restart(ctx, allocID)
+	return r.restart(ctx, allocID, state)
 }
 
-func (r *AllocationReconciler) restart(ctx context.Context, allocID string) error {
+func (r *AllocationReconciler) restart(ctx context.Context, allocID string, state *allocationReconcileState) error {
 	r.mu.Lock()
-	state, ok := r.states[allocID]
-	if !ok {
+	if r.states[allocID] != state || state.stopping {
 		r.mu.Unlock()
-		return fmt.Errorf("alloc %s not tracked", allocID)
+		return nil
 	}
 	if state.restarting {
 		r.mu.Unlock()
 		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		r.mu.Unlock()
+		return err
 	}
 	state.restarting = true
 
@@ -290,10 +357,16 @@ func (r *AllocationReconciler) restart(ctx context.Context, allocID string) erro
 		r.mu.Unlock()
 		return fmt.Errorf("record restart attempt for alloc %s: %w", allocID, err)
 	}
+	if err := ctx.Err(); err != nil {
+		r.mu.Lock()
+		state.restarting = false
+		r.mu.Unlock()
+		return err
+	}
 
 	if err := r.runtime.Restart(ctx, allocID); err != nil {
 		r.mu.Lock()
-		if current := r.states[allocID]; current != nil {
+		if current := r.states[allocID]; current == state {
 			current.restarting = false
 		}
 		r.mu.Unlock()
@@ -301,10 +374,17 @@ func (r *AllocationReconciler) restart(ctx context.Context, allocID string) erro
 	}
 
 	r.mu.Lock()
-	if current := r.states[allocID]; current != nil {
+	if current := r.states[allocID]; current == state {
 		current.restarting = false
 	}
+	active := r.states[allocID] == state && !state.stopping
 	r.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !active {
+		return nil
+	}
 
 	if healthManaged {
 		r.publishStatus(allocID, "running")

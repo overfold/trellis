@@ -1593,7 +1593,7 @@ func recoverCreatedAllocationForRetry(t *testing.T, rt *createdRecoveryRuntime, 
 	rt.labels = recoveryTestLabels(first.allocations[id])
 	if drainSequence != 0 {
 		drain := &nodeapi.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: request.Epoch, Sequence: drainSequence}
-		if err := first.DrainGroup(drain); err != nil {
+		if err := first.DrainGroup(context.Background(), drain); err != nil {
 			t.Fatalf("drain before agent restart: %v", err)
 		}
 	} else if err := first.persistAllocation(first.allocations[id]); err != nil {
@@ -1681,7 +1681,7 @@ func TestStaleResumeAfterStartRetryKeepsDrain(t *testing.T) {
 		t.Fatal("recovered non-running allocation was tracked before start retry")
 	}
 	drain := &nodeapi.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: request.Epoch, Sequence: 5}
-	if err := agent.DrainGroup(drain); err != nil {
+	if err := agent.DrainGroup(context.Background(), drain); err != nil {
 		t.Fatalf("drain recovered allocation: %v", err)
 	}
 	request.Draining, request.DrainSequence = true, drain.Sequence
@@ -1844,7 +1844,7 @@ func TestStartResumeReachesRunningTasksDespiteLaterFailure(t *testing.T) {
 		t.Fatal("start succeeded despite failed create")
 	}
 	drain := &nodeapi.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: request.Epoch, Sequence: 3}
-	if err := agent.DrainGroup(drain); err != nil {
+	if err := agent.DrainGroup(context.Background(), drain); err != nil {
 		t.Fatalf("drain partially started allocation: %v", err)
 	}
 
@@ -1942,7 +1942,7 @@ func TestRecoverNonRunningAllocationDefersRestartToServer(t *testing.T) {
 				t.Fatal("non-running recovered allocation entered local restart reconciliation")
 			}
 			request := &nodeapi.DrainAllocationRequest{AllocationID: "allocation", Generation: 1, Epoch: 1}
-			if err := second.DrainGroup(request); err != nil {
+			if err := second.DrainGroup(context.Background(), request); err != nil {
 				t.Fatalf("drain recovered allocation: %v", err)
 			}
 			if err := second.ResumeGroup(request); err != nil {
@@ -2292,7 +2292,7 @@ func TestRestartExhaustionReportsFailedAndSurvivesAgentRestart(t *testing.T) {
 	}
 	// Cancelling a drain must tolerate a task that failed terminally.
 	request := &nodeapi.DrainAllocationRequest{AllocationID: "allocation", Generation: 1, Epoch: 1}
-	if err := second.DrainGroup(request); err != nil {
+	if err := second.DrainGroup(context.Background(), request); err != nil {
 		t.Fatalf("drain: %v", err)
 	}
 	if err := second.ResumeGroup(request); err != nil {

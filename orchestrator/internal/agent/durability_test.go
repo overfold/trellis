@@ -70,7 +70,7 @@ func TestAgentMutationsRequirePositiveFences(t *testing.T) {
 			return agent.StopGroup(context.Background(), &nodeapi.StopAllocationRequest{AllocationID: "alloc", Generation: 1})
 		}},
 		{name: "drain epoch", run: func() error {
-			return agent.DrainGroup(&nodeapi.DrainAllocationRequest{AllocationID: "alloc", Generation: 1})
+			return agent.DrainGroup(context.Background(), &nodeapi.DrainAllocationRequest{AllocationID: "alloc", Generation: 1})
 		}},
 		{name: "resume epoch", run: func() error {
 			return agent.ResumeGroup(&nodeapi.DrainAllocationRequest{AllocationID: "alloc", Generation: 1})

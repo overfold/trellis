@@ -362,7 +362,7 @@ func (a *Agent) runGroupTasks(ctx context.Context, start *groupStart, request *n
 	// starting are rebuilt by startTask with the same state.
 	var err error
 	if draining {
-		err = a.applyDrain(request.AllocationID, request.Generation, drainSequence)
+		err = a.applyDrain(ctx, request.AllocationID, request.Generation, drainSequence)
 	} else if drainSequence > 0 {
 		err = a.applyResume(request.AllocationID, request.Generation, drainSequence, true)
 	}

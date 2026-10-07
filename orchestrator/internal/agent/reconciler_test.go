@@ -183,7 +183,7 @@ func TestDrainGroupSuppressesAutomaticRestart(t *testing.T) {
 		reconciler: r,
 		operations: make(map[string]*allocationOperation),
 	}
-	if err := agent.DrainGroup(&nodeapi.DrainAllocationRequest{AllocationID: "alloc", Generation: 2, Epoch: 1}); err != nil {
+	if err := agent.DrainGroup(context.Background(), &nodeapi.DrainAllocationRequest{AllocationID: "alloc", Generation: 2, Epoch: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.Reconcile(context.Background(), "task"); err != nil {
@@ -206,7 +206,7 @@ func TestResumeGroupRestoresAutomaticRestart(t *testing.T) {
 		reconciler:  r,
 		operations:  make(map[string]*allocationOperation),
 	}
-	if err := agent.DrainGroup(&nodeapi.DrainAllocationRequest{AllocationID: "alloc", Generation: 2, Epoch: 1}); err != nil {
+	if err := agent.DrainGroup(context.Background(), &nodeapi.DrainAllocationRequest{AllocationID: "alloc", Generation: 2, Epoch: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if err := agent.ResumeGroup(&nodeapi.DrainAllocationRequest{AllocationID: "alloc", Generation: 2, Epoch: 1}); err != nil {
@@ -236,7 +236,7 @@ func TestLateDrainDoesNotSuppressRestartsAfterResume(t *testing.T) {
 	if err := agent.ResumeGroup(resume); err != nil {
 		t.Fatal(err)
 	}
-	if err := agent.DrainGroup(drain); err != nil {
+	if err := agent.DrainGroup(context.Background(), drain); err != nil {
 		t.Fatal(err)
 	}
 	if agent.allocations["task"].Draining || agent.allocations["task"].DrainSequence != 2 {

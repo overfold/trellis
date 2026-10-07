@@ -218,7 +218,7 @@ func TestStartFencesAgainstStartInProgress(t *testing.T) {
 	if err := agent.StopGroup(context.Background(), &nodeapi.StopAllocationRequest{AllocationID: request.AllocationID, Generation: older.Generation, Epoch: request.Epoch}); !errors.Is(err, ErrStaleGeneration) {
 		t.Fatalf("older stop = %v, want stale generation", err)
 	}
-	if err := agent.DrainGroup(&nodeapi.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: older.Generation, Epoch: request.Epoch, Sequence: 9}); !errors.Is(err, ErrStaleGeneration) {
+	if err := agent.DrainGroup(context.Background(), &nodeapi.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: older.Generation, Epoch: request.Epoch, Sequence: 9}); !errors.Is(err, ErrStaleGeneration) {
 		t.Fatalf("older drain = %v, want stale generation", err)
 	}
 	conflict := singleTaskRequest()
@@ -236,7 +236,7 @@ func TestStartFencesAgainstStartInProgress(t *testing.T) {
 	}
 
 	// A drain delivered during the pull applies when the task is created.
-	if err := agent.DrainGroup(&nodeapi.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: 5, Sequence: 3}); err != nil {
+	if err := agent.DrainGroup(context.Background(), &nodeapi.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: 5, Sequence: 3}); err != nil {
 		t.Fatalf("drain during pull: %v", err)
 	}
 	// The leader of the new epoch re-sends the start it still wants.

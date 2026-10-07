@@ -69,9 +69,14 @@ type Heartbeat struct {
 
 // NewServerClient creates a node client for the control plane at addr.
 func NewServerClient(token string, addr string, tlsConfig *tls.Config) *ServerClient {
+	httpClient := transport.NewHTTPClient(tlsConfig, 30*time.Second)
+	// Bound registration, heartbeat and discovery through body consumption,
+	// not only response headers. Each subsequent loop attempt gets a fresh
+	// budget, and caller cancellation still terminates shutdown immediately.
+	httpClient.Timeout = 10 * time.Second
 	return &ServerClient{
 		baseURL: transport.NormalizeBaseURL(addr),
-		client:  &transport.Client{Token: token, HTTP: transport.NewHTTPClient(tlsConfig, 30*time.Second)},
+		client:  &transport.Client{Token: token, HTTP: httpClient},
 	}
 }
 

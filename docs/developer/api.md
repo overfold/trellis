@@ -18,6 +18,8 @@ Registration reports physical and allocatable resources, workload eligibility (`
 
 Heartbeat bodies are limited to 32 MiB and 320,000 allocation-task reports (`413` on excess). A task `reason` is allowed only for phase `failed`, and currently only `restart_budget_exhausted` is accepted. A task in phase `starting` may carry `start_failure`: `attempt`, a message of at most 1024 bytes, and optional code `stale_generation`, `execution_conflict`, or `restart_budget_exhausted`. Other phases reject that field. The leader counts a failure for the allocation's current attempt once; a non-retryable code immediately fails it.
 
+The node client bounds each registration, heartbeat, and discovery HTTP request to ten seconds, including connection establishment and response-body consumption. A stalled body is closed and its request cancelled when the budget expires. Caller cancellation terminates the request sooner during shutdown. Failed heartbeats retain the registration-before-next-heartbeat retry path; each new HTTP request receives a fresh budget.
+
 Internal discovery exposes catalog entries only for namespaces with active allocations on the authenticated node. The node resolver additionally checks the workload's source namespace before answering. The leader combines durable namespace port slots with node-advertised bases to build WireGuard peer plans; see [networking](node-internals.md#networking).
 
 ## Leader-to-agent operations
@@ -27,6 +29,8 @@ The client verifies that the agent certificate identifies the scheduled node. Th
 The agent acknowledges a fenced start before pulling images and creating tasks in the background. The request's `attempt` is excluded from the execution hash and is returned in background-start failure observations. Exhausted restart budgets reject same-generation starts with HTTP `409` and operation code `restart_budget_exhausted`.
 
 Drain/resume requests carry a persisted intent sequence. The leader saves intent before delivery; a failed undrain save contacts no agent, while a delivery failure after a successful save is retried by reconciliation. Starts carry `draining` and `drain_sequence` outside the execution hash. The agent uses the higher sequence of its local intent and the request (the request wins ties), including for tasks already running, so delayed drains cannot override resumes and start retries cannot restart drained tasks. See [reconciliation](control-plane.md#reconciliation) and [agent convergence](node-internals.md#agent-convergence).
+
+Network-plan requests serialize epoch admission and application through a dedicated, caller-cancellable gate. Validation snapshots active attachments under the agent lock, but external network commands run without that broad lock, so unrelated start admission can proceed. An already admitted plan finishes before another plan applies; accepting a newer epoch elsewhere does not roll back when that older plan completes, and queued stale plans are rejected before application. Network command cancellation and partial-application retries remain the network manager's responsibility.
 
 ## Exec relay
 
