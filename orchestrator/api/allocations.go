@@ -76,6 +76,8 @@ type AllocationResponse struct {
 	Message          string               `json:"message,omitempty"`
 	Attempt          int                  `json:"attempt"`
 	NextRetryAt      *time.Time           `json:"next_retry_at,omitempty"`
+	// Tasks lists the allocation's task names, independently of network endpoints.
+	Tasks []string `json:"tasks,omitempty"`
 }
 
 // AllocationListResponse is the response returned when listing allocations.

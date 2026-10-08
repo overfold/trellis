@@ -28,6 +28,8 @@ The node client bounds each registration, heartbeat, and discovery HTTP request 
 
 Internal discovery exposes catalog entries only for namespaces with active allocations on the authenticated node. The node resolver additionally checks the workload's source namespace before answering. The leader combines durable namespace port slots with node-advertised bases to build WireGuard peer plans; see [networking](node-internals.md#networking).
 
+`GET /v1/internal/discovery` accepts `job` and `label` filters. As with public allocation listings, `label=key` requires presence and `label=key:value` requires presence plus an exact value match; `label=key:` matches a present empty value, not an absent label. The first colon separates the key from the value.
+
 ## Leader-to-agent operations
 
 The client verifies that the agent certificate identifies the scheduled node. The agent verifies that the caller identifies its locally known Raft leader. Start, stop, drain, resume, and network-plan mutations require a positive control epoch; allocation operations also require a positive generation, and starts verify revision and execution hash. Protocol conflicts reject stale or incompatible execution rather than changing newer work.

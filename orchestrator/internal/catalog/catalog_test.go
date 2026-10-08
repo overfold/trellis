@@ -69,6 +69,25 @@ func TestListWithFilters(t *testing.T) {
 	}
 }
 
+func TestListEmptyLabelValue(t *testing.T) {
+	c := New()
+	c.Update("acme", []ServiceInstance{
+		{ID: "empty", Job: "web", Group: "app", Labels: map[string]string{"tier": ""}},
+		{ID: "nonempty", Job: "web", Group: "app", Labels: map[string]string{"tier": "web"}},
+		{ID: "absent", Job: "web", Group: "app", Labels: map[string]string{"other": ""}},
+		{ID: "nil", Job: "web", Group: "app"},
+	})
+	for _, namespace := range []string{"acme", ""} {
+		got := c.List(namespace, &ListFilter{Label: "tier:"})
+		if len(got) != 1 || got[0].ID != "empty" {
+			t.Fatalf("empty-value filter = %#v", got)
+		}
+		if got := c.List(namespace, &ListFilter{Label: "tier"}); len(got) != 2 {
+			t.Fatalf("existence filter = %#v", got)
+		}
+	}
+}
+
 func TestListAllNamespaces(t *testing.T) {
 	c := New()
 	c.Update("acme", []ServiceInstance{

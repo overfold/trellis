@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -126,6 +127,25 @@ func TestClientExecStreamEndings(t *testing.T) {
 			var execErr *ExecError
 			if err == nil || !strings.Contains(err.Error(), tt.want) || errors.As(err, &execErr) != tt.typed {
 				t.Fatalf("wait error = %v, want %q (typed %t)", err, tt.want, tt.typed)
+			}
+		})
+	}
+}
+
+func TestClientExecExitCodes(t *testing.T) {
+	for _, code := range []int{0, 17, -1} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			server := serveExecTestStream(t, nil, func(_ *execstream.Reader, writer *execstream.Writer) {
+				// Unknown fields remain forward-compatible.
+				_ = writer.WriteFrame(execstream.FrameExit, fmt.Appendf(nil, `{"exit_code":%d,"extra":true}`, code))
+			})
+			stream, err := mustNew(t, Config{Address: server.URL, Token: "token", Namespace: "default"}).Exec(context.Background(), "alloc-1", api.ExecRequest{Command: []string{"true"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = stream.Close() }()
+			if got, err := stream.Wait(io.Discard, io.Discard); err != nil || got != code {
+				t.Fatalf("Wait = %d, %v; want %d", got, err, code)
 			}
 		})
 	}

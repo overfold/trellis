@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,7 +14,6 @@ import (
 
 	"github.com/overfold/trellis/orchestrator/api"
 	"github.com/overfold/trellis/orchestrator/client"
-	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
 func isHTTPStatus(err error, status int) bool {
@@ -237,36 +235,25 @@ func resolveLogStreams(ctx context.Context, serverClient *client.Client, target,
 	}
 	matches := append([]api.AllocationResponse(nil), status.Allocations...)
 	matches = filterAllocations(matches, group)
-	matches = preferActiveAllocations(matches)
 	if allocationRef != "" {
 		resolved, err := resolveAllocationPrefix(matches, allocationRef)
 		if err != nil {
 			return nil, err
 		}
 		matches = []api.AllocationResponse{resolved}
+	} else {
+		matches = preferActiveAllocations(matches)
 	}
 	if len(matches) == 0 {
 		return nil, fmt.Errorf("job %s has no allocations matching the requested filters", target)
 	}
 
-	groupTasks := make(map[string][]string)
-	if len(status.Spec) > 0 {
-		var jobSpec spec.JobSpec
-		if err := json.Unmarshal(status.Spec, &jobSpec); err != nil {
-			return nil, fmt.Errorf("decode job %s spec: %w", target, err)
-		}
-		for _, candidateGroup := range jobSpec.TaskGroups {
-			for _, candidateTask := range candidateGroup.Tasks {
-				groupTasks[candidateGroup.Name] = append(groupTasks[candidateGroup.Name], candidateTask.Name)
-			}
-		}
-	}
-
 	streams := make([]jobLogStream, 0)
 	for _, allocation := range matches {
-		tasks := groupTasks[allocation.Group]
+		tasks := allocation.Tasks
 		if task != "" {
-			if containsTask(tasks, task) {
+			// Without task metadata, let the log endpoint validate the selector.
+			if len(tasks) == 0 || slices.Contains(tasks, task) {
 				streams = append(streams, jobLogStream{allocation: allocation, task: task})
 			}
 			continue
@@ -286,10 +273,6 @@ func resolveLogStreams(ctx context.Context, serverClient *client.Client, target,
 		return nil, fmt.Errorf("job %s has no log streams matching the requested filters", target)
 	}
 	return streams, nil
-}
-
-func containsTask(tasks []string, task string) bool {
-	return slices.Contains(tasks, task)
 }
 
 func displayTask(task string) string {

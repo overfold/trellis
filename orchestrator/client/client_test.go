@@ -143,6 +143,12 @@ func TestAllocationListingsUseFiltersAndRoutes(t *testing.T) {
 	if query != "job=web&label=trellis.expose" {
 		t.Fatalf("filtered request = %s?%s", path, query)
 	}
+	if _, err := c.ListAllocations(context.Background(), AllocationFilter{Label: "tier:"}); err != nil {
+		t.Fatal(err)
+	}
+	if query != "label=tier%3A" {
+		t.Fatalf("empty-value filter lost: %s?%s", path, query)
+	}
 }
 
 func TestApplyJobSendsSpecAndPreconditions(t *testing.T) {

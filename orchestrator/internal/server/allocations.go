@@ -141,6 +141,9 @@ func (s *Server) allocationResponseLocked(allocation *Allocation) api.Allocation
 		Labels:           s.allocationLabelsLocked(allocation),
 		Ports:            allocation.Ports,
 	}
+	for _, task := range allocation.Tasks {
+		response.Tasks = append(response.Tasks, task.Name)
+	}
 	if allocation.Node != nil {
 		response.NodeID = allocation.Node.ID
 	}
@@ -196,7 +199,8 @@ func matchAllocationLabel(labels map[string]string, filter string) bool {
 	for i := range filter {
 		if filter[i] == ':' {
 			key, value := filter[:i], filter[i+1:]
-			return labels[key] == value
+			actual, ok := labels[key]
+			return ok && actual == value
 		}
 	}
 	_, ok := labels[filter]

@@ -193,6 +193,8 @@ trellisctl jobs logs web --tail 200
 
 The default is the last 100 lines per selected task stream. Use `--tail 0` for all retained output. Logs are node-local and bounded: each task keeps about the node's `task_log_limit` (64 MiB by default) of its newest output, and older output is discarded (see [Task log limit](operations.md#task-log-limit)).
 
+Without `--allocation`, selection prefers active allocations after applying `--group`; terminal allocations are selected only when no active allocation matches. An explicit allocation ID or unique prefix selects from all retained matching allocations, even when an active replacement exists. Ambiguous prefixes are rejected rather than choosing a replacement.
+
 Narrow the streams by task group or task when appropriate:
 
 ```sh
@@ -206,6 +208,8 @@ Following needs exactly one task stream. Combine the allocation ID displayed by 
 trellisctl jobs logs web --allocation default-web-frontend-a1b2c3d4 --task app --follow
 ```
 
+Task selection uses each allocation's own task inventory, not the current job spec. This includes historical tasks and removed groups while their allocation history is retained. Against a server without allocation task metadata, `--task` is passed through for server validation; without it, the server resolves a single task or rejects an ambiguous multi-task allocation. Use an explicit `--task` for those older-server multi-task allocations.
+
 ## Run commands and open an allocation terminal
 
 `trellisctl exec` targets a Trellis allocation directly. It runs one command over a single bidirectional stream: output is written to the matching local streams as it is produced, and the remote exit status becomes `trellisctl`'s exit status:
@@ -213,6 +217,8 @@ trellisctl jobs logs web --allocation default-web-frontend-a1b2c3d4 --task app -
 ```sh
 trellisctl exec a1b2c3d4 -- /app/bin/migrate --check
 ```
+
+An absent, null, or non-integer remote exit status is a protocol error, never a successful exit. Valid zero and nonzero exit statuses retain their usual meaning.
 
 When the allocation contains multiple tasks, select one explicitly:
 

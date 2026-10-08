@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/client"
 	"github.com/overfold/trellis/orchestrator/internal/execstream"
 	"github.com/overfold/trellis/orchestrator/internal/execwebsocket"
 )
@@ -143,6 +144,28 @@ func TestExecTermRequiresTTY(t *testing.T) {
 	err := cmd.Execute()
 	if err == nil || !strings.Contains(err.Error(), "--term requires --tty") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestExecRejectsInvalidExitStatus(t *testing.T) {
+	previousConfig := config
+	t.Cleanup(func() { config = previousConfig })
+	for _, payload := range []string{`{}`, `null`, `{"exit_code":null}`, `{"exit_code":0.5}`} {
+		t.Run(payload, func(t *testing.T) {
+			server := newExecTestServer(t, func(api.ExecRequest) {}, func(_ *execstream.Reader, writer *execstream.Writer) {
+				_ = writer.WriteFrame(execstream.FrameExit, []byte(payload))
+			})
+			config = CLIConfig{ServerAddr: server.URL, Namespace: "default"}
+			cmd := NewExecCmd()
+			cmd.SetArgs([]string{"alloc-1", "--", "true"})
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&bytes.Buffer{})
+			err := cmd.Execute()
+			var exitErr *execExitError
+			if !errors.Is(err, client.ErrInvalidExecFrame) || errors.As(err, &exitErr) {
+				t.Fatalf("invalid exit status became a process exit: %v", err)
+			}
+		})
 	}
 }
 

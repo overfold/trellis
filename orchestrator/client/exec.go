@@ -86,11 +86,16 @@ func (s *ExecStream) Wait(stdout, stderr io.Writer) (int, error) {
 				return 0, fmt.Errorf("write exec stderr: %w", err)
 			}
 		case execstream.FrameExit:
-			var exit api.ExecExit
+			var exit struct {
+				ExitCode *int `json:"exit_code"`
+			}
 			if err := json.Unmarshal(frame.Payload, &exit); err != nil {
 				return 0, fmt.Errorf("decode exec exit status: %w: %w", ErrInvalidExecFrame, err)
 			}
-			return exit.ExitCode, nil
+			if exit.ExitCode == nil {
+				return 0, fmt.Errorf("decode exec exit status: %w: exit_code must be a non-null integer", ErrInvalidExecFrame)
+			}
+			return *exit.ExitCode, nil
 		case execstream.FrameError:
 			var streamErr api.ExecStreamError
 			if err := json.Unmarshal(frame.Payload, &streamErr); err != nil || streamErr.Message == "" {

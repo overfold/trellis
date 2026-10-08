@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"reflect"
 	"testing"
 	"time"
@@ -51,6 +52,57 @@ func TestListAllocationsWithFilters(t *testing.T) {
 	}
 	if got := s.ListAllocations("", &AllocationListFilter{Job: "web", Label: "trellis.expose:true"}); len(got) != 2 {
 		t.Fatalf("expected two exposed web allocations across namespaces, got %d", len(got))
+	}
+	s.jobs[jobKey("acme", "web")].Spec.TaskGroups[0].Labels["empty"] = ""
+	for _, label := range []string{"empty", "empty:"} {
+		if got := s.ListAllocations("", &AllocationListFilter{Label: label}); len(got) != 1 || got[0].ID != "acme-web-1" {
+			t.Fatalf("filter %q = %#v, want only allocation carrying empty label", label, got)
+		}
+	}
+	if got := s.ListAllocations("", &AllocationListFilter{Label: "absent:"}); len(got) != 0 {
+		t.Fatalf("absent label matched: %#v", got)
+	}
+}
+
+func TestAllocationResponsesUseHistoricalTasks(t *testing.T) {
+	s := &Server{
+		jobs: map[string]*Job{jobKey("default", "web"): {
+			Spec:     &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "frontend", Count: 1, Tasks: []spec.TaskSpec{{Name: "new"}}}}},
+			Revision: 2,
+		}},
+		allocations: []*Allocation{{
+			ID: "old", Namespace: "default", JobName: "web", TaskGroupName: "removed", JobRevision: 1,
+			Tasks: []spec.TaskSpec{{Name: "old"}, {Name: "sidecar"}}, Phase: lifecycle.PhaseStopped,
+		}},
+	}
+	status, err := s.GetJob("default", "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, allocations := range map[string][]api.AllocationResponse{
+		"allocations": s.ListAllocations("default", nil),
+		"status":      status.Allocations,
+		"jobs":        s.ListJobs("default")[0].Allocations,
+	} {
+		t.Run(name, func(t *testing.T) {
+			// Exercise the published JSON name as well as the domain projection.
+			data, err := json.Marshal(allocations)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var wire []struct {
+				Tasks []string `json:"tasks"`
+			}
+			if err := json.Unmarshal(data, &wire); err != nil {
+				t.Fatal(err)
+			}
+			if len(wire) != 1 || !reflect.DeepEqual(wire[0].Tasks, []string{"old", "sidecar"}) {
+				t.Fatalf("historical tasks = %s", data)
+			}
+			if len(allocations[0].Endpoints) != 0 {
+				t.Fatal("non-networked tasks should not require endpoints")
+			}
+		})
 	}
 }
 
