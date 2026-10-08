@@ -372,6 +372,39 @@ func (r *staleListingRuntime) Inspect(context.Context, string) (*runtime.Contain
 	return nil, r.inspectErr
 }
 
+func TestReconcileMissingContainerFailsButTransientErrorPreservesObservation(t *testing.T) {
+	for _, missing := range []bool{false, true} {
+		rt := &staleListingRuntime{listingRecoveryRuntime: &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{}}, inspectErr: errors.New("runtime unavailable")}
+		if missing {
+			rt.inspectErr = fmt.Errorf("load container: %w", errdefs.ErrNotFound)
+		}
+		agent, local := newRecoveryTestAgent(t, rt)
+		record := recoveryTestAllocation(0)
+		record.Ports = nil
+		agent.allocations[record.ID] = record
+		agent.reconciler.Subscriber = agent
+		agent.reconciler.Track(record.ID, false, &spec.RestartPolicySpec{MaxRestarts: 2})
+		err := agent.reconciler.Reconcile(context.Background(), record.ID)
+		if (err == nil) != missing {
+			t.Fatalf("missing=%v reconcile error=%v", missing, err)
+		}
+		if missing {
+			if err := agent.OnHealthy(context.Background(), record.ID); err != nil {
+				t.Fatal(err)
+			}
+			var stored Allocation
+			if err := local.Get(allocationRecordKey(record.ID), &stored); err != nil || stored.Status != "failed" || stored.Health != "unhealthy" {
+				t.Fatalf("stored observation=%+v error=%v", stored, err)
+			}
+		} else if record.Status != "running" || record.Health != "healthy" {
+			t.Fatalf("transient inspection changed observation: %+v", record)
+		}
+		if rt.restartCount != 0 || record.RestartAttempts != 0 || record.RestartExhausted {
+			t.Fatalf("missing container consumed restart budget: %+v", record)
+		}
+	}
+}
+
 func TestRecoverRetryDoesNotResurrectContainerRemovedAfterListing(t *testing.T) {
 	rt := &staleListingRuntime{
 		listingRecoveryRuntime: &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{}, listErr: errors.New("containerd unavailable")},

@@ -369,12 +369,12 @@ Leadership activation failures (Raft barrier, state reload, or epoch acquisition
 
 ## Agent recovery refused
 
-When the daemon starts, its allocation agent recovers from records below `data_dir` (`agent/control-epoch` and `agent/allocations/`). With intact records, an unavailable containerd listing is retried while health is unknown; restore containerd rather than deleting agent state.
+When the daemon starts, its allocation agent recovers from records below `data_dir` (`agent/control-epoch`, `agent/allocations/`, and `agent/stopped-generations/`). With intact records, an unavailable containerd listing is retried while health is unknown; restore containerd rather than deleting agent state. Stop-generation watermarks prevent delayed starts from resurrecting stopped workloads and remain after retained logs are pruned.
 
 The agent refuses to start, and the daemon exits, when that state is broken:
 
-- `agent/control-epoch` or an allocation record is unreadable or malformed, or a record's file name does not match its allocation ID;
-- the control epoch is missing while allocation records or managed containers exist, or while containerd cannot be listed to confirm an empty first boot;
+- `agent/control-epoch`, an allocation record, or a stop-generation watermark is unreadable or malformed, or a record's file name does not match its allocation ID;
+- the control epoch is missing while allocation records, stop-generation watermarks, or managed containers exist, or while containerd cannot be listed to confirm an empty first boot;
 - a Trellis container of this cluster has no allocation record.
 
 The container-without-record check also runs when containerd becomes available after startup. While the daemon is down its allocations stop heartbeating and can be replaced on other nodes. Do not fabricate records or delete fencing state to bypass the refusal; [agent convergence](../developer/node-internals.md#agent-convergence) explains the recovery invariants.
@@ -406,6 +406,8 @@ The error names the file or container and ends with `see "Agent recovery refused
    cd /var/lib/trellis/data   # data_dir
    sudo mkdir -p agent-broken
    sudo mv agent/allocations agent/control-epoch agent-broken/
+   # If present, move stop fences only as part of this complete empty-node reset.
+   if [ -d agent/stopped-generations ]; then sudo mv agent/stopped-generations agent-broken/; fi
    sudo systemctl start trellis
    ```
 

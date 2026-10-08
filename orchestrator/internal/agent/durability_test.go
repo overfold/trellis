@@ -33,6 +33,96 @@ func TestEpochFenceSurvivesRestart(t *testing.T) {
 	}
 }
 
+func TestStopWatermarkSurvivesRestartAndLogPruning(t *testing.T) {
+	for _, retain := range []bool{false, true} {
+		record := recoveryTestAllocation(0)
+		record.Generation = 3
+		record.Ports = nil
+		rt := &retainedLogsRuntime{listingRecoveryRuntime: &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusRunning}}, logs: map[string]string{"task": "logs"}}
+		rt.containers = []runtime.ContainerInfo{{ID: record.ID, Status: runtime.StatusRunning, Labels: recoveryTestLabels(record)}}
+		first, local := newRecoveryTestAgent(t, rt, record)
+		if err := first.recover(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		stop := &nodeapi.StopAllocationRequest{AllocationID: "allocation", Generation: 3, Epoch: 1, RetainLogs: retain}
+		if err := first.StopGroup(context.Background(), stop); err != nil {
+			t.Fatal(err)
+		}
+		rt.containers = nil
+		if len(first.allocations) != 0 || (retain && len(first.retainedLogs) != 1) {
+			t.Fatalf("stop cleanup: tasks=%v logs=%v", first.allocations, first.retainedLogs)
+		}
+		stop.RetainLogs = false
+		if err := first.StopGroup(context.Background(), stop); err != nil {
+			t.Fatal(err)
+		}
+		// An older duplicate stop must not lower the watermark.
+		stop.Generation = 1
+		if err := first.StopGroup(context.Background(), stop); err != nil {
+			t.Fatal(err)
+		}
+		second := newOperationTestAgent(t, rt)
+		second.ConfigureDurability(local, "test")
+		if err := second.recover(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		for _, generation := range []uint64{1, 3} {
+			if err := second.StartGroup(context.Background(), &nodeapi.AllocationRequest{AllocationID: "allocation", Generation: generation, Epoch: 1}); !errors.Is(err, ErrStaleGeneration) {
+				t.Fatalf("generation %d: %v", generation, err)
+			}
+		}
+		if err := second.fenceStart(&nodeapi.AllocationRequest{AllocationID: "allocation", Generation: 4}); err != nil {
+			t.Fatalf("newer generation: %v", err)
+		}
+	}
+}
+
+func TestRecoveryRejectsInvalidStopWatermarksAndIgnoresTemporaryFiles(t *testing.T) {
+	for _, value := range []any{uint64(0), "invalid", uint64(3)} {
+		agent, local := newRecoveryTestAgent(t, &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{}})
+		key := "agent/stopped-generations/" + allocationFileName("allocation")
+		if err := local.Put(key, value); err != nil {
+			t.Fatal(err)
+		}
+		if err := local.Put("agent/allocations/.tmp-interrupted", "not an allocation"); err != nil {
+			t.Fatal(err)
+		}
+		if err := local.Put("agent/stopped-generations/.tmp-interrupted", "not a watermark"); err != nil {
+			t.Fatal(err)
+		}
+		err := agent.recover(context.Background())
+		if (err == nil) != (value == uint64(3)) {
+			t.Fatalf("watermark %v: recover = %v", value, err)
+		}
+		if value == uint64(3) {
+			if err := local.Delete(controlEpochKey); err != nil {
+				t.Fatal(err)
+			}
+			if err := agent.recover(context.Background()); err == nil {
+				t.Fatal("accepted missing epoch with durable stop fencing state")
+			}
+		}
+	}
+}
+
+func TestStopWatermarkPersistencePrecedesTaskCleanup(t *testing.T) {
+	rt := &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{}}
+	record := recoveryTestAllocation(0)
+	agent, local := newRecoveryTestAgent(t, rt, record)
+	agent.allocations[record.ID] = record
+	// A file in place of the watermark directory makes its publication fail.
+	if err := local.Put("agent/stopped-generations", "blocked"); err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.StopGroup(context.Background(), &nodeapi.StopAllocationRequest{AllocationID: record.AllocationID, Generation: record.Generation, Epoch: 1}); err == nil {
+		t.Fatal("stop acknowledged without a durable generation fence")
+	}
+	var stored Allocation
+	if err := local.Get(allocationRecordKey(record.ID), &stored); err != nil || stored.Status != "running" || rt.stopCount != 0 || rt.removeCount != 0 {
+		t.Fatalf("task cleanup preceded durable fence: record=%+v error=%v stops=%d removes=%d", stored, err, rt.stopCount, rt.removeCount)
+	}
+}
+
 func TestPrepareStartRejectsObsoleteGenerationAndConflict(t *testing.T) {
 	agent := &Agent{allocations: map[string]*Allocation{
 		"task": {ID: "task", AllocationID: "alloc", Generation: 3, JobRevision: 7, ExecutionHash: "same"},

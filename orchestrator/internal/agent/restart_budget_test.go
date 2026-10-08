@@ -91,17 +91,25 @@ func TestRecoveredStoppedTaskKeepsRestartAttemptsOnStartRetry(t *testing.T) {
 	policy := &spec.RestartPolicySpec{MaxRestarts: 1, Window: time.Hour}
 	window := time.Now().Add(-time.Minute).Round(0)
 	rt := &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusStopped}}
-	agent, _, _ := restartBudgetTestAgent(t, rt, "running", 1, window)
+	agent, local, record := restartBudgetTestAgent(t, rt, "running", 1, window)
+	record.Restart = policy
+	if err := agent.persistAllocation(record); err != nil {
+		t.Fatal(err)
+	}
 	rt.containers = []runtime.ContainerInfo{{ID: "task", Status: runtime.StatusStopped, Labels: recoveryTestLabels(recoveryTestAllocation(0))}}
 	if err := agent.recover(context.Background()); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
-	if got := agent.allocations["task"]; got == nil || got.Status != "starting" {
-		t.Fatalf("recovered allocation = %+v, want starting for the server start retry", got)
+	if got := agent.allocations["task"]; got == nil || got.Status != "running" || got.Health != "unhealthy" {
+		t.Fatalf("recovered allocation = %+v, want committed task awaiting budgeted restart", got)
 	}
 
+	recovered := agent.allocations["task"]
 	if err := runRestartBudgetTestTask(agent, policy); err != nil {
 		t.Fatalf("start retry: %v", err)
+	}
+	if agent.allocations["task"] != recovered || rt.stopCount != 0 || rt.removeCount != 0 {
+		t.Fatal("start retry recreated an exited committed task outside restart accounting")
 	}
 	if got := agent.allocations["task"]; got.RestartAttempts != 1 || !got.RestartWindow.Equal(window) {
 		t.Fatalf("restarted record = %d/%v, want 1/%v", got.RestartAttempts, got.RestartWindow, window)
@@ -111,6 +119,37 @@ func TestRecoveredStoppedTaskKeepsRestartAttemptsOnStartRetry(t *testing.T) {
 	}
 	if rt.restartCount != 0 || agent.allocations["task"].Status != "failed" {
 		t.Fatalf("restart=%d status=%q, want the carried budget exhausted", rt.restartCount, agent.allocations["task"].Status)
+	}
+	var stored Allocation
+	if err := local.Get(allocationRecordKey("task"), &stored); err != nil || !stored.RestartExhausted {
+		t.Fatalf("durable exhaustion = %+v, error = %v", stored, err)
+	}
+}
+
+func TestRecoveredCommittedTaskConsumesBudgetAcrossCrashes(t *testing.T) {
+	policy := &spec.RestartPolicySpec{MaxRestarts: 1, Window: time.Hour}
+	rt := &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusStopped}}
+	agent, local, record := restartBudgetTestAgent(t, rt, "running", 0, time.Now())
+	record.Restart = policy
+	if err := agent.persistAllocation(record); err != nil {
+		t.Fatal(err)
+	}
+	rt.containers = []runtime.ContainerInfo{{ID: record.ID, Status: runtime.StatusStopped, Labels: recoveryTestLabels(record)}}
+	for pass := range 2 {
+		if pass != 0 {
+			agent = newOperationTestAgent(t, rt)
+			agent.ConfigureDurability(local, "test")
+			agent.reconciler.Subscriber = agent
+		}
+		if err := agent.recover(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if err := agent.reconciler.Reconcile(context.Background(), record.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rt.restartCount != 1 || !agent.allocations[record.ID].RestartExhausted {
+		t.Fatalf("restarts=%d record=%+v, want one restart then exhaustion", rt.restartCount, agent.allocations[record.ID])
 	}
 }
 

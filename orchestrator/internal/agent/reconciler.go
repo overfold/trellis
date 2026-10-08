@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/containerd/errdefs"
 	"github.com/overfold/trellis/orchestrator/internal/runtime"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
@@ -292,6 +293,12 @@ func (r *AllocationReconciler) reconcile(ctx context.Context, allocID string, st
 
 	containerState, err := r.runtime.Inspect(ctx, allocID)
 	if err != nil {
+		if errdefs.IsNotFound(err) && ctx.Err() == nil {
+			// Absence is a failed observation, not a transient inspection
+			// error or permission to recreate the container locally.
+			r.publishStatus(allocID, "failed")
+			return nil
+		}
 		return fmt.Errorf("inspect alloc %s: %w", allocID, err)
 	}
 	if err := ctx.Err(); err != nil {

@@ -139,7 +139,8 @@ func (s *LocalStorage) ListRaw(key string) (map[string]json.RawMessage, []error)
 	}
 	var errs []error
 	for _, entry := range entries {
-		if entry.IsDir() {
+		// Put publishes only by rename; interrupted writes are not records.
+		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".tmp-") {
 			continue
 		}
 		content, err := os.ReadFile(filepath.Join(root, entry.Name()))

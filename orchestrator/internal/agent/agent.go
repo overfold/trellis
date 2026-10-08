@@ -78,6 +78,8 @@ type Agent struct {
 	// starts holds accepted allocation starts running in the background, and
 	// failed ones until the control plane retries; guarded by mu.
 	starts map[string]*groupStart
+	// stoppedGenerations fences starts independently of task and log retention.
+	stoppedGenerations map[string]uint64
 	// lifetime bounds background starts; Init sets it.
 	lifetime context.Context
 
@@ -518,6 +520,22 @@ func (a *Agent) recover(ctx context.Context) error {
 	if epochErr != nil && !errors.Is(epochErr, os.ErrNotExist) {
 		return fmt.Errorf("read control-plane epoch %s: %w; %s", controlEpochKey, epochErr, recoveryGuidance)
 	}
+	stops, stopErrs := a.local.ListRaw("agent/stopped-generations")
+	if err := errors.Join(stopErrs...); err != nil {
+		return fmt.Errorf("read stopped generation watermarks: %w; %s", err, recoveryGuidance)
+	}
+	a.stoppedGenerations = make(map[string]uint64, len(stops))
+	for name, raw := range stops {
+		id, err := base64.RawURLEncoding.DecodeString(name)
+		var generation uint64
+		if err != nil || len(id) == 0 || allocationFileName(string(id)) != name || json.Unmarshal(raw, &generation) != nil || generation == 0 {
+			return fmt.Errorf("invalid stopped generation watermark %s; %s", name, recoveryGuidance)
+		}
+		a.stoppedGenerations[string(id)] = generation
+	}
+	if epochErr != nil && len(stops) != 0 {
+		return fmt.Errorf("control-plane epoch is missing while stopped generation watermarks exist; %s", recoveryGuidance)
+	}
 	records, recordErrs := a.local.ListRaw("agent/allocations")
 	if err := errors.Join(recordErrs...); err != nil {
 		return fmt.Errorf("read allocation recovery records: %w; %s", err, recoveryGuidance)
@@ -701,9 +719,14 @@ func (a *Agent) recoverContainer(container runtime.ContainerInfo, allocation *Al
 	// reporting the failed observation instead of asking for a new start.
 	notRunning := !stopping && (container.Status == runtime.StatusCreated || container.Status == runtime.StatusStopped)
 	exhausted := notRunning && allocation.RestartExhausted
-	recoveryPending := notRunning && !exhausted
+	committed := allocation.Status == "running"
+	recoveryPending := notRunning && !exhausted && !committed
 	if exhausted {
 		allocation.Status = "failed"
+		allocation.Health = "unhealthy"
+	} else if notRunning && committed {
+		// Keep committed tasks on the durable, budgeted restart path rather
+		// than recreating them as incomplete starts after every agent crash.
 		allocation.Health = "unhealthy"
 	} else if recoveryPending {
 		// Recovery reports observation; it does not invent desired state.
@@ -745,7 +768,7 @@ func (a *Agent) recoverContainer(container runtime.ContainerInfo, allocation *Al
 	} else if !recoveryPending {
 		a.reconciler.TrackRecovered(allocation.ID, healthManaged, allocation.Restart, allocation.RestartAttempts, allocation.RestartWindow, allocation.RestartExhausted)
 	}
-	if healthManaged && !stopping && !recoveryPending && !exhausted {
+	if healthManaged && !stopping && !notRunning {
 		a.health.RegisterTask(allocation.ID, allocation.ContainerID, allocation.Spec.HealthCheck, "namespace", allocation.Namespace, "job", allocation.JobName, "allocation", allocation.AllocationID, "task", allocation.TaskName)
 	}
 }
@@ -1373,6 +1396,23 @@ func (a *Agent) StopGroup(ctx context.Context, request *nodeapi.StopAllocationRe
 			return listErr
 		}
 	}
+	// Persist the fence before deleting any task record. A crash during
+	// cleanup must not permit a delayed start to undo this stop intent.
+	a.mu.Lock()
+	if a.stoppedGenerations[request.AllocationID] < request.Generation {
+		if a.local != nil {
+			key := "agent/stopped-generations/" + allocationFileName(request.AllocationID)
+			if err := a.local.Put(key, request.Generation); err != nil {
+				a.mu.Unlock()
+				return fmt.Errorf("persist stopped generation: %w", err)
+			}
+		}
+		if a.stoppedGenerations == nil {
+			a.stoppedGenerations = make(map[string]uint64)
+		}
+		a.stoppedGenerations[request.AllocationID] = request.Generation
+	}
+	a.mu.Unlock()
 	var errs []error
 	for _, id := range ids {
 		if err := a.stopAllocation(ctx, id, request.RetainLogs); err != nil {
@@ -2273,6 +2313,10 @@ func (a *Agent) OnReconciledStatus(allocID, status string) {
 			alloc.Health = status
 		} else {
 			alloc.Status = status
+			if status == "failed" {
+				alloc.Health = "unhealthy"
+				a.health.DeregisterTask(allocID)
+			}
 			if status == "running" && alloc.Spec != nil && alloc.Spec.HealthCheck != nil {
 				alloc.Health = "unknown"
 				a.health.RegisterTask(allocID, alloc.ContainerID, alloc.Spec.HealthCheck, "namespace", alloc.Namespace, "job", alloc.JobName, "allocation", alloc.AllocationID, "task", alloc.TaskName)

@@ -1914,8 +1914,8 @@ func TestStartDrainStatePrefersHigherSequenceThenDraining(t *testing.T) {
 	}
 }
 
-func TestRecoverNonRunningAllocationDefersRestartToServer(t *testing.T) {
-	for _, durableStatus := range []string{"running", "starting"} {
+func TestRecoverIncompleteAllocationDefersRestartToServer(t *testing.T) {
+	for _, durableStatus := range []string{"starting"} {
 		t.Run(durableStatus, func(t *testing.T) {
 			rt := &stoppedWithErrorRuntime{
 				reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusStopped},

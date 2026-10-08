@@ -278,6 +278,9 @@ func (a *Agent) pullImages(ctx context.Context, request *nodeapi.AllocationReque
 func (a *Agent) fenceStart(request *nodeapi.AllocationRequest) error {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
+	if stopped := a.stoppedGenerations[request.AllocationID]; stopped != 0 && request.Generation <= stopped {
+		return fmt.Errorf("%w: stopped through %d, requested %d", ErrStaleGeneration, stopped, request.Generation)
+	}
 	var exhaustedTask string
 	for _, allocation := range a.allocations {
 		if allocation.AllocationID != request.AllocationID {

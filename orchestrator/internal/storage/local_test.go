@@ -45,3 +45,26 @@ func TestLocalStoragePutIsPrivateAndSupportsNestedKeys(t *testing.T) {
 		t.Fatalf("value = %q", value)
 	}
 }
+
+func TestLocalStorageListIgnoresInterruptedWrites(t *testing.T) {
+	store := NewLocalStorage(t.TempDir())
+	if err := store.Put("records/committed", "original"); err != nil {
+		t.Fatal(err)
+	}
+	for _, content := range []string{`{"partial":`, `"uncommitted"`} {
+		file, err := os.CreateTemp(store.formatPath("records"), ".tmp-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := file.WriteString(content); err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	records, errs := store.ListRaw("records")
+	if len(errs) != 0 || len(records) != 1 || string(records["committed"]) != `"original"` {
+		t.Fatalf("records = %s, errors = %v", records, errs)
+	}
+}

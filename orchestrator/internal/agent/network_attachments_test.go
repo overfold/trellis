@@ -483,7 +483,9 @@ func TestHungOrphanDetachDoesNotBlockAgentOrReleaseOwnershipOnCancellation(t *te
 	if manager.isAttached("allocation-g2-first") {
 		t.Fatal("retry did not remove attachment")
 	}
-	if err := runGroup(context.Background(), agent, operationTestRequest()); err != nil {
+	request := operationTestRequest()
+	request.Generation++ // The earlier explicit stop permanently fenced generation 2.
+	if err := runGroup(context.Background(), agent, request); err != nil {
 		t.Fatalf("start after cleanup: %v", err)
 	}
 }
