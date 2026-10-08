@@ -300,6 +300,19 @@ It downloads and verifies the new release before touching the running daemon, th
 
 A service that was already stopped remains stopped. On a multi-node cluster the script also evacuates the node first; see [Multi-node clusters](multi-node.md#maintain-a-multi-node-cluster).
 
+Current builds pin Go 1.26.9 (including the TLS post-handshake/KeyUpdate CPU-DoS
+fix in [GO-2026-6090](https://pkg.go.dev/vuln/GO-2026-6090), fixed in 1.26.6),
+containerd's Go SDK 2.3.6 (the repeated OCI descriptor-graph pull-DoS fix in
+[GO-2026-6597](https://pkg.go.dev/vuln/GO-2026-6597)), and gRPC 1.83.2 (the fixed
+transitive transport for [GO-2026-6061](https://pkg.go.dev/vuln/GO-2026-6061) and
+[GO-2026-6348](https://pkg.go.dev/vuln/GO-2026-6348)). The Go and containerd updates
+stay on their existing release lines. These changes do not change operator/node
+wire contracts or the existing identity file layout; the enrollment journal is
+only an interrupted-write recovery record. Existing complete identities need no
+re-enrollment. Updating Trellis patches its embedded SDK, **not** the separately
+installed containerd daemon: update that daemon through your host maintenance
+process as well (the graph fix is in 1.7.36, 2.2.9, 2.3.6, and 2.4.1).
+
 The verified staged daemon decodes the installed node YAML with the same parser as normal startup, including quoted paths, comments, and aliases. Maintenance uses that `data_dir` and `containerd_socket`; an invalid configuration or missing/empty node identity on a running node stops the upgrade before binaries change. Containerd query failures are not evidence of evacuation: they abort the upgrade and attempt to undrain the node, just like an evacuation timeout.
 
 Upgrade and graceful uninstall require `jq` for structural parsing of the CLI's node-list JSON (on Debian/Ubuntu, `sudo apt-get install jq`). Membership must be a single nonempty JSON array of node objects with nonempty IDs; malformed, empty, or unexpected output stops maintenance before draining, replacing binaries, or deleting local state. Labels and pretty/compact formatting do not affect the count. Only a validated one-node list selects the single-node flow. Uninstall's explicit `--force` bypasses cluster inspection, not local resource cleanup.
@@ -375,6 +388,16 @@ Install and upgrade select exactly one `trellis_linux_x64.tar.gz` asset by its n
 Both scripts require `jq` and `sha256sum` (GNU coreutils), in addition to their existing host tools. Releases without GitHub asset digests cannot be installed or upgraded by these scripts; there is no unverified fallback. Already-installed nodes do not redownload when the current version matches the latest release.
 
 The artifact and digest are trusted through the same GitHub release account/channel. This detects corruption and substitution relative to the metadata, but **does not protect against release-account compromise**, a malicious authorized release, or compromise of GitHub/TLS trust. There are no independently signed checksums or verified build provenance in this flow. The entrypoint scripts and shared helpers fetched from `main` are also trusted executable inputs; archive verification does not authenticate those scripts. Inspect and pin scripts through your own trusted delivery process when stronger assurance is required.
+
+Piped entrypoints fetch their helpers over HTTPS and refuse downgrade redirects;
+they never execute helper files found in the current working directory. Running
+a downloaded file or repository checkout intentionally uses its sibling helpers.
+Optional gVisor installation similarly verifies the full upstream bundle against
+its SHA-512 digest over HTTPS before extraction, without Debian package hooks or
+Docker registration. That digest shares the upstream release trust channel and
+is not an independent signature or provenance check. Uninstall removes only the
+tracked Trellis bundle and its exact links, never Docker runtime registration;
+old `gvisor_config_owned` flags do not authorize deleting Docker configuration.
 
 ### Canonical specification and content-hash upgrades
 

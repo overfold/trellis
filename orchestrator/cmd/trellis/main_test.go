@@ -5,8 +5,10 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -14,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,6 +29,7 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/election"
 	"github.com/overfold/trellis/orchestrator/internal/execstream"
 	"github.com/overfold/trellis/orchestrator/internal/execwebsocket"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/server"
 	"github.com/overfold/trellis/orchestrator/internal/storage"
 	"github.com/overfold/trellis/orchestrator/internal/tlsutil"
@@ -707,5 +711,239 @@ func TestSecretsKeyLoaderRejectsUnsafeOwnershipAndSymlink(t *testing.T) {
 		}
 	} else {
 		t.Log("foreign ownership test requires root; symlink rejection verified")
+	}
+}
+
+func TestSecureJoinAddress(t *testing.T) {
+	for _, input := range []string{"node-a:8128", "https://node-a:8128/", " [::1]:8128 "} {
+		base, err := secureJoinAddress(input)
+		if err != nil || !strings.HasPrefix(base, "https://") || strings.HasSuffix(base, "/") {
+			t.Fatalf("secureJoinAddress(%q) = %q, %v", input, base, err)
+		}
+	}
+	for _, input := range []string{"", "http://node-a:8128", "ftp://node-a:8128", "https://user:password@node-a:8128", "https://node-a:8128/path", "https://node-a:8128?secret", "https://node-a:8128#fragment", "https://node-a:bad"} {
+		if _, err := secureJoinAddress(input); err == nil {
+			t.Errorf("accepted insecure or malformed address %q", input)
+		}
+	}
+}
+
+func TestEnrollmentRejectsHTTPWithoutSendingToken(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests.Add(1) }))
+	defer server.Close()
+	_, err := joinClusterTLS(context.Background(), slog.Default(), server.URL, "secret", nil, "", "", "", api.NodeRoleWorker, nil)
+	if err == nil || !strings.Contains(err.Error(), "HTTPS") || requests.Load() != 0 {
+		t.Fatalf("HTTP enrollment: error=%v, requests=%d", err, requests.Load())
+	}
+}
+
+func TestEnrollmentRedirectSecurity(t *testing.T) {
+	ca, caKey, err := tlsutil.GenerateCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, key, err := tlsutil.GenerateAPICert(ca, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair, err := tls.X509KeyPair(cert, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range []int{301, 302, 307, 308} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var leaked atomic.Int32
+			plain := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { leaked.Add(1) }))
+			defer plain.Close()
+			redirect := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "Bearer join-secret" {
+					t.Error("missing bearer token at pinned TLS endpoint")
+				}
+				http.Redirect(w, r, plain.URL+"/v1/nodes/enroll", status)
+			}))
+			redirect.TLS = &tls.Config{Certificates: []tls.Certificate{pair}, MinVersion: tls.VersionTLS12}
+			redirect.StartTLS()
+			defer redirect.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+			defer cancel()
+			if _, err := joinClusterTLS(ctx, slog.Default(), redirect.URL, "join-secret", ca, "", "", "", api.NodeRoleWorker, nil); err == nil {
+				t.Fatal("accepted downgrade redirect")
+			}
+			if leaked.Load() != 0 {
+				t.Fatalf("sent %d plaintext requests", leaked.Load())
+			}
+		})
+	}
+	// Legitimate same-CA leader redirects still work and preserve POST + token.
+	leader := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.Header.Get("Authorization") != "Bearer join-secret" {
+			t.Error("redirect lost enrollment method or authorization")
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"role":"worker"}`))
+	}))
+	leader.TLS = &tls.Config{Certificates: []tls.Certificate{pair}, MinVersion: tls.VersionTLS12}
+	leader.StartTLS()
+	defer leader.Close()
+	follower := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, leader.URL+"/v1/nodes/enroll", http.StatusTemporaryRedirect)
+	}))
+	follower.TLS = &tls.Config{Certificates: []tls.Certificate{pair}, MinVersion: tls.VersionTLS12}
+	follower.StartTLS()
+	defer follower.Close()
+	if _, err := joinClusterTLS(context.Background(), slog.Default(), follower.URL, "join-secret", ca, "", "", "", api.NodeRoleWorker, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnrollmentJournalResumesPartialPublication(t *testing.T) {
+	ca, caKey, err := tlsutil.GenerateCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := uuid.New()
+	cert, key, err := tlsutil.GenerateNodeCert(ca, caKey, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, obstruction := range []string{"tls/node-key", "tls/role", "node-id"} {
+		t.Run(obstruction, func(t *testing.T) {
+			dir := t.TempDir()
+			local := storage.NewLocalStorage(dir)
+			pending := pendingEnrollment{NodeID: id, Role: api.NodeRoleWorker, CACert: string(ca), Cert: string(cert), Key: string(key)}
+			if err := local.Put("tls/pending-enrollment", &pending); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, obstruction)
+			if err := os.MkdirAll(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			worker := false
+			cfg := &config{DataDir: dir, Join: "must-not-contact.invalid:8128", ControlPlane: &worker, SigningMode: "managed"}
+			if _, _, err := loadOrBootstrapTLS(context.Background(), slog.Default(), cfg, local, uuid.New()); err == nil {
+				t.Fatal("publication unexpectedly succeeded")
+			}
+			if err := local.Get("tls/pending-enrollment", &pending); err != nil {
+				t.Fatal("lost enrollment journal", err)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "node-id"), []byte("interrupted"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			acquired, err := acquireNodeID(dir)
+			if err != nil || acquired != id {
+				t.Fatalf("acquired %s, %v", acquired, err)
+			}
+			m, enrolled, err := loadOrBootstrapTLS(context.Background(), slog.Default(), cfg, local, acquired)
+			if err != nil || enrolled != id {
+				t.Fatalf("resume = %s, %v", enrolled, err)
+			}
+			if !bytes.Equal(m.Key, key) || !bytes.Equal(m.Cert, cert) {
+				t.Fatal("resume changed enrolled key pair")
+			}
+			if err := local.Get("tls/pending-enrollment", &pending); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("journal retained after publication", err)
+			}
+			stored, err := acquireNodeID(dir)
+			if err != nil || stored != id {
+				t.Fatalf("published ID = %s, %v", stored, err)
+			}
+			info, err := os.Stat(filepath.Join(dir, "tls/node-key"))
+			if err != nil || info.Mode().Perm() != 0o600 {
+				t.Fatal("private key permissions", err)
+			}
+		})
+	}
+}
+
+func TestEnrollmentPublishesJournalBeforeKeyProjection(t *testing.T) {
+	ca, caKey, err := tlsutil.GenerateCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiCert, apiKey, err := tlsutil.GenerateAPICert(ca, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair, err := tls.X509KeyPair(apiCert, apiKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := uuid.New()
+	var enrollments atomic.Int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		enrollments.Add(1)
+		var request nodeapi.NodeEnrollmentRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+			w.WriteHeader(400)
+			return
+		}
+		cert, err := tlsutil.SignNodeCSR(ca, caKey, []byte(request.CSR), id)
+		if err != nil {
+			t.Error(err)
+			w.WriteHeader(400)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		if err := json.NewEncoder(w).Encode(nodeapi.NodeEnrollmentResponse{NodeID: id, Role: api.NodeRoleWorker, Cert: string(cert)}); err != nil {
+			t.Error(err)
+		}
+	}))
+	server.TLS = &tls.Config{Certificates: []tls.Certificate{pair}, MinVersion: tls.VersionTLS12}
+	server.StartTLS()
+	defer server.Close()
+	dir := t.TempDir()
+	caPath := filepath.Join(dir, "pinned-ca")
+	if err := os.WriteFile(caPath, ca, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "tls/node-key"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	worker := false
+	cfg := &config{DataDir: dir, Join: server.URL, JoinToken: "single-use", CACert: caPath, SigningMode: "managed", ControlPlane: &worker}
+	local := storage.NewLocalStorage(dir)
+	if _, _, err := loadOrBootstrapTLS(context.Background(), slog.Default(), cfg, local, uuid.New()); err == nil {
+		t.Fatal("key projection unexpectedly succeeded")
+	}
+	var pending pendingEnrollment
+	if err := local.Get("tls/pending-enrollment", &pending); err != nil {
+		t.Fatal("enrollment identity not durable before projection", err)
+	}
+	info, err := os.Stat(filepath.Join(dir, "tls/pending-enrollment"))
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatal("journal permissions", err)
+	}
+	if err := os.Remove(filepath.Join(dir, "tls/node-key")); err != nil {
+		t.Fatal(err)
+	}
+	cfg.JoinToken = "" // Consumed token is not needed to resume.
+	m, gotID, err := loadOrBootstrapTLS(context.Background(), slog.Default(), cfg, local, uuid.New())
+	if err != nil || gotID != id {
+		t.Fatalf("resume ID = %s, %v", gotID, err)
+	}
+	if string(m.Key) != pending.Key || enrollments.Load() != 1 {
+		t.Fatal("re-enrolled or changed private key on resume")
+	}
+}
+
+func TestDetectRunscRequiresContainerdShim(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PATH", dir)
+	for _, name := range []string{"runsc", "containerd-shim-runsc-v1"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		got := detectNodeCapabilities()
+		if name == "runsc" && len(got) != 0 {
+			t.Fatal("Docker-only runsc advertised")
+		}
+		if name != "runsc" && (len(got) != 1 || got[0] != "runtime.runsc") {
+			t.Fatalf("containerd shim capabilities = %v", got)
+		}
 	}
 }

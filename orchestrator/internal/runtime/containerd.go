@@ -221,6 +221,13 @@ func (c *ContainerdRuntime) Create(ctx context.Context, options CreateOptions) (
 		oci.WithMounts(allMounts),
 		withManagedSecretMounts(options.Mounts),
 	}
+	if options.Runtime == "runsc" {
+		// Each workload is its own sandbox. The shim otherwise misclassifies
+		// an unannotated root as a child and attaches stdio too late.
+		ociSpecOpts = append(ociSpecOpts, oci.WithAnnotations(map[string]string{
+			"io.kubernetes.cri.container-type": "sandbox",
+		}))
+	}
 	if options.NetworkNamespace != "" {
 		ociSpecOpts = append(ociSpecOpts, oci.WithLinuxNamespace(specs.LinuxNamespace{
 			Type: specs.NetworkNamespace, Path: options.NetworkNamespace,
@@ -371,7 +378,11 @@ func (c *ContainerdRuntime) Start(ctx context.Context, containerID string) error
 	if err := ensureRuntimeDir(c.logDir); err != nil {
 		return fmt.Errorf("create log directory: %w", err)
 	}
-	task, err := container.NewTask(ctx, cio.LogFile(c.logPath(containerID)))
+	info, err := container.Info(ctx)
+	if err != nil {
+		return fmt.Errorf("reading runtime for %s: %w", containerID, err)
+	}
+	task, err := container.NewTask(ctx, taskLogIO(info.Runtime.Name, c.logPath(containerID)))
 	if err != nil {
 		return fmt.Errorf("creating task for %s: %w", containerID, err)
 	}
@@ -383,6 +394,31 @@ func (c *ContainerdRuntime) Start(ctx context.Context, containerID string) error
 	}
 
 	return nil
+}
+
+// Both shims own their output descriptors. Unlike runc, runsc accepts a plain
+// existing path, not a file:// URI, and opens it with O_APPEND but not O_CREAT.
+func taskLogIO(runtimeName, path string) cio.Creator {
+	if runtimeName != "io.containerd.runsc.v1" {
+		return cio.LogFile(path)
+	}
+	return func(string) (cio.IO, error) {
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0o600)
+		if err != nil {
+			return nil, fmt.Errorf("prepare runsc log: %w", err)
+		}
+		defer func() { _ = file.Close() }()
+		info, err := file.Stat()
+		if err != nil {
+			return nil, err
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("runsc log must be a regular file")
+		}
+		// Load preserves raw path bytes (including spaces and URL metacharacters)
+		// and creates no agent-side output-copy goroutines or descriptors.
+		return cio.Load(cio.NewFIFOSet(cio.Config{Stdout: path, Stderr: path}, nil))
+	}
 }
 
 // ensureAppArmorProfile reloads Trellis's AppArmor profile when a stored spec

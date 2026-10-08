@@ -90,7 +90,7 @@ trellisctl --administrator-key ./trellis-administrator.pem \
   nodes join-token create --role control-plane --ttl 30m > trellis-join-token
 ```
 
-The token is printed once; the cluster stores only its hash. `trellisctl nodes join-token list` shows unexpired tokens with their use counts, and `trellisctl nodes join-token revoke ID` withdraws one before it expires. Revoking a token does not affect nodes that already enrolled with it. Each enrollment attempt that the leader accepts uses the token once, even if its response is lost before the node stores its identity; if a node then reports that its token is exhausted, mint another. Rerun the installer with `--join-token-file` or `TRELLIS_JOIN_TOKEN`: an incomplete managed join without a stored node certificate atomically replaces the saved token while preserving the existing node configuration, identity, pinned CA, and secrets key. An already-enrolled node or completed installation does not replace its token.
+The token is printed once; the cluster stores only its hash. `trellisctl nodes join-token list` shows unexpired tokens with their use counts, and `trellisctl nodes join-token revoke ID` withdraws one before it expires. Revoking a token does not affect nodes that already enrolled with it. Each enrollment attempt that the leader accepts uses the token once, even if its response is lost before the node durably stores its identity; if a node then reports that its token is exhausted, mint another. Rerun the installer with `--join-token-file` or `TRELLIS_JOIN_TOKEN`: an incomplete managed join without a stored certificate or pending enrollment journal atomically replaces the saved token while preserving the existing node configuration, identity, pinned CA, and secrets key. An already-enrolled node or completed installation does not replace its token. After publishing the enrollment journal, interrupted certificate/key, role, or node-ID writes resume from that same identity without another token use. The journal is private-key material; do not remove it to retry installation.
 
 For a worker, create a worker token and omit the secrets-key transfer:
 
@@ -135,6 +135,11 @@ trellisctl nodes list
 ```
 
 A join token is accepted only by the managed enrollment endpoint and is never administrator API authority. Enrollment sends it only over TLS authenticated by the pinned CA, and each enrollment consumes one use in the same replicated transaction that records the new identity, so a use limit holds even when enrollments race. The node generates its private key locally and submits a signing request; the leader ignores requested names, assigns the new UUID, and returns only the certificate. Node identity certificates carry `<uuid>.node.trellis`, never the API name `trellis`. Control-plane nodes serve that name with a separate 24-hour API certificate, renewed hourly by the leader while the node remains admitted. The managed CA signing key is delivered only after a control-plane identity proves its certificate and joins Raft. Administrator requests are checked by the current leader against the replicated public key, so followers do not need or retain the administrator private key.
+
+Join addresses may be `HOST:8128` (HTTPS implied) or `https://HOST:8128`.
+Explicit HTTP, user information, paths, queries, and fragments are rejected.
+Enrollment and Raft join redirects must remain HTTPS; legitimate leader
+redirects still use the pinned CA. There is no plaintext enrollment fallback.
 
 **In managed mode every control-plane node holds the cluster CA private key; workers do not.** Compromise of a control-plane node is therefore cluster compromise. To promote an enrolled worker, run `trellisctl --administrator-key ./trellis-administrator.pem nodes promote NODE`, then set `control_plane: true`, configure the matching secrets key if the cluster uses one, and restart its daemon. Changing local configuration alone cannot promote a worker.
 

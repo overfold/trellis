@@ -4,7 +4,7 @@ This is the shortest complete Trellis journey: install one node, use the CLI as 
 
 ## 1. Install one node
 
-You need a systemd-based Debian or Ubuntu x86-64 host with `sudo`, `curl`, `jq`, OpenSSL, `tar`, and `sha256sum` (GNU coreutils), and outbound access to GitHub and the package repositories. If needed, install the download/verification prerequisites with `sudo apt-get update && sudo apt-get install -y curl ca-certificates jq openssl tar coreutils`. The installer can install containerd when it is missing. Run it on the host, not inside a container; Trellis and containerd need the same host mount namespace.
+You need a systemd-based Debian or Ubuntu x86-64 host with `sudo`, `curl`, `jq`, OpenSSL, `tar`, `bzip2`, and `sha256sum`/`sha512sum` (GNU coreutils), and outbound access to GitHub, Google Cloud Storage, and the package repositories. If needed, install the download/verification prerequisites with `sudo apt-get update && sudo apt-get install -y curl ca-certificates jq openssl tar bzip2 coreutils`. The installer can install containerd when it is missing. Run it on the host, not inside a container; Trellis and containerd need the same host mount namespace.
 
 Have a password manager ready before installing: the installer displays the administrator private key once, and Trellis does not retain it.
 
@@ -16,9 +16,25 @@ The default plan is the feature-complete beginner path: create a new single-node
 
 For automation, the same choices are available as flags. `--without-gvisor` opts out of gVisor.
 
+gVisor uses containerd's direct Runtime v2 shim. Fresh installation verifies the
+upstream bundle's SHA-512 digest before installing `runsc`,
+`containerd-shim-runsc-v1`, and their sidecars under
+`/usr/local/bin/trellis-gvisor`, with links beside the Trellis binaries. It does
+not install the Docker-configuring Debian `runsc` package, run Docker registration
+commands, or rewrite containerd/Docker configuration. Complete pre-existing
+runtime installations are kept; an incomplete unrelated installation requires
+manual repair rather than being overwritten. Both service PATHs must find the
+runtime and shim; this is normally true for `/usr/local/bin`.
+
 Before changing host packages, services, or node state, the installer stages the Linux x64 release and verifies its SHA-256 digest from GitHub's HTTPS release API before extraction or execution. Missing, malformed, or mismatching digests stop installation. This detects corruption or artifact substitution relative to the release metadata, not compromise of the release account; see the [download trust model](operations.md#release-download-trust-model).
 
 The installer uses the administrator key transiently to mint a normal `cluster/write` operator credential and saves a `local` context for the user who invoked `sudo`. It displays the base64 PKCS#8 Ed25519 private key once so you can move it to an operator password manager; the daemon receives and replicates only the public key. Routine `trellisctl` commands therefore do **not** need `sudo` and do not receive the administrator key.
+
+On resume or join, a retained `local` credential is reused only after an
+authenticated node-list request against the running cluster using its current
+CA. A credential from a replaced cluster is not silently kept: the installer
+recreates it when it has the new administrator key, or stops with operator
+configuration instructions when it does not. Other contexts remain unchanged.
 
 Before reporting a new single-node cluster ready, the installer waits for the local worker to register and become healthy. If the worker does not become ready within the bounded retry window, installation stops with a diagnostic rather than reporting success; check the daemon logs and rerun the installer to resume.
 

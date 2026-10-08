@@ -19,7 +19,10 @@ trap cleanup EXIT
 
 load_common() {
     local script_dir
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)"
+    script_dir=""
+    if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+        script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    fi
     if [ -n "$script_dir" ] && [ -f "${script_dir}/common.sh" ]; then
         # shellcheck source=common.sh
         source "${script_dir}/common.sh"
@@ -27,7 +30,7 @@ load_common() {
     fi
     command -v curl >/dev/null 2>&1 || { echo "error: curl is required" >&2; exit 1; }
     COMMON_TMP="$(mktemp -d)"
-    curl -fsSL "$RAW_COMMON" -o "${COMMON_TMP}/common.sh"
+    curl --proto '=https' --proto-redir '=https' -fsSL "$RAW_COMMON" -o "${COMMON_TMP}/common.sh"
     # shellcheck source=/dev/null
     source "${COMMON_TMP}/common.sh"
 }
@@ -102,6 +105,7 @@ load_install_state
 # An interrupted installation keeps the features it already installed. Explicit flags
 # may add capabilities, but rerunning the installer never silently removes them.
 [ "$GVISOR_ENABLED" != true ] || with_gvisor=true
+if [ "$with_gvisor" = true ]; then require_commands bzip2 sha512sum; fi
 
 # Recognize complete installs that predate the install-state file without claiming
 # ownership of packages that Trellis cannot prove it installed.
@@ -292,7 +296,7 @@ else
     configured_join="$(awk -F': ' '$1 == "join" {print $2; exit}' "$CONFIG_FILE")"
     configured_signing="$(awk -F': ' '$1 == "node_signing_mode" {print $2; exit}' "$CONFIG_FILE")"
     if [ -n "$configured_join" ] && [ "${configured_signing:-managed}" = managed ] && \
-       [ ! -e "${DATA_DIR}/tls/node-cert" ] && \
+       [ ! -e "${DATA_DIR}/tls/node-cert" ] && [ ! -e "${DATA_DIR}/tls/pending-enrollment" ] && \
        { [ -n "$join_token_file" ] || [ "${TRELLIS_JOIN_TOKEN+x}" = x ]; }; then
         if [ -n "$join_token_file" ]; then
             join_token="$(cat "$join_token_file")" || ui_die "Cannot read replacement join token file."
@@ -326,8 +330,8 @@ if grep -q '^join_token: ' "$CONFIG_FILE"; then
     ui_step "Removed the consumed join token from the node configuration"
 fi
 
-if [ "$with_gvisor" = true ] && [ "$GVISOR_ENABLED" != true ]; then install_gvisor; fi
 if [ "$with_gvisor" = true ]; then
+    install_gvisor
     systemctl restart trellis
     wait_for_service "$WORK_TMP" || ui_die "Trellis did not become healthy after dependency setup."
 fi
@@ -343,11 +347,17 @@ else
 fi
 operator_config="${operator_home}/.config/trellis/config.yaml"
 if { [ "$existing_config" = true ] || [ -n "$join_addr" ]; } && \
-   [ -f "$operator_config" ] && grep -q '^  local:' "$operator_config" 2>/dev/null; then
+   [ -f "$operator_config" ] && grep -q '^  local:' "$operator_config" 2>/dev/null && \
+   env -u TRELLIS_TOKEN -u TRELLIS_ADMINISTRATOR_KEY TRELLIS_CONFIG="$operator_config" \
+       "${INSTALL_DIR}/trellisctl" --context local --server-addr https://127.0.0.1:8128 \
+       --ca-cert "${RUN_DIR}/ca.crt" --cert= --key= nodes status >/dev/null 2>&1; then
     ui_step "Existing local trellisctl context kept for ${operator_user}"
 else
     if [ -z "${administrator_private_key:-}" ]; then
         ui_detail "No administrator credential was copied to this joining node; configure trellisctl from an operator workstation."
+        if [ -f "$operator_config" ] && grep -q '^  local:' "$operator_config" 2>/dev/null; then
+            ui_die "The retained local context cannot authenticate to this cluster. Replace its operator credential from an operator workstation and rerun install."
+        fi
     else
         if [ -f "$operator_config" ] && grep -q '^  local:' "$operator_config" 2>/dev/null; then
             ui_detail "Replacing the local context's trust and operator credential for this new cluster; other contexts are kept."

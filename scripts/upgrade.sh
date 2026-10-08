@@ -32,7 +32,10 @@ trap cleanup EXIT
 
 load_common() {
     local script_dir
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)"
+    script_dir=""
+    if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+        script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    fi
     if [ -n "$script_dir" ] && [ -f "${script_dir}/common.sh" ]; then
         # shellcheck source=common.sh
         source "${script_dir}/common.sh"
@@ -40,7 +43,7 @@ load_common() {
     fi
     command -v curl >/dev/null 2>&1 || { echo "error: curl is required" >&2; exit 1; }
     COMMON_TMP="$(mktemp -d)"
-    curl -fsSL "$RAW_COMMON" -o "${COMMON_TMP}/common.sh"
+    curl --proto '=https' --proto-redir '=https' -fsSL "$RAW_COMMON" -o "${COMMON_TMP}/common.sh"
     # shellcheck source=/dev/null
     source "${COMMON_TMP}/common.sh"
 }

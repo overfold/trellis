@@ -76,7 +76,7 @@ for mode in new control-plane worker reuse; do
     printf 'PASS private installer creation: %s\n' "$mode"
 done
 
-for mode in file environment precedence absent empty-file empty-env missing-file multiline enrolled external; do
+for mode in file environment precedence absent empty-file empty-env missing-file multiline enrolled pending external; do
     (
         unset TRELLIS_JOIN_TOKEN
         export PERMISSION_LOG="$tmp/resume-$mode.permissions"
@@ -97,11 +97,12 @@ for mode in file environment precedence absent empty-file empty-env missing-file
                 [ "$mode" != multiline ] || printf 'token\ninjected: value\n' >"$join_token_file"
                 [ "$mode" != precedence ] || export TRELLIS_JOIN_TOKEN=ignored-environment
                 ;;
-            environment|enrolled|external) export TRELLIS_JOIN_TOKEN=replacement-environment ;;
+            environment|enrolled|pending|external) export TRELLIS_JOIN_TOKEN=replacement-environment ;;
             empty-env) export TRELLIS_JOIN_TOKEN= ;;
             missing-file) join_token_file="$CONFIG_DIR/missing" ;;
         esac
         [ "$mode" != enrolled ] || printf 'stored-certificate\n' >"$DATA_DIR/tls/node-cert"
+        [ "$mode" != pending ] || printf 'durable-identity\n' >"$DATA_DIR/tls/pending-enrollment"
         [ "$mode" != external ] || sed -i 's/mode: managed/mode: external/' "$CONFIG_FILE"
         if [[ "$mode" = empty-* || "$mode" = missing-file || "$mode" = multiline ]]; then
             if (source "$tmp/create-config.sh") >"$CONFIG_DIR/output" 2>&1; then
@@ -140,6 +141,7 @@ done
     printf '#!/bin/sh\n' >"$INSTALL_DIR/trellis"; chmod +x "$INSTALL_DIR/trellis"
     printf 'join_token: untouched\n' >"$CONFIG_FILE"
     printf 'complete=true\n' >"$STATE_FILE"
+    with_gvisor=false
     join_token_file=/missing/replacement
     export TRELLIS_JOIN_TOKEN=replacement
     awk '/^load_install_state$/ {copy=1} /^resuming=false$/ {copy=0} copy' "$script_dir/install-core.sh" >"$tmp/completed.sh"
@@ -286,6 +288,7 @@ if [[ " $* " == *" credentials create "* ]]; then
 elif [[ " $* " == *" nodes status "* ]]; then
     [ -z "${TRELLIS_TOKEN:-}" ]
     [ -z "${TRELLIS_ADMINISTRATOR_KEY:-}" ]
+    if [ "${CONTEXT_REJECT:-false}" = true ] && [ "${@: -1}" = status ]; then exit 1; fi
     if [ "${READINESS_FAIL:-false}" = true ]; then
         printf 'Status: unhealthy\n'
     else
@@ -297,7 +300,7 @@ fi
 MOCK
 chmod +x "$tmp/bin/trellisctl"
 
-for scenario in replacement resume join first-install worker-timeout; do
+for scenario in replacement resume stale-resume join stale-join first-install worker-timeout; do
     (
         source "$script_dir/common.sh"
         export TEST_HOME="$tmp/$scenario" CALL_LOG="$tmp/$scenario.calls"
@@ -307,7 +310,9 @@ for scenario in replacement resume join first-install worker-timeout; do
         advertise_host=192.0.2.10
         case "$scenario" in
             resume) existing_config=true ;;
+            stale-resume) existing_config=true; export CONTEXT_REJECT=true ;;
             join) join_addr=node-a:8128; administrator_private_key="" ;;
+            stale-join) join_addr=node-a:8128; administrator_private_key=""; export CONTEXT_REJECT=true ;;
             worker-timeout) existing_config=true; export READINESS_FAIL=true ;;
         esac
         mkdir -p "$TEST_HOME/.config/trellis" "$RUN_DIR"
@@ -337,7 +342,15 @@ CONFIG
         sleep() { :; }
         if ( source "$tmp/operator-access.sh" ) >"$tmp/$scenario.output" 2>&1; then
             [ "$scenario" != worker-timeout ]
+            [ "$scenario" != stale-join ]
         else
+            if [ "$scenario" = stale-join ]; then
+                grep -q 'retained local context cannot authenticate to this cluster' "$tmp/$scenario.output"
+                grep -q 'token: old-operator-token' "$TEST_HOME/.config/trellis/config.yaml"
+                ! grep -q 'credentials create\|context save\|nodes status 192' "$CALL_LOG"
+                printf 'PASS operator access: stale join context fails closed\n'
+                exit 0
+            fi
             [ "$scenario" = worker-timeout ]
             grep -q 'control-plane API is healthy, but the local worker is not ready' "$tmp/$scenario.output"
             ! grep -q 'Local worker is registered and healthy' "$tmp/$scenario.output"

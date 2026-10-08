@@ -5,22 +5,29 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 
 	v1stats "github.com/containerd/cgroups/v3/cgroup1/stats"
 	v2stats "github.com/containerd/cgroups/v3/cgroup2/stats"
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/containers"
+	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/errdefs"
+	digest "github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
@@ -1043,5 +1050,102 @@ func TestResourceSpecMinimumCPUQuota(t *testing.T) {
 		if got := *generated.Linux.Resources.CPU.Quota; got != int64(cpu)*100 {
 			t.Fatalf("CPU %d quota=%d", cpu, got)
 		}
+	}
+}
+
+// Pull uses SDK images.Dispatch. A small acyclic graph can expand to tens of
+// thousands of references without tens of thousands of distinct descriptors.
+// GO-2026-6597 bounds reference traversal, not just unique digest count.
+func TestContainerdPullGraphAmplificationBound(t *testing.T) {
+	descriptor := func(name string) ocispec.Descriptor {
+		return ocispec.Descriptor{MediaType: ocispec.MediaTypeImageIndex, Digest: digest.FromString(name), Size: 1}
+	}
+	root, shared, leaf := descriptor("root"), descriptor("shared"), descriptor("leaf")
+	graph := map[digest.Digest][]ocispec.Descriptor{root.Digest: {shared, shared, leaf}, shared.Digest: {leaf}}
+	var visits atomic.Int32
+	handler := images.HandlerFunc(func(_ context.Context, d ocispec.Descriptor) ([]ocispec.Descriptor, error) {
+		visits.Add(1)
+		return graph[d.Digest], nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := images.Dispatch(ctx, handler, nil, root); err != nil {
+		t.Fatal("valid repeated-reference graph rejected", err)
+	}
+	if visits.Load() != 6 {
+		t.Fatalf("valid graph visits = %d, want 6 (duplicates remain valid)", visits.Load())
+	}
+	// Nine levels of triple references expand to 29,524 visits in the old SDK.
+	for depth := range 9 {
+		parent, child := descriptor(fmt.Sprintf("level-%d", depth)), descriptor(fmt.Sprintf("level-%d", depth+1))
+		graph[parent.Digest] = []ocispec.Descriptor{child, child, child}
+	}
+	visits.Store(0)
+	err := images.Dispatch(ctx, handler, nil, descriptor("level-0"))
+	if !errors.Is(err, errdefs.ErrResourceExhausted) {
+		t.Fatalf("amplifying graph error = %v, want resource exhaustion", err)
+	}
+	if n := visits.Load(); n == 0 || n > 10_000 {
+		t.Fatalf("unbounded traversal: %d visits", n)
+	}
+}
+
+func TestTaskLogIOPreservesRuntimeLoggingContracts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "task space%?#.log")
+	for _, runtimeName := range []string{"io.containerd.runc.v2", "io.containerd.runsc.v1"} {
+		if err := os.WriteFile(path, []byte("retained output\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		stream, err := taskLogIO(runtimeName, path)("task")
+		if err != nil {
+			t.Fatal(err)
+		}
+		config := stream.Config()
+		if runtimeName == "io.containerd.runsc.v1" {
+			if config.Stdout != path || config.Stderr != path {
+				t.Fatalf("runsc path escaped: %+v", config)
+			}
+		} else if !strings.HasPrefix(config.Stdout, "file://") || config.Stdout != config.Stderr {
+			t.Fatalf("changed runc log URI: %+v", config)
+		}
+		if err := stream.Close(); err != nil {
+			t.Fatal(err)
+		}
+		contents, err := os.ReadFile(path)
+		if err != nil || string(contents) != "retained output\n" {
+			t.Fatalf("log truncated: %q, %v", contents, err)
+		}
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	stream, err := taskLogIO("io.containerd.runsc.v1", path)("task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatal("private logfile not prepared", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "unrelated")
+	if err := os.WriteFile(target, []byte("unrelated data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	if stream, err := taskLogIO("io.containerd.runsc.v1", path)("task"); err == nil {
+		_ = stream.Close()
+		t.Fatal("symlink logfile accepted")
+	}
+	data, err := os.ReadFile(target)
+	if err != nil || string(data) != "unrelated data" {
+		t.Fatal("modified symlink target", err)
 	}
 }

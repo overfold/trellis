@@ -48,14 +48,17 @@ done
 resolve_engine() {
     local script_dir
     TMP="$(mktemp -d)"
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)"
+    script_dir=""
+    if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+        script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    fi
     if [ -n "$script_dir" ] && [ -f "$script_dir/install-core.sh" ] && [ -f "$script_dir/common.sh" ]; then
         cp "$script_dir/install-core.sh" "$TMP/install-core.sh"
         cp "$script_dir/common.sh" "$TMP/common-real.sh"
     else
         command -v curl >/dev/null 2>&1 || { echo "error: curl is required" >&2; exit 1; }
-        curl -fsSL "$RAW_BASE/install-core.sh" -o "$TMP/install-core.sh"
-        curl -fsSL "$RAW_BASE/common.sh" -o "$TMP/common-real.sh"
+        curl --proto '=https' --proto-redir '=https' -fsSL "$RAW_BASE/install-core.sh" -o "$TMP/install-core.sh"
+        curl --proto '=https' --proto-redir '=https' -fsSL "$RAW_BASE/common.sh" -o "$TMP/common-real.sh"
     fi
     cat >"$TMP/common.sh" <<'SHIM'
 source "$(dirname "${BASH_SOURCE[0]}")/common-real.sh"

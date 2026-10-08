@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -188,6 +189,11 @@ func main() {
 }
 
 func run(parent context.Context, cfg *config) error {
+	if cfg.Join != "" {
+		if _, err := secureJoinAddress(cfg.Join); err != nil {
+			return err
+		}
+	}
 	if !cfg.controlPlane() && (cfg.Join == "" || cfg.CAKey != "" || cfg.SecretsKey != "" || cfg.APICert != "" || cfg.APIKey != "") {
 		return fmt.Errorf("workers require join and must not configure CA, secrets, or API private keys")
 	}
@@ -280,7 +286,8 @@ func run(parent context.Context, cfg *config) error {
 		return fmt.Errorf("TLS bootstrap: %w", err)
 	}
 	id = enrolledID
-	if err := os.WriteFile(filepath.Join(cfg.DataDir, "node-ca.crt"), tlsMaterials.CACert, 0o644); err != nil { //nolint:gosec // The operator-selected data directory stores the node's public CA certificate.
+	// This file contains the public node CA, not private signing material.
+	if err := os.WriteFile(filepath.Join(cfg.DataDir, "node-ca.crt"), tlsMaterials.CACert, 0o644); err != nil {
 		return fmt.Errorf("write trusted node CA certificate: %w", err)
 	}
 
@@ -758,7 +765,7 @@ func openRuntime(cfg *config) (containerruntime.ContainerRuntime, io.Closer, []s
 func detectNodeCapabilities() []spec.NodeCapability {
 	var capabilities []spec.NodeCapability
 	if _, err := exec.LookPath("runsc"); err == nil {
-		if config, err := os.ReadFile("/etc/containerd/config.toml"); err == nil && bytes.Contains(config, []byte("io.containerd.runsc.v1")) {
+		if _, err := exec.LookPath("containerd-shim-runsc-v1"); err == nil {
 			capabilities = append(capabilities, spec.CapabilityRunsc)
 		}
 	}
@@ -849,7 +856,46 @@ func decodeSecretsKey(raw []byte) ([]byte, error) {
 	return key, nil
 }
 
+// pendingEnrollment is a single atomically published identity. Replay completes
+// its projections without a second CSR or a second use of the consumed token.
+type pendingEnrollment struct {
+	NodeID uuid.UUID    `json:"node_id"`
+	Role   api.NodeRole `json:"role"`
+	CACert string       `json:"ca_cert"`
+	Cert   string       `json:"cert"`
+	Key    string       `json:"key"`
+}
+
+func finishEnrollment(cfg *config, local *storage.LocalStorage, pending *pendingEnrollment) (*tlsutil.Materials, uuid.UUID, error) {
+	m := &tlsutil.Materials{CACert: []byte(pending.CACert), Cert: []byte(pending.Cert), Key: []byte(pending.Key)}
+	if pending.Role != cfg.nodeRole() {
+		return nil, uuid.Nil, fmt.Errorf("pending enrollment role does not match configured role")
+	}
+	if err := tlsutil.ValidateMaterials(m, pending.NodeID); err != nil {
+		return nil, uuid.Nil, fmt.Errorf("validate pending enrollment: %w", err)
+	}
+	if err := saveTLSToStorage(local, m); err != nil {
+		return nil, uuid.Nil, fmt.Errorf("save TLS materials: %w", err)
+	}
+	if err := local.Put("tls/role", pending.Role); err != nil {
+		return nil, uuid.Nil, fmt.Errorf("save enrolled role: %w", err)
+	}
+	if err := saveNodeID(cfg.DataDir, pending.NodeID); err != nil {
+		return nil, uuid.Nil, err
+	}
+	if err := local.Delete("tls/pending-enrollment"); err != nil {
+		return nil, uuid.Nil, err
+	}
+	return m, pending.NodeID, nil
+}
+
 func loadOrBootstrapTLS(ctx context.Context, log *slog.Logger, cfg *config, local *storage.LocalStorage, nodeID uuid.UUID) (*tlsutil.Materials, uuid.UUID, error) {
+	var pending pendingEnrollment
+	if err := local.Get("tls/pending-enrollment", &pending); err == nil {
+		return finishEnrollment(cfg, local, &pending)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, uuid.Nil, fmt.Errorf("read pending enrollment: %w", err)
+	}
 	var storedRole api.NodeRole
 	if err := local.Get("tls/role", &storedRole); err == nil && storedRole != cfg.nodeRole() {
 		if storedRole != api.NodeRoleWorker || !cfg.controlPlane() {
@@ -938,17 +984,12 @@ func loadOrBootstrapTLS(ctx context.Context, log *slog.Logger, cfg *config, loca
 		if err := tlsutil.ValidateMaterials(m, resp.NodeID); err != nil {
 			return nil, uuid.Nil, fmt.Errorf("validate enrolled node certificate: %w", err)
 		}
-		if err := saveNodeID(cfg.DataDir, resp.NodeID); err != nil {
-			return nil, uuid.Nil, err
-		}
-		if err := saveTLSToStorage(local, m); err != nil {
-			return nil, uuid.Nil, fmt.Errorf("save TLS materials: %w", err)
-		}
-		if err := local.Put("tls/role", cfg.nodeRole()); err != nil {
-			return nil, uuid.Nil, fmt.Errorf("save enrolled role: %w", err)
+		pending = pendingEnrollment{NodeID: resp.NodeID, Role: cfg.nodeRole(), CACert: string(caCert), Cert: resp.Cert, Key: string(key)}
+		if err := local.Put("tls/pending-enrollment", &pending); err != nil {
+			return nil, uuid.Nil, fmt.Errorf("publish enrolled identity: %w", err)
 		}
 		log.Info("TLS materials received from cluster and stored")
-		return m, resp.NodeID, nil
+		return finishEnrollment(cfg, local, &pending)
 	}
 	caCert, caKey, err := tlsutil.GenerateCA()
 	if err != nil {
@@ -1032,17 +1073,40 @@ func saveTLSToStorage(local *storage.LocalStorage, m *tlsutil.Materials) error {
 	return local.Put("tls/node-key", string(m.Key))
 }
 
-func joinClusterTLS(ctx context.Context, log *slog.Logger, joinAddr, joinToken string, caCert []byte, serverAdvertise, agentAdvertise, raftAdvertise string, role api.NodeRole, csr []byte) (*nodeapi.NodeEnrollmentResponse, error) {
-	body, _ := json.Marshal(nodeapi.NodeEnrollmentRequest{ServerAdvertise: serverAdvertise, AgentAdvertise: agentAdvertise, RaftAdvertise: raftAdvertise, Role: role, CSR: string(csr)})
-	base := joinAddr
+func secureJoinAddress(joinAddr string) (string, error) {
+	base := strings.TrimRight(strings.TrimSpace(joinAddr), "/")
 	if !strings.Contains(base, "://") {
 		base = "https://" + base
+	}
+	u, err := url.Parse(base)
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" {
+		return "", fmt.Errorf("join address must be an HTTPS host:port without user information, path, query, or fragment")
+	}
+	return base, nil
+}
+
+func secureJoinRedirect(req *http.Request, via []*http.Request) error {
+	if req.URL.Scheme != "https" || req.URL.User != nil {
+		return fmt.Errorf("join redirect must use HTTPS without user information")
+	}
+	if len(via) >= 10 {
+		return fmt.Errorf("too many join redirects")
+	}
+	return nil
+}
+
+func joinClusterTLS(ctx context.Context, log *slog.Logger, joinAddr, joinToken string, caCert []byte, serverAdvertise, agentAdvertise, raftAdvertise string, role api.NodeRole, csr []byte) (*nodeapi.NodeEnrollmentResponse, error) {
+	body, _ := json.Marshal(nodeapi.NodeEnrollmentRequest{ServerAdvertise: serverAdvertise, AgentAdvertise: agentAdvertise, RaftAdvertise: raftAdvertise, Role: role, CSR: string(csr)})
+	base, err := secureJoinAddress(joinAddr)
+	if err != nil {
+		return nil, err
 	}
 	tlsConfig, err := tlsutil.CAClientTLSConfig(caCert)
 	if err != nil {
 		return nil, err
 	}
-	httpClient := &http.Client{Transport: &http.Transport{TLSClientConfig: tlsConfig}}
+	httpClient := &http.Client{Transport: &http.Transport{TLSClientConfig: tlsConfig}, CheckRedirect: secureJoinRedirect, Timeout: 10 * time.Second}
+	defer httpClient.CloseIdleConnections()
 	for i := 0; ; i++ {
 		req, _ := http.NewRequestWithContext(ctx, "POST", base+"/v1/nodes/enroll", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
@@ -1081,13 +1145,16 @@ func joinClusterTLS(ctx context.Context, log *slog.Logger, joinAddr, joinToken s
 
 func joinClusterRaft(ctx context.Context, log *slog.Logger, joinAddr, serverAddr, raftAddr string, tlsConfig *tls.Config) (*nodeapi.RaftJoinResponse, error) {
 	body, _ := json.Marshal(nodeapi.RaftJoinRequest{ServerAddress: serverAddr, RaftAddress: raftAddr})
-	base := joinAddr
-	if !strings.Contains(base, "://") {
-		base = "https://" + base
+	base, err := secureJoinAddress(joinAddr)
+	if err != nil {
+		return nil, err
 	}
 	httpClient := &http.Client{
-		Transport: &http.Transport{TLSClientConfig: tlsConfig},
+		Transport:     &http.Transport{TLSClientConfig: tlsConfig},
+		CheckRedirect: secureJoinRedirect,
+		Timeout:       10 * time.Second,
 	}
+	defer httpClient.CloseIdleConnections()
 	for i := 0; ; i++ {
 		req, _ := http.NewRequestWithContext(ctx, "POST", base+"/v1/raft/join", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
@@ -1390,6 +1457,17 @@ func parseLabels(raw []string) (map[string]string, error) {
 }
 
 func acquireNodeID(dataDir string) (uuid.UUID, error) {
+	var pending pendingEnrollment
+	if err := storage.NewLocalStorage(dataDir).Get("tls/pending-enrollment", &pending); err == nil {
+		// A crash during publication may leave the old or an incomplete node-id.
+		// The durable enrollment record is authoritative until replay finishes.
+		if pending.NodeID == uuid.Nil {
+			return uuid.Nil, fmt.Errorf("pending enrollment has no node ID")
+		}
+		return pending.NodeID, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return uuid.Nil, fmt.Errorf("read pending enrollment: %w", err)
+	}
 	path := filepath.Join(dataDir, "node-id")
 	raw, err := os.ReadFile(path)
 	if err == nil {
@@ -1413,8 +1491,30 @@ func saveNodeID(dataDir string, id uuid.UUID) error {
 	if id == uuid.Nil {
 		return fmt.Errorf("write node ID: ID is required")
 	}
-	if err := os.WriteFile(filepath.Join(dataDir, "node-id"), []byte(id.String()), 0o600); err != nil {
+	f, err := os.CreateTemp(dataDir, ".node-id-*")
+	if err != nil {
 		return fmt.Errorf("write node ID: %w", err)
+	}
+	defer func() { _ = f.Close(); _ = os.Remove(f.Name()) }()
+	if _, err := f.WriteString(id.String()); err != nil {
+		return fmt.Errorf("write node ID: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("sync node ID: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close node ID: %w", err)
+	}
+	if err := os.Rename(f.Name(), filepath.Join(dataDir, "node-id")); err != nil {
+		return fmt.Errorf("publish node ID: %w", err)
+	}
+	dir, err := os.Open(dataDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dir.Close() }()
+	if err := dir.Sync(); err != nil {
+		return fmt.Errorf("sync node ID directory: %w", err)
 	}
 	return nil
 }

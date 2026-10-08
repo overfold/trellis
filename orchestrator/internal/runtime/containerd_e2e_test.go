@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -26,6 +27,66 @@ import (
 // This intentionally stays small: distributed behavior belongs in the
 // injected-runtime process suite, while this test protects the real containerd
 // boundary and the managed-allocation inventory used for restart adoption.
+// Opt in only on hosts with a complete gVisor installation. Once opted in,
+// missing binaries or runtime failures are failures, not skipped verification.
+func TestContainerdRunsc(t *testing.T) {
+	if os.Getenv("TRELLIS_RUNSC_E2E") != "1" {
+		t.Skip("set TRELLIS_RUNSC_E2E=1 to verify the direct containerd runsc shim")
+	}
+	if os.Geteuid() != 0 {
+		t.Fatal("runsc E2E requires root")
+	}
+	for _, name := range []string{"runsc", "containerd-shim-runsc-v1"} {
+		if _, err := exec.LookPath(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	socket := os.Getenv("CONTAINERD_ADDRESS")
+	if socket == "" {
+		socket = "/run/containerd/containerd.sock"
+	}
+	r, err := runtime.NewContainerdRuntime(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	const image = "docker.io/library/nginx:1.27-alpine"
+	if err := r.Pull(ctx, image); err != nil {
+		t.Fatal(err)
+	}
+	const id = "trellis-e2e-runsc"
+	_ = r.Stop(ctx, id)
+	_ = r.Remove(ctx, id)
+	created, err := r.Create(ctx, runtime.CreateOptions{ID: id, Image: image, Runtime: "runsc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Stop(context.Background(), created); _ = r.Remove(context.Background(), created) }()
+	if err := r.Start(ctx, created); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, code, err := execOutput(ctx, r, created, runtime.ExecOptions{Command: []string{"sh", "-c", "printf sandbox-ready"}})
+	if err != nil || code != 0 || stdout != "sandbox-ready" || stderr != "" {
+		if logs, logErr := r.Logs(ctx, created, false, 0); logErr == nil {
+			output, _ := io.ReadAll(logs)
+			_ = logs.Close()
+			t.Logf("runsc workload logs: %s", output)
+		}
+		t.Fatalf("runsc exec = %q, %q, %d, %v", stdout, stderr, code, err)
+	}
+	logs, err := r.Logs(ctx, created, false, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := io.ReadAll(logs)
+	_ = logs.Close()
+	if err != nil || !bytes.Contains(output, []byte("/docker-entrypoint.sh")) {
+		t.Fatalf("runsc task output = %q, %v; want entrypoint logs", output, err)
+	}
+}
+
 func TestContainerdRetainedLogsAfterRemoval(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("containerd E2E requires root")

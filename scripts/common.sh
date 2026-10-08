@@ -74,6 +74,7 @@ load_install_state() {
     DOCKER_REPO_OWNED="$(state_get docker_repo_owned false)"
     DOCKER_KEY_OWNED="$(state_get docker_key_owned false)"
     RUNSC_OWNED="$(state_get runsc_owned false)"
+    GVISOR_BUNDLE_OWNED="$(state_get gvisor_bundle_owned false)"
     GVISOR_REPO_OWNED="$(state_get gvisor_repo_owned false)"
     GVISOR_KEY_OWNED="$(state_get gvisor_key_owned false)"
     GVISOR_CONFIG_OWNED="$(state_get gvisor_config_owned false)"
@@ -105,6 +106,7 @@ containerd_config_owned=${CONTAINERD_CONFIG_OWNED}
 docker_repo_owned=${DOCKER_REPO_OWNED}
 docker_key_owned=${DOCKER_KEY_OWNED}
 runsc_owned=${RUNSC_OWNED}
+gvisor_bundle_owned=${GVISOR_BUNDLE_OWNED}
 gvisor_repo_owned=${GVISOR_REPO_OWNED}
 gvisor_key_owned=${GVISOR_KEY_OWNED}
 gvisor_config_owned=${GVISOR_CONFIG_OWNED}
@@ -361,34 +363,48 @@ install_networking() {
 }
 
 install_gvisor() {
-    detect_distro
     ui_step "Installing gVisor"
-    local had_runsc=false had_runsc_config=false
-    command -v runsc >/dev/null 2>&1 && had_runsc=true
-    grep -q 'io.containerd.runsc.v1' /etc/containerd/config.toml 2>/dev/null && had_runsc_config=true
-    apt-get update -qq >/dev/null
-    apt-get install -y -qq ca-certificates curl gnupg >/dev/null
-
-    if [ ! -f /usr/share/keyrings/gvisor-archive-keyring.gpg ]; then
-        curl -fsSL https://gvisor.dev/archive.key |
-            gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
-        GVISOR_KEY_OWNED=true
+    if command -v runsc >/dev/null 2>&1 && command -v containerd-shim-runsc-v1 >/dev/null 2>&1; then
+        GVISOR_ENABLED=true
         write_install_state
+        return
     fi
-    if [ ! -f /etc/apt/sources.list.d/gvisor.list ]; then
-        echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" \
-            >/etc/apt/sources.list.d/gvisor.list
-        GVISOR_REPO_OWNED=true
+    local name target bundle="${INSTALL_DIR}/trellis-gvisor" dir="${WORK_TMP}/gvisor"
+    # A Debian runsc postinst configures Docker. Use the complete upstream
+    # bundle instead, including its sidecars, without running registration hooks.
+    for name in runsc containerd-shim-runsc-v1; do
+        target="${INSTALL_DIR}/${name}"
+        if command -v "$name" >/dev/null 2>&1 || [ -e "$target" ] || [ -L "$target" ]; then
+            [ "$GVISOR_BUNDLE_OWNED" = true ] && [ "$(readlink "$target" 2>/dev/null)" = "${bundle}/${name}" ] ||
+                ui_die "Existing ${name} installation is incomplete; install its matching containerd shim manually. Nothing will be overwritten."
+        fi
+    done
+    if [ -e "$bundle" ] || [ -L "$bundle" ]; then
+        [ "$GVISOR_BUNDLE_OWNED" = true ] && [ -d "$bundle" ] && [ ! -L "$bundle" ] ||
+            ui_die "Refusing to overwrite unrelated ${bundle}."
+    else
+        require_commands curl tar bzip2 sha512sum
+        install -d -m 0755 "$dir/bundle"
+        local url="https://storage.googleapis.com/gvisor/releases/release/latest/x86_64" checksum expected actual
+        curl --proto '=https' --proto-redir '=https' -fsSL "$url/gvisor.tar.bz2" -o "$dir/gvisor.tar.bz2"
+        curl --proto '=https' --proto-redir '=https' -fsSL "$url/gvisor.tar.bz2.sha512" -o "$dir/gvisor.tar.bz2.sha512"
+        checksum="$(cat "$dir/gvisor.tar.bz2.sha512")"
+        [[ "$checksum" =~ ^[0-9a-fA-F]{128}[[:space:]]+\*?gvisor\.tar\.bz2[[:space:]]*$ ]] ||
+            ui_die "Malformed gVisor SHA-512 digest; refusing extraction."
+        expected="${checksum:0:128}"
+        actual="$(sha512sum "$dir/gvisor.tar.bz2")"
+        [ "${actual%% *}" = "${expected,,}" ] || ui_die "gVisor SHA-512 mismatch; refusing extraction."
+        tar --no-same-owner -xjf "$dir/gvisor.tar.bz2" -C "$dir/bundle"
+        [ -x "$dir/bundle/runsc" ] && [ -x "$dir/bundle/containerd-shim-runsc-v1" ] && [ -d "$dir/bundle/gvisor-bin" ] ||
+            ui_die "gVisor bundle is missing runtimes or sidecars."
+        GVISOR_BUNDLE_OWNED=true
         write_install_state
+        mv "$dir/bundle" "$bundle"
     fi
-    apt-get update -qq >/dev/null
-    apt-get install -y -qq runsc >/dev/null
-    $had_runsc || RUNSC_OWNED=true
-    write_install_state
-    runsc install >/dev/null
-    $had_runsc_config || GVISOR_CONFIG_OWNED=true
-    write_install_state
-    systemctl restart containerd
+    for name in runsc containerd-shim-runsc-v1; do
+        [ -L "${INSTALL_DIR}/${name}" ] || ln -s "${bundle}/${name}" "${INSTALL_DIR}/${name}"
+    done
+    require_commands runsc containerd-shim-runsc-v1
     GVISOR_ENABLED=true
     write_install_state
 }
@@ -398,13 +414,21 @@ package_installed() {
 }
 
 remove_owned_dependencies() {
+    if [ "$GVISOR_BUNDLE_OWNED" = true ]; then
+        local name bundle="${INSTALL_DIR}/trellis-gvisor"
+        for name in runsc containerd-shim-runsc-v1; do
+            if [ "$(readlink "${INSTALL_DIR}/${name}" 2>/dev/null)" = "${bundle}/${name}" ]; then
+                rm -f "${INSTALL_DIR}/${name}"
+            fi
+        done
+        rm -rf "$bundle"
+    fi
     command -v apt-get >/dev/null 2>&1 || return 0
     command -v dpkg-query >/dev/null 2>&1 || return 0
     local removals=() repo_changed=false
 
-    if [ "$GVISOR_CONFIG_OWNED" = true ] && command -v runsc >/dev/null 2>&1; then
-        runsc uninstall >/dev/null 2>&1 || true
-    fi
+    # Older installers recorded Docker config ownership after `runsc install`.
+    # Never use that flag to delete shared Docker configuration.
     if [ "$RUNSC_OWNED" = true ] && package_installed runsc; then
         removals+=(runsc)
     fi

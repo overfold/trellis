@@ -2,7 +2,7 @@
 
 ## Toolchains
 
-The Go module `github.com/overfold/trellis` is rooted at the repository (`go.mod` in the repository root) and targets Go 1.26.4. All of its code lives under `orchestrator/`, so its packages are `github.com/overfold/trellis/orchestrator/...` and release tags (`vX.Y.Z`) are module versions. Run commands from `orchestrator/`, as CI does; `go test ./...` from the repository root is equivalent. `tutorial/` is a separate module.
+The Go module `github.com/overfold/trellis` is rooted at the repository (`go.mod` in the repository root) and targets Go 1.26.9. All of its code lives under `orchestrator/`, so its packages are `github.com/overfold/trellis/orchestrator/...` and release tags (`vX.Y.Z`) are module versions. Run commands from `orchestrator/`, as CI does; `go test ./...` from the repository root is equivalent. `tutorial/` is a separate module.
 
 ```sh
 cd orchestrator
@@ -23,6 +23,20 @@ sudo env CONTAINERD_ADDRESS=/run/containerd/containerd.sock TRELLIS_HEALTH_PROBE
 ```
 
 Read the output for skipped tests: a green suite that skipped runtime tests is not containerd verification. These tests create and remove test containers and managed-volume fixtures; use a disposable development host.
+
+With a complete gVisor bundle installed and both `runsc` and
+`containerd-shim-runsc-v1` in the node/containerd service PATH, add
+`TRELLIS_RUNSC_E2E=1` to the `sudo env` command above. This enables
+`TestContainerdRunsc`, which starts and execs a real sandbox through the direct
+Runtime v2 shim, without Docker or CRI configuration. Once opted in, missing
+binaries and runtime failures fail the test rather than skip it.
+
+Verify dependency advisories from `orchestrator/` with
+`go run golang.org/x/vuln/cmd/govulncheck@latest ./...`, and run `go test -race ./...`
+for security/concurrency changes. The SDK regression
+`TestContainerdPullGraphAmplificationBound` exercises a finite repeated OCI index
+graph on the actual `images.Dispatch` pull path: valid repeated references stay
+valid, while expansion beyond the SDK's 10,000-reference budget is rejected.
 
 Namespace-network kernel regressions need root with network/mount namespace
 privileges, IPv6 and WireGuard kernel support, and `ip`, `wg`, `iptables`,
@@ -67,7 +81,9 @@ From the repository root, `bash scripts/install-core_test.sh` checks secret/conf
 
 `bash scripts/release_test.sh` uses real digest validation, hashing, and extraction with mocked downloads. It covers valid archives, substituted same-version binaries, absent/malformed/mismatching digests, exact platform/asset selection, and full install/upgrade failures before host mutation. `python3 scripts/install_test.py` runs the interactive `install.sh` wrapper in a controlling pseudo-terminal with a mocked engine, covering confirmation, cancellation, customization, fixed resume settings, flag forwarding, invalid roles, and the completed-install fast path.
 
-The `installer-test` workflow runs these four shell suites and wrapper tests on pull requests and pushes to `main`, as both the runner user and root (including permission/ownership assertions). It explicitly installs Go, `jq`, OpenSSL, curl/CA certificates, tar, GNU core utilities/text tools, and Python 3. Test output is grouped by suite and privilege; a ten-minute job timeout bounds failures. These tests use temporary paths and mocked host services, not live systemd/containerd or Vagrant VMs.
+`bash scripts/security_test.sh` pipes all four lifecycle entrypoints into Bash from an attacker-controlled working directory, checks HTTPS-only helper downloads, and exercises verified full gVisor bundles, checksum failures, missing sidecars, incomplete/unrelated installations, resumed publication, owned removal, and unchanged Docker configuration. It uses real hashing/extraction and temporary installation paths, with mocked downloads and no package or service changes.
+
+The `installer-test` workflow runs these five shell suites and wrapper tests on pull requests and pushes to `main`, as both the runner user and root (including permission/ownership assertions). It explicitly installs Go, `jq`, OpenSSL, curl/CA certificates, tar/bzip2, GNU core utilities/text tools, and Python 3. Test output is grouped by suite and privilege; a ten-minute job timeout bounds failures. These tests use temporary paths and mocked host services, not live systemd/containerd or Vagrant VMs.
 
 ## Linting
 

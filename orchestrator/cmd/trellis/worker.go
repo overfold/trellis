@@ -35,9 +35,14 @@ func confirmNodeRole(ctx context.Context, join string, config *tls.Config, expec
 	if join == "" {
 		return fmt.Errorf("role verification requires a control-plane join address")
 	}
+	base, err := secureJoinAddress(join)
+	if err != nil {
+		return err
+	}
 	client := &transport.Client{HTTP: transport.NewHTTPClient(config, 10*time.Second)}
+	client.HTTP.CheckRedirect = secureJoinRedirect
 	var response nodeapi.NodeRoleResponse
-	if err := client.Request(ctx, http.MethodGet, normalizeAPIAddress(join)+"/v1/internal/node-role", nil, &response); err != nil {
+	if err := client.Request(ctx, http.MethodGet, base+"/v1/internal/node-role", nil, &response); err != nil {
 		return fmt.Errorf("verify administrator-assigned node role: %w", err)
 	}
 	if response.Role != expected {

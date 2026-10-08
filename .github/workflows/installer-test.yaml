@@ -21,13 +21,13 @@ jobs:
       - name: Install shell test prerequisites
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y bash sudo jq openssl curl ca-certificates tar gzip coreutils gawk grep sed findutils libc-bin python3 util-linux
+          sudo apt-get install -y bash sudo jq openssl curl ca-certificates tar gzip bzip2 coreutils gawk grep sed findutils libc-bin python3 util-linux
       - name: Check shell syntax
         run: for script in scripts/*.sh; do bash -n "$script"; done
       - name: Test lifecycle as runner user
         run: |
           set -euo pipefail
-          for suite in install-core upgrade uninstall release; do
+          for suite in install-core upgrade uninstall release security; do
             echo "::group::${suite} (user)"
             if ! bash "scripts/${suite}_test.sh"; then
               echo "::error::${suite} suite failed as runner user"
@@ -39,7 +39,7 @@ jobs:
       - name: Test root permissions and ownership
         run: |
           set -euo pipefail
-          for suite in install-core upgrade uninstall release; do
+          for suite in install-core upgrade uninstall release security; do
             echo "::group::${suite} (root)"
             if ! sudo env PATH="$PATH" bash "scripts/${suite}_test.sh"; then
               echo "::error::${suite} suite failed as root"
