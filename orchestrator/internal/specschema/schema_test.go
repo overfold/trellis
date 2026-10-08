@@ -67,6 +67,11 @@ func TestYAMLSchemaOnlyAddsAuthoringRepresentation(t *testing.T) {
 
 	apiDefs := api["$defs"].(map[string]any)
 	yamlDefs := yaml["$defs"].(map[string]any)
+	for _, defs := range []map[string]any{apiDefs, yamlDefs} {
+		if cpu := property(t, defs, "ResourcesSpec", "cpu"); cpu["minimum"] != float64(10) {
+			t.Fatalf("CPU schema minimum = %#v, want 10", cpu)
+		}
+	}
 	apiMemory := property(t, apiDefs, "ResourcesSpec", "memory")
 	yamlMemory := property(t, yamlDefs, "ResourcesSpec", "memory")
 	if apiMemory["type"] != "integer" {

@@ -215,6 +215,9 @@ func TestHeartbeatPersistsOnlyDurableChanges(t *testing.T) {
 	store := &auditStore{memoryStore: memoryStore{}}
 	s := &Server{now: time.Now, state: NewStateController(store, "test"), allocations: []*Allocation{allocation}, catalog: newNopCatalog()}
 	addTestNode(s, node, time.Time{})
+	// This fixture measures writes, not placement; keep its reported capacity
+	// identical to the stored node across heartbeats.
+	node.CPUAllocatable, node.MemoryAllocatable = 0, 0
 	status := []nodeapi.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
 
 	// Liveness returning is an observation, not a durable fact.

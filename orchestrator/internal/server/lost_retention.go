@@ -9,9 +9,9 @@ import (
 )
 
 // retainedOriginal is a lost allocation whose returning node still reports its
-// container running. Lost stays terminal: the allocation never counts toward
+// containers running and healthy. Lost stays terminal: it never counts toward
 // its group again. Its container is only left running as a bridge until the
-// group has enough running replacements, and it never blocks a replacement:
+// group has enough healthy replacements, and it never blocks a replacement:
 // reconciliation releases (stops) it as soon as it would.
 type retainedOriginal struct {
 	allocation *Allocation

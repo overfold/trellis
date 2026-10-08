@@ -16,7 +16,7 @@ import (
 var planNow = time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 
 func planTestNode(id byte, status NodeStatus) *Node {
-	return &Node{ID: uuid.UUID{id}, Host: "10.0.0.1", Port: 8127, Status: status}
+	return &Node{ID: uuid.UUID{id}, Host: "10.0.0.1", Port: 8127, Status: status, CPUAllocatable: 4000, MemoryAllocatable: 8 << 30}
 }
 
 func planTestJob(name string, count, revision int, strategy spec.UpdateStrategy) *Job {

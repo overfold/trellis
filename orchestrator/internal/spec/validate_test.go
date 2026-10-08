@@ -260,3 +260,22 @@ func TestValidateVolumeAndEnvConflicts(t *testing.T) {
 		t.Fatalf("valid job rejected: %v", err)
 	}
 }
+
+func TestMinimumCPURequest(t *testing.T) {
+	for _, cpu := range []int{1, 9, 10, 11} {
+		job := validJob()
+		job.TaskGroups[0].Tasks[0].Resources = &ResourcesSpec{CPU: cpu, Memory: 128 << 20}
+		if err := Canonicalize(job, DefaultLimits()); (err == nil) != (cpu >= 10) {
+			t.Fatalf("CPU=%d: error=%v", cpu, err)
+		}
+		limits := DefaultLimits()
+		limits.DefaultTaskCPU = cpu
+		if err := ValidateLimits(limits); (err == nil) != (cpu >= 10) {
+			t.Fatalf("default CPU=%d: error=%v", cpu, err)
+		}
+		limits.DefaultTaskCPU, limits.MaxTaskCPU = 10, cpu
+		if err := ValidateLimits(limits); (err == nil) != (cpu >= 10) {
+			t.Fatalf("maximum CPU=%d: error=%v", cpu, err)
+		}
+	}
+}

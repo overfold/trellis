@@ -331,6 +331,9 @@ func resourceSpecOpts(options CreateOptions, limitSwap bool) ([]oci.SpecOpts, er
 		return nil, fmt.Errorf("resource limits for %s must not be negative: cpu=%d memory=%d pids=%d", options.ID, options.CPU, options.Memory, options.PidsLimit)
 	}
 	if options.CPU > 0 {
+		if options.CPU < 10 {
+			return nil, fmt.Errorf("CPU request %d must be at least 10 millicores (the minimum CFS quota)", options.CPU)
+		}
 		cpuQuota := int64(options.CPU) * 100
 		if cpuQuota/100 != int64(options.CPU) {
 			return nil, fmt.Errorf("CPU request %d overflows CFS quota", options.CPU)

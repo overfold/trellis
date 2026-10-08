@@ -268,8 +268,8 @@ func TestNetworkSubnetsRetainedUntilPartitionedAllocationCleanup(t *testing.T) {
 				delete(s.jobs, jobKey("default", "web"))
 			}
 			s.Reconcile(ctx)
-			if f.original.Phase != phase {
-				t.Fatalf("running transition = %s, want %s", f.original.Phase, phase)
+			if f.original.Phase != lifecycle.PhaseLost {
+				t.Fatalf("running transition = %s, want lost even when the job was deleted", f.original.Phase)
 			}
 			delete(s.jobs, jobKey("default", "web"))
 			// Discard any replacements made while the old desired job existed;

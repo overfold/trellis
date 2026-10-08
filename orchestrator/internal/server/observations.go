@@ -510,7 +510,7 @@ func newNodeObservation(nodeID uuid.UUID, at time.Time, actual []nodeapi.Allocat
 	}
 	observed := make([]observedAllocation, 0, len(statuses))
 	for _, info := range statuses {
-		observed = append(observed, observedAllocation{ID: info.ID, Generation: info.Generation, RetainedLogs: info.RetainedLogs, Phase: info.Phase})
+		observed = append(observed, observedAllocation{ID: info.ID, Generation: info.Generation, RetainedLogs: info.RetainedLogs, Phase: info.Phase, Health: info.Health, Tasks: info.ObservedTasks})
 	}
 	sort.Slice(observed, func(i, j int) bool {
 		if observed[i].ID == observed[j].ID {

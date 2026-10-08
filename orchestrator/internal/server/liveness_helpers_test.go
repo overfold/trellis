@@ -13,6 +13,11 @@ import (
 // the given time. A zero time registers the node without a heartbeat in the
 // current term.
 func addTestNode(s *Server, node *Node, heartbeat time.Time) {
+	// General reconciliation fixtures model nodes with available capacity.
+	// Capacity boundary tests use explicit planner/scheduler inputs instead.
+	if node.CPUAllocatable == 0 && node.MemoryAllocatable == 0 {
+		node.CPUAllocatable, node.MemoryAllocatable = 4000, 8<<30
+	}
 	if s.nodes == nil {
 		s.nodes = make(map[uuid.UUID]*Node)
 	}

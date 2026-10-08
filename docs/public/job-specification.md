@@ -236,7 +236,7 @@ resources:
   memory: 256MiB
 ```
 
-CPU is expressed in millicores. The first-party YAML representation accepts a raw byte count or readable binary/decimal size such as `256MiB`, `1GiB`, or `500MB`; canonical JSON represents memory as integer bytes. The scheduler multiplies each task request by its group count when considering desired capacity. A task may omit `resources`; Trellis resolves it to the operator-configured default CPU and memory before persistence and scheduling. When supplied, both values must be positive; zero never requests the default.
+CPU is expressed in millicores, with a minimum of 10 millicores to satisfy the runtime's minimum CFS quota. The first-party YAML representation accepts a raw byte count or readable binary/decimal size such as `256MiB`, `1GiB`, or `500MB`; canonical JSON represents memory as integer bytes. The scheduler multiplies each task request by its group count when considering desired capacity. A task may omit `resources`; Trellis resolves it to the operator-configured default CPU and memory before persistence and scheduling. When supplied, CPU must be at least 10 and memory must be positive; zero never requests the default. Operator-configured default and maximum CPU must also be at least 10 millicores.
 
 Memory units are case-insensitive: decimal `B`, `KB`, `MB`, `GB`, `TB`, and binary `Ki`/`KiB`, `Mi`/`MiB`, `Gi`/`GiB`, `Ti`/`TiB`. Whitespace between the amount and unit and surrounding whitespace are accepted (quote surrounding whitespace in YAML), so `64MIB`, `64 MI`, and `" 64MiB "` all mean 67,108,864 bytes. Bare `K`, `M`, `G`, and `T` are not valid units. The generated authoring schema checks these spellings; parsing also checks numeric range before canonical integer-byte validation.
 

@@ -540,3 +540,24 @@ func TestScheduleCombinesBuiltinAndLabelConstraints(t *testing.T) {
 		t.Fatalf("unexpected placements: %#v", placements)
 	}
 }
+
+func TestScheduleZeroAllocatableIsNotUnlimited(t *testing.T) {
+	for _, cpu := range []bool{false, true} {
+		node := spreadTestNode("00000000-0000-0000-0000-000000000001")
+		if cpu {
+			node.CPUAllocatable = 0
+		} else {
+			node.MemoryAllocatable = 0
+		}
+		intent := &PlacementIntent{Count: 1, Nodes: []*Node{node}, Tasks: []spec.TaskSpec{{Resources: &spec.ResourcesSpec{CPU: 10, Memory: 1}}}}
+		placements, diagnostic := schedule(intent)
+		if len(placements) != 0 || diagnostic == nil || diagnostic.Reason != "insufficient_capacity" {
+			t.Fatalf("cpu=%t placements=%#v diagnostic=%#v", cpu, placements, diagnostic)
+		}
+		// Zero capacity still fits a zero request; it is not a sentinel.
+		intent.Tasks = nil
+		if placements := Schedule(intent); len(placements) != 1 {
+			t.Fatalf("zero request rejected: %#v", placements)
+		}
+	}
+}

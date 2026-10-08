@@ -286,7 +286,7 @@ func TestPlanRollingChargesReturnedLostOriginal(t *testing.T) {
 		planTestNode(1, NodeStatusHealthy), planTestNode(2, NodeStatusHealthy),
 		planTestNode(3, NodeStatusHealthy), planTestNode(4, NodeStatusHealthy),
 	}
-	nodes[0].observedAllocations = []observedAllocation{{ID: "lost-original", Generation: 1, Phase: lifecycle.PhaseRunning}}
+	nodes[0].observedAllocations = []observedAllocation{{ID: "lost-original", Generation: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy, Tasks: map[string]bool{"server": true}}}
 	lostOriginal := planTestAllocation("lost-original", nodes[0], lifecycle.PhaseLost, 1)
 	oldHealthy := drainingPlanAllocation("old-b", nodes[1])
 	newHealthy := planTestAllocation("new-healthy", nodes[2], lifecycle.PhaseRunning, 2)

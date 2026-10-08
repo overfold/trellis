@@ -69,7 +69,7 @@ func (f *lostReturnFixture) addAllocation(id string, node *Node, phase lifecycle
 func (f *lostReturnFixture) heartbeatA(t *testing.T) {
 	t.Helper()
 	statuses := []nodeapi.AllocationStatus{{ID: "original", Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
-	if err := heartbeatAndApply(t, f.s, f.nodeA.ID, statuses, "test", nodeResourceObservation{}); err != nil {
+	if err := heartbeatAndApply(t, f.s, f.nodeA.ID, statuses, "test", nodeResourceObservation{CPUCapacity: 4000, CPUAllocatable: 4000, MemoryCapacity: 8 << 30, MemoryAllocatable: 8 << 30}); err != nil {
 		t.Fatal(err)
 	}
 	if f.original.Phase != lifecycle.PhaseLost {

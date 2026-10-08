@@ -38,6 +38,9 @@ func (n *Node) Clone() *Node {
 	clone.Volumes = slices.Clone(n.Volumes)
 	clone.Capabilities = slices.Clone(n.Capabilities)
 	clone.observedAllocations = slices.Clone(n.observedAllocations)
+	for i := range clone.observedAllocations {
+		clone.observedAllocations[i].Tasks = maps.Clone(n.observedAllocations[i].Tasks)
+	}
 	return &clone
 }
 

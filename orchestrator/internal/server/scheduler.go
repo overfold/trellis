@@ -292,11 +292,11 @@ func checkedAddInt64(a, b int64) (int64, bool) {
 }
 
 func fitsIntCapacity(capacity, used int, usedOverflow bool, requested int, requestedOverflow bool) bool {
-	return capacity <= 0 || !usedOverflow && !requestedOverflow && used <= capacity && requested <= capacity-used
+	return capacity >= 0 && !usedOverflow && !requestedOverflow && used <= capacity && requested <= capacity-used
 }
 
 func fitsInt64Capacity(capacity, used int64, usedOverflow bool, requested int64, requestedOverflow bool) bool {
-	return capacity <= 0 || !usedOverflow && !requestedOverflow && used <= capacity && requested <= capacity-used
+	return capacity >= 0 && !usedOverflow && !requestedOverflow && used <= capacity && requested <= capacity-used
 }
 
 func nodeHasCapabilities(node *Node, required []spec.NodeCapability) bool {

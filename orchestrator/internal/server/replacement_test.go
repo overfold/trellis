@@ -575,8 +575,8 @@ func TestReconcilePrunesTerminalAllocationRecords(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Default retention keeps only the newest five terminal records, f3..f7.
-	// The observed f0 is pruned too and is stopped as an orphan.
+	// Default retention keeps the newest five terminal records, f3..f7.
+	// f0 must also retain its occupancy evidence until cleanup is observed.
 	for _, id := range ids {
 		_, inMemory := func() (*Allocation, bool) {
 			for _, allocation := range s.allocations {
@@ -587,10 +587,17 @@ func TestReconcilePrunesTerminalAllocationRecords(t *testing.T) {
 			return nil, false
 		}()
 		_, stored := persisted[id]
-		want := id >= "f3"
+		want := id == "f0" || id >= "f3"
 		if inMemory != want || stored != want {
 			t.Fatalf("allocation %s retained in memory=%t store=%t, want %t (remaining %v)", id, inMemory, stored, want, remaining)
 		}
+	}
+	node.observedAllocations = nil
+	node.observedAt = clock.now.Add(time.Second)
+	clock.advance(node, 2*time.Second)
+	s.Reconcile(ctx)
+	if _, exists := store[s.state.allocationKey("f0")]; exists {
+		t.Fatal("cleaned-up f0 remained beyond terminal retention")
 	}
 }
 

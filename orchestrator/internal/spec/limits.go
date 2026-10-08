@@ -40,6 +40,9 @@ func ValidateLimits(limits Limits) error {
 	if limits.DefaultTaskCPU <= 0 || limits.DefaultTaskMemory <= 0 || limits.MaxTaskCPU <= 0 || limits.MaxTaskMemory <= 0 {
 		return fmt.Errorf("default task CPU and memory must be positive")
 	}
+	if limits.DefaultTaskCPU < 10 || limits.MaxTaskCPU < 10 {
+		return fmt.Errorf("default and maximum task CPU must be at least 10 millicores")
+	}
 	if limits.DefaultTaskCPU > limits.MaxTaskCPU || limits.DefaultTaskMemory > limits.MaxTaskMemory {
 		return fmt.Errorf("default task resources exceed their maximums")
 	}

@@ -541,14 +541,21 @@ func (s *Server) dispatchReconcileActions(ctx context.Context, actions []Action,
 			}
 			defer s.releaseActionNode(nodeID)
 			defer func() { <-slots }()
+			cleanupFailed := false
 			for i := range batch {
 				action := &batch[i]
+				if cleanupFailed && action.Type == ActionStart {
+					continue
+				}
 				if err := s.Execute(ctx, action); err != nil {
 					allocationID := action.ID
 					if action.Allocation != nil {
 						allocationID = action.Allocation.ID
 					}
 					s.log.Error("reconcile action failed", "action", action.Type, "allocation", allocationID, "error", err)
+					if action.Type == ActionStopObserved {
+						cleanupFailed = true
+					}
 				}
 			}
 		}(nodeID, byNode[nodeID])

@@ -110,7 +110,9 @@ type observedAllocation struct {
 	Generation   uint64
 	RetainedLogs bool
 	// Phase is the lifecycle phase aggregated from the node's task reports.
-	Phase lifecycle.Phase
+	Phase  lifecycle.Phase
+	Health lifecycle.Health
+	Tasks  map[string]bool
 }
 
 // NodeStatus describes whether a node can receive allocations.

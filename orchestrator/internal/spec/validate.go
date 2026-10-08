@@ -195,8 +195,8 @@ func Validate(job *JobSpec) error {
 				add(taskPath+".image", "invalid_image", "must be a valid OCI image reference (repository, optional tag or digest)")
 			}
 			if task.Resources != nil {
-				if task.Resources.CPU <= 0 {
-					add(taskPath+".resources.cpu", "out_of_range", "must be positive")
+				if task.Resources.CPU < 10 {
+					add(taskPath+".resources.cpu", "out_of_range", "must be at least 10 millicores (the minimum CFS quota)")
 				}
 				if task.Resources.Memory <= 0 {
 					add(taskPath+".resources.memory", "out_of_range", "must be positive")

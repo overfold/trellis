@@ -190,6 +190,24 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 	// action so a replacement never starts while an original it conflicts
 	// with still holds its node's ports.
 	var retainedStops []Action
+	// Terminal task failure does not prove that live siblings were cleaned up.
+	observedOccupancy := make(map[*Allocation]bool)
+	retainedSet := make(map[*Allocation]bool)
+	for _, allocation := range allocations {
+		if allocation.Node == nil || activeAllocationPhase(allocation.Phase) {
+			continue
+		}
+		if node := in.Nodes[allocation.Node.ID]; node != nil && !lossTimedOut(node) {
+			if allocation.Phase == lifecycle.PhaseFailed && node.observedAt.Before(allocation.TransitionedAt) {
+				observedOccupancy[allocation] = true
+			}
+			for _, observed := range node.observedAllocations {
+				if observed.ID == allocation.ID && observed.Generation == allocation.Generation && !observed.RetainedLogs {
+					observedOccupancy[allocation] = true
+				}
+			}
+		}
+	}
 	if !in.LeaderSince.IsZero() && recoveryElapsed {
 		type observationKey struct {
 			nodeID     uuid.UUID
@@ -223,9 +241,18 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 				if active[key] && !observed.RetainedLogs {
 					continue
 				}
-				if original := lost[key]; original != nil && observed.Phase == lifecycle.PhaseRunning {
-					retained = append(retained, &retainedOriginal{allocation: original, node: node})
-					continue
+				if original := lost[key]; original != nil && observed.Phase == lifecycle.PhaseRunning && observed.Health == lifecycle.HealthHealthy {
+					complete := true
+					for _, task := range original.Tasks {
+						if !observed.Tasks[task.Name] {
+							complete = false
+						}
+					}
+					if complete {
+						retained = append(retained, &retainedOriginal{allocation: original, node: node})
+						retainedSet[original] = true
+						continue
+					}
 				}
 				actions = append(actions, Action{Type: ActionStopObserved, Node: node, ID: observed.ID, Generation: observed.Generation, RetainLogs: desired[key]})
 			}
@@ -237,6 +264,20 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 	for _, allocation := range allocations {
 		key := jobKey(allocation.Namespace, allocation.JobName)
 		job := admittedJobs[key]
+		// Loss applies to every execution, including deleted jobs and obsolete
+		// incarnations. Cleanup and retry policy must not bypass this timeout.
+		if activeAllocationPhase(allocation.Phase) && allocation.Node != nil && lossTimedOut(allocation.Node) {
+			_ = allocation.Transition(lifecycle.PhaseLost, now, "node_unavailable", "node did not re-register before the allocation loss timeout")
+			markUpdated(allocation)
+			continue
+		}
+		// Once stopping is durable, health changes cannot revoke that intent.
+		if allocation.Phase == lifecycle.PhaseStopping {
+			if allocation.NextRetryAt == nil || !now.Before(*allocation.NextRetryAt) {
+				actions = append(actions, Action{Type: ActionStop, Allocation: allocation})
+			}
+			continue
+		}
 		if job == nil {
 			if activeAllocationPhase(allocation.Phase) && allocation.Node != nil {
 				actions = append(actions, Action{Type: ActionStop, Allocation: allocation})
@@ -274,19 +315,10 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 			valid = append(valid, allocation)
 			continue
 		}
-		if job == nil {
-			actions = append(actions, Action{Type: ActionStop, Allocation: allocation})
-			continue
-		}
 		if allocation.Draining && allocation.Node != nil && (allocation.Node.Status == NodeStatusHealthy || allocation.Node.Status == NodeStatusDraining) {
 			actions = append(actions, Action{Type: ActionDrain, Allocation: allocation})
 		}
 		if allocation.Node != nil && allocation.Node.Status == NodeStatusDraining {
-			if lossTimedOut(allocation.Node) {
-				_ = allocation.Transition(lifecycle.PhaseLost, now, "node_unavailable", "node did not re-register before the allocation loss timeout")
-				markUpdated(allocation)
-				continue
-			}
 			if !jobHasGroup(job, allocation.TaskGroupName) {
 				actions = append(actions, Action{Type: ActionStop, Allocation: allocation})
 				continue
@@ -315,10 +347,6 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 					}
 				}
 				if allocation.Node == nil || allocation.Node.Status != NodeStatusHealthy {
-					if lossTimedOut(allocation.Node) {
-						_ = allocation.Transition(lifecycle.PhaseLost, now, "node_unavailable", "node did not re-register before the allocation loss timeout")
-						markUpdated(allocation)
-					}
 					continue
 				}
 				valid = append(valid, allocation)
@@ -329,10 +357,6 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 			}
 		}
 		if allocation.Node == nil || allocation.Node.Status != NodeStatusHealthy {
-			if lossTimedOut(allocation.Node) {
-				_ = allocation.Transition(lifecycle.PhaseLost, now, "node_unavailable", "node did not re-register before the allocation loss timeout")
-				markUpdated(allocation)
-			}
 			continue
 		}
 		// A start request carries the drain state itself, so only a running
@@ -341,12 +365,8 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 			in.DeliveredResumes[resumeDeliveryKey{allocation: allocation.ID, generation: allocation.Generation}] != allocation.DrainSequence {
 			actions = append(actions, Action{Type: ActionResume, Allocation: allocation})
 		}
-		if allocation.Phase == lifecycle.PhasePlaced || allocation.Phase == lifecycle.PhaseStarting || allocation.Phase == lifecycle.PhaseStopping {
-			actionType := ActionStart
-			if allocation.Phase == lifecycle.PhaseStopping {
-				actionType = ActionStop
-			}
-			actions = append(actions, Action{Type: actionType, Allocation: allocation})
+		if allocation.Phase == lifecycle.PhasePlaced || allocation.Phase == lifecycle.PhaseStarting {
+			actions = append(actions, Action{Type: ActionStart, Allocation: allocation})
 		}
 		valid = append(valid, allocation)
 	}
@@ -357,7 +377,7 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 	occupied := make([]*Allocation, 0, len(allocations))
 	occupiedSet := make(map[*Allocation]bool, len(allocations))
 	for _, allocation := range allocations {
-		if allocation.Node != nil && activeAllocationPhase(allocation.Phase) {
+		if allocation.Node != nil && (activeAllocationPhase(allocation.Phase) || observedOccupancy[allocation] && !retainedSet[allocation]) {
 			occupied = append(occupied, allocation)
 			occupiedSet[allocation] = true
 		}
@@ -377,7 +397,7 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 			plannedBackoffs[backoffKey] = backoff
 			live := 0
 			for _, alloc := range allocationsByGroup[backoffKey] {
-				if potentiallyLiveAllocation(alloc.Phase) {
+				if potentiallyLiveAllocation(alloc.Phase) || observedOccupancy[alloc] && !retainedSet[alloc] {
 					live++
 				}
 			}
@@ -407,19 +427,37 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 					unavailable++
 				}
 			}
+			// Keep healthy running replicas first, with ID order breaking ties.
+			sort.SliceStable(current, func(i, j int) bool {
+				iHealthy := current[i].Phase == lifecycle.PhaseRunning && current[i].Health == lifecycle.HealthHealthy
+				jHealthy := current[j].Phase == lifecycle.PhaseRunning && current[j].Health == lifecycle.HealthHealthy
+				return iHealthy && !jHealthy
+			})
+			// Draining stops consume the front, rather than the back.
+			sort.SliceStable(draining, func(i, j int) bool {
+				iHealthy := draining[i].Phase == lifecycle.PhaseRunning && draining[i].Health == lifecycle.HealthHealthy
+				jHealthy := draining[j].Phase == lifecycle.PhaseRunning && draining[j].Health == lifecycle.HealthHealthy
+				return !iHealthy && jHealthy
+			})
 			for len(current) > group.Count {
 				actions = append(actions, Action{Type: ActionStop, Allocation: current[len(current)-1]})
 				current = current[:len(current)-1]
 			}
-			// Keep a lost original's container running while the group has
-			// fewer running replacements than it needs, unless it holds a host
-			// port an already placed allocation on its node needs.
+			// Retain only capacity missing from healthy current and draining
+			// replicas. Redundant returned originals otherwise fill surge slots
+			// forever while waiting for replacements that cannot be placed.
 			missing := group.Count
 			for _, alloc := range current {
-				if alloc.Phase == lifecycle.PhaseRunning {
+				if alloc.Phase == lifecycle.PhaseRunning && alloc.Health == lifecycle.HealthHealthy {
 					missing--
 				}
 			}
+			for _, alloc := range draining {
+				if alloc.Phase == lifecycle.PhaseRunning && alloc.Health == lifecycle.HealthHealthy {
+					missing--
+				}
+			}
+			retainedAvailable := 0
 			for _, original := range retained {
 				if original.released || original.kept || !original.inGroup(namespace, jobName, group.Name) {
 					continue
@@ -427,6 +465,7 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 				if missing > 0 && original.allocation.JobIncarnation == job.Incarnation && (original.allocation.JobRevision == job.Revision || updateStrategy(job, group.Name) == spec.UpdateRolling) && !original.blocksPlacedAllocation(occupied) {
 					original.kept = true
 					missing--
+					retainedAvailable++
 					continue
 				}
 				retainedStops = append(retainedStops, original.release())
@@ -438,7 +477,9 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 						healthyNew++
 					}
 				}
-				drainsToStop := min(max(healthyNew+len(draining)-group.Count, 0), len(draining))
+				// Retained capacity can only justify stopping unhealthy drains:
+				// healthy drains were already deducted from the retention deficit.
+				drainsToStop := min(max(healthyNew+retainedAvailable+len(draining)-group.Count, 0), len(draining))
 				for i := range drainsToStop {
 					if draining[i].NextRetryAt == nil || !now.Before(*draining[i].NextRetryAt) {
 						actions = append(actions, Action{Type: ActionStop, Allocation: draining[i]})
@@ -495,7 +536,10 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 				// surge slot for a later pass. This keeps actual and accepted
 				// executions at or below count + max_parallel without imposing
 				// cross-node serialization on unrelated actions.
-				placeable = min(placeable, max(group.Count+parallel-live, 0))
+				// Subtract first: max_parallel can be MaxInt.
+				if slots, overflow := checkedAddInt(group.Count-live, parallel); !overflow {
+					placeable = min(placeable, max(slots, 0))
+				}
 			}
 			if placeable <= 0 {
 				continue
@@ -562,7 +606,11 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 	}
 	plan.Actions = append(retainedStops, actions...)
 
-	plan.Pruned = planTerminalPruning(policy.RetainTerminal, allocations, plannedUpdates)
+	pruneSkip := maps.Clone(plannedUpdates)
+	for allocation := range observedOccupancy {
+		pruneSkip[allocation] = true
+	}
+	plan.Pruned = planTerminalPruning(policy.RetainTerminal, allocations, pruneSkip)
 	prunedSet := make(map[*Allocation]bool, len(plan.Pruned))
 	for _, allocation := range plan.Pruned {
 		prunedSet[allocation] = true

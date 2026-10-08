@@ -1018,3 +1018,30 @@ func TestDecodeContainerMetricsBounds(t *testing.T) {
 		})
 	}
 }
+
+func TestResourceSpecMinimumCPUQuota(t *testing.T) {
+	for _, cpu := range []int{0, 1, 9, 10, 11} {
+		opts, err := resourceSpecOpts(CreateOptions{CPU: cpu}, true)
+		if cpu > 0 && cpu < 10 {
+			if err == nil {
+				t.Fatalf("CPU %d accepted below the minimum CFS quota", cpu)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cpu == 0 {
+			continue
+		}
+		generated := specs.Spec{Linux: &specs.Linux{}}
+		for _, opt := range opts {
+			if err := opt(context.Background(), nil, nil, &generated); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := *generated.Linux.Resources.CPU.Quota; got != int64(cpu)*100 {
+			t.Fatalf("CPU %d quota=%d", cpu, got)
+		}
+	}
+}

@@ -32,7 +32,7 @@ An allocation can therefore be `running` and `unhealthy`. Lifecycle and health a
 
 ## Scheduling
 
-The scheduler considers only healthy, non-draining nodes with matching constraints, runtime capabilities, volume locality, available node ports, and declared CPU/memory capacity. It favors spreading replicas of a task group, then best-fit resource utilization. Placement is deterministic, but spreading is soft: when constraints, volumes, node ports, or capacity leave only some nodes eligible, replicas share those nodes. Scheduling uses declared requests and allocatable capacity, not live utilization. See the [developer scheduling algorithm](../developer/control-plane.md#scheduling-algorithm) for scoring and tie-breaking details.
+The scheduler considers only healthy, non-draining nodes with matching constraints, runtime capabilities, volume locality, available node ports, and declared CPU/memory capacity. It favors spreading replicas of a task group, then best-fit resource utilization. Placement is deterministic, but spreading is soft: when constraints, volumes, node ports, or capacity leave only some nodes eligible, replicas share those nodes. Scheduling uses declared requests and allocatable capacity, not live utilization; zero allocatable CPU or memory means no capacity for a positive request, not unlimited capacity. Scale-down preserves healthy running replicas before unhealthy or starting ones. See the [developer scheduling algorithm](../developer/control-plane.md#scheduling-algorithm) for scoring and tie-breaking details.
 
 ## Reconciliation and failure handling
 
