@@ -285,6 +285,26 @@ EOF_CONFIG
 else
     configured_control_plane="$(awk -F': ' '$1 == "control_plane" {print $2; exit}' "$CONFIG_FILE")"
     [ "${configured_control_plane:-true}" != true ] || [ -f "$SECRETS_KEY_FILE" ] || ui_die "${CONFIG_FILE} exists but ${SECRETS_KEY_FILE} is missing; restore the matching key and rerun install."
+    # A retained TLS identity means enrollment already succeeded, even if a
+    # later installation phase failed. Never replace its token or other state.
+    configured_join="$(awk -F': ' '$1 == "join" {print $2; exit}' "$CONFIG_FILE")"
+    configured_signing="$(awk -F': ' '$1 == "node_signing_mode" {print $2; exit}' "$CONFIG_FILE")"
+    if [ -n "$configured_join" ] && [ "${configured_signing:-managed}" = managed ] && \
+       [ ! -e "${DATA_DIR}/tls/node-cert" ] && \
+       { [ -n "$join_token_file" ] || [ "${TRELLIS_JOIN_TOKEN+x}" = x ]; }; then
+        if [ -n "$join_token_file" ]; then
+            join_token="$(cat "$join_token_file")" || ui_die "Cannot read replacement join token file."
+        else
+            join_token="${TRELLIS_JOIN_TOKEN:-}"
+        fi
+        [ -n "$join_token" ] || ui_die "Replacement node join token is empty; mint a new token and supply --join-token-file or TRELLIS_JOIN_TOKEN."
+        [[ "$join_token" != *$'\n'* ]] || ui_die "Replacement node join token must be a single line."
+        # Pass secret bytes on stdin, not through awk's command-line arguments.
+        { printf 'join_token: %s\n' "$join_token"; sed '/^join_token:/d' "$CONFIG_FILE"; } | \
+            write_private_file "$CONFIG_FILE"
+        unset join_token
+        ui_step "Replaced the join token for the unenrolled node"
+    fi
     chmod 600 "$CONFIG_FILE"
     [ ! -f "$SECRETS_KEY_FILE" ] || chmod 600 "$SECRETS_KEY_FILE"
     ui_step "Reusing existing node configuration"

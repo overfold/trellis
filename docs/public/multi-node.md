@@ -11,7 +11,7 @@ Every machine runs the same `trellis` daemon, with two independent settings:
 - `control_plane` (default `true`) determines whether it replicates state through Raft and may lead;
 - `runs_workloads` (default `true`) determines whether it receives allocations;
 - worker-only nodes (`control_plane: false`) register and heartbeat but hold no Raft state, secrets-encryption key, or CA private key;
-- up to five control-plane nodes are **voters**; other control-plane nodes are **non-voters** that can be promoted;
+- the steady-state target is up to five control-plane **voters**; other control-plane nodes are **non-voters** that can be promoted;
 - one elected voter, the **leader**, serves the control-plane API, schedules, and reconciles jobs.
 
 Trellis chooses the voters itself. A node always joins as a non-voter, and the leader promotes healthy nodes that have caught up with the replicated state until the cluster has the right number of voters. `trellisctl nodes list` shows each node's role in the **Control plane** column.
@@ -20,7 +20,7 @@ Any node accepts control-plane connections. A worker is a TCP relay: the client-
 
 ## Choose a cluster size
 
-A majority of voters (a **quorum**) must be reachable for Trellis to elect a leader and accept changes. Trellis keeps an odd number of voters, because an even number tolerates no more failures than one fewer:
+A majority of voters (a **quorum**) must be reachable for Trellis to elect a leader and accept changes. Trellis targets an odd number of voters in steady state, because an even number tolerates no more failures than one fewer:
 
 | Control-plane nodes | Voters | Voter failures tolerated |
 |---|---|---|
@@ -35,7 +35,7 @@ Voters are replaced automatically when that is safe:
 - when a voter is removed with `nodes remove` (or by the uninstall script), Trellis first promotes a healthy non-voter, if one exists, so the number of reachable voters never drops;
 - when a voter's node has been silent for 5 minutes, Trellis demotes it, first promoting a healthy non-voter in its place when one exists. If the node returns, it stays a non-voter until a voter is needed again.
 
-Trellis never promotes a node when that would leave an even number of voters. After a voter is removed and no healthy non-voter can take its place yet, the cluster can briefly run with an even number of voters; the next node to become healthy is promoted.
+Odd voter counts are steady-state targets, not a guarantee for every intermediate configuration. Membership changes happen one at a time: growth passes through 1→2→3 or 3→4→5 voters, and replacement promotes before removing or demoting the old voter. These temporary even sets require their own majority (for example, three of four voters); a replacement becoming unavailable during promotion can interrupt progress even while the old quorum remains reachable. After a voter is removed and no healthy non-voter can take its place yet, the cluster can also briefly run with an even number of voters; the next eligible node is promoted toward the odd target.
 
 When quorum is lost, allocations already running on reachable nodes keep running, but nothing can change: jobs cannot be applied or deleted, failed or lost allocations are not replaced, nodes cannot be drained, and no voter can be replaced. The cluster resumes once a majority of voters is reachable again.
 
@@ -90,7 +90,7 @@ trellisctl --administrator-key ./trellis-administrator.pem \
   nodes join-token create --role control-plane --ttl 30m > trellis-join-token
 ```
 
-The token is printed once; the cluster stores only its hash. `trellisctl nodes join-token list` shows unexpired tokens with their use counts, and `trellisctl nodes join-token revoke ID` withdraws one before it expires. Revoking a token does not affect nodes that already enrolled with it. Each enrollment attempt that the leader accepts uses the token once, even if its response is lost before the node stores its identity; if a node then reports that its token is exhausted, mint another.
+The token is printed once; the cluster stores only its hash. `trellisctl nodes join-token list` shows unexpired tokens with their use counts, and `trellisctl nodes join-token revoke ID` withdraws one before it expires. Revoking a token does not affect nodes that already enrolled with it. Each enrollment attempt that the leader accepts uses the token once, even if its response is lost before the node stores its identity; if a node then reports that its token is exhausted, mint another. Rerun the installer with `--join-token-file` or `TRELLIS_JOIN_TOKEN`: an incomplete managed join without a stored node certificate atomically replaces the saved token while preserving the existing node configuration, identity, pinned CA, and secrets key. An already-enrolled node or completed installation does not replace its token.
 
 For a worker, create a worker token and omit the secrets-key transfer:
 

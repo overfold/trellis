@@ -46,6 +46,8 @@ fi
 MOCK
 cat >"$tmp/mocks/trellisctl" <<'MOCK'
 #!/usr/bin/env bash
+# The real-CLI/TLS regressions separately verify these pinned flags.
+shift 8
 printf 'trellisctl %s\n' "$*" >>"$CALL_LOG"
 if [ "$*" = 'nodes list --output json' ]; then
     case "$SCENARIO" in
@@ -106,6 +108,8 @@ for scenario in membership-failure malformed wrong-shape empty cleanup-failure s
         printf 'test-config\n' >"$CONFIG_FILE"
         printf 'test-secret-key\n' >"$SECRETS_KEY_FILE"
         printf 'complete=true\n' >"$STATE_FILE"
+        export TRELLIS_CONFIG="$root/operator.yaml" TRELLIS_ADMINISTRATOR_KEY=test-key
+        touch "$TRELLIS_CONFIG"
         args=(--yes)
         case "$scenario" in
             force|taskless) args+=(--force) ;;

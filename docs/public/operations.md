@@ -307,6 +307,10 @@ curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/upgra
 sudo env TRELLIS_CONFIG="$HOME/.config/trellis/config.yaml" bash /tmp/trellis-upgrade.sh
 ```
 
+## Leadership activation failures
+
+Leadership activation failures (Raft barrier, state reload, or epoch acquisition) shut the node down fail-closed with a nonzero exit status. The first-party `Restart=on-failure` systemd unit restarts it; the daemon does not retry activation in place. Inspect `journalctl -u trellis` if faults persist. Requested SIGTERM/SIGINT shutdown remains successful.
+
 ## Agent recovery refused
 
 When the daemon starts, its allocation agent recovers from records below `data_dir` (`agent/control-epoch` and `agent/allocations/`). With intact records, an unavailable containerd listing is retried while health is unknown; restore containerd rather than deleting agent state.
@@ -360,6 +364,8 @@ curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/unins
 ```
 
 It removes only dependencies/repositories recorded as introduced by Trellis; older installations without ownership records are handled conservatively and shared host packages are left alone. The user's `trellisctl` contexts are also kept because they describe cluster connections, not ownership of this machine. On a live cluster with other registered nodes, the script first drains the node and removes its registration; see [Multi-node clusters](multi-node.md#maintain-a-multi-node-cluster). This path applies to workers as well as control-plane members: workers have no Raft membership to remove, and `nodes remove` records their tombstone so the old identity cannot register again.
+
+Graceful inspection and drain use the invoking user's saved `local` cluster/write context (selected using `SUDO_USER`, or an explicit `TRELLIS_CONFIG`), pinned to the local API and `/run/trellis/ca.crt`; ambient `TRELLIS_TOKEN` does not override it. Joining nodes need an operator-provisioned local context. Multi-node leadership transfer and removal additionally require explicit, transient `TRELLIS_ADMINISTRATOR_KEY`, as a private-key file path or base64 PKCS#8 key. For example, download the script, inspect it, and run `sudo env TRELLIS_CONFIG=/home/operator/.config/trellis/config.yaml TRELLIS_ADMINISTRATOR_KEY=/secure/trellis-administrator.pem bash uninstall.sh`. The script does not copy the administrator key into daemon state. Missing authority aborts before drain; rejected authority or unavailable quorum prevents deletion and leaves the node drained, so check its state and undrain it if abandoning removal. Single-node uninstall does not require administrator authority.
 
 Installing a new cluster on this machine replaces the invoking user's `local` context with a freshly minted operator token and a live CA-file reference to `/run/trellis/ca.crt`; unrelated contexts are preserved. Resuming an existing installation or joining a cluster keeps an existing `local` context. File-backed local trust follows the running daemon, but old bearer tokens and administrator keys do not gain access to a replacement cluster. Embedded remote contexts remain pinned to their saved CA; see [CA sources](cli.md#named-cluster-contexts).
 

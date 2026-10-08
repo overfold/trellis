@@ -617,13 +617,28 @@ func run(parent context.Context, cfg *config) error {
 	}()
 	go watchLeader(ctx, log, elector, leaderClient)
 
+	err = runLeadership(ctx, log.With("node_id", id, "address", cfg.ServerAdvertise), events, ag.Failed(), apiProxy, func() error {
+		return raftStore.Raft().Barrier(10 * time.Second).Error()
+	}, control)
+	stop()
+	return err
+}
+
+// leaderControl owns activation and the loops started only after it succeeds.
+type leaderControl interface {
+	Reload(context.Context) error
+	AcquireLeadership(context.Context) error
+	Run(context.Context) <-chan struct{}
+}
+
+func runLeadership(ctx context.Context, log *slog.Logger, events <-chan election.Event, failed <-chan error, apiProxy *controlPlaneProxy, barrier func() error, control leaderControl) error {
 	var term leaderTerm
 	defer term.stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case err := <-ag.Failed():
+		case err := <-failed:
 			return fmt.Errorf("allocation agent: %w", err)
 		case event, ok := <-events:
 			if !ok {
@@ -636,26 +651,29 @@ func run(parent context.Context, cfg *config) error {
 				// committed entry inherited from the previous leader. Reloading at
 				// that point resurrects stale jobs and allocations in memory. A
 				// barrier makes the leadership snapshot include all prior commits.
-				if err := raftStore.Raft().Barrier(10 * time.Second).Error(); err != nil {
-					log.Error("raft leadership barrier failed", "error", err)
-					stop()
-					continue
+				if err := barrier(); err != nil {
+					if ctx.Err() != nil {
+						return nil
+					}
+					return fmt.Errorf("raft leadership barrier failed: %w", err)
 				}
 				if err := control.Reload(ctx); err != nil {
-					log.Error("load leader state failed", "error", err)
-					stop()
-					continue
+					if ctx.Err() != nil {
+						return nil
+					}
+					return fmt.Errorf("load leader state failed: %w", err)
 				}
 				if err := control.AcquireLeadership(ctx); err != nil {
-					log.Error("advance leadership epoch failed", "error", err)
-					stop()
-					continue
+					if ctx.Err() != nil {
+						return nil
+					}
+					return fmt.Errorf("advance leadership epoch failed: %w", err)
 				}
-				log.Info("leadership acquired", "node_id", id, "address", cfg.ServerAdvertise)
+				log.Info("leadership acquired")
 				term.start(ctx, control.Run)
 				apiProxy.SetLeaderActive(true)
 			} else {
-				log.Warn("leadership lost", "node_id", id)
+				log.Warn("leadership lost")
 			}
 		}
 	}

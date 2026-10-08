@@ -76,6 +76,79 @@ for mode in new control-plane worker reuse; do
     )
     printf 'PASS private installer creation: %s\n' "$mode"
 done
+
+for mode in file environment precedence absent empty-file empty-env missing-file multiline enrolled external; do
+    (
+        unset TRELLIS_JOIN_TOKEN
+        export PERMISSION_LOG="$tmp/resume-$mode.permissions"
+        CONFIG_DIR="$tmp/resume-$mode/config"; DATA_DIR="$tmp/resume-$mode/data"
+        mkdir -p "$CONFIG_DIR" "$DATA_DIR/tls"
+        CONFIG_FILE="$CONFIG_DIR/trellis.yaml"; SECRETS_KEY_FILE="$CONFIG_DIR/secrets.key"
+        printf 'node_signing_mode: managed\njoin: original:8128\njoin_token: exhausted\nca_cert: original-ca\ncontrol_plane: true\nagent_advertise: original:8127\n' >"$CONFIG_FILE"
+        printf 'original-key\n' >"$SECRETS_KEY_FILE"
+        printf 'original-id\n' >"$DATA_DIR/node-id"
+        cp "$CONFIG_FILE" "$CONFIG_DIR/before"
+        before_owner="$(stat -c '%u:%g' "$CONFIG_FILE")"
+        join_token_file=""
+        case "$mode" in
+            file|precedence|empty-file|multiline)
+                join_token_file="$CONFIG_DIR/replacement"
+                printf 'replacement-file\n' >"$join_token_file"
+                [ "$mode" != empty-file ] || : >"$join_token_file"
+                [ "$mode" != multiline ] || printf 'token\ninjected: value\n' >"$join_token_file"
+                [ "$mode" != precedence ] || export TRELLIS_JOIN_TOKEN=ignored-environment
+                ;;
+            environment|enrolled|external) export TRELLIS_JOIN_TOKEN=replacement-environment ;;
+            empty-env) export TRELLIS_JOIN_TOKEN= ;;
+            missing-file) join_token_file="$CONFIG_DIR/missing" ;;
+        esac
+        [ "$mode" != enrolled ] || printf 'stored-certificate\n' >"$DATA_DIR/tls/node-cert"
+        [ "$mode" != external ] || sed -i 's/mode: managed/mode: external/' "$CONFIG_FILE"
+        if [[ "$mode" = empty-* || "$mode" = missing-file || "$mode" = multiline ]]; then
+            if (source "$tmp/create-config.sh") >"$CONFIG_DIR/output" 2>&1; then
+                echo 'Accepted invalid replacement token' >&2; exit 1
+            fi
+            cmp "$CONFIG_DIR/before" "$CONFIG_FILE"
+            test ! -e "$PERMISSION_LOG"
+        else
+            source "$tmp/create-config.sh" >/dev/null 2>&1
+            case "$mode" in
+                file|precedence|environment)
+                    if [ "$mode" = environment ]; then expected=replacement-environment; else expected=replacement-file; fi
+                    grep -qx "join_token: $expected" "$CONFIG_FILE"
+                    [ "$(grep -c '^join_token:' "$CONFIG_FILE")" -eq 1 ]
+                    diff <(sed '/^join_token:/d' "$CONFIG_DIR/before") <(sed '/^join_token:/d' "$CONFIG_FILE")
+                    grep -q "published $CONFIG_FILE" "$PERMISSION_LOG"
+                    [ "$(stat -c %a "$CONFIG_FILE")" = 600 ]
+                    [ "$(stat -c '%u:%g' "$CONFIG_FILE")" = "$before_owner" ]
+                    ;;
+                *) grep -qx 'join_token: exhausted' "$CONFIG_FILE"; test ! -e "$PERMISSION_LOG" ;;
+            esac
+        fi
+        grep -qx original-key "$SECRETS_KEY_FILE"
+        grep -qx original-id "$DATA_DIR/node-id"
+        [ "$mode" != enrolled ] || grep -qx stored-certificate "$DATA_DIR/tls/node-cert"
+        printf 'PASS managed join replacement: %s\n' "$mode"
+    )
+done
+
+# Completed installs return before reading replacement input or publishing config.
+(
+    source "$script_dir/common.sh"
+    require_root_linux_amd64() { :; }; require_commands() { :; }
+    CONFIG_FILE="$tmp/completed.yaml"; INSTALL_DIR="$tmp/completed-bin"; STATE_FILE="$tmp/completed-state"
+    mkdir -p "$INSTALL_DIR"
+    printf '#!/bin/sh\n' >"$INSTALL_DIR/trellis"; chmod +x "$INSTALL_DIR/trellis"
+    printf 'join_token: untouched\n' >"$CONFIG_FILE"
+    printf 'complete=true\n' >"$STATE_FILE"
+    join_token_file=/missing/replacement
+    export TRELLIS_JOIN_TOKEN=replacement
+    awk '/^load_install_state$/ {copy=1} /^resuming=false$/ {copy=0} copy' "$script_dir/install-core.sh" >"$tmp/completed.sh"
+    (source "$tmp/completed.sh") >/dev/null
+    grep -qx 'join_token: untouched' "$CONFIG_FILE"
+)
+printf 'PASS completed install ignores replacement\n'
+
 for demo_node in worker-1 worker-2 control control-new; do
     (
         umask 022
