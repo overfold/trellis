@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/overfold/trellis/orchestrator/internal/auth"
@@ -213,5 +214,100 @@ func TestAPIAccessTokenNone(t *testing.T) {
 	}
 	if token != "" {
 		t.Fatalf("disabled api access returned token %q", token)
+	}
+}
+
+func TestRetainedHistoryDoesNotRetainWorkloadAuthority(t *testing.T) {
+	for _, phase := range []lifecycle.Phase{lifecycle.PhaseRunning, lifecycle.PhaseStopping, lifecycle.PhaseStopped, lifecycle.PhaseFailed, lifecycle.PhaseLost} {
+		t.Run(string(phase), func(t *testing.T) {
+			s, store := newAPIAccessServer(t)
+			s.state = NewStateController(store, "test")
+			node := &Node{ID: uuid.New()}
+			s.nodes = map[uuid.UUID]*Node{node.ID: node}
+			access := &spec.APIAccessSpec{Scope: spec.APIAccessCluster, Access: spec.APIAccessRead}
+			s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", APIAccess: access}}})}
+			s.allocations = []*Allocation{{ID: "retained", Namespace: "default", JobName: "web", TaskGroupName: "app", Phase: phase, Node: node}}
+			token, err := s.apiAccessToken(context.Background(), access, &nodeapi.AllocationRequest{AllocationID: "retained", Generation: 1, Namespace: "default", JobName: "web", GroupName: "app"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.revokeStaleWorkloadCredentials(context.Background())
+			principal, err := s.tokenManager.ValidateToken(context.Background(), token)
+			wantValid := phase == lifecycle.PhaseRunning || phase == lifecycle.PhaseStopping
+			if err != nil || (principal != nil) != wantValid || len(s.allocations) != 1 {
+				t.Fatalf("phase=%s principal=%v history=%d err=%v", phase, principal, len(s.allocations), err)
+			}
+			if wantValid {
+				if err := s.state.PutNodeTombstone(context.Background(), node.ID.String(), NodeTombstone{}); err != nil {
+					t.Fatal(err)
+				}
+				s.revokeStaleWorkloadCredentials(context.Background())
+				if principal, _ := s.tokenManager.ValidateToken(context.Background(), token); principal != nil {
+					t.Fatal("tombstoned node retained workload authority")
+				}
+			}
+		})
+	}
+}
+
+func TestWorkloadAuthenticationPartitionDeadlineWithoutReconciliation(t *testing.T) {
+	s, store := newAPIAccessServer(t)
+	s.state = NewStateController(store, "test")
+	now := time.Date(2026, 10, 8, 0, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+	s.leaderSince = now.Add(-time.Hour)
+	s.tokenManager.SetWorkloadAuthorizer(s.authorizeWorkloadCredential)
+	node := &Node{ID: uuid.New()}
+	s.nodes = map[uuid.UUID]*Node{node.ID: node}
+	s.liveness.register(node.ID, now)
+	access := &spec.APIAccessSpec{Scope: spec.APIAccessCluster, Access: spec.APIAccessRead}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", APIAccess: access}}})}
+	s.allocations = []*Allocation{{ID: "active", Generation: 1, Namespace: "default", JobName: "web", TaskGroupName: "app", Phase: lifecycle.PhaseRunning, Node: node}}
+	token, err := s.apiAccessToken(context.Background(), access, &nodeapi.AllocationRequest{AllocationID: "active", Generation: 1, Namespace: "default", JobName: "web", GroupName: "app"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := func() bool {
+		principal, err := s.tokenManager.ValidateToken(context.Background(), token)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return principal != nil
+	}
+	now = now.Add(DefaultAllocationLossTimeout - time.Nanosecond)
+	if !valid() {
+		t.Fatal("temporary partition prematurely revoked authority")
+	}
+	now = now.Add(time.Nanosecond)
+	if valid() {
+		t.Fatal("partition retained authority at the loss deadline without reconciliation")
+	}
+	s.liveness.stamp(node.ID, now)
+	if !valid() {
+		t.Fatal("renewed observation did not restore nonterminal authority")
+	}
+	s.leaderSince = now
+	s.liveness.startTerm()
+	s.reconciliation = DefaultReconciliationSettings()
+	s.reconciliation.AllocationLossTimeout = MinAllocationLossTimeout
+	now = now.Add(leaderRecoveryGrace - time.Nanosecond)
+	if !valid() {
+		t.Fatal("new-term recovery grace prematurely rejected authority")
+	}
+	now = now.Add(time.Nanosecond)
+	if valid() {
+		t.Fatal("new-term grace deadline did not bound silent workload authority")
+	}
+	s.liveness.stamp(node.ID, now)
+	s.allocations[0].Phase = lifecycle.PhaseLost
+	if valid() {
+		t.Fatal("retained lost history authenticated after heartbeat")
+	}
+	s.allocations[0].Phase = lifecycle.PhaseRunning
+	if err := s.state.PutNodeTombstone(context.Background(), node.ID.String(), NodeTombstone{}); err != nil {
+		t.Fatal(err)
+	}
+	if valid() {
+		t.Fatal("tombstone did not reject credential before durable token deletion")
 	}
 }

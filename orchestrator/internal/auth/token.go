@@ -104,12 +104,20 @@ func (p Principal) Validate() error {
 	return nil
 }
 
+// tokenRecord adds the allocation lookup to the stored principal, not the
+// public principal. Workload authentication never scans other sealed tokens.
+type tokenRecord struct {
+	Principal    `json:",inline"`
+	AllocationID string `json:"allocation_id,omitempty"`
+}
+
 // TokenManager creates and validates persisted scoped tokens.
 type TokenManager struct {
-	store            state.Store
-	cluster          string
-	now              func() time.Time
-	workloadTokensMu sync.Mutex
+	store             state.Store
+	cluster           string
+	now               func() time.Time
+	workloadTokensMu  sync.Mutex
+	workloadAuthorize func(context.Context, WorkloadCredential) bool
 }
 
 // NewTokenManager creates a token manager backed by state storage.
@@ -119,6 +127,12 @@ func NewTokenManager(store state.Store, cluster string) *TokenManager {
 
 // SetClock replaces the clock used for credential creation and expiry.
 func (m *TokenManager) SetClock(now func() time.Time) { m.now = now }
+
+// SetWorkloadAuthorizer installs the coordinator's live credential-authority
+// check before serving requests. It is immutable once requests are served.
+func (m *TokenManager) SetWorkloadAuthorizer(authorize func(context.Context, WorkloadCredential) bool) {
+	m.workloadAuthorize = authorize
+}
 
 // ErrCredentialNotFound reports that no operator credential has the given ID.
 var ErrCredentialNotFound = errors.New("credential not found")
@@ -281,14 +295,28 @@ func (m *TokenManager) ValidateToken(ctx context.Context, rawToken string) (*Pri
 	if data == nil {
 		return nil, nil
 	}
-	var principal Principal
-	if err := json.Unmarshal(data, &principal); err != nil {
+	var record tokenRecord
+	if err := json.Unmarshal(data, &record); err != nil {
 		return nil, fmt.Errorf("unmarshal principal: %w", err)
 	}
+	principal := record.Principal
 	if err := principal.Validate(); err != nil {
 		return nil, fmt.Errorf("stored token has invalid principal: %w", err)
 	}
 	if !principal.ExpiresAt.IsZero() && !m.now().Before(principal.ExpiresAt) {
+		return nil, nil
+	}
+	if principal.Kind == CredentialWorkload && m.workloadAuthorize != nil {
+		if record.AllocationID == "" {
+			return nil, nil
+		}
+		credential, err := m.loadWorkloadCredential(ctx, m.workloadCredentialKey(record.AllocationID))
+		if err != nil {
+			return nil, fmt.Errorf("lookup workload authority: %w", err)
+		}
+		if credential != nil && credential.TokenHash == hex.EncodeToString(hash[:]) && samePrincipalGrant(credential.Principal, principal) && m.workloadAuthorize(ctx, *credential) {
+			return &principal, nil
+		}
 		return nil, nil
 	}
 	return &principal, nil
@@ -391,6 +419,10 @@ func (m *TokenManager) WorkloadToken(ctx context.Context, sealer Sealer, allocat
 	stored := principal
 	if err := json.Unmarshal(tokenData, &stored); err != nil {
 		return "", fmt.Errorf("decode workload principal: %w", err)
+	}
+	tokenData, err = json.Marshal(tokenRecord{Principal: stored, AllocationID: allocationID})
+	if err != nil {
+		return "", fmt.Errorf("marshal workload token: %w", err)
 	}
 	hash := sha256.Sum256([]byte(token))
 	hashHex := hex.EncodeToString(hash[:])

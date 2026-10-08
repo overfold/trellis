@@ -373,6 +373,7 @@ func (s *Server) RemoveMember(ctx context.Context, id string) error {
 	if err := s.state.PutNodeTombstone(ctx, id, NodeTombstone{RemovedAt: s.now().UTC()}); err != nil {
 		return fmt.Errorf("record removal of node %s: %w", id, err)
 	}
+	s.revokeStaleWorkloadCredentials(ctx)
 	if index < 0 {
 		return nil
 	}

@@ -24,7 +24,7 @@ func newLocalCleanupCommand() *cobra.Command {
 	cfg := &config{}
 	cmd := &cobra.Command{
 		Use:    "local-cleanup",
-		Short:  "Remove journaled local network resources and volume staging mounts",
+		Short:  "Remove journaled local resources and delivered secrets",
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -45,6 +45,9 @@ func newLocalCleanupCommand() *cobra.Command {
 			}
 			if err := cleanupVolumeStaging(cfg.DataDir); err != nil {
 				return fmt.Errorf("cleaning volume staging mounts: %w", err)
+			}
+			if err := agent.CleanupDeliveredSecrets(cfg.DataDir); err != nil {
+				return fmt.Errorf("cleaning delivered secrets: %w", err)
 			}
 			return nil
 		},

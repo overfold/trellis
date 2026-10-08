@@ -10,6 +10,7 @@ import (
 
 	"github.com/overfold/trellis/orchestrator/internal/agent"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/storage"
 	"golang.org/x/sys/unix"
 )
 
@@ -196,5 +197,48 @@ func TestLocalCleanupCommandReportsFailures(t *testing.T) {
 				t.Fatalf("error = %v, volumeCalled = %t", err, volumeCalled)
 			}
 		})
+	}
+}
+
+func TestLocalCleanupCommandRemovesPlaintextBeforeStateCanBePurged(t *testing.T) {
+	originalNetwork := cleanupNetworkAttachments
+	t.Cleanup(func() { cleanupNetworkAttachments = originalNetwork })
+	cleanupNetworkAttachments = func(context.Context, string, string) error { return nil }
+	dataDir := t.TempDir()
+	root, err := os.MkdirTemp("/dev/shm", "trellis-secrets-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	local := storage.NewLocalStorage(dataDir)
+	if err := local.Put("agent/secret-root", root); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "allocation", "env")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "TRELLIS_TOKEN"), []byte("plaintext-token"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	cmd := newLocalCleanupCommand()
+	cmd.SetArgs([]string{"--data-dir", dataDir})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(root); !os.IsNotExist(err) {
+		t.Fatal("plaintext survived local cleanup", err)
+	}
+	// Unreadable records must retain state and fail rather than abandon roots.
+	if err := os.WriteFile(filepath.Join(dataDir, "agent", "secret-root"), []byte("bad-json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd = newLocalCleanupCommand()
+	cmd.SetArgs([]string{"--data-dir", dataDir})
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "delivered secrets") {
+		t.Fatal("unreadable pointer did not fail cleanup", err)
 	}
 }

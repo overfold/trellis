@@ -12,6 +12,7 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/runtime"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/storage"
 )
 
 // defaultSecretBase is the memory-backed filesystem holding secret roots.
@@ -27,6 +28,36 @@ const tmpfsMagic = 0x01021994
 // record never learned about them. A reboot empties /dev/shm, after which the
 // recorded path is untrusted until checked again.
 const secretRootKey = "agent/secret-root"
+
+// CleanupDeliveredSecrets removes only this node's recorded private tmpfs root.
+// The caller must first stop the daemon and remove every local container.
+func CleanupDeliveredSecrets(dataDir string) error {
+	a := &Agent{local: storage.NewLocalStorage(dataDir)}
+	root, reuse, err := a.recordedSecretRoot()
+	if err != nil {
+		return err
+	}
+	if !reuse {
+		return nil
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		path := filepath.Join(root, entry.Name())
+		var err error
+		if entry.IsDir() {
+			err = removeSecretDir(path)
+		} else {
+			err = os.Remove(path)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return os.Remove(root)
+}
 
 func taskHasSecrets(taskName string, delivered []nodeapi.DeliveredSecret) bool {
 	for _, secret := range delivered {
@@ -166,8 +197,15 @@ func removeSecretDir(dir string) error {
 	// Environment directories are read/execute-only while mounted so the
 	// workload UID cannot replace entries. Restore owner write access only as
 	// part of cleanup; the agent-owned parent prevents an unprivileged swap.
-	if err := os.Chmod(filepath.Join(dir, "env"), 0o700); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("prepare environment secret cleanup: %w", err)
+	envDir := filepath.Join(dir, "env")
+	if info, err := os.Lstat(envDir); err == nil {
+		if info.IsDir() {
+			if err := os.Chmod(envDir, 0o700); err != nil {
+				return fmt.Errorf("prepare environment secret cleanup: %w", err)
+			}
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("inspect environment secret cleanup: %w", err)
 	}
 	return os.RemoveAll(dir)
 }

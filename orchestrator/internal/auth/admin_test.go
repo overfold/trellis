@@ -10,7 +10,7 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/adminsign"
 )
 
-func TestAdministratorChallengeIssuanceRemainsAvailableAtCapacity(t *testing.T) {
+func TestAdministratorChallengeFloodPreservesInflightChallenges(t *testing.T) {
 	authenticator := NewAdministratorAuthenticator()
 	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 	authenticator.now = func() time.Time { return now }
@@ -25,9 +25,10 @@ func TestAdministratorChallengeIssuanceRemainsAvailableAtCapacity(t *testing.T) 
 		}
 	}
 
-	challenge, _, err := authenticator.Issue(7)
-	if err != nil {
-		t.Fatalf("issue challenge at capacity: %v", err)
+	for range 10 {
+		if _, _, err := authenticator.Issue(7); err == nil {
+			t.Fatal("issued challenge at capacity")
+		}
 	}
 	if len(authenticator.challenges) != maxAdministratorChallenges {
 		t.Fatalf("outstanding challenges = %d, want %d", len(authenticator.challenges), maxAdministratorChallenges)
@@ -38,8 +39,12 @@ func TestAdministratorChallengeIssuanceRemainsAvailableAtCapacity(t *testing.T) 
 	}
 	oldestPayload := adminsign.Payload(oldest, "POST", "/v1/credentials", nil)
 	oldestSignature := base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, oldestPayload))
-	if authenticator.Verify(publicKey, 7, oldest, oldestSignature, oldestPayload) {
-		t.Fatal("oldest challenge remained usable after capacity eviction")
+	if !authenticator.Verify(publicKey, 7, oldest, oldestSignature, oldestPayload) {
+		t.Fatal("flood evicted an in-flight challenge")
+	}
+	challenge, _, err := authenticator.Issue(7)
+	if err != nil {
+		t.Fatal(err)
 	}
 	payload := adminsign.Payload(challenge, "POST", "/v1/credentials", nil)
 	signature := base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, payload))
@@ -48,6 +53,10 @@ func TestAdministratorChallengeIssuanceRemainsAvailableAtCapacity(t *testing.T) 
 	}
 	if authenticator.Verify(publicKey, 7, challenge, signature, payload) {
 		t.Fatal("consumed challenge verified twice")
+	}
+	now = now.Add(authenticator.ttl)
+	if _, _, err := authenticator.Issue(7); err != nil {
+		t.Fatal("expired capacity was not reclaimed", err)
 	}
 }
 

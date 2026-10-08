@@ -204,9 +204,9 @@ if [ -f "$CONFIG_FILE" ]; then
     cleanup_args+=(--config "$CONFIG_FILE")
 fi
 if ! "${INSTALL_DIR}/trellis" local-cleanup "${cleanup_args[@]}"; then
-    ui_die "Could not remove Trellis network resources or volume staging mounts. The cleanup error is shown above; node data and installed files were retained for retry."
+    ui_die "Could not remove Trellis network resources, volume staging mounts, or delivered secrets. The cleanup error is shown above; node data and installed files were retained for retry."
 fi
-ui_step "Removed journaled Trellis network resources and volume staging mounts"
+ui_step "Removed journaled Trellis network resources, volume staging mounts, and delivered secrets"
 
 if [ "$purge" = true ]; then
     ui_section "Data"

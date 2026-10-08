@@ -491,6 +491,7 @@ func TestAdministratorRequestSignatures(t *testing.T) {
 	}
 	epoch := uint64(7)
 	verificationAvailable := true
+	var retainedBody []byte
 	e := echo.New()
 	e.Use(leaderAuthMiddleware(auth.NewAdministratorAuthenticator(), func() (ed25519.PublicKey, uint64, bool) {
 		return publicKey, epoch, verificationAvailable
@@ -500,6 +501,11 @@ func TestAdministratorRequestSignatures(t *testing.T) {
 			t.Fatal("valid signature did not grant administrator context")
 		}
 		return c.NoContent(http.StatusNoContent)
+	})
+	e.POST("/v1/secrets", func(c *echo.Context) error {
+		// bytes.Reader.WriteTo passes the middleware's actual backing slice.
+		_, err := io.Copy(captureBodyWriter{capture: &retainedBody}, c.Request().Body)
+		return err
 	})
 	e.POST("/v1/backup/restore", func(c *echo.Context) error {
 		if admin, _ := c.Request().Context().Value(server.AdminContextKey).(bool); !admin {
@@ -532,6 +538,15 @@ func TestAdministratorRequestSignatures(t *testing.T) {
 		req.Header.Set(adminsign.SignatureHeader, base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, payload)))
 		return req
 	}
+	t.Run("secret request buffer wiped after downstream", func(t *testing.T) {
+		body := []byte(`{"value_base64":"c2VjcmV0"}`)
+		req := signedRequest("POST", "/v1/secrets", body, "POST", "/v1/secrets", body, privateKey, challenge())
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || len(retainedBody) != len(body) || !bytes.Equal(retainedBody, make([]byte, len(body))) {
+			t.Fatal("redundant signed request body was retained", rec.Code)
+		}
+	})
 	t.Run("large restore signature and spool cleanup", func(t *testing.T) {
 		t.Setenv("TMPDIR", t.TempDir())
 		body := bytes.Repeat([]byte("x"), (64<<20)+1)
@@ -656,5 +671,41 @@ func TestAdministratorRequestSignatures(t *testing.T) {
 				t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
 			}
 		})
+	}
+}
+
+type captureBodyWriter struct{ capture *[]byte }
+
+func (w captureBodyWriter) Write(p []byte) (int, error) {
+	*w.capture = p
+	return len(p), nil
+}
+
+func TestSecretsKeyLoaderRejectsUnsafeOwnershipAndSymlink(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "key")
+	if err := os.WriteFile(path, bytes.Repeat([]byte{7}, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	key, _, err := loadSecretsKey(path, "")
+	if err != nil || len(key) != 32 {
+		t.Fatal("private owned key rejected", err)
+	}
+	clear(key)
+	link := path + "-link"
+	if err := os.Symlink(path, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := loadSecretsKey(link, ""); err == nil {
+		t.Fatal("symlink key accepted")
+	}
+	if os.Geteuid() == 0 {
+		if err := os.Chown(path, 65534, 65534); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := loadSecretsKey(path, ""); err == nil {
+			t.Fatal("foreign-owned mode-0600 key accepted")
+		}
+	} else {
+		t.Log("foreign ownership test requires root; symlink rejection verified")
 	}
 }

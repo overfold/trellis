@@ -87,6 +87,35 @@ func TestMutationHandlersRequirePositiveFences(t *testing.T) {
 	}
 }
 
+type secretCaptureBinder struct {
+	value []byte
+	fail  bool
+}
+
+func (b secretCaptureBinder) Bind(_ *echo.Context, target any) error {
+	request := target.(*nodeapi.AllocationRequest)
+	request.Secrets = []nodeapi.DeliveredSecret{{Value: b.value}}
+	if b.fail {
+		return errors.New("partially decoded request")
+	}
+	return nil
+}
+
+func TestRunHandlerClearsSecretsOnBindAndValidationErrors(t *testing.T) {
+	for _, fail := range []bool{true, false} {
+		value := []byte("delivered-plaintext")
+		e := echo.New()
+		e.Binder = secretCaptureBinder{value: value, fail: fail}
+		h := &Handler{}
+		e.POST("/v1/allocations", h.handleRun)
+		recorder := httptest.NewRecorder()
+		e.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/allocations", nil))
+		if recorder.Code != http.StatusBadRequest || !bytes.Equal(value, make([]byte, len(value))) {
+			t.Fatal("error path retained delivered bytes", recorder.Code)
+		}
+	}
+}
+
 func TestHandleRunRequiresPositiveJobRevision(t *testing.T) {
 	for _, test := range []struct {
 		name     string

@@ -14,7 +14,6 @@ const maxAdministratorChallenges = 4096
 type administratorChallenge struct {
 	expiresAt time.Time
 	epoch     uint64
-	order     uint64
 }
 
 // AdministratorAuthenticator issues and consumes leader-local administrator challenges.
@@ -23,7 +22,6 @@ type AdministratorAuthenticator struct {
 	challenges map[string]administratorChallenge
 	now        func() time.Time
 	ttl        time.Duration
-	nextOrder  uint64
 }
 
 // NewAdministratorAuthenticator creates an administrator request authenticator.
@@ -45,23 +43,17 @@ func (a *AdministratorAuthenticator) Issue(epoch uint64) (string, time.Time, err
 	expiresAt := now.Add(a.ttl)
 	challenge := base64.RawURLEncoding.EncodeToString(raw)
 	a.mu.Lock()
-	oldest := ""
-	var oldestOrder uint64
+	defer a.mu.Unlock()
 	for value, existing := range a.challenges {
 		if !existing.expiresAt.After(now) || existing.epoch != epoch {
 			delete(a.challenges, value)
 			continue
 		}
-		if oldest == "" || existing.order < oldestOrder {
-			oldest, oldestOrder = value, existing.order
-		}
 	}
 	if len(a.challenges) >= maxAdministratorChallenges {
-		delete(a.challenges, oldest)
+		return "", time.Time{}, fmt.Errorf("administrator challenge capacity exhausted")
 	}
-	a.nextOrder++
-	a.challenges[challenge] = administratorChallenge{expiresAt: expiresAt, epoch: epoch, order: a.nextOrder}
-	a.mu.Unlock()
+	a.challenges[challenge] = administratorChallenge{expiresAt: expiresAt, epoch: epoch}
 	return challenge, expiresAt, nil
 }
 

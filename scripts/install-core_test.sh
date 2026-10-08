@@ -46,7 +46,6 @@ for mode in new control-plane worker reuse; do
         if [ "$mode" = control-plane ]; then
             printf 'previous-key\n' >"$SECRETS_KEY_FILE"
             if [ "$(id -u)" = 0 ]; then command chown 65534:65534 "$SECRETS_KEY_FILE"; fi
-            key_owner="$(stat -c '%u:%g' "$SECRETS_KEY_FILE")"
         fi
         if [ "$mode" = reuse ]; then
             printf 'control_plane: true\n' >"$CONFIG_FILE"
@@ -67,7 +66,7 @@ for mode in new control-plane worker reuse; do
                 grep -q "published $SECRETS_KEY_FILE" "$PERMISSION_LOG"
                 [ "$(stat -c %a "$SECRETS_KEY_FILE")" = 600 ]
                 if [ "$mode" = control-plane ]; then
-                    [ "$key_owner" = "$(stat -c '%u:%g' "$SECRETS_KEY_FILE")" ]
+                    [ "$(id -u):$(id -g)" = "$(stat -c '%u:%g' "$SECRETS_KEY_FILE")" ]
                     grep -qx cluster-secret "$SECRETS_KEY_FILE"
                 fi
             fi

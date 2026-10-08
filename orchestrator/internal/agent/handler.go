@@ -141,6 +141,11 @@ func (h *Handler) handleRun(c *echo.Context) error {
 	ctx := c.Request().Context()
 
 	var request nodeapi.AllocationRequest
+	defer func() {
+		for i := range request.Secrets {
+			clear(request.Secrets[i].Value)
+		}
+	}()
 	err := c.Bind(&request)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
@@ -167,11 +172,6 @@ func (h *Handler) handleRun(c *echo.Context) error {
 	if err := validateCanonicalRequest(&request); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
-	defer func() {
-		for i := range request.Secrets {
-			clear(request.Secrets[i].Value)
-		}
-	}()
 	// The agent accepts a fenced start and pulls images and creates tasks in
 	// the background; heartbeats report progress and failure.
 	if err := h.agent.StartGroup(ctx, &request); err != nil {

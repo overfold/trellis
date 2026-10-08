@@ -135,7 +135,8 @@ type RaftConfig struct {
 	// cluster CA may open an inbound Raft stream. The CA proves only that a
 	// certificate was issued for some node; this check decides whether that
 	// node is currently entitled to replicate or vote with this member. It is
-	// required with TLS and runs during every inbound TLS handshake.
+	// required with TLS and runs during every inbound TLS handshake and before
+	// each RPC frame is released for dispatch on an established stream.
 	AuthorizePeer func(certificate *x509.Certificate) error
 	// Logger receives Raft, transport, and snapshot-store diagnostics at Warn
 	// and above, rate limited. Nil uses slog.Default.
@@ -144,9 +145,11 @@ type RaftConfig struct {
 
 type tlsStreamLayer struct {
 	net.Listener
-	advertise net.Addr
-	tlsCfg    *tls.Config
-	targetID  func(raft.ServerAddress) (uuid.UUID, error)
+	advertise         net.Addr
+	tlsCfg            *tls.Config
+	targetID          func(raft.ServerAddress) (uuid.UUID, error)
+	authorize         func(*x509.Certificate) error
+	verifyPeerAddress func(uuid.UUID, raft.ServerAddress) error
 }
 
 func (t *tlsStreamLayer) Addr() net.Addr {
@@ -311,7 +314,30 @@ func NewRaftStore(cfg RaftConfig) (*RaftStore, error) {
 		if err != nil {
 			return nil, fmt.Errorf("create TLS listener: %w", err)
 		}
-		stream := &tlsStreamLayer{Listener: ln, advertise: advAddr, tlsCfg: cfg.TLS, targetID: resolveTargetID}
+		verifyPeerAddress := func(id uuid.UUID, address raft.ServerAddress) error {
+			r := raftRef.Load()
+			if r == nil {
+				return fmt.Errorf("Raft is not initialized")
+			}
+			future := r.GetConfiguration()
+			if err := future.Error(); err != nil {
+				return err
+			}
+			members := future.Configuration().Servers
+			// A joining replica has no configuration until its bootstrap-trusted
+			// leader sends the first log/snapshot. Certificate authorization still
+			// runs; once configuration arrives it also owns the address binding.
+			if len(members) == 0 {
+				return nil
+			}
+			for _, member := range members {
+				if string(member.ID) == id.String() && member.Address == address {
+					return nil
+				}
+			}
+			return fmt.Errorf("Raft RPC address is not bound to peer %s", id)
+		}
+		stream := &tlsStreamLayer{Listener: ln, advertise: advAddr, tlsCfg: cfg.TLS, targetID: resolveTargetID, authorize: cfg.AuthorizePeer, verifyPeerAddress: verifyPeerAddress}
 		transport = raft.NewNetworkTransportWithConfig(&raft.NetworkTransportConfig{
 			Stream:  stream,
 			MaxPool: 3,

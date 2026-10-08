@@ -49,7 +49,6 @@ write_private_file() (
     staged="$(mktemp "${target}.XXXXXX")" || exit 1
     trap 'rm -f "$staged"' EXIT
     cat >"$staged" || exit 1
-    if [ -e "$target" ]; then chown --reference="$target" "$staged" || exit 1; fi
     mv -f "$staged" "$target"
 )
 

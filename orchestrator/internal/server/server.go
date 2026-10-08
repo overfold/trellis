@@ -185,6 +185,7 @@ func NewServer(log *slog.Logger, storage *storage.LocalStorage, state *StateCont
 	s.events = newEventBus()
 	s.logStreams = transport.NewStreamLimiter(logFollowGlobalLimit, logFollowPerAllocationLimit)
 	s.tokenManager.SetClock(func() time.Time { return s.now() })
+	s.tokenManager.SetWorkloadAuthorizer(s.authorizeWorkloadCredential)
 	return s
 }
 

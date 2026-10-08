@@ -45,7 +45,7 @@ job_limits:
 
 A node joining a managed-mode cluster also sets `join` and `ca_cert`, plus `join_token` until it has enrolled; see [Multi-node clusters](multi-node.md#add-a-node). The join token is used once, at first start, and the installer removes it afterwards.
 
-New installer config and secrets-key files are staged with mode 0600 from creation and atomically renamed into place, including custom paths in traversable directories. New files belong to the installing user (root); replacing a key preserves its existing owner/group. Resuming an existing config keeps its contents and ownership and tightens config/key modes to 0600; upgrading does the same without regenerating keys.
+New installer config and secrets-key files are staged with mode 0600 from creation and atomically renamed into place, including custom paths in traversable directories. New and replacement files belong to the installing user (root); an unsafe previous owner is never inherited. Resuming an existing config keeps its contents and ownership and tightens config/key modes to 0600; upgrading does the same without regenerating keys. The daemon rejects a secrets key that is a symlink, is not a regular file, is owned by another UID, or permits group/other access. Before starting an existing installation, verify the key and its parent directories are controlled by the daemon user (root for the installer), and correct ownership rather than making the file more permissive.
 
 `job_limits` is operator-only admission policy. Jobs cannot override it. The
 defaults shown above are used when the section is omitted. Every task without a
@@ -280,6 +280,10 @@ trellisctl --administrator-key ./trellis-administrator.pem credentials revoke 3f
 
 `trellisctl` fetches the signing challenge and signs the request automatically. Join tokens and ordinary `cluster/write` bearer credentials cannot manage credentials, change Raft membership, or perform backup/restore.
 
+Administrator challenges expire after 30 seconds and are single-use and leadership-epoch-bound. At the 4,096 outstanding-challenge limit, issuance returns `503` without evicting an unexpired challenge. Consuming or expiring challenges frees capacity. This protects in-flight signatures, not availability of new challenges under sustained unauthenticated flooding; keep the administrative API on a trusted network and rate-limit it at the network boundary.
+
+Workload-token storage includes its allocation lookup so authentication checks live authority without scanning other credentials. Tokens written before this binding was introduced fail closed; after a coordinated upgrade, replace API-enabled allocations to receive current-format credentials. There is no token migration or widening of older grants. Retained history and node removal follow the [workload credential lifecycle](job-specification.md#api-access).
+
 ## Drain and maintenance
 
 `trellisctl nodes drain NODE` prevents new placement and migrates allocations to other nodes. `NODE` may be the host/address displayed by `nodes list`, a unique UUID prefix, or a complete UUID. Wait until workloads have healthy replacements before maintenance. `trellisctl nodes undrain NODE` re-enables scheduling. `nodes remove NODE` permanently removes a node from the cluster, requires the administrator key, and is different from draining; see [Multi-node clusters](multi-node.md#maintain-a-multi-node-cluster) before removing a member.
@@ -453,6 +457,8 @@ Instead of throwing away the encryption key while retaining encrypted state, nor
 After stopping the daemon, uninstall force-deletes containerd tasks, waiting for their processes to exit before removing containers. Failures show the underlying containerd error and identify the task or container that could not be removed; cleanup stops before changing network resources or node data.
 
 Once all containers are removed, uninstall uses the installed Trellis binary to remove every local network resource recorded in its attachment journals and detach leftover volume-staging bind mounts. This applies equally to single-node, `--force`, and `--purge` removal. Staging cleanup does not delete backing volume contents and runs before either archiving or purging data; uninstall never guesses at or deletes unjournaled host interfaces or firewall rules.
+
+Local cleanup also removes delivered plaintext secrets and workload-token files from the agent's recorded private `/dev/shm/trellis-secrets-*` root before archiving or purging the state that identifies it. It validates the recorded path, directory ownership, and permissions rather than glob-deleting other agents' roots. A missing root is already clean; an unreadable record or unsafe permissions stop cleanup and retain installed files and node state for repair/retry. A foreign-owned or redirected root is not followed. Recovery archives do not retain delivered plaintext files. This does not erase secrets a workload already copied elsewhere, or revoke cluster membership when `--force` skipped removal.
 
 The service, binaries, and dependencies remain installed until data handling succeeds. If local resource cleanup or data handling fails, fix the reported error and rerun the same uninstall command. A failed purge may already have deleted some data; retryability does not make purge reversible.
 

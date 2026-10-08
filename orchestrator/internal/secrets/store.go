@@ -111,10 +111,10 @@ func (s *Store) Set(ctx context.Context, namespace, name string, value []byte, e
 	}
 	version := currentVersion + 1
 	dek := make([]byte, 32)
+	defer clear(dek)
 	if _, err := io.ReadFull(rand.Reader, dek); err != nil {
 		return nil, fmt.Errorf("generate data encryption key: %w", err)
 	}
-	defer clear(dek)
 	block, err := aes.NewCipher(dek)
 	if err != nil {
 		return nil, err

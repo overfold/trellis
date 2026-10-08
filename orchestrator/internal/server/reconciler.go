@@ -1043,6 +1043,11 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 		// locks; each durable lifecycle update takes a fresh serialized snapshot.
 		unlockState()
 
+		defer func() {
+			for i := range request.Secrets {
+				clear(request.Secrets[i].Value)
+			}
+		}()
 		for _, task := range request.Tasks {
 			for _, ref := range task.Secrets {
 				if s.secrets == nil {
@@ -1055,11 +1060,6 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 				request.Secrets = append(request.Secrets, nodeapi.DeliveredSecret{Task: task.Name, Name: ref.Name, Version: version, Target: ref.Target, Env: ref.Env, Path: ref.Path, Mode: ref.Mode, Value: value})
 			}
 		}
-		defer func() {
-			for i := range request.Secrets {
-				clear(request.Secrets[i].Value)
-			}
-		}()
 		if groupAPIAccess != nil {
 			token, err := s.apiAccessToken(ctx, groupAPIAccess, request)
 			if err != nil {

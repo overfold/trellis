@@ -59,6 +59,82 @@ func TestMaterializeSecretsDeliversEnvAndMemoryBackedFile(t *testing.T) {
 	}
 }
 
+func TestCleanupDeliveredSecretsRemovesRecordedRootOnly(t *testing.T) {
+	root, err := os.MkdirTemp(defaultSecretBase, secretRootPrefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	dataDir := t.TempDir()
+	local := storage.NewLocalStorage(dataDir)
+	if err := local.Put(secretRootKey, root); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "allocation")
+	if err := createSecretDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := materializeSecrets(dir, "app", []nodeapi.DeliveredSecret{{Task: "app", Target: spec.SecretTargetEnv, Env: "TRELLIS_TOKEN", Value: []byte("plaintext-token")}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := CleanupDeliveredSecrets(dataDir); err == nil {
+		t.Fatal("unsafe root permissions abandoned plaintext")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "env", "TRELLIS_TOKEN")); err != nil {
+		t.Fatal("failed cleanup discarded retryable state", err)
+	}
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	foreign := t.TempDir()
+	// Neither a root-level symlink nor an environment-directory symlink may
+	// redirect deletion or permission changes outside the recorded root.
+	if err := os.Symlink(foreign, filepath.Join(root, "redirect")); err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(root, "other")
+	if err := os.Mkdir(other, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(foreign, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(foreign, 0o700) })
+	if err := os.Symlink(foreign, filepath.Join(other, "env")); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := CleanupDeliveredSecrets(dataDir); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(root); !os.IsNotExist(err) {
+			t.Fatal("plaintext root remains", err)
+		}
+	}
+	if info, err := os.Stat(foreign); err != nil || info.Mode().Perm() != 0o500 {
+		t.Fatal("cleanup followed an environment symlink", err)
+	}
+	if err := os.Chmod(foreign, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(foreign, "keep")
+	if err := os.WriteFile(sentinel, []byte("unrelated"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := local.Put(secretRootKey, foreign); err != nil {
+		t.Fatal(err)
+	}
+	if err := CleanupDeliveredSecrets(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Fatal("unrecorded foreign data removed", err)
+	}
+}
+
 func TestSecretDirForRefusesExistingDirectory(t *testing.T) {
 	agent := newOperationTestAgent(t, &reconcilerRuntime{})
 	dir, err := agent.secretDirFor("allocation")

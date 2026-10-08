@@ -457,10 +457,10 @@ func (h *Handler) handleSetSecret(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusRequestEntityTooLarge, "secret exceeds 65536 bytes")
 	}
 	value, err := base64.StdEncoding.DecodeString(request.ValueBase64)
+	defer clear(value)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "value_base64 is invalid")
 	}
-	defer clear(value)
 	meta, err := h.server.SetSecret(c.Request().Context(), ns, c.Param("name"), value, request.ExpectedVersion)
 	if errors.Is(err, secretstore.ErrVersionConflict) {
 		return echo.NewHTTPError(http.StatusConflict, "secret version conflict")

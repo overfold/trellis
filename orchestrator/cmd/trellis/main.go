@@ -802,14 +802,21 @@ func waitForRaftSync(ctx context.Context, store *state.RaftStore) error {
 }
 
 func loadSecretsKey(path, configuredID string) ([]byte, string, error) {
-	info, err := os.Stat(path)
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, "", fmt.Errorf("open secrets key: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
 	if err != nil {
 		return nil, "", fmt.Errorf("stat secrets key: %w", err)
 	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return nil, "", fmt.Errorf("secrets key must not be accessible by group or others")
+	owner, ok := info.Sys().(*syscall.Stat_t)
+	if !info.Mode().IsRegular() || !ok || int(owner.Uid) != os.Geteuid() || info.Mode().Perm()&0o077 != 0 {
+		return nil, "", fmt.Errorf("secrets key must be a private regular file owned by the daemon user")
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := io.ReadAll(file)
+	defer clear(raw)
 	if err != nil {
 		return nil, "", fmt.Errorf("read secrets key: %w", err)
 	}
@@ -1307,6 +1314,7 @@ func leaderAuthMiddleware(administrator *auth.AdministratorAuthenticator, admini
 					payload = adminsign.PayloadDigest(challenge, c.Request().Method, c.Request().URL.RequestURI(), [sha256.Size]byte(hash.Sum(nil)))
 				} else {
 					body, err := io.ReadAll(io.LimitReader(c.Request().Body, (64<<20)+1))
+					defer clear(body)
 					if err != nil {
 						c.Response().Header().Set(adminsign.ChallengeStatusHeader, adminsign.ChallengeInvalid)
 						return echo.NewHTTPError(http.StatusBadRequest, "unable to read signed request body")
