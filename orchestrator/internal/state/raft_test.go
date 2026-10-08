@@ -6,8 +6,10 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -362,6 +364,11 @@ func TestRaftStore_Snapshot(t *testing.T) {
 	store := newTestRaftStore(t)
 	waitLeader(t, store)
 	ctx := context.Background()
+	config := store.Raft().ReloadableConfig()
+	config.TrailingLogs = 0
+	if err := store.Raft().ReloadConfig(config); err != nil {
+		t.Fatal(err)
+	}
 
 	for i := range 20 {
 		if err := store.Put(ctx, fmt.Sprintf("key-%d", i), fmt.Appendf(nil, "val-%d", i)); err != nil {
@@ -372,6 +379,10 @@ func TestRaftStore_Snapshot(t *testing.T) {
 	snap := store.Raft().Snapshot()
 	if err := snap.Error(); err != nil {
 		t.Fatal(err)
+	}
+	first, err := store.logStore.FirstIndex()
+	if err != nil || first != 0 {
+		t.Fatalf("snapshot did not compact logs: first=%d err=%v", first, err)
 	}
 
 	followerDir := t.TempDir()
@@ -400,13 +411,103 @@ func TestRaftStore_Snapshot(t *testing.T) {
 	for time.Now().Before(deadline) {
 		entries, _ := follower.List(ctx, "key-")
 		if len(entries) == 20 {
-			return
+			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 
 	entries, _ := follower.List(ctx, "key-")
-	t.Fatalf("expected 20 entries on follower, got %d", len(entries))
+	if len(entries) != 20 {
+		t.Fatalf("expected 20 entries on follower, got %d", len(entries))
+	}
+	for i := range 20 {
+		if string(entries[fmt.Sprintf("key-%d", i)]) != fmt.Sprintf("val-%d", i) {
+			t.Fatalf("snapshot entry %d differs", i)
+		}
+	}
+	if err := store.PromoteVoter(followerID.String(), follower.LocalAddr()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Raft().LeadershipTransferToServer(raft.ServerID(followerID.String()), raft.ServerAddress(follower.LocalAddr())).Error(); err != nil {
+		t.Fatal(err)
+	}
+	waitLeader(t, follower)
+	if err := follower.Put(ctx, "after-transfer", []byte("new-term")); err != nil {
+		t.Fatal(err)
+	}
+	if err := follower.Raft().Snapshot().Error(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRaftStoreLegacySnapshotUpgradeAndRestart(t *testing.T) {
+	dir := t.TempDir()
+	id := uuid.New()
+	bind := fmt.Sprintf("127.0.0.1:%d", freePort(t))
+	configuration := raft.Configuration{Servers: []raft.Server{{ID: raft.ServerID(id.String()), Address: raft.ServerAddress(bind), Suffrage: raft.Voter}}}
+	snapshots, err := raft.NewFileSnapshotStore(filepath.Join(dir, "raft"), 2, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Metadata version is Raft's transport version, not the payload version.
+	_, transport := raft.NewInmemTransport(raft.ServerAddress(bind))
+	defer func() { _ = transport.Close() }()
+	sink, err := snapshots.Create(raft.SnapshotVersionMax, 1, 1, configuration, 1, transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(sink, `{"legacy":"b2xkLXZhbHVl"}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := RaftConfig{DataDir: dir, BindAddr: bind, ServerID: id.String(), TLS: testTLSConfig(t, id), AuthorizePeer: allowAnyRaftPeer}
+	store, err := NewRaftStore(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	waitLeader(t, store)
+	ctx := context.Background()
+	value, err := store.Get(ctx, "legacy")
+	if err != nil || string(value) != "old-value" {
+		t.Fatalf("legacy startup = %q, %v", value, err)
+	}
+	if err := store.Put(ctx, "current", []byte("new-value")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Raft().Snapshot().Error(); err != nil {
+		t.Fatal(err)
+	}
+	list, err := snapshots.List()
+	if err != nil || len(list) == 0 {
+		t.Fatalf("list snapshots: %v", err)
+	}
+	_, reader, err := snapshots.Open(list[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := io.ReadAll(reader)
+	_ = reader.Close()
+	if err != nil || !strings.HasPrefix(string(payload), "[2,{") {
+		t.Fatalf("upgraded snapshot has no v2 envelope: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := NewRaftStore(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store = restarted
+	waitLeader(t, store)
+	for key, want := range map[string]string{"legacy": "old-value", "current": "new-value"} {
+		value, err := store.Get(ctx, key)
+		if err != nil || string(value) != want {
+			t.Fatalf("v2 restart %s = %q, %v", key, value, err)
+		}
+	}
 }
 
 func TestRaftStore_RejoinExistingState(t *testing.T) {

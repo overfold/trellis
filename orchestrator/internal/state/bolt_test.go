@@ -6,9 +6,13 @@ import (
 	"encoding/json"
 	"net/url"
 	"path/filepath"
+	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/overfold/trellis/orchestrator/internal/spec"
+	bolt "go.etcd.io/bbolt"
 )
 
 func validSnapshotJob(t *testing.T, namespace, name string, revision int) (string, []byte) {
@@ -83,7 +87,7 @@ func TestBoltStoreListPrefix(t *testing.T) {
 	}
 }
 
-func TestBoltSnapshotStreamsDeterministicCompatibleJSON(t *testing.T) {
+func TestBoltSnapshotStreamsDeterministicVersionedJSON(t *testing.T) {
 	store, err := NewBoltStore(filepath.Join(t.TempDir(), "source.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -107,6 +111,7 @@ func TestBoltSnapshotStreamsDeterministicCompatibleJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	want, _ := json.Marshal(map[string][]byte{"z/key": []byte("last"), "a/key": []byte("first"), "m/key": []byte("middle")})
+	want = append(append([]byte("[2,"), want...), ']')
 	if !bytes.Equal(encoded.Bytes(), want) {
 		t.Fatalf("streamed snapshot = %s, want %s", encoded.Bytes(), want)
 	}
@@ -123,8 +128,29 @@ func TestBoltSnapshotStreamsDeterministicCompatibleJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 3 || string(entries["a/key"]) != "first" || string(entries["z/key"]) != "last" {
+	if !reflect.DeepEqual(entries, map[string][]byte{"a/key": []byte("first"), "m/key": []byte("middle"), "z/key": []byte("last")}) {
 		t.Fatalf("restored streamed snapshot = %#v", entries)
+	}
+}
+
+func TestBoltRestoreReaderLegacy(t *testing.T) {
+	store, err := NewBoltStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	if err := store.Put(context.Background(), "old", []byte("discard")); err != nil {
+		t.Fatal(err)
+	}
+	// Keys resembling envelope fields remain ordinary legacy keys. Opaque
+	// binary and empty values must survive without record reinterpretation.
+	if err := store.RestoreReader(strings.NewReader(`{"version":"AP8=","data":"","z":"bGFzdA=="}`)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.List(context.Background(), "")
+	want := map[string][]byte{"version": {0, 255}, "data": {}, "z": []byte("last")}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("legacy restore = %#v, %v; want %#v", got, err, want)
 	}
 }
 
@@ -138,12 +164,49 @@ func TestBoltRestoreReaderIsAtomicOnInvalidSnapshot(t *testing.T) {
 	if err := store.Put(ctx, "existing", []byte("value")); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.RestoreReader(bytes.NewBufferString(`{"new":"bmV3","bad":"!"}`)); err == nil {
-		t.Fatal("expected invalid snapshot to fail")
+	invalid := []string{
+		``, `null`, `[]`, `[2]`, `[2,null]`, `[2,[]]`, `["2",{}]`,
+		`[2.5,{}]`, `[null,{}]`, `[1,{}]`, `[0,{}]`, `[-1,{}]`,
+		`[3,`, `[999,{}]`, `[2,{},{}]`, `[2,{}`, `[2,{}] {}`,
 	}
-	value, err := store.Get(ctx, "existing")
-	if err != nil || string(value) != "value" {
-		t.Fatalf("failed restore changed state: value=%q err=%v", value, err)
+	// Exercise the same strict payload contract in both supported formats,
+	// including errors discovered only after a valid entry was written.
+	for _, payload := range []string{
+		`{"new":"bmV3","bad":"!"}`, `{"new":"bmV3","bad":null}`,
+		`{"new":"bmV3","bad":4}`, `{"new":"bmV3","bad":{}}`,
+		`{"new":"bmV3","":"YQ=="}`, `{"new":"","new":"YQ=="}`,
+		`{"new":"bmV3","new":"YQ=="}`, `{"new":"bmV3"`,
+		`{"` + strings.Repeat("k", bolt.MaxKeySize+1) + `":""}`,
+	} {
+		invalid = append(invalid, payload, "[2,"+payload+"]")
+	}
+	invalid = append(invalid, `{} {}`)
+	for i, input := range invalid {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			if err := store.RestoreReader(strings.NewReader(input)); err == nil {
+				t.Fatal("expected invalid snapshot to fail")
+			}
+			got, err := store.List(ctx, "")
+			if err != nil || !reflect.DeepEqual(got, map[string][]byte{"existing": []byte("value")}) {
+				t.Fatalf("failed restore changed state: entries=%#v err=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestBoltRestoreReaderUnknownVersionBeforeTransaction(t *testing.T) {
+	store, err := NewBoltStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Even with storage unavailable and no payload, reject the version rather
+	// than attempting a transaction or interpreting unknown data.
+	err = store.RestoreReader(strings.NewReader(`[3,`))
+	if err == nil || !strings.Contains(err.Error(), "unsupported application snapshot version 3") {
+		t.Fatalf("expected version rejection before storage access, got %v", err)
 	}
 }
 

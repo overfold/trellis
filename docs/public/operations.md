@@ -307,6 +307,42 @@ curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/upgra
 sudo env TRELLIS_CONFIG="$HOME/.config/trellis/config.yaml" bash /tmp/trellis-upgrade.sh
 ```
 
+### Raft snapshot format upgrades
+
+The application snapshot writer now uses format v2. It still reads the bare
+key/base64-value snapshots produced by pre-versioned releases as legacy v1,
+without changing stored record bytes. Unsupported versions and malformed
+snapshots are rejected without partially installing state. Raft's own snapshot
+metadata version is separate; see [application snapshot compatibility](../developer/architecture.md#application-snapshot-compatibility).
+Operator desired-state backup files and their restore validation are unchanged.
+
+**Crossing from a pre-versioned release to a v2 writer is a coordinated
+control-plane upgrade, not a rolling upgrade.** Old binaries cannot consume v2
+snapshots. An upgraded leader may compact logs and need to send a snapshot to an
+old follower; leadership transfer to an old node does not remove this risk.
+There is no format negotiation or dual-writing mode. Upgrade every control-plane
+member, including non-voters, before restarting any of them. Worker-only nodes
+have no Raft snapshots; this policy does not promise unrelated private-protocol
+compatibility between releases.
+
+Before crossing this boundary, save a [desired-state backup](#backups), then stop
+all control-plane daemons and take recovery copies of their stopped data
+directories, configuration and separately protected secrets keys. Plan for API
+and scheduling downtime. Stage verified, release-matched binaries on every
+control-plane node; preserve membership and data directories, and do not
+bootstrap a replacement cluster. The upgrade script preserves an already
+stopped service's stopped state: stop all members first, update each, then start
+them only when every member has the new binary. Check leadership, membership,
+node registration and workload health afterward.
+
+Do not rely on automatic binary-only rollback once a v2 binary has run: it can
+write a v2 snapshot, even if the local readiness check later fails. To return to
+the pre-versioned release, stop all control-plane nodes and restore the matching
+pre-upgrade recovery copies and binaries as a coordinated recovery; changes
+since those copies are lost. Never edit snapshot JSON or mix old recovery data
+with newer replicas. Future format boundaries must have explicit release notes;
+unknown versions require a compatible binary, not an assumed data migration.
+
 ### Release download trust model
 
 Install and upgrade select exactly one `trellis_linux_x64.tar.gz` asset by its name from GitHub's latest-release API, over certificate-validated HTTPS. They require the asset's `sha256:` digest to contain exactly 64 hexadecimal digits, hash the downloaded archive, and compare it before extraction or running the staged `trellis --version`. Missing, malformed, or mismatching integrity metadata fails closed, before host changes during installation or drain/binary replacement during upgrade. A matching version is an additional consistency check, not proof of authenticity.

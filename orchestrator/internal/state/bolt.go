@@ -254,9 +254,13 @@ type boltSnapshot struct {
 	tx *bolt.Tx
 }
 
+// Bare key/value objects are legacy v1. V2 wraps the unchanged payload in
+// [version, object], unambiguously separating it from every legacy key.
+const applicationSnapshotVersion = 2
+
 func (s *boltSnapshot) persistTo(w io.Writer) error {
 	bw := bufio.NewWriter(w)
-	if err := bw.WriteByte('{'); err != nil {
+	if _, err := fmt.Fprintf(bw, "[%d,{", applicationSnapshotVersion); err != nil {
 		return err
 	}
 	first := true
@@ -280,7 +284,7 @@ func (s *boltSnapshot) persistTo(w io.Writer) error {
 			return err
 		}
 	}
-	if err := bw.WriteByte('}'); err != nil {
+	if _, err := bw.WriteString("}]"); err != nil {
 		return err
 	}
 	return bw.Flush()
@@ -297,6 +301,25 @@ func (s *boltSnapshot) Close() error {
 
 // RestoreReader atomically replaces all state from the streamed snapshot JSON.
 func (b *BoltStore) RestoreReader(r io.Reader) error {
+	decoder := json.NewDecoder(r)
+	token, err := decoder.Token()
+	if err != nil {
+		return fmt.Errorf("read snapshot envelope: %w", err)
+	}
+	versioned := token == json.Delim('[')
+	if versioned {
+		var version int
+		if err := decoder.Decode(&version); err != nil {
+			return fmt.Errorf("invalid application snapshot version: %w", err)
+		}
+		if version != applicationSnapshotVersion {
+			return fmt.Errorf("unsupported application snapshot version %d (supported: legacy v1 object and v%d); use a compatible Trellis binary", version, applicationSnapshotVersion)
+		}
+		token, err = decoder.Token()
+	}
+	if err != nil || token != json.Delim('{') {
+		return fmt.Errorf("invalid snapshot payload: expected key/value object")
+	}
 	return b.db.Update(func(tx *bolt.Tx) error {
 		if err := tx.DeleteBucket(bucketName); err != nil {
 			return err
@@ -305,27 +328,29 @@ func (b *BoltStore) RestoreReader(r io.Reader) error {
 		if err != nil {
 			return err
 		}
-		decoder := json.NewDecoder(r)
-		token, err := decoder.Token()
-		if err != nil || token != json.Delim('{') {
-			return fmt.Errorf("invalid snapshot object")
-		}
 		for decoder.More() {
 			keyToken, err := decoder.Token()
 			if err != nil {
 				return err
 			}
 			key, ok := keyToken.(string)
-			if !ok || key == "" {
+			if !ok || key == "" || len(key) > bolt.MaxKeySize {
 				return fmt.Errorf("invalid snapshot key")
 			}
-			var encoded string
-			if err := decoder.Decode(&encoded); err != nil {
+			if bucket.Get([]byte(key)) != nil {
+				return fmt.Errorf("duplicate snapshot key")
+			}
+			valueToken, err := decoder.Token()
+			if err != nil {
 				return err
+			}
+			encoded, ok := valueToken.(string)
+			if !ok {
+				return fmt.Errorf("invalid snapshot value: expected base64 string")
 			}
 			value, err := base64.StdEncoding.DecodeString(encoded)
 			if err != nil {
-				return fmt.Errorf("decode snapshot value %q: %w", key, err)
+				return fmt.Errorf("decode snapshot value: %w", err)
 			}
 			if err := bucket.Put([]byte(key), value); err != nil {
 				return err
@@ -333,6 +358,11 @@ func (b *BoltStore) RestoreReader(r io.Reader) error {
 		}
 		if _, err := decoder.Token(); err != nil {
 			return err
+		}
+		if versioned {
+			if token, err := decoder.Token(); err != nil || token != json.Delim(']') {
+				return fmt.Errorf("invalid snapshot envelope: expected end after payload")
+			}
 		}
 		var trailing any
 		if err := decoder.Decode(&trailing); err != io.EOF {

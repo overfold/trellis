@@ -16,7 +16,35 @@ Operator restore also authenticates every encrypted secret through `internal/sec
 
 A `spec.JobSpec` is immutable input to a job revision. The server resolves authored image references at plan/apply and stores `ResolvedImages` with each job and historical version. Execution hashing and allocation construction use those pins, while the canonical spec retains authored tags. Registry resolution happens outside mutation locks and Raft application; planned pins are validated and reused at apply, and reconciliation never resolves tags. A task group's execution content is hashed independently of count, labels, and update policy so metadata/scale changes can be distinguished from container replacement. Server `Allocation` objects join desired identity (namespace/job/group/revision/generation) with placement and observed lifecycle/health. Agents reconstruct local allocation state from durable allocation records after restart and verify it against runtime labels.
 
-Desired state is durable. Observations—heartbeats, runtime status, logs, much of the catalog—are renewable. Each live job retains its 10 newest versions (every accepted spec change is a version; execution changes also advance the revision); deletion removes that history with the job. Backups capture the replicated cluster settings, desired jobs, their retained version history, encrypted secrets, and placement metadata from one consistent view, and a restore installs them in one Raft entry; restoring reconstitutes desired state and lets reconciliation schedule clean allocations. Raft FSM snapshots stream the stable Bolt read transaction directly into deterministic key-ordered JSON and restore it inside one Bolt write transaction, avoiding whole-state maps while preserving the existing snapshot representation and atomic restore.
+Desired state is durable. Observations—heartbeats, runtime status, logs, much of the catalog—are renewable. Each live job retains its 10 newest versions (every accepted spec change is a version; execution changes also advance the revision); deletion removes that history with the job. Backups capture the replicated cluster settings, desired jobs, their retained version history, encrypted secrets, and placement metadata from one consistent view, and a restore installs them in one Raft entry; restoring reconstitutes desired state and lets reconciliation schedule clean allocations. Raft FSM snapshots stream a stable Bolt read transaction directly into deterministic key-ordered JSON and restore inside one Bolt write transaction, avoiding whole-state maps and partial installation.
+
+### Application snapshot compatibility
+
+`internal/state` owns the full FSM snapshot format, independently of Hashicorp
+Raft's `SnapshotMeta.Version` (which versions Raft metadata/transport) and the
+operator desired-state backup format. Current writers emit the JSON tuple
+`[2,{"key":"base64-value"}]`: exactly an integer version followed by a key/value
+object. Readers support v2 and explicitly recognize the pre-versioned bare
+object as legacy v1, including snapshots from releases using that representation.
+The tuple avoids reserving a key that could collide with legacy state. Empty
+objects and empty/binary values are valid; record bytes are not migrated.
+
+Restore rejects unsupported versions before starting a write transaction. Both
+formats require nonempty, storage-sized, unique keys and base64 string values;
+nulls, malformed JSON, extra tuple elements and trailing data are rejected.
+Payload validation and bucket replacement share one Bolt transaction: even a
+late decode or storage failure rolls back every write and preserves existing
+state. Key order in received snapshots is immaterial; writers use Bolt key order.
+Values remain opaque at this layer, not revalidated as desired-state backups or
+interpreted using server record types. Domain validation on reload still applies.
+
+This supports forward reading of legacy v1, **not old-binary reading of v2** or
+arbitrary mixed-release operation. The introduction of v2 requires the
+[coordinated control-plane upgrade](../public/operations.md#raft-snapshot-format-upgrades).
+Future incompatible payload or persisted-record changes must explicitly revise
+this version and document supported readers and upgrade boundaries; do not add
+speculative migrations or reinterpret unknown versions as legacy. Snapshot
+versioning alone does not negotiate log-command or private API compatibility.
 
 ## Package map
 
