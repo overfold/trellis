@@ -222,6 +222,22 @@ func (s *Store) Resolve(ctx context.Context, namespace, name string) ([]byte, ui
 	if err != nil {
 		return nil, 0, err
 	}
+	return s.decrypt(rec, namespace, name)
+}
+
+// ValidateRecord authenticates an encrypted backup record without persisting it
+// or retaining its plaintext. It uses the same key and authentication as Resolve.
+func (s *Store) ValidateRecord(raw []byte) error {
+	var rec record
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		return fmt.Errorf("decode encrypted secret: %w", err)
+	}
+	plaintext, _, err := s.decrypt(&rec, rec.Namespace, rec.Name)
+	clear(plaintext)
+	return err
+}
+
+func (s *Store) decrypt(rec *record, namespace, name string) ([]byte, uint64, error) {
 	if rec.KeyID != s.keyID {
 		return nil, 0, fmt.Errorf("secret key %q is unavailable", rec.KeyID)
 	}
@@ -245,6 +261,9 @@ func (s *Store) Resolve(ctx context.Context, namespace, name string) ([]byte, ui
 		return nil, 0, fmt.Errorf("decode wrapped key: %w", err)
 	}
 	defer clear(wrappedDEK)
+	if len(wrapNonce) != s.aead.NonceSize() {
+		return nil, 0, fmt.Errorf("invalid key wrap nonce size")
+	}
 	dek, err := s.aead.Open(nil, wrapNonce, wrappedDEK, append(aad(namespace, name, rec.RecordID, rec.Version), []byte("\x00dek")...))
 	if err != nil {
 		return nil, 0, fmt.Errorf("unwrap data encryption key: %w", err)
@@ -257,6 +276,9 @@ func (s *Store) Resolve(ctx context.Context, namespace, name string) ([]byte, ui
 	dataAEAD, err := cipher.NewGCM(block)
 	if err != nil {
 		return nil, 0, err
+	}
+	if len(nonce) != dataAEAD.NonceSize() {
+		return nil, 0, fmt.Errorf("invalid secret nonce size")
 	}
 	plaintext, err := dataAEAD.Open(nil, nonce, ciphertext, aad(namespace, name, rec.RecordID, rec.Version))
 	if err != nil {

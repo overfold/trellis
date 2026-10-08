@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -73,6 +73,45 @@ func TestFollowerApplyFailureStopsNode(t *testing.T) {
 	}
 }
 
+func TestRestoreFreshnessConflictPreservesEveryResource(t *testing.T) {
+	store, err := NewBoltStore(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	for _, resource := range []string{"jobs", "job-revisions", "secrets", "volume-registrations", "network-port-registrations", "network-subnet-registrations", "allocations", "replacement-backoffs"} {
+		t.Run(resource, func(t *testing.T) {
+			key := "trellis/test/" + resource + "/retained"
+			if err := store.Put(t.Context(), key, []byte("retained")); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.RestoreDesired("test", &DesiredSnapshot{Cluster: []byte(`{}`)}); !errors.Is(err, ErrRestoreNotFresh) {
+				t.Fatalf("restore error = %v", err)
+			}
+			if got, err := store.Get(t.Context(), key); err != nil || string(got) != "retained" {
+				t.Fatalf("retained state changed: %q %v", got, err)
+			}
+			if got, err := store.Get(t.Context(), "trellis/test/meta"); err != nil || got != nil {
+				t.Fatalf("cluster partially installed: %q %v", got, err)
+			}
+			if err := store.Delete(t.Context(), key); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestRestoreBarrierFailureIsNotFreshnessConflict(t *testing.T) {
+	store := newTestRaftStore(t)
+	waitLeader(t, store)
+	if err := store.Raft().Shutdown().Error(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RestoreDesired("test", &DesiredSnapshot{}); err == nil || errors.Is(err, ErrRestoreNotFresh) {
+		t.Fatalf("barrier failure = %v", err)
+	}
+}
+
 func waitReplicatedValue(t *testing.T, store *RaftStore, key string, want []byte) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -100,7 +139,7 @@ func TestRaftRestoreUniformRejectionIsHealthy(t *testing.T) {
 	}
 	waitReplicatedValue(t, follower, "trellis/new/jobs/"+key, value)
 	before := leader.Raft().LastIndex()
-	if err := leader.RestoreDesired("new", snapshot); err == nil || !strings.Contains(err.Error(), "fresh cluster") {
+	if err := leader.RestoreDesired("new", snapshot); !errors.Is(err, ErrRestoreNotFresh) {
 		t.Fatalf("restore rejection = %v", err)
 	}
 	// The barrier is allowed a log entry, but the rejected restore is not.
@@ -149,8 +188,8 @@ func TestRestoreBackoffFreshnessAndCleanup(t *testing.T) {
 						t.Fatal(err)
 					}
 					if !cleanupFirst {
-						if err := store.RestoreDesired("new", snapshot); err == nil {
-							t.Fatal("restore accepted a backoff-only target")
+						if err := store.RestoreDesired("new", snapshot); !errors.Is(err, ErrRestoreNotFresh) {
+							t.Fatalf("restore backoff-only target: %v", err)
 						}
 						if got, err := store.Get(t.Context(), "trellis/new/jobs/"+key); err != nil || got != nil {
 							t.Fatalf("rejection partially installed job: %q, %v", got, err)

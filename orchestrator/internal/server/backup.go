@@ -3,8 +3,11 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"net/url"
+	"slices"
 	"sort"
 
 	"github.com/overfold/trellis/orchestrator/api"
@@ -92,7 +95,7 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 		return err
 	}
 	if s.backupStore == nil {
-		return fmt.Errorf("restore is unavailable")
+		return stateUnavailable(fmt.Errorf("restore is unavailable"))
 	}
 	settings, err := ClusterSettingsFromAPI(backup.ClusterSettings)
 	if err != nil {
@@ -186,6 +189,16 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 	if err := state.ValidateDesiredSnapshot(snapshot, nil); err != nil {
 		return err
 	}
+	// Authenticate all secrets locally before any replicated mutation. Keys and
+	// plaintext must never enter the snapshot or the deterministic FSM.
+	for _, key := range slices.Sorted(maps.Keys(snapshot.Secrets)) {
+		if s.secrets == nil {
+			return fmt.Errorf("validate secret %q: secrets store is unavailable; configure the original secrets_key and secrets_key_id before restoring", key)
+		}
+		if err := s.secrets.ValidateRecord(snapshot.Secrets[key]); err != nil {
+			return fmt.Errorf("validate secret %q: %w; configure the original secrets_key and secrets_key_id before restoring", key, err)
+		}
+	}
 	retainedRevisions, err := retainedJobRevisionEntries(snapshot.Jobs, snapshot.JobRevisions)
 	if err != nil {
 		return err
@@ -210,6 +223,9 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 		return fmt.Errorf("encode restored cluster record: %w", err)
 	}
 	if err := s.backupStore.RestoreDesired(s.clusterName, snapshot); err != nil {
+		if errors.Is(err, state.ErrRestoreNotFresh) {
+			return err
+		}
 		return stateUnavailable(err)
 	}
 	s.mu.Lock()

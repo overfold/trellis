@@ -466,6 +466,9 @@ func (h *Handler) handleGetSecret(c *echo.Context) error {
 	if err != nil {
 		return err
 	}
+	if !spec.ValidIdentifier(c.Param("name")) {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid secret name")
+	}
 	meta, err := h.server.GetSecretMetadata(c.Request().Context(), ns, c.Param("name"))
 	if errors.Is(err, secretstore.ErrNotFound) {
 		return echo.NewHTTPError(http.StatusNotFound, "secret not found")
@@ -481,6 +484,9 @@ func (h *Handler) handleDeleteSecret(c *echo.Context) error {
 	ns, err := namespaceWrite(c, "deleting secrets requires write authorization")
 	if err != nil {
 		return err
+	}
+	if !spec.ValidIdentifier(c.Param("name")) {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid secret name")
 	}
 	if err := h.server.DeleteSecret(c.Request().Context(), ns, c.Param("name")); errors.Is(err, secretstore.ErrNotFound) {
 		return echo.NewHTTPError(http.StatusNotFound, "secret not found")

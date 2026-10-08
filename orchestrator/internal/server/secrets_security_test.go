@@ -34,6 +34,28 @@ func secretHandler(t *testing.T) (*echo.Echo, *secretstore.Store) {
 	return e, store
 }
 
+func TestSecretIdentifierMethodParity(t *testing.T) {
+	e, _ := secretHandler(t)
+	for _, method := range []string{http.MethodPut, http.MethodGet, http.MethodDelete} {
+		for _, name := range []string{"bad%20name", "bad%2Bname", "%3F", "-bad"} {
+			req := scopedRequest(t, method, "/v1/namespaces/default/secrets/"+name, `{"value_base64":"eA=="}`, auth.AccessCluster, auth.AccessWrite)
+			rec := httptest.NewRecorder()
+			e.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest || strings.TrimSpace(rec.Body.String()) != `{"message":"invalid secret name"}` {
+				t.Errorf("%s %s: %d %s", method, name, rec.Code, rec.Body.String())
+			}
+		}
+	}
+	for _, method := range []string{http.MethodGet, http.MethodDelete} {
+		req := scopedRequest(t, method, "/v1/namespaces/default/secrets/valid-missing", "", auth.AccessCluster, auth.AccessWrite)
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound || strings.TrimSpace(rec.Body.String()) != `{"message":"secret not found"}` {
+			t.Errorf("%s missing: %d %s", method, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 func TestSecretMetadataEndpointsNeverReturnPlaintext(t *testing.T) {
 	e, store := secretHandler(t)
 	const plaintext = "metadata-sentinel-plaintext"

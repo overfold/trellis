@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -20,6 +21,9 @@ import (
 )
 
 var bucketName = []byte("trellis")
+
+// ErrRestoreNotFresh indicates a permanent conflict with retained target state.
+var ErrRestoreNotFresh = errors.New("restore requires a fresh cluster with no jobs, job revisions, secrets, volume registrations, network port or subnet registrations, allocations, or replacement backoffs")
 
 // BoltStore persists state in a local Bolt database.
 type BoltStore struct {
@@ -426,7 +430,7 @@ func checkRestoreFresh(tx *bolt.Tx, cluster string) error {
 		prefix := fmt.Appendf(nil, "trellis/%s/%s/", cluster, resource)
 		key, _ := tx.Bucket(bucketName).Cursor().Seek(prefix)
 		if bytes.HasPrefix(key, prefix) {
-			return fmt.Errorf("restore requires a fresh cluster with no jobs, job revisions, secrets, volume registrations, network port or subnet registrations, allocations, or replacement backoffs")
+			return ErrRestoreNotFresh
 		}
 	}
 	return nil
