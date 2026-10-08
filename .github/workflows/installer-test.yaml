@@ -1,0 +1,50 @@
+name: installer-test
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+permissions:
+  contents: read
+jobs:
+  lifecycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - name: Install Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Install shell test prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y bash sudo jq openssl curl ca-certificates tar gzip coreutils gawk grep sed findutils libc-bin python3 util-linux
+      - name: Check shell syntax
+        run: for script in scripts/*.sh; do bash -n "$script"; done
+      - name: Test lifecycle as runner user
+        run: |
+          set -euo pipefail
+          for suite in install-core upgrade uninstall release; do
+            echo "::group::${suite} (user)"
+            if ! bash "scripts/${suite}_test.sh"; then
+              echo "::error::${suite} suite failed as runner user"
+              exit 1
+            fi
+            echo '::endgroup::'
+          done
+          python3 scripts/install_test.py
+      - name: Test root permissions and ownership
+        run: |
+          set -euo pipefail
+          for suite in install-core upgrade uninstall release; do
+            echo "::group::${suite} (root)"
+            if ! sudo env PATH="$PATH" bash "scripts/${suite}_test.sh"; then
+              echo "::error::${suite} suite failed as root"
+              exit 1
+            fi
+            echo '::endgroup::'
+          done
+          sudo env PATH="$PATH" python3 scripts/install_test.py

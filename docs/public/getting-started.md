@@ -4,7 +4,7 @@ This is the shortest complete Trellis journey: install one node, use the CLI as 
 
 ## 1. Install one node
 
-You need a systemd-based Debian or Ubuntu x86-64 host with `sudo`, `curl`, and outbound access to GitHub and the package repositories. The installer can install containerd when it is missing. Run it on the host, not inside a container; Trellis and containerd need the same host mount namespace.
+You need a systemd-based Debian or Ubuntu x86-64 host with `sudo`, `curl`, `jq`, OpenSSL, `tar`, and `sha256sum` (GNU coreutils), and outbound access to GitHub and the package repositories. If needed, install the download/verification prerequisites with `sudo apt-get update && sudo apt-get install -y curl ca-certificates jq openssl tar coreutils`. The installer can install containerd when it is missing. Run it on the host, not inside a container; Trellis and containerd need the same host mount namespace.
 
 Have a password manager ready before installing: the installer displays the administrator private key once, and Trellis does not retain it.
 
@@ -15,6 +15,8 @@ curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/insta
 The default plan is the feature-complete beginner path: create a new single-node cluster, auto-detect a reachable node address, and install the namespace-networking dependencies (WireGuard, iproute2, and iptables, which every node needs) and gVisor/runsc. The plan is shown before anything changes. Press Enter to install it, or choose **Customize** to change the cluster mode, address, or gVisor. You do not need to discover command-line flags just to make a different first-install choice.
 
 For automation, the same choices are available as flags. `--without-gvisor` opts out of gVisor.
+
+Before changing host packages, services, or node state, the installer stages the Linux x64 release and verifies its SHA-256 digest from GitHub's HTTPS release API before extraction or execution. Missing, malformed, or mismatching digests stop installation. This detects corruption or artifact substitution relative to the release metadata, not compromise of the release account; see the [download trust model](operations.md#release-download-trust-model).
 
 The installer uses the administrator key transiently to mint a normal `cluster/write` operator credential and saves a `local` context for the user who invoked `sudo`. It displays the base64 PKCS#8 Ed25519 private key once so you can move it to an operator password manager; the daemon receives and replicates only the public key. Routine `trellisctl` commands therefore do **not** need `sudo` and do not receive the administrator key.
 

@@ -40,6 +40,10 @@ From the repository root, `bash scripts/install-core_test.sh` checks secret/conf
 
 `bash scripts/uninstall_test.sh` exercises evacuation, membership removal, local resource cleanup, archiving, force/purge modes, and failures with mocked host services. Like the upgrade tests, it does not remove a real installation.
 
+`bash scripts/release_test.sh` uses real digest validation, hashing, and extraction with mocked downloads. It covers valid archives, substituted same-version binaries, absent/malformed/mismatching digests, exact platform/asset selection, and full install/upgrade failures before host mutation. `python3 scripts/install_test.py` runs the interactive `install.sh` wrapper in a controlling pseudo-terminal with a mocked engine, covering confirmation, cancellation, customization, fixed resume settings, flag forwarding, invalid roles, and the completed-install fast path.
+
+The `installer-test` workflow runs these four shell suites and wrapper tests on pull requests and pushes to `main`, as both the runner user and root (including permission/ownership assertions). It explicitly installs Go, `jq`, OpenSSL, curl/CA certificates, tar, GNU core utilities/text tools, and Python 3. Test output is grouped by suite and privilege; a ten-minute job timeout bounds failures. These tests use temporary paths and mocked host services, not live systemd/containerd or Vagrant VMs.
+
 ## Linting
 
 Run `golangci-lint run` from `orchestrator/` using the version pinned in CI.

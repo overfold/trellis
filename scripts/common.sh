@@ -203,19 +203,33 @@ detect_distro() {
 }
 
 fetch_latest_release() {
+    require_commands curl jq sha256sum
     local release_json
-    release_json="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest")" ||
+    release_json="$(curl --proto '=https' --proto-redir '=https' -fsSL "https://api.github.com/repos/${REPO}/releases/latest")" ||
         ui_die "Failed to find the latest release."
-    RELEASE_TAG="$(printf '%s' "$release_json" | grep -oP '"tag_name":\s*"\K[^"]+' | head -1 || true)"
-    BIN_URL="$(printf '%s' "$release_json" |
-        grep -oP '"browser_download_url":\s*"\K[^"]*trellis_linux_x64\.tar\.gz' | head -1 || true)"
-    [ -n "$RELEASE_TAG" ] || ui_die "Latest release is missing a tag name."
-    [ -n "$BIN_URL" ] || ui_die "Release ${RELEASE_TAG} is missing trellis_linux_x64.tar.gz."
+    RELEASE_TAG="$(jq -er '.tag_name | select(type == "string" and length > 0)' <<<"$release_json")" ||
+        ui_die "Latest release is missing a valid tag name."
+    local asset
+    asset="$(jq -cer '[.assets[] | select(.name == "trellis_linux_x64.tar.gz")] |
+        if length == 1 then .[0] else error("expected exactly one Linux x64 asset") end' <<<"$release_json")" ||
+        ui_die "Release ${RELEASE_TAG} must contain exactly one trellis_linux_x64.tar.gz asset."
+    BIN_URL="$(jq -er '.browser_download_url | select(type == "string" and startswith("https://"))' <<<"$asset")" ||
+        ui_die "Release ${RELEASE_TAG} has no HTTPS asset URL."
+    RELEASE_DIGEST="$(jq -er '.digest | select(type == "string" and test("^sha256:[0-9a-fA-F]{64}$"))' <<<"$asset")" ||
+        ui_die "Release ${RELEASE_TAG} is missing a valid SHA-256 asset digest; refusing unverified binaries."
 }
 
 download_release() {
     local dir="$1"
-    curl -fsSL -o "${dir}/trellis_linux_x64.tar.gz" "$BIN_URL"
+    require_commands curl sha256sum tar
+    [[ "${RELEASE_DIGEST:-}" =~ ^sha256:[0-9a-fA-F]{64}$ ]] ||
+        ui_die "Missing or malformed SHA-256 asset digest; refusing unverified binaries."
+    curl --proto '=https' --proto-redir '=https' -fsSL -o "${dir}/trellis_linux_x64.tar.gz" "$BIN_URL" ||
+        ui_die "Failed to download release ${RELEASE_TAG}."
+    local actual expected="${RELEASE_DIGEST#sha256:}"
+    actual="$(sha256sum "${dir}/trellis_linux_x64.tar.gz")"
+    [ "${actual%% *}" = "${expected,,}" ] ||
+        ui_die "SHA-256 mismatch for release ${RELEASE_TAG}; refusing extraction and execution."
     tar -xzf "${dir}/trellis_linux_x64.tar.gz" -C "$dir"
     [ -x "${dir}/trellis" ] && [ -x "${dir}/trellisctl" ] && [ -x "${dir}/trellis-health-probe" ] ||
         ui_die "Release archive does not contain trellis, trellisctl, and trellis-health-probe."

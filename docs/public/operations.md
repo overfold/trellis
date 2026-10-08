@@ -307,6 +307,14 @@ curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/upgra
 sudo env TRELLIS_CONFIG="$HOME/.config/trellis/config.yaml" bash /tmp/trellis-upgrade.sh
 ```
 
+### Release download trust model
+
+Install and upgrade select exactly one `trellis_linux_x64.tar.gz` asset by its name from GitHub's latest-release API, over certificate-validated HTTPS. They require the asset's `sha256:` digest to contain exactly 64 hexadecimal digits, hash the downloaded archive, and compare it before extraction or running the staged `trellis --version`. Missing, malformed, or mismatching integrity metadata fails closed, before host changes during installation or drain/binary replacement during upgrade. A matching version is an additional consistency check, not proof of authenticity.
+
+Both scripts require `jq` and `sha256sum` (GNU coreutils), in addition to their existing host tools. Releases without GitHub asset digests cannot be installed or upgraded by these scripts; there is no unverified fallback. Already-installed nodes do not redownload when the current version matches the latest release.
+
+The artifact and digest are trusted through the same GitHub release account/channel. This detects corruption and substitution relative to the metadata, but **does not protect against release-account compromise**, a malicious authorized release, or compromise of GitHub/TLS trust. There are no independently signed checksums or verified build provenance in this flow. The entrypoint scripts and shared helpers fetched from `main` are also trusted executable inputs; archive verification does not authenticate those scripts. Inspect and pin scripts through your own trusted delivery process when stronger assurance is required.
+
 ### Discovery identifier upgrades
 
 Older versions accepted dots in namespace, job, and task-group names even though their discovery names did not resolve. These names are now rejected; there is no automatic dot-to-hyphen conversion, escaping, or identity-boundary reinterpretation. Task, secret, and volume names are unchanged.

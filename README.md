@@ -17,7 +17,7 @@ Trellis places containers across your machines, keeps them healthy, and rolls ou
 
 ## Quick start
 
-You need a systemd-based Debian or Ubuntu x86-64 host with `sudo`, `curl`, and outbound access to GitHub and package repositories.
+You need a systemd-based Debian or Ubuntu x86-64 host with `sudo`, `curl`, `jq`, OpenSSL, `tar`, and `sha256sum` (GNU coreutils), and outbound access to GitHub and package repositories. See [host prerequisites](docs/public/getting-started.md#1-install-one-node).
 
 You do not need to clone or build Trellis for this quick start. Have a password manager ready: the installer displays the administrator private key once, and Trellis does not retain it.
 

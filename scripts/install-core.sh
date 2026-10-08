@@ -182,6 +182,11 @@ if [ "$assume_yes" != true ]; then
     read -r answer </dev/tty
     case "${answer:-y}" in [Yy]*) ;; *) ui_detail "No changes made."; exit 0 ;; esac
 fi
+
+# Verify and stage the release before changing packages, services, or node state.
+WORK_TMP="$(mktemp -d)"
+ui_step "Downloading Trellis ${RELEASE_TAG}"
+download_release "$WORK_TMP"
 STARTED=true
 
 STATE_COMPLETE=false
@@ -205,9 +210,6 @@ else
     install_networking
 fi
 
-WORK_TMP="$(mktemp -d)"
-ui_step "Downloading Trellis ${RELEASE_TAG}"
-download_release "$WORK_TMP"
 install -d -m 0755 "$INSTALL_DIR"
 install -m 0755 "${WORK_TMP}/trellis" "${INSTALL_DIR}/.trellis.new"
 install -m 0755 "${WORK_TMP}/trellisctl" "${INSTALL_DIR}/.trellisctl.new"
