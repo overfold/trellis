@@ -30,6 +30,15 @@ Multi-node integration uses the test/injected runtime and is separated in CI. Th
 go test -tags=integration ./cmd/trellis ./integration -count=1 -timeout=6m
 ```
 
+The deterministic promotion-stage removal fault test uses real Raft, Bolt,
+TCP/TLS and node authorization in-process, with a test-only Joiner hook after
+tombstone commit and before promotion. It covers loss of the old voter and the
+replacement, quorum recovery, retry, permanent revocation and convergence:
+
+```sh
+go test -race -tags=integration ./internal/server -run '^TestRemovalPromotionLossAndRecovery$' -count=3 -timeout=2m
+```
+
 Normal builds reject `--runtime injected`.
 
 Tests beside each package document state-machine invariants, Raft persistence, scheduler behavior, network planning, durability, update regressions, and security validation.

@@ -371,12 +371,12 @@ func (s *Server) RemoveMember(ctx context.Context, id string) error {
 	if members[index].Voter {
 		if promote {
 			if err := s.applyMembershipChange(replacement); err != nil {
-				return err
+				return fmt.Errorf("node %s is tombstoned but removal is incomplete during replacement %s promotion; restore reachable quorum and retry removal: %w", id, replacement.ID, err)
 			}
 		}
 	}
 	if err := s.joiner.RemoveServer(id); err != nil {
-		return fmt.Errorf("remove Raft member %s: %w", id, err)
+		return fmt.Errorf("node %s is tombstoned but Raft removal is incomplete; restore reachable quorum and retry removal: %w", id, err)
 	}
 	s.liveness.forgetRaftProgress(nodeID)
 	s.wakeMembership()

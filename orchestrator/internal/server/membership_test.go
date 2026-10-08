@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -323,6 +324,40 @@ func TestRemoveMemberPromotesReplacementBeforeRemovingVoter(t *testing.T) {
 	}
 	if got, want := joiner.voters(), sortedIDs(leader, c, d); !slices.Equal(got, want) {
 		t.Fatalf("voters = %v, want %v", got, want)
+	}
+}
+
+func TestRemoveMemberPromotionFailurePreservesRevocationAndRetries(t *testing.T) {
+	leader, b, c, d := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	joiner := newFakeMembership(fakeMember(leader, true), fakeMember(b, true), fakeMember(c, true), fakeMember(d, false))
+	s := membershipTestServer(joiner, leader, b, d) // c is already unavailable.
+	failure := errors.New("leadership lost while committing log")
+	joiner.err = failure
+	err := s.RemoveMember(t.Context(), b.String())
+	if !errors.Is(err, failure) || !strings.Contains(err.Error(), "tombstoned but removal is incomplete") {
+		t.Fatalf("promotion failure = %v", err)
+	}
+	if removed, err := s.state.NodeRemoved(t.Context(), b.String()); err != nil || !removed {
+		t.Fatalf("tombstone after failed promotion = %v, %v", removed, err)
+	}
+	if _, err := s.JoinMember(t.Context(), b, "b:8129"); !errors.Is(err, ErrNodeRemoved) {
+		t.Fatalf("revoked member rejoined: %v", err)
+	}
+	if got := joiner.operations(); len(got) != 0 {
+		t.Fatalf("failed promotion continued to removal: %v", got)
+	}
+	joiner.err = nil
+	if err := s.RemoveMember(t.Context(), b.String()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RemoveMember(t.Context(), b.String()); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := joiner.operations(), []string{"promote " + d.String(), "remove " + b.String()}; !slices.Equal(got, want) {
+		t.Fatalf("retry operations = %v, want %v", got, want)
+	}
+	if got, want := joiner.voters(), sortedIDs(leader, c, d); !slices.Equal(got, want) {
+		t.Fatalf("final voters = %v, want %v", got, want)
 	}
 }
 

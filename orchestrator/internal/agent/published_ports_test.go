@@ -107,7 +107,7 @@ func TestPortManagerTreatsUDPListenerAsTaken(t *testing.T) {
 	}
 	defer func() { _ = conn.Close() }()
 	port := conn.LocalAddr().(*net.UDPAddr).Port
-	manager := NewPortManager(nil, 0, 0, 0)
+	manager := NewPortManager(nil, 0, 0)
 	if _, err := manager.Claim(spec.PortSpec{Port: 8080, HostPort: port}); err == nil {
 		// The TCP port of the same number may be free; the UDP listener still
 		// holds a port that publishing would forward.

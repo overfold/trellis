@@ -24,6 +24,20 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/storage"
 )
 
+// StopAllocation exercises task cleanup directly in unit tests. Production
+// callers use StopGroup, which validates the request's epoch and generation.
+func (a *Agent) StopAllocation(ctx context.Context, allocID string) error {
+	a.mu.RLock()
+	allocation := a.allocations[allocID]
+	a.mu.RUnlock()
+	if allocation == nil {
+		return fmt.Errorf("%w: %s", ErrAllocationNotFound, allocID)
+	}
+	unlock := a.lockAllocationOperation(allocation.AllocationID)
+	defer unlock()
+	return a.stopAllocation(ctx, allocID, false)
+}
+
 type blockingStartRuntime struct {
 	*reconcilerRuntime
 	started chan string
@@ -351,7 +365,7 @@ func newOperationTestAgent(t *testing.T, rt runtime.ContainerRuntime) *Agent {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	reconciler := NewAllocationReconciler(rt, nil)
-	agent := NewAgent(log, rt, health.NewHealthManager(log, rt, nil), reconciler, NewPortManager(rt, 0, 0, 0), NewVolumeManager(t.TempDir()), nil, uuid.New())
+	agent := NewAgent(log, rt, health.NewHealthManager(log, rt, nil), reconciler, NewPortManager(rt, 0, 0), NewVolumeManager(t.TempDir()), nil, uuid.New())
 	agent.SetNetworkManager(staticNetworkManager{})
 	agent.secretBase = t.TempDir()
 	agent.secretStatfs = func(_ string, stat *syscall.Statfs_t) error {

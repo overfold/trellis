@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"maps"
 	"net/netip"
@@ -2095,30 +2094,6 @@ func (a *Agent) releaseOrphanedStaging(ctx context.Context, allocID string) erro
 		return fmt.Errorf("release orphaned volume staging: %w", err)
 	}
 	return nil
-}
-
-// Logs opens the log stream for an allocation.
-func (a *Agent) Logs(ctx context.Context, allocID string, follow bool, tail int) (io.ReadCloser, error) {
-	a.mu.RLock()
-	alloc := a.allocations[allocID]
-	a.mu.RUnlock()
-	if alloc == nil {
-		return nil, fmt.Errorf("%w: %s", ErrAllocationNotFound, allocID)
-	}
-	return a.runtime.Logs(ctx, alloc.ContainerID, follow, tail)
-}
-
-// StopAllocation stops and removes an allocation.
-func (a *Agent) StopAllocation(ctx context.Context, allocID string) error {
-	a.mu.RLock()
-	allocation := a.allocations[allocID]
-	a.mu.RUnlock()
-	if allocation == nil {
-		return fmt.Errorf("%w: %s", ErrAllocationNotFound, allocID)
-	}
-	unlock := a.lockAllocationOperation(allocation.AllocationID)
-	defer unlock()
-	return a.stopAllocation(ctx, allocID, false)
 }
 
 func (a *Agent) stopAllocation(ctx context.Context, allocID string, retainLogs bool) error {

@@ -444,7 +444,7 @@ func run(parent context.Context, cfg *config) error {
 	restartCtl := agent.NewAllocationReconciler(runtimeClient, nil)
 	leaderClient := client.NewServerClient("", "", clientTLS)
 	volumeManager := agent.NewVolumeManager(cfg.DataDir)
-	ag := agent.NewAgent(log, runtimeClient, healthMgr, restartCtl, agent.NewPortManager(runtimeClient, 0, 0, 0), volumeManager, leaderClient, id)
+	ag := agent.NewAgent(log, runtimeClient, healthMgr, restartCtl, agent.NewPortManager(runtimeClient, 0, 0), volumeManager, leaderClient, id)
 	ag.SetVersion(version.Current())
 	ag.SetRunsWorkloads(cfg.runsWorkloads())
 	if raftStore != nil {

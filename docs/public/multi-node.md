@@ -212,6 +212,18 @@ To remove a node that can no longer be uninstalled cleanly—for example, a mach
 
 Removal is permanent and revokes the node's identity. Before changing Raft membership, Trellis records a replicated tombstone for the node's UUID; from then on its certificate is rejected by the control-plane API, the agent API, the Raft transport, and Raft join, even if the machine still has its data directory and restarts. A removed machine returns to the cluster only as a new node: wipe its data directory (the uninstall script archives it) and add it again with a new join token. In managed mode a removed node may still hold a copy of the CA private key; removal stops it from acting as its old identity or joining as a member, but if the machine is untrusted, treat the key as exposed.
 
+### Recover an interrupted removal
+
+The quorum preflight checks the final configuration using recent heartbeats; it cannot guarantee availability throughout promotion. For example, with A/B/C voters, C offline, and caught-up non-voter D, removing B first promotes D. Promotion needs three of A/B/C/D. If B or D stops before acknowledging that entry, leadership can be lost; losing D can interrupt progress even though A/B still form the original quorum. Once promotion commits, B's removal needs two of A/C/D, **not** three of the intermediate four voters. This is an availability window, not evidence of corrupted state.
+
+Prefer removal while all remaining voters and the replacement are reachable. Keep those nodes running until removal succeeds; do not combine removal with another node's maintenance. If removal reports that the node is **tombstoned but removal is incomplete**, or the response is lost:
+
+1. Treat the target identity as permanently revoked; a failed request is not a rollback. Stop the target daemon and retain its data for inspection. Do not delete tombstones, edit Raft files, force a new bootstrap, or wipe healthy replicas to bypass quorum.
+2. Restore network/process availability of non-revoked voters and the replacement. In the example, restore C and D so A/C/D can elect and commit without relying on B. A displayed voter role may reflect an uncommitted configuration and is not proof that promotion finished.
+3. Once the API is writable, retry `nodes remove` for the **same UUID**. Retries do not readmit it. Verify `nodes list` has no control-plane role for that UUID and the remaining voter set converges to the odd target before further maintenance or local uninstall. If the API is still unavailable, repeated removal requests cannot substitute for quorum recovery.
+
+Revocation is checked against each receiver's locally applied state on authentication; it does not erase copied keys or retroactively close already-authenticated streams. Do not rely on a tombstone as an immediate process kill or instantaneous cluster-wide disconnection.
+
 To move control-plane leadership deliberately before maintenance, the advanced command `trellisctl --administrator-key ./trellis-administrator.pem nodes transfer-leadership` requests a transfer to another voter; non-voters never receive leadership. It is hidden from normal CLI help because workload operations should not require understanding Raft leadership.
 
 ## Node failure

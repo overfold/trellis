@@ -25,7 +25,7 @@ type PortManager struct {
 }
 
 // NewPortManager creates a port manager for an inclusive range.
-func NewPortManager(containerRuntime runtime.ContainerRuntime, minPort int, maxPort int, cursor int) *PortManager {
+func NewPortManager(containerRuntime runtime.ContainerRuntime, minPort int, maxPort int) *PortManager {
 	if minPort == 0 {
 		minPort = 20000
 	}
