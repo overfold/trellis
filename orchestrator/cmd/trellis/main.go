@@ -545,12 +545,6 @@ func run(parent context.Context, cfg *config) error {
 		}
 		ag.SetLabels(labels)
 	}
-	if err := ag.Init(ctx); err != nil {
-		return fmt.Errorf("initialize allocation agent: %w", err)
-	}
-	// Runs before the runtime client closes, so terminals can still be killed.
-	defer ag.CloseExecSessions(context.Background())
-
 	upstreams, upstreamErr := trellisdns.SystemResolvers("/etc/resolv.conf")
 	if upstreamErr != nil {
 		log.Warn("load DNS upstreams", "error", upstreamErr)
@@ -564,11 +558,13 @@ func run(parent context.Context, cfg *config) error {
 		filteredUpstreams = append(filteredUpstreams, upstream)
 	}
 	dnsResolver := trellisdns.NewResolver(log, leaderClient, networkManager, trellisdns.DefaultDomain, filteredUpstreams...)
-	go func() {
-		if err := dnsResolver.Run(ctx, cfg.DNSListen); err != nil && ctx.Err() == nil {
-			log.Error("dns resolver stopped", "error", err)
-		}
-	}()
+	ag.SetReadiness(dnsResolver.Ready)
+	go dnsResolver.RunSupervised(ctx, cfg.DNSListen)
+	if err := ag.Init(ctx); err != nil {
+		return fmt.Errorf("initialize allocation agent: %w", err)
+	}
+	// Runs before the runtime client closes, so terminals can still be killed.
+	defer ag.CloseExecSessions(context.Background())
 
 	agentHTTP := echo.New()
 	var authorizeCertificate func(context.Context, uuid.UUID, *x509.Certificate) bool

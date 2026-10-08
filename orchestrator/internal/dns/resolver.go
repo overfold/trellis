@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
@@ -28,6 +29,7 @@ const (
 	defaultMaxConcurrentUDPQueries = 256
 	defaultMaxTCPConnections       = 128
 	maxDNSMessageSize              = 65535
+	cacheLifetime                  = 15 * time.Second
 )
 
 // DiscoveryLookup lists service-discovery records.
@@ -57,8 +59,10 @@ type Resolver struct {
 	udpSlots   chan struct{}
 	tcpSlots   chan struct{}
 
-	mu    sync.RWMutex
-	cache map[string]*record // "group.job.namespace" -> record
+	mu           sync.RWMutex
+	cache        map[string]*record // "group.job.namespace" -> record
+	cacheExpires time.Time
+	ready        atomic.Bool
 }
 
 // NewResolver creates a DNS resolver for the supplied discovery source.
@@ -116,6 +120,24 @@ func SystemResolvers(path string) ([]string, error) {
 	return result, nil
 }
 
+// Ready reports whether both listeners are bound and serving.
+func (r *Resolver) Ready() bool { return r.ready.Load() }
+
+// RunSupervised retries listener failures until cancellation. Readiness is
+// withdrawn during each failure, including failure to bind either protocol.
+func (r *Resolver) RunSupervised(ctx context.Context, addr string) {
+	for ctx.Err() == nil {
+		if err := r.Run(ctx, addr); err != nil && r.log != nil {
+			r.log.Error("dns resolver stopped; retrying", "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Second):
+		}
+	}
+}
+
 // Run serves DNS over UDP and TCP on addr until ctx is canceled.
 func (r *Resolver) Run(ctx context.Context, addr string) error {
 	ctx, cancel := context.WithCancel(ctx)
@@ -139,6 +161,8 @@ func (r *Resolver) Run(ctx context.Context, addr string) error {
 		_ = udpConn.Close()
 		return fmt.Errorf("listen TCP: %w", err)
 	}
+	r.ready.Store(true)
+	defer r.ready.Store(false)
 	var background sync.WaitGroup
 	background.Add(2)
 	go func() {
@@ -148,6 +172,7 @@ func (r *Resolver) Run(ctx context.Context, addr string) error {
 	go func() {
 		defer background.Done()
 		<-ctx.Done()
+		r.ready.Store(false)
 		_ = udpConn.Close()
 		_ = tcpListener.Close()
 	}()
@@ -169,6 +194,7 @@ func (r *Resolver) Run(ctx context.Context, addr string) error {
 	for range 2 {
 		if err := <-errCh; err != nil && ctx.Err() == nil && runErr == nil {
 			runErr = err
+			r.ready.Store(false)
 			cancel()
 		}
 	}
@@ -281,9 +307,14 @@ func (r *Resolver) refreshLoop(ctx context.Context) {
 }
 
 func (r *Resolver) refresh(ctx context.Context) {
+	started := time.Now()
+	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
 	resp, err := r.lookup.ListDiscovery(ctx)
 	if err != nil {
-		r.log.Error("dns refresh failed", "error", err)
+		if r.log != nil {
+			r.log.Error("dns refresh failed", "error", err)
+		}
 		return
 	}
 	if resp == nil {
@@ -315,9 +346,19 @@ func (r *Resolver) refresh(ctx context.Context) {
 		}
 		rec.addresses = append(rec.addresses, ip)
 	}
+	if ctx.Err() != nil {
+		return
+	}
 	r.mu.Lock()
 	r.cache = cache
+	r.cacheExpires = started.Add(cacheLifetime)
 	r.mu.Unlock()
+}
+
+func (r *Resolver) cacheFresh() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return time.Now().Before(r.cacheExpires)
 }
 
 func (r *Resolver) resolve(name, sourceNamespace string) []net.IP {
@@ -336,8 +377,9 @@ func (r *Resolver) resolve(name, sourceNamespace string) []net.IP {
 
 	r.mu.RLock()
 	rec := r.cache[key]
+	fresh := time.Now().Before(r.cacheExpires)
 	r.mu.RUnlock()
-	if rec == nil || rec.ambiguous || (sourceNamespace != "" && rec.namespace != sourceNamespace) {
+	if !fresh || rec == nil || rec.ambiguous || (sourceNamespace != "" && rec.namespace != sourceNamespace) {
 		return nil
 	}
 	return rec.addresses
@@ -406,6 +448,9 @@ func (r *Resolver) handleQueryNetworkContext(ctx context.Context, packet []byte,
 
 	if qclass != 1 {
 		return buildResponse(id, name, qtype, qclass, nil)
+	}
+	if !r.cacheFresh() {
+		return buildErrorResponse(packet, 2) // Discovery unavailable, not NXDOMAIN.
 	}
 	ips := r.resolve(name, sourceNamespace)
 	return buildResponse(id, name, qtype, qclass, ips)

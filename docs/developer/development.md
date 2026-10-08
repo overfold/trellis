@@ -24,6 +24,22 @@ sudo env CONTAINERD_ADDRESS=/run/containerd/containerd.sock TRELLIS_HEALTH_PROBE
 
 Read the output for skipped tests: a green suite that skipped runtime tests is not containerd verification. These tests create and remove test containers and managed-volume fixtures; use a disposable development host.
 
+Namespace-network kernel regressions need root with network/mount namespace
+privileges, IPv6 and WireGuard kernel support, and `ip`, `wg`, `iptables`,
+`unshare`, `mount`, and `curl`. They isolate network tables, sysfs, and named
+network namespaces in a child process, and do not require containerd:
+
+```sh
+go test -c -o /tmp/trellis-network.test ./internal/network
+sudo env TRELLIS_NETWORK_E2E=1 /tmp/trellis-network.test -test.run '^TestKernelNamespaceAudit$' -test.v
+```
+
+The suite proves old 40-bit collision separation, refuses foreign ownership,
+exercises IPv6 link-local and real WireGuard host-input denial with working
+pre-fix baselines, preserves node/host-initiated and namespace-peer connections,
+repairs API reachability after a firewall flush, and checks final teardown.
+Normal unit runs skip this opt-in suite; a failure after opting in is not skipped.
+
 Multi-node integration uses the test/injected runtime and is separated in CI. The injected runtime is compiled into the node binary only under the `integration` build tag; the suite builds its own node binary with that tag:
 
 ```sh

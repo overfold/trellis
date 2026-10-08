@@ -86,6 +86,10 @@ type Agent struct {
 	// planOperation serializes plan application without holding mu across I/O.
 	// It is initialized under operationMu.
 	planOperation chan struct{}
+	// Topology updates are authoritative; guarded by mu. Delayed starts only
+	// bootstrap a path, and successful cleanup forgets an idle namespace.
+	networkPlans map[string]network.Plan
+	readiness    func() bool
 
 	recoveryListPending bool
 	// supersededStops holds retained older generations that recovery must
@@ -834,6 +838,7 @@ func (a *Agent) recoverMissing(ctx context.Context, allocation *Allocation) {
 	_ = a.reconciler.Untrack(allocation.ID)
 	a.mu.Lock()
 	delete(a.allocations, allocation.ID)
+	a.forgetIdleNetworkPlanLocked(allocation.Namespace)
 	a.mu.Unlock()
 	if adopted {
 		for _, port := range allocation.Ports {
@@ -1266,8 +1271,7 @@ func (a *Agent) startDrainState(request *nodeapi.AllocationRequest) (bool, uint6
 	return draining, sequence
 }
 
-// UpdateNetworkPlan refreshes the network shared by running allocations.
-func (a *Agent) UpdateNetworkPlan(ctx context.Context, request *nodeapi.NetworkPlanRequest) error {
+func (a *Agent) lockNetworkPlan(ctx context.Context) (func(), error) {
 	a.operationMu.Lock()
 	if a.planOperation == nil {
 		a.planOperation = make(chan struct{}, 1)
@@ -1276,10 +1280,19 @@ func (a *Agent) UpdateNetworkPlan(ctx context.Context, request *nodeapi.NetworkP
 	a.operationMu.Unlock()
 	select {
 	case operation <- struct{}{}:
-		defer func() { <-operation }()
+		return func() { <-operation }, nil
 	case <-ctx.Done():
-		return ctx.Err()
+		return nil, ctx.Err()
 	}
+}
+
+// UpdateNetworkPlan refreshes the network shared by running allocations.
+func (a *Agent) UpdateNetworkPlan(ctx context.Context, request *nodeapi.NetworkPlanRequest) error {
+	unlock, err := a.lockNetworkPlan(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -1324,13 +1337,39 @@ func (a *Agent) UpdateNetworkPlan(ctx context.Context, request *nodeapi.NetworkP
 	}(); err != nil {
 		return err
 	}
-	if !active {
-		return nil
-	}
-	if err := a.network.UpdatePlan(ctx, request.Namespace, request.Plan); err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
+	a.mu.Lock()
+	if a.networkPlans == nil {
+		a.networkPlans = make(map[string]network.Plan)
+	}
+	a.networkPlans[request.Namespace] = request.Plan
+	a.mu.Unlock()
+	// Retain the accepted desired topology even after a partial apply failure;
+	// a delayed start must not roll it back while reconciliation retries.
+	if active {
+		if err := a.network.UpdatePlan(ctx, request.Namespace, request.Plan); err != nil {
+			return err
+		}
+	}
 	return ctx.Err()
+}
+
+// The caller holds mu. Pending pulls and retained failed-cleanup records own
+// the plan too; a recreated idle namespace must bootstrap from its new start.
+func (a *Agent) forgetIdleNetworkPlanLocked(namespace string) {
+	for _, allocation := range a.allocations {
+		if allocation.Namespace == namespace && (allocation.Network != nil || allocation.NetworkIntent != nil) {
+			return
+		}
+	}
+	for _, start := range a.starts {
+		if start.namespace == namespace && !start.finished() {
+			return
+		}
+	}
+	delete(a.networkPlans, namespace)
 }
 
 // StopGroup stops all tasks in an allocation group.
@@ -1885,6 +1924,21 @@ func (a *Agent) attachTaskNetwork(ctx context.Context, launch *taskLaunch) error
 	if task.NetworkPlan == nil {
 		return fmt.Errorf("automatic WireGuard network plan is required")
 	}
+	unlock, err := a.lockNetworkPlan(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	plan := *task.NetworkPlan
+	a.mu.RLock()
+	current, ok := a.networkPlans[task.Namespace]
+	a.mu.RUnlock()
+	if ok {
+		// API access belongs to this task's execution, not the peer topology.
+		current.APIPort = plan.APIPort
+		plan = current
+	}
+	task.NetworkPlan = &plan
 	// Record the intent before Attach so a restarted agent can find and
 	// detach an attachment whose result was never recorded.
 	alloc.NetworkIntent = &network.AttachmentIntent{AllocationID: task.ID, Namespace: task.Namespace, Network: task.Namespace}
@@ -1895,7 +1949,7 @@ func (a *Agent) attachTaskNetwork(ctx context.Context, launch *taskLaunch) error
 	for _, port := range launch.ports {
 		ports = append(ports, network.PortMapping{HostPort: port.HostPort, ContainerPort: port.ContainerPort})
 	}
-	attachment, err := a.network.Attach(ctx, network.AttachRequest{AllocationID: task.ID, Namespace: task.Namespace, Network: task.Namespace, Plan: *task.NetworkPlan, Ports: ports})
+	attachment, err := a.network.Attach(ctx, network.AttachRequest{AllocationID: task.ID, Namespace: task.Namespace, Network: task.Namespace, Plan: plan, Ports: ports})
 	if err != nil {
 		return fmt.Errorf("attach WireGuard network: %w", err)
 	}
@@ -2114,6 +2168,7 @@ func (a *Agent) abortTaskStart(ctx context.Context, launch *taskLaunch) error {
 	}
 	a.mu.Lock()
 	delete(a.allocations, task.ID)
+	a.forgetIdleNetworkPlanLocked(task.Namespace)
 	a.mu.Unlock()
 	return errors.Join(errs...)
 }
@@ -2229,6 +2284,7 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string, retainLogs b
 	}
 	a.mu.Lock()
 	delete(a.allocations, allocID)
+	a.forgetIdleNetworkPlanLocked(alloc.Namespace)
 	a.mu.Unlock()
 	for _, p := range alloc.Ports {
 		// Recovery may retain a stale record sharing a live allocation's port.
@@ -2355,6 +2411,11 @@ func (a *Agent) OnRestartState(allocID string, attempts int, window time.Time, e
 	return nil
 }
 
+// SetReadiness installs a node prerequisite before Init starts heartbeats.
+func (a *Agent) SetReadiness(ready func() bool) { a.readiness = ready }
+
+func (a *Agent) ready() bool { return a.readiness == nil || a.readiness() }
+
 func (a *Agent) runHeartbeatLoop(ctx context.Context) {
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
@@ -2362,7 +2423,7 @@ func (a *Agent) runHeartbeatLoop(ctx context.Context) {
 
 	for {
 		if !registered {
-			if a.server.Ready() {
+			if a.server.Ready() && a.ready() {
 				a.nodeInfo.Volumes = a.volumes.AvailableHostVolumes()
 				if _, err := a.server.RegisterNode(ctx, &a.nodeInfo); err != nil {
 					a.log.Error("register node failed", "error", err)
@@ -2375,7 +2436,7 @@ func (a *Agent) runHeartbeatLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if !a.server.Ready() {
+			if !a.server.Ready() || !a.ready() {
 				continue
 			}
 			if !registered {

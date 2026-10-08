@@ -210,7 +210,7 @@ networking:
       host_port: 80
 ```
 
-Each task has its own network attachment; tasks in one group do not share a network namespace, so a sidecar reaches its peer task through the group's network (for example over service DNS), not `localhost`. `networking.mode` is one of:
+Each namespace-mode task has its own network attachment and address; tasks in one group do not share a network namespace or `localhost`. Groups with distinct task addresses are omitted from group DNS; a sidecar must use its peer's task endpoint from the allocation API, not the group discovery name. Host-mode tasks share the node network and can communicate through node loopback. See the [group discovery contract](core-concepts.md#networking-and-discovery). `networking.mode` is one of:
 
 | Mode | Network | Ports |
 | --- | --- | --- |
@@ -221,6 +221,8 @@ Each task has its own network attachment; tasks in one group do not share a netw
 **`namespace`** gives the task a private address on the namespace network, which spans every node running an allocation of that namespace. Tasks reach each other by address or through [service discovery](core-concepts.md#networking-and-discovery) DNS; the network is not reachable from other namespaces. Traffic to anything beyond the namespace network, such as the internet, leaves through the node with its source address translated to the node's (masquerade). That egress reaches whatever the node can reach, including its local network, other nodes' addresses, and link-local services such as cloud metadata endpoints. Trellis currently realizes this mode with WireGuard, which every node runs.
 
 Each namespace-mode `ports` entry publishes node port `host_port` to `port`, the port the process listens on inside its network. Omitting `host_port` publishes the same number; the stored job shows the resolved value. Published ports forward TCP and UDP from any of the node's addresses, preserve the client's source address, and are also reachable from the node itself, from host-networked tasks, and from namespace-networked tasks, including other namespaces' and the publishing task's own, through a node address. They are not reachable on `127.0.0.1`. A published port does not need to be declared for namespace-network peers, which reach every listening port directly. Published ports are forwarded before the node's own forwarding rules, like Docker's, so a host firewall does not filter them.
+
+Namespace networking is IPv4-only. IPv6 is disabled on its host-side links, including automatic link-local addresses; this does not change IPv6 access in host mode. Direct host-bound traffic from a local namespace bridge is limited to workload DNS, enabled API access on its gateway, and replies. Decrypted remote WireGuard traffic may reply to host-initiated connections but cannot initiate connections to host services. Published-port forwarding remains available under the policy above.
 
 **`host`** joins the node's network namespace. Each `ports` entry reserves `port` on the node for scheduling; `host_port` is not allowed because there is no translation. Host networking is node-level network access: the task can bind any node port, reach every service listening on the node, and open connections into every namespace network present on the node — the namespace bridges and WireGuard interfaces live in the node's network namespace — including namespaces other than its own. See [Multitenancy and trust boundaries](multitenancy.md#networking) before accepting host networking from less-trusted authors.
 

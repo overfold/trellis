@@ -20,6 +20,7 @@ import (
 // retries with another attempt. It is not persisted: after an agent restart,
 // the control plane's next start request for the generation starts it again.
 type groupStart struct {
+	namespace     string
 	generation    uint64
 	jobRevision   int
 	executionHash string
@@ -77,6 +78,9 @@ func (a *Agent) StartGroup(ctx context.Context, request *nodeapi.AllocationReque
 }
 
 func (a *Agent) acceptStart(ctx context.Context, request *nodeapi.AllocationRequest) (*groupStart, error) {
+	if !a.ready() {
+		return nil, fmt.Errorf("agent not ready: workload DNS listeners unavailable")
+	}
 	// A retry of a running start is accepted without the operation lock,
 	// which the start holds while it creates tasks.
 	if start, err := a.acceptRunningStart(request); start != nil || err != nil {
@@ -169,6 +173,7 @@ func (a *Agent) acceptStartLocked(request *nodeapi.AllocationRequest) (*groupSta
 	}
 	ctx, cancel := context.WithTimeout(a.lifetimeContext(), maxStartDuration)
 	start := &groupStart{
+		namespace:     request.Namespace,
 		generation:    request.Generation,
 		jobRevision:   request.JobRevision,
 		executionHash: request.ExecutionHash,
@@ -244,6 +249,7 @@ func (a *Agent) finishStart(ctx context.Context, allocationID string, start *gro
 		delete(a.starts, allocationID)
 	}
 	close(start.done)
+	a.forgetIdleNetworkPlanLocked(start.namespace)
 	a.mu.Unlock()
 	start.cancel()
 }

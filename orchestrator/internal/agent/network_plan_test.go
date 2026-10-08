@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -143,4 +144,77 @@ func TestSlowNetworkPlanAllowsStartAndCancelledPlanWait(t *testing.T) {
 			t.Fatalf("late stale plan = %v", err)
 		}
 	})
+}
+
+func TestDelayedAttachmentUsesAuthoritativeTopology(t *testing.T) {
+	for _, active := range []bool{false, true} {
+		t.Run(map[bool]string{false: "before-first-attachment", true: "active-path"}[active], func(t *testing.T) {
+			a := newOperationTestAgent(t, &reconcilerRuntime{})
+			manager := newRecoveringNetworkManager()
+			a.SetNetworkManager(manager)
+			if active {
+				a.allocations["existing"] = &Allocation{Namespace: "acme", Network: &network.Attachment{}}
+			}
+			newer := network.Plan{CIDR: "10.42.0.0/24", Gateway: "10.42.0.1", Peers: []network.PeerPlan{{PublicKey: "new-peer", AllowedIPs: []string{"10.42.3.0/24"}}}}
+			if err := a.UpdateNetworkPlan(t.Context(), &nodeapi.NetworkPlanRequest{Epoch: 1, Namespace: "acme", Plan: newer}); err != nil {
+				t.Fatal(err)
+			}
+			stale := newer
+			stale.Peers = []network.PeerPlan{{PublicKey: "removed-peer", AllowedIPs: []string{"10.42.2.0/24"}}}
+			stale.APIPort = 8126
+			manager.beforeAttach = func(request network.AttachRequest) {
+				if !reflect.DeepEqual(request.Plan.Peers, newer.Peers) || request.Plan.APIPort != 8126 {
+					t.Fatalf("delayed start overwrote topology or lost its API grant: %#v", request.Plan)
+				}
+			}
+			launch := &taskLaunch{task: &taskStart{ID: "delayed", Namespace: "acme", NetworkPlan: &stale}, alloc: &Allocation{ID: "delayed", Namespace: "acme"}}
+			if err := a.attachTaskNetwork(t.Context(), launch); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestAgentReadinessTracksDNSPrerequisite(t *testing.T) {
+	a := newOperationTestAgent(t, &reconcilerRuntime{})
+	ready := false
+	a.SetReadiness(func() bool { return ready })
+	if a.ready() {
+		t.Fatal("agent advertised readiness without DNS listeners")
+	}
+	if err := a.StartGroup(t.Context(), singleTaskRequest()); err == nil {
+		t.Fatal("agent accepted a new start without DNS listeners")
+	}
+	ready = true
+	if !a.ready() {
+		t.Fatal("agent did not recover readiness after listener restart")
+	}
+	ready = false
+	if a.ready() {
+		t.Fatal("agent retained readiness after DNS listener failure")
+	}
+}
+
+func TestIdleNamespaceForgetsTopologyButPendingStartsAndCleanupRetainIt(t *testing.T) {
+	a := newOperationTestAgent(t, &reconcilerRuntime{})
+	a.networkPlans = map[string]network.Plan{"acme": {CIDR: "10.42.1.0/24"}}
+	done := make(chan struct{})
+	a.starts = map[string]*groupStart{"pulling": {namespace: "acme", done: done}}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.forgetIdleNetworkPlanLocked("acme")
+	if _, ok := a.networkPlans["acme"]; !ok {
+		t.Fatal("a pending image pull lost its authoritative topology")
+	}
+	close(done)
+	a.allocations["cleanup"] = &Allocation{Namespace: "acme", NetworkIntent: &network.AttachmentIntent{}}
+	a.forgetIdleNetworkPlanLocked("acme")
+	if _, ok := a.networkPlans["acme"]; !ok {
+		t.Fatal("retained network intent lost its authoritative topology")
+	}
+	delete(a.allocations, "cleanup")
+	a.forgetIdleNetworkPlanLocked("acme")
+	if _, ok := a.networkPlans["acme"]; ok {
+		t.Fatal("recreated idle namespace would inherit its old subnet and peers")
+	}
 }

@@ -2,6 +2,7 @@ package network
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -57,6 +59,23 @@ func newRecoveryTestManager(t *testing.T) (*WireGuardManager, *absentRunner) {
 
 func recoveryTestPlan() Plan {
 	return Plan{CIDR: "10.42.1.0/24", Gateway: "10.42.1.1", WireGuardAddress: "169.254.1.1/32", ListenPort: 51917, APIPort: 8126}
+}
+
+func recordTestNetnsInode(t *testing.T, manager *WireGuardManager, id string) {
+	t.Helper()
+	info, err := os.Stat(manager.netnsPath(id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := manager.readAttachmentRecord(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.NetnsCreated, record.NetnsInode = true, info.Sys().(*syscall.Stat_t).Ino
+	raw, _ := json.Marshal(record)
+	if err := writeAtomicFile(manager.journalPath(id), raw); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func attachForRecovery(t *testing.T, manager *WireGuardManager, allocation string) *Attachment {
@@ -510,6 +529,7 @@ func TestDetachAllocationKeepsRecordUntilRemovalSucceeds(t *testing.T) {
 	if err := os.WriteFile(manager.netnsPath("alloc-one"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	recordTestNetnsInode(t, manager, "alloc-one")
 	runner.fail = []string{"ip netns del"}
 	if err := manager.DetachAllocation(context.Background(), "alloc-one"); err == nil {
 		t.Fatal("detach reported success while the network namespace remained")
@@ -561,8 +581,12 @@ func TestAttachFailureRollsBackAndRemovesRecord(t *testing.T) {
 
 func TestAttachFailedRollbackKeepsRecordForLaterDetach(t *testing.T) {
 	manager, runner := newRecoveryTestManager(t)
-	if err := os.WriteFile(manager.netnsPath("alloc-one"), nil, 0o600); err != nil {
-		t.Fatal(err)
+	runner.hook = func(command string) {
+		if command == "ip netns add alloc-one" {
+			if err := os.WriteFile(manager.netnsPath("alloc-one"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 	runner.fail = []string{"ip -n alloc-one addr add", "ip netns del"}
 	if _, err := manager.Attach(context.Background(), AttachRequest{Namespace: "acme", Network: "acme", AllocationID: "alloc-one", Plan: recoveryTestPlan()}); err == nil {
@@ -652,10 +676,14 @@ func TestDetachAllocationRemovesRealNetworkNamespace(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = run.Run(ctx, "ip", "netns", "del", allocation) })
+	recordTestNetnsInode(t, manager, allocation)
 	if err := run.Run(ctx, "ip", "link", "add", hostVeth, "type", "veth", "peer", "name", peerVeth); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = run.Run(ctx, "ip", "link", "del", hostVeth) })
+	if err := run.Run(ctx, "ip", "link", "set", "dev", hostVeth, "alias", allocationOwner(allocation)+":"+hostVeth); err != nil {
+		t.Fatal(err)
+	}
 	if err := run.Run(ctx, "ip", "link", "set", peerVeth, "netns", allocation); err != nil {
 		t.Fatal(err)
 	}

@@ -267,7 +267,9 @@ func TestAllocationEndpointDoesNotFallBackForNamespaceNetworking(t *testing.T) {
 		Phase:      lifecycle.PhaseRunning,
 		Health:     lifecycle.HealthHealthy,
 	}
-	s := &Server{allocations: []*Allocation{allocation}, catalog: catalog.New()}
+	s := &Server{allocations: []*Allocation{allocation}, catalog: catalog.New(), jobs: map[string]*Job{
+		jobKey("demo", "web"): {Spec: &spec.JobSpec{Namespace: "demo", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "web", Tasks: allocation.Tasks}}}},
+	}}
 
 	listed := s.ListAllocations("demo", nil)
 	if len(listed) != 1 || listed[0].Address != "" {
@@ -321,7 +323,9 @@ func TestAllocationEndpointKeepsDistinctTaskAddresses(t *testing.T) {
 		Phase:      lifecycle.PhaseRunning,
 		Health:     lifecycle.HealthHealthy,
 	}
-	s := &Server{allocations: []*Allocation{allocation}, catalog: catalog.New()}
+	s := &Server{allocations: []*Allocation{allocation}, catalog: catalog.New(), jobs: map[string]*Job{
+		jobKey("demo", "web"): {Spec: &spec.JobSpec{Namespace: "demo", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "web", Tasks: allocation.Tasks}}}},
+	}}
 
 	listed := s.ListAllocations("demo", nil)
 	if len(listed) != 1 || listed[0].Address != "" || len(listed[0].Endpoints) != 2 {
@@ -334,6 +338,18 @@ func TestAllocationEndpointKeepsDistinctTaskAddresses(t *testing.T) {
 	s.refreshCatalog()
 	if services := s.ListServices("demo", nil); len(services) != 0 {
 		t.Fatalf("catalog = %#v, want ambiguous allocation omitted from allocation-level discovery", services)
+	}
+	// Prove that catalog admission is otherwise live, then verify incremental
+	// updates remove an endpoint when the group becomes ambiguous again.
+	allocation.Endpoints[0].Address = "10.86.213.2"
+	s.refreshCatalogAllocations([]*Allocation{allocation})
+	if services := s.ListServices("demo", nil); len(services) != 1 || services[0].Address != "10.86.213.2" {
+		t.Fatalf("unambiguous group discovery = %#v", services)
+	}
+	allocation.Endpoints[0].Address = "10.86.213.17"
+	s.refreshCatalogAllocations([]*Allocation{allocation})
+	if services := s.ListServices("demo", nil); len(services) != 0 {
+		t.Fatalf("incremental catalog retained ambiguous group: %#v", services)
 	}
 }
 

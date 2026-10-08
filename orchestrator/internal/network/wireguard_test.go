@@ -518,6 +518,7 @@ func TestWireGuardDetachPreservesLeaseAndConvergesAfterCleanupFailure(t *testing
 				if err := os.WriteFile(manager.netnsPath(attachment.AllocationID), nil, 0o600); err != nil {
 					t.Fatal(err)
 				}
+				recordTestNetnsInode(t, manager, attachment.AllocationID)
 			}
 
 			err = manager.Detach(context.Background(), attachment)
@@ -896,7 +897,7 @@ func TestAtomicNetworkPlanWritePreservesPreviousFileOnCommitFailure(t *testing.T
 		t.Fatalf("temporary network plan was not cleaned up: %#v", entries)
 	}
 
-	if err := writeAtomicFile(path, next, 0o600); err != nil {
+	if err := writeAtomicFile(path, next); err != nil {
 		t.Fatal(err)
 	}
 	got, err = os.ReadFile(path)

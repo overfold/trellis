@@ -5,6 +5,7 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base32"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -18,6 +19,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -188,7 +190,15 @@ func (m *WireGuardManager) load(name string) (*Config, error) {
 
 func short(prefix, value string) string {
 	h := sha256.Sum256([]byte(value))
-	return fmt.Sprintf("%s%x", prefix, h[:5])
+	encoded := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(h[:]))
+	if prefix == "" {
+		return encoded
+	}
+	limit := 15 // Linux IFNAMSIZ, excluding the terminating NUL.
+	if strings.HasPrefix(prefix, "TRELLIS-") {
+		limit = 28 // iptables chain name limit.
+	}
+	return prefix + encoded[:limit-len(prefix)]
 }
 
 func allocationAddress(cidr, allocation string) (string, error) {
@@ -264,13 +274,18 @@ func reserveAddress(leaseDir, cidr, allocation string) (address, lease string, e
 	return "", "", fmt.Errorf("network %s has no free allocation addresses", cidr)
 }
 
-func (m *WireGuardManager) ensureLink(ctx context.Context, name string, args ...string) error {
-	if err := m.run.Run(ctx, "ip", append([]string{"link", "add", name}, args...)...); err != nil {
-		if showErr := m.run.Run(ctx, "ip", "link", "show", "dev", name); showErr != nil {
-			return err
-		}
+func (m *WireGuardManager) ensureLink(ctx context.Context, name, owner string, args ...string) error {
+	exists, err := checkLinkOwner(name, owner)
+	if err != nil {
+		return err
 	}
-	return nil
+	if exists {
+		return nil
+	}
+	if err := m.run.Run(ctx, "ip", append([]string{"link", "add", name}, args...)...); err != nil {
+		return err // Never adopt a device after an ambiguous create.
+	}
+	return m.run.Run(ctx, "ip", "link", "set", "dev", name, "alias", owner+":"+name)
 }
 
 const wireGuardCommandArgBudget = 16 << 10
@@ -360,8 +375,8 @@ func conservativePeerPlan(previous, desired []Peer) []Peer {
 	return result
 }
 
-func writeAtomicFile(path string, data []byte, mode os.FileMode) error {
-	return writeAtomicFileWithOps(path, data, mode, os.Rename, os.Open)
+func writeAtomicFile(path string, data []byte) error {
+	return writeAtomicFileWithOps(path, data, 0o600, os.Rename, os.Open)
 }
 
 func writeAtomicFileWithRename(path string, data []byte, mode os.FileMode, rename func(string, string) error) error {
@@ -412,7 +427,7 @@ func (m *WireGuardManager) persistPeerPlan(namespace, networkName string, peers 
 		return fmt.Errorf("create network plan state: %w", err)
 	}
 	raw, _ := json.Marshal(peers)
-	if err := writeAtomicFile(m.planPath(namespace, networkName), raw, 0o600); err != nil {
+	if err := writeAtomicFile(m.planPath(namespace, networkName), raw); err != nil {
 		return fmt.Errorf("persist applied network plan: %w", err)
 	}
 	return nil
@@ -517,6 +532,14 @@ func (m *WireGuardManager) UpdatePlan(ctx context.Context, namespace string, pla
 	if plan.ListenPort < 1 || plan.ListenPort > 65535 {
 		return fmt.Errorf("WireGuard listen port %d is invalid", plan.ListenPort)
 	}
+	for _, name := range []string{wg, short("tb", namespace+"\x00"+namespace)} {
+		if _, err := checkLinkOwner(name, pathOwner(namespace, namespace)); err != nil {
+			return err
+		}
+		if err := m.disableIPv6(ctx, name); err != nil {
+			return err
+		}
+	}
 	if err := m.run.Run(ctx, "ip", "addr", "replace", plan.WireGuardAddress, "dev", wg); err != nil {
 		return fmt.Errorf("configure WireGuard address: %w", err)
 	}
@@ -588,6 +611,9 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 	}
 	wg, bridge, hostVeth, peerVeth := short("tw", namespace+"\x00"+networkName), short("tb", namespace+"\x00"+networkName), short("vh", allocation), short("vc", allocation)
 	ns := m.netnsPath(allocation)
+	if err := m.checkResourceOwnership(namespace, networkName, allocation); err != nil {
+		return nil, err
+	}
 	// Journal the attachment before creating anything, so an agent that
 	// crashes before it learns the result can still detach by allocation ID.
 	if err := m.recordAttachment(attachmentRecord{AllocationID: allocation, Namespace: namespace, Network: networkName, CIDR: cfg.CIDR, Gateway: cfg.Gateway, APIPort: request.Plan.APIPort, Ports: ports}); err != nil {
@@ -615,8 +641,11 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 		return nil, err
 	}
 	// Every command is idempotently reconciled; "replace" is used for routes.
-	if err = m.ensureLink(ctx, bridge, "type", "bridge"); err != nil {
+	if err = m.ensureLink(ctx, bridge, pathOwner(namespace, networkName), "type", "bridge"); err != nil {
 		return nil, fmt.Errorf("create bridge: %w", err)
+	}
+	if err = m.disableIPv6(ctx, bridge); err != nil {
+		return nil, err
 	}
 	if err = m.run.Run(ctx, "ip", "addr", "replace", cfg.Gateway+"/"+strings.Split(cfg.CIDR, "/")[1], "dev", bridge); err != nil {
 		return nil, fmt.Errorf("configure bridge address: %w", err)
@@ -624,8 +653,11 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 	if err = m.run.Run(ctx, "ip", "link", "set", bridge, "up"); err != nil {
 		return nil, err
 	}
-	if err = m.ensureLink(ctx, wg, "type", "wireguard"); err != nil {
+	if err = m.ensureLink(ctx, wg, pathOwner(namespace, networkName), "type", "wireguard"); err != nil {
 		return nil, fmt.Errorf("create WireGuard interface: %w", err)
+	}
+	if err = m.disableIPv6(ctx, wg); err != nil {
+		return nil, err
 	}
 	if err = m.run.Run(ctx, "ip", "addr", "replace", cfg.WireGuardAddress, "dev", wg); err != nil {
 		return nil, fmt.Errorf("configure WireGuard address: %w", err)
@@ -671,7 +703,27 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 	if err = m.run.Run(ctx, "ip", "netns", "add", allocation); err != nil {
 		return nil, err
 	}
+	record, err := m.readAttachmentRecord(allocation)
+	if err != nil {
+		return nil, err
+	}
+	record.NetnsCreated = true
+	if info, statErr := os.Stat(ns); statErr == nil {
+		record.NetnsInode = info.Sys().(*syscall.Stat_t).Ino
+	} else if !os.IsNotExist(statErr) {
+		return nil, statErr
+	}
+	raw, _ := json.Marshal(record)
+	if err = writeAtomicFile(m.journalPath(allocation), raw); err != nil {
+		return nil, err
+	}
 	if err = m.run.Run(ctx, "ip", "link", "add", hostVeth, "type", "veth", "peer", "name", peerVeth); err != nil {
+		return nil, err
+	}
+	if err = m.run.Run(ctx, "ip", "link", "set", "dev", hostVeth, "alias", allocationOwner(allocation)+":"+hostVeth); err != nil {
+		return nil, err
+	}
+	if err = m.disableIPv6(ctx, hostVeth); err != nil {
 		return nil, err
 	}
 	if err = m.run.Run(ctx, "ip", "link", "set", hostVeth, "master", bridge); err != nil {
@@ -715,6 +767,15 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 		LeasePath:          lease,
 		Ports:              ports,
 	}, nil
+}
+
+// Namespace networking is IPv4-only. Disable IPv6 before links come up, so
+// automatic link-local addresses cannot create an unfiltered host-input path.
+func (m *WireGuardManager) disableIPv6(ctx context.Context, name string) error {
+	if _, err := os.Stat("/proc/sys/net/ipv6"); os.IsNotExist(err) {
+		return nil // Kernel built without IPv6.
+	}
+	return m.run.Run(ctx, "sysctl", "-w", "net.ipv6.conf."+name+".disable_ipv6=1")
 }
 
 // Detach removes networking resources for an allocation. Resources that

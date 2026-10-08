@@ -309,6 +309,25 @@ curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/upgra
 sudo env TRELLIS_CONFIG="$HOME/.config/trellis/config.yaml" bash /tmp/trellis-upgrade.sh
 ```
 
+### Namespace network resource upgrades
+
+Namespace network resources now use longer names and kernel ownership markers;
+attachment journals use resource version 2. Before crossing from the old 40-bit
+name scheme, evacuate each node **with the old binary still running**, and
+confirm its network attachment journals have been removed by successful stops.
+On a single-node cluster, stop the affected jobs and wait for allocation cleanup
+before replacing the binary; reapply them afterward. This transition requires
+workload downtime on a single node. Do not merely delete the journal files.
+
+The new binary refuses older journals instead of deriving new names and falsely
+reporting that the old resources were cleaned up. If upgraded prematurely, use
+the creating binary to finish cleanup first. An ownership mismatch also preserves
+the journal and resources: investigate the named link or network namespace.
+Never add ownership markers to an unrelated device to force adoption. A crash
+between resource creation and ownership recording may require operator removal
+of the confirmed orphan after its workload is stopped; Trellis fails closed
+rather than assuming that a matching device name proves ownership.
+
 ### Raft snapshot format upgrades
 
 The application snapshot writer now uses format v2. It still reads the bare

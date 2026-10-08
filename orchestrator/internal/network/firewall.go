@@ -96,6 +96,10 @@ func namespaceRules(bridge, wg, cidr, gateway, dnsAddress string, apiPort int) [
 	}
 	add("", true, inputChain, "-i", bridge, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT")
 	add("", false, inputChain, "-i", bridge, "-j", "DROP")
+	// Remote peers may reply to node-initiated connections, but must not
+	// reach host services through the decrypted WireGuard ingress path.
+	add("", true, inputChain, "-i", wg, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT")
+	add("", false, inputChain, "-i", wg, "-j", "DROP")
 
 	if cidr != "" {
 		add("nat", false, postroutingChain, "-s", cidr, "-o", wg, "-j", "RETURN")
@@ -119,6 +123,23 @@ func (m *WireGuardManager) reconcileFirewall(ctx context.Context, bridge, wg, ci
 	for _, jump := range chainJumps {
 		if err := m.ensureJumpChain(ctx, jump); err != nil {
 			return err
+		}
+	}
+	// Topology updates do not carry group API grants. Reconstruct all live
+	// grants from attachment journals after a host firewall flush/reload.
+	ids, err := m.attachmentIDsLocked()
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		record, err := m.readAttachmentRecord(id)
+		if err != nil {
+			return err
+		}
+		if short("tb", record.Namespace+"\x00"+record.Network) == bridge && record.APIPort > 0 {
+			if err := m.ensureRule(ctx, "", "-I", inputChain, "-i", bridge, "-s", record.CIDR, "-d", record.Gateway, "-p", "tcp", "--dport", fmt.Sprint(record.APIPort), "-j", "ACCEPT"); err != nil {
+				return err
+			}
 		}
 	}
 	for _, rule := range namespaceRules(bridge, wg, prefix.String(), gateway, m.dnsAddress, apiPort) {

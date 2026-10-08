@@ -145,8 +145,8 @@ func TestNamespaceFirewallFiltersHostTrafficBeforeHostAcceptRules(t *testing.T) 
 		t.Fatalf("FORWARD = %q, want %q", model.chains["FORWARD"], want)
 	}
 	input := model.chains[inputChain]
-	if len(input) != 10 {
-		t.Fatalf("%s has %d rules after repeated reconciliation, want 10:\n%s", inputChain, len(input), strings.Join(input, "\n"))
+	if len(input) != 14 {
+		t.Fatalf("%s has %d rules after repeated reconciliation, want 14:\n%s", inputChain, len(input), strings.Join(input, "\n"))
 	}
 	for _, bridge := range []string{"tb-acme", "tb-other"} {
 		drop := slices.Index(input, "-i "+bridge+" -j DROP")
@@ -218,7 +218,7 @@ func TestNamespacePathRemovalDeletesTrellisChainsAfterLastPath(t *testing.T) {
 			t.Fatalf("%s kept rule for detached bridge: %q", inputChain, rule)
 		}
 	}
-	if len(model.chains[inputChain]) != 5 || model.chains["INPUT"][0] != "-j "+inputChain {
+	if len(model.chains[inputChain]) != 7 || model.chains["INPUT"][0] != "-j "+inputChain {
 		t.Fatalf("remaining namespace lost its input filtering: INPUT=%q %s=%q", model.chains["INPUT"], inputChain, model.chains[inputChain])
 	}
 
