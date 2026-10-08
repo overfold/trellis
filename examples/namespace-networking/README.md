@@ -11,6 +11,8 @@ The `web` task group runs two tutorial allocations. Once they are healthy, Trell
 web.namespace-networking.default.trellis
 ```
 
+Each of the group (`web`), job (`namespace-networking`), and namespace (`default`) is one name component. When adapting the example, use letters, digits, underscores or hyphens, begin with a letter or digit, stay within 63 characters, and do not put dots in those three identifiers. Task, secret, and volume names may still contain dots. Names that differ only by case must not share a discovery name.
+
 The `observer` group runs the same small tutorial image with an opt-in peer probe. Every ten seconds it requests the `web` group's `/health` endpoint through that DNS name. This makes namespace networking and discovery visible in ordinary task logs instead of requiring a special debugging image.
 
 ## Prepare the nodes

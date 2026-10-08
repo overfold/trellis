@@ -61,6 +61,12 @@ func (v ValidationErrors) Error() string {
 // ValidIdentifier reports whether value is safe for use as an identifier.
 func ValidIdentifier(value string) bool { return identifierPattern.MatchString(value) }
 
+// ValidDiscoveryIdentifier reports whether an identifier occupies exactly one
+// component of group.job.namespace.trellis. Case is preserved, not normalized.
+func ValidDiscoveryIdentifier(value string) bool {
+	return ValidIdentifier(value) && !strings.Contains(value, ".")
+}
+
 // Validate checks that a job specification is complete and internally consistent.
 func Validate(job *JobSpec) error {
 	if job == nil {
@@ -74,13 +80,13 @@ func Validate(job *JobSpec) error {
 
 	if strings.TrimSpace(job.Name) == "" {
 		add("name", "required", "job name is required")
-	} else if !identifierPattern.MatchString(job.Name) {
-		add("name", "invalid_identifier", "job name must be a safe identifier")
+	} else if !ValidDiscoveryIdentifier(job.Name) {
+		add("name", "invalid_identifier", "job name must be 1-63 letters, digits, underscores or hyphens, begin with a letter or digit, and contain no dots")
 	}
 	if strings.TrimSpace(job.Namespace) == "" {
 		add("namespace", "required", "job namespace is required")
-	} else if !identifierPattern.MatchString(job.Namespace) {
-		add("namespace", "invalid_identifier", "job namespace must be a safe identifier")
+	} else if !ValidDiscoveryIdentifier(job.Namespace) {
+		add("namespace", "invalid_identifier", "job namespace must be 1-63 letters, digits, underscores or hyphens, begin with a letter or digit, and contain no dots")
 	}
 	if len(job.TaskGroups) == 0 {
 		add("task_groups", "required", "at least one task group is required")
@@ -95,8 +101,8 @@ func Validate(job *JobSpec) error {
 		if strings.TrimSpace(group.Name) == "" {
 			add(groupPath+".name", "required", "name is required")
 		} else {
-			if !identifierPattern.MatchString(group.Name) {
-				add(groupPath+".name", "invalid_identifier", "name must be a safe identifier")
+			if !ValidDiscoveryIdentifier(group.Name) {
+				add(groupPath+".name", "invalid_identifier", "name must be 1-63 letters, digits, underscores or hyphens, begin with a letter or digit, and contain no dots")
 			}
 			if _, exists := groups[group.Name]; exists {
 				add(groupPath+".name", "duplicate", fmt.Sprintf("duplicate task group %q", group.Name))

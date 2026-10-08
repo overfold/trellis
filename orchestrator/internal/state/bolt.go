@@ -520,20 +520,20 @@ func ValidateDesiredSnapshot(snapshot *DesiredSnapshot, additionalJobValidation 
 	}
 	for key, raw := range snapshot.VolumeRegistrations {
 		var record volumeRegistration
-		if key == "" || json.Unmarshal(raw, &record) != nil || record.Namespace == "" || record.Name == "" || record.NodeID == uuid.Nil || key != url.QueryEscape(record.Namespace+"/"+record.Name) {
+		if key == "" || json.Unmarshal(raw, &record) != nil || !spec.ValidDiscoveryIdentifier(record.Namespace) || record.Name == "" || record.NodeID == uuid.Nil || key != url.QueryEscape(record.Namespace+"/"+record.Name) {
 			return fmt.Errorf("invalid volume registration %q", key)
 		}
 	}
 	for key, raw := range snapshot.NetworkPortRegistrations {
 		var record networkPortRegistration
-		if key == "" || json.Unmarshal(raw, &record) != nil || record.Namespace == "" || record.Slot < 0 || key != url.QueryEscape(record.Namespace) {
+		if key == "" || json.Unmarshal(raw, &record) != nil || !spec.ValidDiscoveryIdentifier(record.Namespace) || record.Slot < 0 || key != url.QueryEscape(record.Namespace) {
 			return fmt.Errorf("invalid network port registration %q", key)
 		}
 	}
 	subnetIndexes := make(map[int]string, len(snapshot.NetworkSubnetRegistrations))
 	for key, raw := range snapshot.NetworkSubnetRegistrations {
 		var record networkSubnetRegistration
-		if key == "" || json.Unmarshal(raw, &record) != nil || record.Namespace == "" || record.NodeID == uuid.Nil || record.Index < 0 || key != url.QueryEscape(record.Namespace)+"/"+record.NodeID.String() {
+		if key == "" || json.Unmarshal(raw, &record) != nil || !spec.ValidDiscoveryIdentifier(record.Namespace) || record.NodeID == uuid.Nil || record.Index < 0 || key != url.QueryEscape(record.Namespace)+"/"+record.NodeID.String() {
 			return fmt.Errorf("invalid network subnet registration %q", key)
 		}
 		if previous, exists := subnetIndexes[record.Index]; exists {
@@ -543,7 +543,7 @@ func ValidateDesiredSnapshot(snapshot *DesiredSnapshot, additionalJobValidation 
 	}
 	for key, raw := range snapshot.Secrets {
 		var record secretRecord
-		if json.Unmarshal(raw, &record) != nil || record.Namespace == "" || record.Name == "" || record.Version == 0 || record.RecordID == "" || record.KeyID == "" || record.CiphertextSize < 1 || key != url.PathEscape(record.Namespace)+"/"+url.PathEscape(record.Name) {
+		if json.Unmarshal(raw, &record) != nil || !spec.ValidDiscoveryIdentifier(record.Namespace) || record.Name == "" || record.Version == 0 || record.RecordID == "" || record.KeyID == "" || record.CiphertextSize < 1 || key != url.PathEscape(record.Namespace)+"/"+url.PathEscape(record.Name) {
 			return fmt.Errorf("invalid secret record %q", key)
 		}
 		for _, encoded := range []string{record.Nonce, record.Ciphertext, record.WrapNonce, record.WrappedDEK} {

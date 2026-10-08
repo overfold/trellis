@@ -24,6 +24,34 @@ func TestGenerateDeterministic(t *testing.T) {
 	}
 }
 
+func TestDiscoveryIdentifierPatterns(t *testing.T) {
+	apiRaw, yamlRaw, err := Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range [][]byte{apiRaw, yamlRaw} {
+		var root map[string]any
+		if err := json.Unmarshal(raw, &root); err != nil {
+			t.Fatal(err)
+		}
+		defs := root["$defs"].(map[string]any)
+		props := root["properties"].(map[string]any)
+		for _, p := range []map[string]any{props["name"].(map[string]any), props["namespace"].(map[string]any), property(t, defs, "TaskGroupSpec", "name")} {
+			pattern := regexp.MustCompile(p["pattern"].(string))
+			for _, name := range []string{"Web_1-", "a.b", "", "-a", "a" + string(bytes.Repeat([]byte("b"), 63))} {
+				if pattern.MatchString(name) != spec.ValidDiscoveryIdentifier(name) {
+					t.Fatalf("schema/validator disagree on %q", name)
+				}
+			}
+		}
+		for _, def := range []string{"TaskSpec", "SecretRefSpec", "VolumeSpec"} {
+			if !regexp.MustCompile(property(t, defs, def, "name")["pattern"].(string)).MatchString("a.b") {
+				t.Fatalf("%s name lost dot support", def)
+			}
+		}
+	}
+}
+
 func TestYAMLSchemaOnlyAddsAuthoringRepresentation(t *testing.T) {
 	apiRaw, yamlRaw, err := Generate()
 	if err != nil {

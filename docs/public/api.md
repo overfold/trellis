@@ -6,6 +6,8 @@ The control-plane API defaults to port 8128. Ordinary operator and workload call
 
 Every namespaced resource names its namespace in the path: `/v1/namespaces/{namespace}/jobs`, `/allocations`, `/events`, and `/secrets`. There is no namespace header and no implicit default namespace. Listing across namespaces is a separate, explicit cluster-scoped request (`GET /v1/allocations`, `GET /v1/events`).
 
+Namespace, job, and task-group identifiers must be single components without dots (1–63 letters, digits, `_` or `-`, beginning with a letter or digit). Invalid namespace/job/group path parameters return `400`. Invalid job specifications in plan/apply return `422` with path-specific `invalid_identifier` issues before persistence. The CLI's local manifest validation applies the same rule. Task, secret, and volume names retain dot support. Identities are never split, case-normalized, or renamed; [legacy dotted state requires preparation before upgrade](operations.md#discovery-identifier-upgrades).
+
 JSON request bodies must be sent with `Content-Type: application/json` (otherwise `415`) and are decoded strictly, with the same rules as YAML manifests and the published schemas: a body must contain exactly one JSON value, and unknown fields, trailing data, and an empty body are rejected with `400` and a `message` naming the problem (for example `invalid request body: json: unknown field "imgae"`). Bodies are size-limited per route; an oversized body returns `413`. Job submissions and plans are limited to 4 MiB, backup restores to 64 MiB, secret writes to 96 KiB, and other JSON requests to 64 KiB or 1 MiB. Exec uses the WebSocket frame limits described below, not a JSON request body.
 
 Trellis distinguishes three credential kinds:

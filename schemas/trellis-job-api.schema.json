@@ -295,7 +295,7 @@
           "type": "object"
         },
         "name": {
-          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$",
           "type": "string"
         },
         "restart": {
@@ -490,11 +490,11 @@
   "description": "Canonical JSON representation accepted by the Trellis API. Human authoring syntaxes must convert quantities and durations before submission.",
   "properties": {
     "name": {
-      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$",
       "type": "string"
     },
     "namespace": {
-      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$",
       "type": "string"
     },
     "task_groups": {

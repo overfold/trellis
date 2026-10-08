@@ -2,6 +2,7 @@ package spec
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -29,6 +30,46 @@ func TestParseYAML(t *testing.T) {
 	}
 	if got := job.TaskGroups[0].Tasks[0].Networking.Ports[0].Port; got != 8080 {
 		t.Fatalf("port = %d, want 8080", got)
+	}
+}
+
+func TestDiscoveryIdentityValidation(t *testing.T) {
+	for _, field := range []string{"namespace", "job", "group"} {
+		t.Run(field, func(t *testing.T) {
+			job := validJob()
+			switch field {
+			case "namespace":
+				job.Namespace = "team.prod"
+			case "job":
+				job.Name = "web.v1"
+			case "group":
+				job.TaskGroups[0].Name = "api.v1"
+			}
+			for _, validate := range []func(*JobSpec) error{Validate, func(job *JobSpec) error { return Canonicalize(job, DefaultLimits()) }, ValidateCanonical} {
+				var issues ValidationErrors
+				if err := validate(job); !errors.As(err, &issues) || len(issues) != 1 || issues[0].Code != "invalid_identifier" {
+					t.Fatalf("expected one identifier error: %v", err)
+				}
+			}
+		})
+	}
+	job := validJob()
+	job.Name, job.Namespace, job.TaskGroups[0].Name = "Web-1", "Team_2", "API_3"
+	task := &job.TaskGroups[0].Tasks[0]
+	task.Name = "app.v1"
+	task.Secrets = []SecretRefSpec{{Name: "db.password", Target: SecretTargetEnv, Env: "PASSWORD"}}
+	task.Volumes = []VolumeSpec{{Name: "data.v1", HostPath: "@/data", ContainerPath: "/data"}}
+	if err := Canonicalize(job, DefaultLimits()); err != nil {
+		t.Fatal(err)
+	}
+	if job.Name != "Web-1" || job.Namespace != "Team_2" || job.TaskGroups[0].Name != "API_3" {
+		t.Fatal("canonicalization changed identity case")
+	}
+	for _, value := range []string{"a", "A_1-", strings.Repeat("a", 63), strings.Repeat("a", 64), ".a", "a.b", "a.", "a..b", ""} {
+		want := value == "a" || value == "A_1-" || value == strings.Repeat("a", 63)
+		if ValidDiscoveryIdentifier(value) != want {
+			t.Fatalf("ValidDiscoveryIdentifier(%q) != %v", value, want)
+		}
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 
 	"github.com/overfold/trellis/orchestrator/api"
 	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
 // ServiceInstance describes one discoverable allocation endpoint.
@@ -35,6 +36,7 @@ func New() *ServiceCatalog {
 func (c *ServiceCatalog) Update(namespace string, instances []ServiceInstance) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	instances = discoveryInstances(namespace, instances)
 	if len(instances) == 0 {
 		delete(c.services, namespace)
 	} else {
@@ -48,6 +50,7 @@ func (c *ServiceCatalog) Replace(services map[string][]ServiceInstance) {
 	defer c.mu.Unlock()
 	c.services = make(map[string][]ServiceInstance, len(services))
 	for namespace, instances := range services {
+		instances = discoveryInstances(namespace, instances)
 		if len(instances) != 0 {
 			c.services[namespace] = append([]ServiceInstance(nil), instances...)
 		}
@@ -77,8 +80,24 @@ func (c *ServiceCatalog) ReplaceInstances(ids map[string]bool, replacements map[
 		}
 	}
 	for namespace, instances := range replacements {
-		c.services[namespace] = append(c.services[namespace], instances...)
+		if instances = discoveryInstances(namespace, instances); len(instances) != 0 {
+			c.services[namespace] = append(c.services[namespace], instances...)
+		}
 	}
+}
+
+// Legacy or malformed allocation identities must never enter discovery.
+func discoveryInstances(namespace string, instances []ServiceInstance) []ServiceInstance {
+	if !spec.ValidDiscoveryIdentifier(namespace) {
+		return nil
+	}
+	var valid []ServiceInstance
+	for _, instance := range instances {
+		if spec.ValidDiscoveryIdentifier(instance.Job) && spec.ValidDiscoveryIdentifier(instance.Group) {
+			valid = append(valid, instance)
+		}
+	}
+	return valid
 }
 
 // Lookup returns instances for a job in a namespace.

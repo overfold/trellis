@@ -125,6 +125,9 @@ func (s *StateController) ListJobs(ctx context.Context) (map[string]*Job, error)
 	}
 	result := make(map[string]*Job, len(values))
 	for _, job := range values {
+		if err := spec.ValidateCanonical(job.Spec); err != nil {
+			return nil, fmt.Errorf("invalid persisted job (repair before upgrading): %w", err)
+		}
 		result[jobKey(job.Spec.Namespace, job.Spec.Name)] = job
 	}
 	return result, nil
@@ -596,6 +599,9 @@ func (s *StateController) listJobRevisions(ctx context.Context, prefix string, l
 		var record JobRevisionRecord
 		if err := json.Unmarshal(raw, &record); err != nil {
 			return fmt.Errorf("unmarshal job revision: %w", err)
+		}
+		if err := spec.ValidateCanonical(record.Spec); err != nil {
+			return fmt.Errorf("invalid persisted job revision (repair before upgrading): %w", err)
 		}
 		result = append(result, &record)
 		sort.Slice(result, func(i, j int) bool { return result[i].Version < result[j].Version })

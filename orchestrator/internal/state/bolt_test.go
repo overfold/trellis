@@ -241,6 +241,61 @@ func TestRestoreDesiredRejectsInvalidSnapshotWithoutWriting(t *testing.T) {
 	}
 }
 
+func TestRestoreDottedDiscoveryIdentityIsAtomic(t *testing.T) {
+	for _, field := range []string{"namespace", "job", "group", "volume namespace", "port namespace", "subnet namespace", "secret namespace"} {
+		t.Run(field, func(t *testing.T) {
+			store, err := NewBoltStore(filepath.Join(t.TempDir(), "test.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = store.Close() }()
+			_, raw := validSnapshotJob(t, "default", "web", 1)
+			var job persistedJob
+			if err := json.Unmarshal(raw, &job); err != nil {
+				t.Fatal(err)
+			}
+			snapshot := &DesiredSnapshot{}
+			switch field {
+			case "namespace":
+				job.Spec.Namespace = "team.prod"
+			case "job":
+				job.Spec.Name = "web.v1"
+			case "group":
+				job.Spec.TaskGroups[0].Name = "api.v1"
+			case "volume namespace":
+				snapshot.VolumeRegistrations = map[string][]byte{url.QueryEscape("team.prod/data.v1"): []byte(`{"namespace":"team.prod","name":"data.v1","node_id":"11111111-1111-1111-1111-111111111111"}`)}
+			case "port namespace":
+				snapshot.NetworkPortRegistrations = map[string][]byte{"team.prod": []byte(`{"namespace":"team.prod","slot":0}`)}
+			case "subnet namespace":
+				snapshot.NetworkSubnetRegistrations = map[string][]byte{"team.prod/11111111-1111-1111-1111-111111111111": []byte(`{"namespace":"team.prod","node_id":"11111111-1111-1111-1111-111111111111","index":0}`)}
+			case "secret namespace":
+				snapshot.Secrets = map[string][]byte{"team.prod/db.password": []byte(`{"namespace":"team.prod","name":"db.password","version":1,"record_id":"r","key_id":"k","ciphertext_size":1,"nonce":"YQ","ciphertext":"YQ","wrap_nonce":"YQ","wrapped_dek":"YQ"}`)}
+			}
+			key := url.QueryEscape(job.Spec.Namespace + "\x00" + job.Spec.Name)
+			raw, err = json.Marshal(job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			snapshot.Jobs = map[string][]byte{key: raw}
+			if err := store.RestoreDesired("test", snapshot); err == nil {
+				t.Fatal("restore accepted dotted identity")
+			}
+			entries, err := store.List(t.Context(), "trellis/test/")
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("invalid restore wrote state: %v, %v", entries, err)
+			}
+			// Namespace restrictions must not narrow ordinary resource names.
+			safe := &DesiredSnapshot{
+				VolumeRegistrations: map[string][]byte{url.QueryEscape("default/data.v1"): []byte(`{"namespace":"default","name":"data.v1","node_id":"11111111-1111-1111-1111-111111111111"}`)},
+				Secrets:             map[string][]byte{"default/db.password": []byte(`{"namespace":"default","name":"db.password","version":1,"record_id":"r","key_id":"k","ciphertext_size":1,"nonce":"YQ","ciphertext":"YQ","wrap_nonce":"YQ","wrapped_dek":"YQ"}`)},
+			}
+			if err := ValidateDesiredSnapshot(safe, nil); err != nil {
+				t.Fatalf("dotted ordinary names rejected: %v", err)
+			}
+		})
+	}
+}
+
 func TestValidateDesiredSnapshotRejectsInvalidNetworkSubnetRegistrations(t *testing.T) {
 	node := "11111111-1111-1111-1111-111111111111"
 	other := "22222222-2222-2222-2222-222222222222"

@@ -118,8 +118,8 @@ func jsonTypeName(t reflect.Type) string {
 // namespaceParam validates the {namespace} path parameter and authorizes the caller.
 func namespaceParam(c *echo.Context) (string, error) {
 	namespace := c.Param("namespace")
-	if !spec.ValidIdentifier(namespace) {
-		return "", echo.NewHTTPError(http.StatusBadRequest, "invalid namespace")
+	if !spec.ValidDiscoveryIdentifier(namespace) {
+		return "", echo.NewHTTPError(http.StatusBadRequest, "invalid namespace: must be a single identifier without dots")
 	}
 	authz := authorization(c)
 	if authz.root || authz.scope == auth.AccessCluster {

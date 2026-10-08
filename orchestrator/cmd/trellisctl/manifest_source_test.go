@@ -4,9 +4,35 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestReadManifestRejectsDottedDiscoveryIdentity(t *testing.T) {
+	for _, field := range []string{"namespace", "job", "group"} {
+		t.Run(field, func(t *testing.T) {
+			namespace, job, group := "default", "web", "api"
+			switch field {
+			case "namespace":
+				namespace = "team.prod"
+			case "job":
+				job = "web.v1"
+			case "group":
+				group = "api.v1"
+			}
+			path := filepath.Join(t.TempDir(), "trellis.yaml")
+			raw := "namespace: " + namespace + "\nname: " + job + "\ntask_groups:\n  - name: " + group + "\n    count: 1\n    tasks:\n      - name: app.v1\n        image: example/app:1\n"
+			if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := readJobManifest(t.Context(), path); err == nil || !strings.Contains(err.Error(), "dots") {
+				t.Fatalf("expected actionable dot error: %v", err)
+			}
+		})
+	}
+}
 
 func TestParseGitHubManifestSource(t *testing.T) {
 	tests := []struct {

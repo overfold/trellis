@@ -307,6 +307,18 @@ curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/upgra
 sudo env TRELLIS_CONFIG="$HOME/.config/trellis/config.yaml" bash /tmp/trellis-upgrade.sh
 ```
 
+### Discovery identifier upgrades
+
+Older versions accepted dots in namespace, job, and task-group names even though their discovery names did not resolve. These names are now rejected; there is no automatic dot-to-hyphen conversion, escaping, or identity-boundary reinterpretation. Task, secret, and volume names are unchanged.
+
+Before upgrading, save a [desired-state backup](#backups) and a consistent recovery copy of stopped nodes' data directories, configuration, and separately protected secrets keys. Inspect manifests, live jobs, and retained job versions for dotted namespace/job/group names, and inspect namespace-bearing secret, volume, and network registrations in the backup. Merely applying a renamed group is insufficient: its old retained versions still contain the dotted identity.
+
+While still running the old version, create replacement jobs with explicitly chosen single-component names, update application DNS references, and delete the old jobs (which also removes their version history). Verify workload and attachment cleanup, including unreachable/lost allocations, before proceeding. A namespace rename is resource recreation, not a metadata edit: recreate secrets from their original secure source and plan volume-data transfer/locality explicitly. Do not rewrite encrypted secret namespaces or volume registrations in a backup; their identity and node-side paths matter.
+
+If residual dotted namespaces remain in registrations, or safe cleanup cannot be confirmed, migrate workloads and their data to a fresh cluster with valid names rather than editing Bolt/Raft state. Keep the old cluster and recovery copies until the replacement is verified. Do not restore a legacy dotted backup into the new version: restore rejects it atomically, including dotted historical jobs and namespace-bearing registrations.
+
+Loading an invalid persisted job or reading an invalid retained revision returns a repair diagnostic; control-plane startup/leadership reload refuses invalid live jobs rather than scheduling or renaming them. Legacy allocation discovery entries are excluded from the catalog and DNS cache. Already-running containers are not automatically migrated or stopped by this validation change. If an upgrade was attempted prematurely, stop the upgraded nodes and return to the prior binaries with intact state (or the saved recovery copy) to perform cleanup; do not expect the new API to delete invalid dotted paths.
+
 ## Leadership activation failures
 
 Leadership activation failures (Raft barrier, state reload, or epoch acquisition) shut the node down fail-closed with a nonzero exit status. The first-party `Restart=on-failure` systemd unit restarts it; the daemon does not retry activation in place. Inspect `journalctl -u trellis` if faults persist. Requested SIGTERM/SIGINT shutdown remains successful.

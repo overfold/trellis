@@ -180,11 +180,11 @@ func jsonFieldName(field reflect.StructField) string {
 }
 
 func applySemanticConstraints(root schema) {
-	set(root, []string{"properties", "name"}, identifier())
-	set(root, []string{"properties", "namespace"}, identifier())
+	set(root, []string{"properties", "name"}, discoveryIdentifier())
+	set(root, []string{"properties", "namespace"}, discoveryIdentifier())
 	patch(root, []string{"properties", "task_groups"}, schema{"minItems": 1})
 
-	patchDef(root, "TaskGroupSpec", "name", identifier())
+	patchDef(root, "TaskGroupSpec", "name", discoveryIdentifier())
 	patchDef(root, "TaskGroupSpec", "count", schema{"minimum": 1})
 	patchDef(root, "TaskGroupSpec", "tasks", schema{"minItems": 1})
 	patchDef(root, "TaskGroupSpec", "labels", schema{
@@ -407,6 +407,10 @@ func removeEmptyEnum(value schema) {
 
 func identifier() schema {
 	return schema{"type": "string", "pattern": `^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$`}
+}
+
+func discoveryIdentifier() schema {
+	return schema{"type": "string", "pattern": `^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$`}
 }
 
 func def(root schema, name string) schema {

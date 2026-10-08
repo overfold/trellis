@@ -310,7 +310,7 @@ health_check:
 
 ## Validation and editor tooling
 
-Job, namespace, group, task, secret, and volume identifiers accept letters, digits, `_`, `.`, and `-`, must begin with a letter or digit, and are limited to 63 characters. Unknown YAML fields are rejected by the first-party parser.
+Job, namespace, and task-group identifiers accept letters, digits, `_`, and `-`, must begin with a letter or digit, and are limited to 63 characters. Dots are forbidden because each identity occupies one component of `group.job.namespace.trellis`. Task, secret, and volume identifiers additionally allow dots; they are not discovery-name components. Identifiers remain case-sensitive and canonicalization never renames them. Unknown YAML fields are rejected by the first-party parser. See the [upgrade compatibility note](operations.md#discovery-identifier-upgrades) for previously accepted dotted identities.
 
 The server also applies operator-configured admission limits after resolving default resources. Defaults are 500 replicas per task group, 64 task groups per job, 32 tasks per task group, 1,000 desired allocations per job, 10,000 desired allocations per namespace, 1,000,000 millicores per task, and 1 TiB memory per task. Operators may choose different values; see [Cluster settings](operations.md#cluster-settings). A manifest can therefore satisfy the structural schema yet exceed the target cluster's policy.
 

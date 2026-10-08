@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
 const (
@@ -290,7 +291,8 @@ func (r *Resolver) refresh(ctx context.Context) {
 	}
 	cache := make(map[string]*record)
 	for _, svc := range *resp {
-		if svc.Address == "" {
+		if svc.Address == "" || !spec.ValidDiscoveryIdentifier(svc.Namespace) ||
+			!spec.ValidDiscoveryIdentifier(svc.Job) || !spec.ValidDiscoveryIdentifier(svc.Group) {
 			continue
 		}
 		ip := net.ParseIP(svc.Address)

@@ -169,11 +169,19 @@ func (h *Handler) Register(e *echo.Echo) {
 	ns.GET("/jobs", h.handleListJobs)
 	ns.POST("/jobs", h.handleRegisterJob)
 	ns.POST("/jobs/plan", h.handlePlanJob)
-	ns.GET("/jobs/:name", h.handleGetJob)
-	ns.DELETE("/jobs/:name", h.handleDeleteJob)
-	ns.POST("/jobs/:name/restart", h.handleRestartJob)
-	ns.POST("/jobs/:name/groups/:group/replacement-backoff/reset", h.handleResetReplacementBackoff)
-	ns.GET("/jobs/:name/versions", h.handleListJobVersions)
+	jobs := ns.Group("/jobs/:name", func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c *echo.Context) error {
+			if !spec.ValidDiscoveryIdentifier(c.Param("name")) {
+				return echo.NewHTTPError(http.StatusBadRequest, "invalid job name: must be a single identifier without dots")
+			}
+			return next(c)
+		}
+	})
+	jobs.GET("", h.handleGetJob)
+	jobs.DELETE("", h.handleDeleteJob)
+	jobs.POST("/restart", h.handleRestartJob)
+	jobs.POST("/groups/:group/replacement-backoff/reset", h.handleResetReplacementBackoff)
+	jobs.GET("/versions", h.handleListJobVersions)
 	ns.GET("/allocations", h.handleListAllocations)
 	ns.DELETE("/allocations/:id", h.handleStopAllocation)
 	ns.GET("/allocations/:id/events", h.handleAllocationEvents)
@@ -1103,8 +1111,8 @@ func (h *Handler) handleResetReplacementBackoff(c *echo.Context) error {
 		return err
 	}
 	name, group := c.Param("name"), c.Param("group")
-	if !spec.ValidIdentifier(name) || !spec.ValidIdentifier(group) {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid job or task group name")
+	if !spec.ValidDiscoveryIdentifier(name) || !spec.ValidDiscoveryIdentifier(group) {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid job or task group name: must be single identifiers without dots")
 	}
 	if err := h.server.ResetReplacementBackoff(c.Request().Context(), ns, name, group); err != nil {
 		if errors.Is(err, ErrTaskGroupNotFound) {

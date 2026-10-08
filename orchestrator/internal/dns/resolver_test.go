@@ -712,6 +712,103 @@ func TestDiscoveryCaseFoldingPreservesNamespaceIsolation(t *testing.T) {
 	}
 }
 
+func TestDiscoverySingleLabelAndLegacyIdentitiesOverUDPAndTCP(t *testing.T) {
+	services := nodeapi.ServiceListResponse{
+		{Group: "API_3", Job: "Web-1", Namespace: "Team_2", Address: "10.0.0.7"},
+		{Group: "api.v1", Job: "web", Namespace: "Team_2", Address: "10.0.0.8"},
+		{Group: "api", Job: "v1.web", Namespace: "Team_2", Address: "10.0.0.9"},
+		{Group: "api", Job: "web", Namespace: "Team_2.prod", Address: "10.0.0.10"},
+		{Group: "API_3", Job: "Web-1", Namespace: "Other", Address: "10.0.0.11"},
+	}
+	r := NewResolver(nil, &mockLookup{services: &services}, namespaceLookup{netip.MustParsePrefix("127.0.0.0/8"): "Team_2"}, "trellis")
+	r.refresh(t.Context())
+	if len(r.cache) != 2 {
+		t.Fatalf("legacy identities entered cache: %#v", r.cache)
+	}
+	udp, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tcp, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		_ = udp.Close()
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 2)
+	go func() { done <- r.serveUDP(ctx, udp) }()
+	go func() { done <- r.serveTCP(ctx, tcp) }()
+	t.Cleanup(func() {
+		cancel()
+		_ = udp.Close()
+		_ = tcp.Close()
+		for range 2 {
+			if err := <-done; err != nil {
+				t.Error(err)
+			}
+		}
+	})
+	for _, transport := range []string{"udp", "tcp"} {
+		for _, tc := range []struct {
+			name  string
+			count uint16
+		}{
+			{"aPI_3.wEB-1.tEAM_2.TrElLiS.", 1},
+			{"api.v1.web.Team_2.trellis.", 0},
+			{"api.web.Team_2.prod.trellis.", 0},
+			{"API_3.Web-1.Other.trellis.", 0},
+		} {
+			address := udp.LocalAddr().String()
+			if transport == "tcp" {
+				address = tcp.Addr().String()
+			}
+			conn, err := (&net.Dialer{}).DialContext(ctx, transport, address)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			query := buildQuery(tc.name)
+			wire := query
+			if transport == "tcp" {
+				wire = make([]byte, 2+len(query))
+				binary.BigEndian.PutUint16(wire[:2], uint16(len(query)))
+				copy(wire[2:], query)
+			}
+			if _, err := conn.Write(wire); err != nil {
+				t.Fatal(err)
+			}
+			response := make([]byte, 512)
+			if transport == "tcp" {
+				if _, err := io.ReadFull(conn, response[:2]); err != nil {
+					t.Fatal(err)
+				}
+				response = response[:binary.BigEndian.Uint16(response[:2])]
+				if _, err := io.ReadFull(conn, response); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				n, err := conn.Read(response)
+				if err != nil {
+					t.Fatal(err)
+				}
+				response = response[:n]
+			}
+			_ = conn.Close()
+			if got := binary.BigEndian.Uint16(response[6:8]); got != tc.count {
+				t.Fatalf("%s %s: answers=%d want %d", transport, tc.name, got, tc.count)
+			}
+			if !reflect.DeepEqual(response[12:len(query)], query[12:]) {
+				t.Fatal("question case changed")
+			}
+			if tc.count == 1 && !net.IP(response[len(response)-4:]).Equal(net.ParseIP("10.0.0.7")) {
+				t.Fatalf("wrong endpoint: %x", response)
+			}
+		}
+	}
+}
+
 func TestDiscoveryUDPTruncationAndTCPFallback(t *testing.T) {
 	services := nodeapi.ServiceListResponse{}
 	for i := range 30 {

@@ -124,13 +124,19 @@ var _ state.Store = memoryStore{}
 var _ state.AtomicStore = memoryStore{}
 var _ state.PrefixIterator = memoryStore{}
 
+func persistedTestSpec(name string) *spec.JobSpec {
+	return canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: name,
+		TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1,
+			Tasks: []spec.TaskSpec{{Name: "app", Image: "example/app:1"}}}}})
+}
+
 func TestJobRevisionRetentionAndDeletion(t *testing.T) {
 	ctx := context.Background()
 	store := memoryStore{}
 	controller := NewStateController(store, "test")
 	identity := jobKey("default", "web")
 	for revision := 1; revision <= jobRevisionRetention+3; revision++ {
-		job := &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web"}), Revision: revision, Version: revision}
+		job := &Job{Spec: persistedTestSpec("web"), Revision: revision, Version: revision}
 		record := &JobRevisionRecord{Version: revision, Revision: revision, Spec: job.Spec, CreatedAt: time.Unix(int64(revision), 0).UTC()}
 		if err := controller.PutJobWithRevision(ctx, identity, job, record); err != nil {
 			t.Fatal(err)
@@ -157,7 +163,7 @@ func TestListJobRevisionsBoundsLegacyHistory(t *testing.T) {
 	controller := NewStateController(store, "test")
 	prefix := "trellis/test/job-revisions/" + url.QueryEscape(jobKey("default", "web")) + "/"
 	for revision := 1; revision <= 25; revision++ {
-		raw, err := json.Marshal(&JobRevisionRecord{Version: revision, Revision: revision, Spec: &spec.JobSpec{Namespace: "default", Name: "web"}, CreatedAt: time.Unix(int64(revision), 0).UTC()})
+		raw, err := json.Marshal(&JobRevisionRecord{Version: revision, Revision: revision, Spec: persistedTestSpec("web"), CreatedAt: time.Unix(int64(revision), 0).UTC()})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -184,7 +190,7 @@ func TestCompactJobRevisionsBoundsLegacyHistoryAndRemovesOrphans(t *testing.T) {
 			if identity != liveIdentity {
 				name = "deleted"
 			}
-			raw, err := json.Marshal(&JobRevisionRecord{Version: revision, Revision: revision, Spec: &spec.JobSpec{Namespace: "default", Name: name}, CreatedAt: time.Unix(int64(revision), 0).UTC()})
+			raw, err := json.Marshal(&JobRevisionRecord{Version: revision, Revision: revision, Spec: persistedTestSpec(name), CreatedAt: time.Unix(int64(revision), 0).UTC()})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -213,15 +219,15 @@ func TestCompactJobRevisionsBoundsLegacyHistoryAndRemovesOrphans(t *testing.T) {
 func TestStateControllerRoundTripsDurableLeaderState(t *testing.T) {
 	ctx := context.Background()
 	controller := NewStateController(memoryStore{}, "test")
-	job := &Job{Spec: canonicalTestSpec(&spec.JobSpec{Name: "web"}), Revision: 3}
-	if err := controller.PutJob(ctx, "web", job); err != nil {
+	job := &Job{Spec: persistedTestSpec("web"), Revision: 3}
+	if err := controller.PutJob(ctx, jobKey("default", "web"), job); err != nil {
 		t.Fatal(err)
 	}
 	jobs, err := controller.ListJobs(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if jobs["web"] == nil || jobs["web"].Revision != 3 {
+	if jobs[jobKey("default", "web")] == nil || jobs[jobKey("default", "web")].Revision != 3 {
 		t.Fatalf("unexpected jobs: %#v", jobs)
 	}
 	allocation := &Allocation{ID: "web-1", JobName: "web", JobRevision: 3,
