@@ -69,6 +69,8 @@ The Raft listener requires a client certificate that chains to the cluster CA an
 
 A newly admitted node has neither state nor configuration until the leader first replicates to it. It therefore also trusts the member IDs returned by its Raft join response (the configuration at admission), still subject to the tombstone and binding checks once those replicate. Until the join response arrives it rejects every inbound stream, and the leader's replication retries. A member that was offline while every node it knows left the voter set cannot authenticate the new leaders and must be removed and replaced with a fresh identity.
 
+Startup persists the admitting member IDs locally at `raft/join-members` only after receiving the join response and saving any managed signing key. Stable Raft files or a nonzero term alone do not prove admission completed: a node configured to join repeats the idempotent Raft join until this completion record exists, using its enrolled identity rather than enrolling again. Restart reloads the saved admitting IDs for initial peer authorization; replicated tombstones, role bindings, and certificate bindings still override this trust.
+
 ## Scheduling algorithm
 
 For each task-group deficit, `Schedule`:

@@ -22,10 +22,66 @@ import (
 	"testing"
 	"time"
 
+	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
 	"github.com/overfold/trellis/orchestrator/api"
 	"github.com/overfold/trellis/orchestrator/client"
+	"github.com/overfold/trellis/orchestrator/internal/state"
 	"github.com/overfold/trellis/orchestrator/internal/storage"
 )
+
+// Model interruption after saving admission keys but before persisting join
+// completion: Raft has stable state, but cannot authenticate its admitting
+// peers from the empty FSM. A restart must repeat admission with its enrolled
+// identity, not consume the join token again or wait forever for replication.
+func TestControlPlaneResumesIncompleteAdmission(t *testing.T) {
+	h := newHarness(t, 2)
+	defer h.close()
+	h.waitNodes(2)
+	h.stop(1)
+	n := h.nodes[1]
+	if err := os.RemoveAll(filepath.Join(n.dir, "raft")); err != nil {
+		t.Fatal(err)
+	}
+	local := storage.NewLocalStorage(n.dir)
+	if err := local.Delete("raft/join-members"); err != nil {
+		t.Fatal(err)
+	}
+	r, err := state.NewRaftStore(state.RaftConfig{DataDir: n.dir, BindAddr: addr(n.ports[2]), ServerID: h.nodeID(1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stable, err := raftboltdb.NewBoltStore(filepath.Join(n.dir, "raft", "log.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An unsuccessful initial election advances the term before admission.
+	if err := stable.SetUint64([]byte("CurrentTerm"), 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := stable.Close(); err != nil {
+		t.Fatal(err)
+	}
+	r, err = state.NewRaftStore(state.RaftConfig{DataDir: n.dir, BindAddr: addr(n.ports[2]), ServerID: h.nodeID(1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.HadExistingState() {
+		t.Fatal("fixture has no preexisting Raft stable state")
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	h.start(1)
+	h.waitHTTP(1)
+	h.waitNodes(2)
+	var members []string
+	if err := local.Get("raft/join-members", &members); err != nil || len(members) == 0 {
+		t.Fatalf("admission not saved: %v, %v", members, err)
+	}
+}
 
 // TestMultiNodeFailureRecovery intentionally uses OS processes, loopback TCP,
 // HTTPS, and on-disk Raft/runtime state. The injected runtime replaces only

@@ -134,6 +134,7 @@ func main() {
 		Run:   func(_ *cobra.Command, _ []string) { fmt.Println(version.Current()) },
 	})
 	root.AddCommand(newLocalCleanupCommand())
+	root.AddCommand(newConfigPathsCommand())
 	f := root.Flags()
 	cfg.ControlPlane = f.Bool("control-plane", true, "Participate in Raft and hold cluster keys (false for workers)")
 	cfg.RunsWorkloads = f.Bool("runs-workloads", true, "Allow workloads to be scheduled on this node")
@@ -335,7 +336,12 @@ func run(parent context.Context, cfg *config) error {
 		stateCtl := server.NewStateController(raftStore, cfg.Cluster)
 		raftPeers.Bind(stateCtl, raftStore.Membership)
 
-		if cfg.Join != "" && (!raftStore.HadExistingState() || (cfg.SigningMode == "managed" && len(tlsMaterials.CAKey) == 0)) {
+		var joinMembers []string
+		joinComplete := local.Get("raft/join-members", &joinMembers) == nil && len(joinMembers) > 0
+		raftPeers.TrustJoinMembers(joinMembers)
+		// Log/stable-store creation is not evidence of successful admission.
+		// Persist completion only after receiving and saving the join response.
+		if cfg.Join != "" && (!joinComplete || (cfg.SigningMode == "managed" && len(tlsMaterials.CAKey) == 0)) {
 			log.Info("joining cluster", "address", cfg.Join)
 			joinResponse, err := joinClusterRaft(ctx, log, cfg.Join, cfg.ServerAdvertise, raftStore.LocalAddr(), clientTLS)
 			if err != nil {
@@ -350,6 +356,9 @@ func run(parent context.Context, cfg *config) error {
 				if err := saveTLSToStorage(local, tlsMaterials); err != nil {
 					return fmt.Errorf("save managed signing key: %w", err)
 				}
+			}
+			if err := local.Put("raft/join-members", joinResponse.Members); err != nil {
+				return fmt.Errorf("save Raft admission: %w", err)
 			}
 		}
 		// Raft construction and joining are asynchronous. Reading the local FSM
@@ -1280,18 +1289,40 @@ func leaderAuthMiddleware(administrator *auth.AdministratorAuthenticator, admini
 				if challenge != "" {
 					defer administrator.Consume(challenge)
 				}
-				body, err := io.ReadAll(io.LimitReader(c.Request().Body, (64<<20)+1))
-				if err != nil {
-					c.Response().Header().Set(adminsign.ChallengeStatusHeader, adminsign.ChallengeInvalid)
-					return echo.NewHTTPError(http.StatusBadRequest, "unable to read signed request body")
+				isRestore := c.Request().Method == http.MethodPost && c.Request().URL.Path == "/v1/backup/restore"
+				var payload []byte
+				if isRestore {
+					// Authenticate the entire aggregate without buffering an
+					// unauthenticated, arbitrarily large body in memory. The
+					// private spool is deleted on every return path.
+					spool, err := os.CreateTemp("", "trellis-restore-*")
+					if err != nil {
+						return echo.NewHTTPError(http.StatusServiceUnavailable, "unable to stage restore body")
+					}
+					defer func() { _ = spool.Close(); _ = os.Remove(spool.Name()) }()
+					hash := sha256.New()
+					if _, err := io.Copy(io.MultiWriter(spool, hash), c.Request().Body); err != nil {
+						return echo.NewHTTPError(http.StatusBadRequest, "unable to read signed restore body")
+					}
+					if _, err := spool.Seek(0, io.SeekStart); err != nil {
+						return echo.NewHTTPError(http.StatusServiceUnavailable, "unable to read staged restore body")
+					}
+					c.Request().Body = spool
+					payload = adminsign.PayloadDigest(challenge, c.Request().Method, c.Request().URL.RequestURI(), [sha256.Size]byte(hash.Sum(nil)))
+				} else {
+					body, err := io.ReadAll(io.LimitReader(c.Request().Body, (64<<20)+1))
+					if err != nil {
+						c.Response().Header().Set(adminsign.ChallengeStatusHeader, adminsign.ChallengeInvalid)
+						return echo.NewHTTPError(http.StatusBadRequest, "unable to read signed request body")
+					}
+					if len(body) > 64<<20 {
+						c.Response().Header().Set(adminsign.ChallengeStatusHeader, adminsign.ChallengeInvalid)
+						return echo.NewHTTPError(http.StatusRequestEntityTooLarge, "signed request body exceeds 64 MiB")
+					}
+					c.Request().Body = io.NopCloser(bytes.NewReader(body))
+					payload = adminsign.Payload(challenge, c.Request().Method, c.Request().URL.RequestURI(), body)
 				}
-				if len(body) > 64<<20 {
-					c.Response().Header().Set(adminsign.ChallengeStatusHeader, adminsign.ChallengeInvalid)
-					return echo.NewHTTPError(http.StatusRequestEntityTooLarge, "signed request body exceeds 64 MiB")
-				}
-				c.Request().Body = io.NopCloser(bytes.NewReader(body))
 				publicKey, epoch, ok := administratorVerification()
-				payload := adminsign.Payload(challenge, c.Request().Method, c.Request().URL.RequestURI(), body)
 				if ok && challenge != "" && signature != "" && administrator.Verify(publicKey, epoch, challenge, signature, payload) {
 					principal := auth.AdministratorPrincipal()
 					ctx := context.WithValue(c.Request().Context(), server.AdminContextKey, true)

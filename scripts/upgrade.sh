@@ -63,12 +63,11 @@ EOF_USAGE
 [ "$#" -eq 0 ] || ui_die "upgrade.sh does not take options"
 
 require_root_linux_amd64
-require_commands curl tar systemctl install mktemp ctr
+require_commands curl tar systemctl install mktemp ctr jq
 [ -x "${INSTALL_DIR}/trellis" ] || ui_die "Trellis is not installed at ${INSTALL_DIR}/trellis."
 [ -x "${INSTALL_DIR}/trellisctl" ] || ui_die "trellisctl is not installed at ${INSTALL_DIR}/trellisctl."
 [ ! -e "${INSTALL_DIR}/trellis-health-probe" ] || had_health_probe=true
 [ -f "$CONFIG_FILE" ] || ui_die "Node configuration is missing at ${CONFIG_FILE}."
-load_node_config_paths
 
 load_install_state
 current_version="$("${INSTALL_DIR}/trellis" --version 2>/dev/null | awk '{print $NF}' || true)"
@@ -88,10 +87,20 @@ ui_section "Stage"
 download_release "$WORK_TMP"
 ui_step "Downloaded and verified ${RELEASE_TAG}"
 
+# Use the verified staged daemon so maintenance can decode YAML even when the
+# currently installed release predates this command. Never eval config values.
+paths="$("${WORK_TMP}/trellis" config-paths --config "$CONFIG_FILE")" || ui_die "Could not decode node configuration; no binaries were changed."
+DATA_DIR="$(printf '%s' "$paths" | jq -er '.data_dir | select(type == "string" and length > 0)')" || ui_die "Invalid data_dir; no binaries were changed."
+CONTAINERD_SOCKET="$(printf '%s' "$paths" | jq -er '.containerd_socket | select(type == "string" and length > 0)')" || ui_die "Invalid containerd_socket; no binaries were changed."
+configured_key="$(printf '%s' "$paths" | jq -er '.secrets_key | select(type == "string")')" || ui_die "Invalid secrets_key; no binaries were changed."
+[ -z "$configured_key" ] || SECRETS_KEY_FILE="$configured_key"
+
 was_running=false
 if systemctl is-active --quiet trellis; then was_running=true; fi
-if [ "$was_running" = true ] && [ -f "${DATA_DIR}/node-id" ]; then
+if [ "$was_running" = true ]; then
+    [ -f "${DATA_DIR}/node-id" ] || ui_die "Running node has no node-id in ${DATA_DIR}; cannot perform maintenance safely. No binaries were changed."
     node_id="$(tr -d '[:space:]' <"${DATA_DIR}/node-id")"
+    [ -n "$node_id" ] || ui_die "Running node has an empty node-id; no binaries were changed."
 fi
 
 if [ "$was_running" = true ] && [ -n "$node_id" ]; then
@@ -115,7 +124,7 @@ if [ "$was_running" = true ] && [ -n "$node_id" ]; then
         ui_step "Drain started"
         if ! wait_for_local_allocations_to_stop; then
             upgrade_ctl nodes undrain "$node_id" >/dev/null 2>&1 || true
-            ui_die "Timed out waiting for allocations to move; the node was undrained and no binaries were changed."
+            ui_die "Could not verify evacuation (containerd query failed or timed out); undrain was attempted and no binaries were changed."
         fi
         ui_step "Allocations moved to healthy replacements"
     else

@@ -25,7 +25,11 @@ const (
 
 // Payload returns the canonical bytes signed by administrator clients.
 func Payload(challenge, method, requestURI string, body []byte) []byte {
-	digest := sha256.Sum256(body)
+	return PayloadDigest(challenge, method, requestURI, sha256.Sum256(body))
+}
+
+// PayloadDigest permits verification while streaming a large request body.
+func PayloadDigest(challenge, method, requestURI string, digest [sha256.Size]byte) []byte {
 	return []byte(strings.Join([]string{
 		signingVersion,
 		challenge,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,6 +20,7 @@ import (
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
 	"github.com/overfold/trellis/orchestrator/internal/tlsutil"
+	bolt "go.etcd.io/bbolt"
 )
 
 var _ Store = (*RaftStore)(nil)
@@ -69,6 +71,9 @@ func (r *RaftStore) BackupDesired(cluster string) (*DesiredSnapshot, error) {
 // failing on any replica is a fatal state-machine failure.
 func (r *RaftStore) RestoreDesired(cluster string, snapshot *DesiredSnapshot) error {
 	if err := ValidateDesiredSnapshot(snapshot, nil); err != nil {
+		return err
+	}
+	if err := ValidateDesiredSnapshotKeys(cluster, snapshot); err != nil {
 		return err
 	}
 	r.submitMu.Lock()
@@ -512,22 +517,39 @@ func (f *fsm) apply(log *raft.Log) error {
 	if err := json.Unmarshal(log.Data, &cmd); err != nil {
 		return err
 	}
-	ctx := context.Background()
-	switch cmd.Op {
-	case "put":
-		return f.store.Put(ctx, cmd.Key, cmd.Value)
-	case "delete":
-		return f.store.Delete(ctx, cmd.Key)
-	case "batch":
-		return f.store.Batch(ctx, cmd.Mutations)
-	case "restore_desired":
-		if cmd.Snapshot == nil {
-			return fmt.Errorf("restore snapshot is missing")
+	return f.store.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketName)
+		// The checkpoint travels with FSM snapshots and is committed atomically
+		// with each command. Raft replays logs after restart; applying them twice
+		// can resurrect deleted state or reject a previously committed restore.
+		checkpoint := []byte("\x00raft-applied-index")
+		if saved := bucket.Get(checkpoint); len(saved) == 8 && log.Index <= binary.BigEndian.Uint64(saved) {
+			return nil
 		}
-		return f.store.RestoreDesired(cmd.Cluster, cmd.Snapshot)
-	default:
-		return fmt.Errorf("unknown FSM command: %s", cmd.Op)
-	}
+		var err error
+		switch cmd.Op {
+		case "put":
+			err = bucket.Put([]byte(cmd.Key), cmd.Value)
+		case "delete":
+			err = bucket.Delete([]byte(cmd.Key))
+		case "batch":
+			err = validateMutations(cmd.Mutations)
+			if err == nil {
+				err = applyMutations(tx, cmd.Mutations)
+			}
+		case "restore_desired":
+			err = ValidateDesiredSnapshot(cmd.Snapshot, nil)
+			if err == nil {
+				err = restoreDesired(tx, cmd.Cluster, cmd.Snapshot)
+			}
+		default:
+			return fmt.Errorf("unknown FSM command: %s", cmd.Op)
+		}
+		if err != nil {
+			return err
+		}
+		return bucket.Put(checkpoint, binary.BigEndian.AppendUint64(nil, log.Index))
+	})
 }
 
 func (f *fsm) Snapshot() (raft.FSMSnapshot, error) {

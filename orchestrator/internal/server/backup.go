@@ -173,20 +173,26 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 		snapshot.VolumeRegistrations[key] = value
 	}
 	for key, value := range backup.NetworkPortRegistrations {
-		if !json.Valid(value) {
-			return fmt.Errorf("network port registration %q contains invalid JSON", key)
+		var record NetworkPortRegistration
+		if json.Unmarshal(value, &record) != nil || record.Slot < 0 || record.Slot >= portCount {
+			return fmt.Errorf("network port registration %q is invalid or outside configured port range", key)
 		}
 		snapshot.NetworkPortRegistrations[key] = value
 	}
+	subnetCapacity := networkSubnetCapacity(pool)
 	for key, value := range backup.NetworkSubnetRegistrations {
-		if !json.Valid(value) {
-			return fmt.Errorf("network subnet registration %q contains invalid JSON", key)
+		var record NetworkSubnetRegistration
+		if json.Unmarshal(value, &record) != nil || record.Index < 0 || record.Index >= subnetCapacity {
+			return fmt.Errorf("network subnet registration %q is invalid or outside configured subnet capacity", key)
 		}
 		snapshot.NetworkSubnetRegistrations[key] = value
 	}
 	// Validate the complete backup before dropping excess or orphaned
 	// revisions so malformed records cannot hide outside the retained window.
 	if err := state.ValidateDesiredSnapshot(snapshot, nil); err != nil {
+		return err
+	}
+	if err := state.ValidateDesiredSnapshotKeys(s.clusterName, snapshot); err != nil {
 		return err
 	}
 	// Authenticate all secrets locally before any replicated mutation. Keys and

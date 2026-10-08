@@ -142,31 +142,35 @@ func (b *BoltStore) Batch(_ context.Context, mutations []Mutation) error {
 		return err
 	}
 	if err := b.db.Update(func(tx *bolt.Tx) error {
-		bucket := tx.Bucket(bucketName)
-		for _, mutation := range mutations {
-			if mutation.DeletePrefix != "" {
-				cursor := bucket.Cursor()
-				prefix := []byte(mutation.DeletePrefix)
-				for key, _ := cursor.Seek(prefix); key != nil && strings.HasPrefix(string(key), mutation.DeletePrefix); key, _ = cursor.Next() {
-					if err := cursor.Delete(); err != nil {
-						return err
-					}
-				}
-				continue
-			}
-			var err error
-			if mutation.Value == nil {
-				err = bucket.Delete([]byte(mutation.Key))
-			} else {
-				err = bucket.Put([]byte(mutation.Key), mutation.Value)
-			}
-			if err != nil {
-				return err
-			}
-		}
-		return nil
+		return applyMutations(tx, mutations)
 	}); err != nil {
 		return fmt.Errorf("apply batch: %w", err)
+	}
+	return nil
+}
+
+func applyMutations(tx *bolt.Tx, mutations []Mutation) error {
+	bucket := tx.Bucket(bucketName)
+	for _, mutation := range mutations {
+		if mutation.DeletePrefix != "" {
+			cursor := bucket.Cursor()
+			prefix := []byte(mutation.DeletePrefix)
+			for key, _ := cursor.Seek(prefix); key != nil && strings.HasPrefix(string(key), mutation.DeletePrefix); key, _ = cursor.Next() {
+				if err := cursor.Delete(); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		var err error
+		if mutation.Value == nil {
+			err = bucket.Delete([]byte(mutation.Key))
+		} else {
+			err = bucket.Put([]byte(mutation.Key), mutation.Value)
+		}
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -383,69 +387,98 @@ func (b *BoltStore) RestoreDesired(cluster string, snapshot *DesiredSnapshot) er
 	if err := ValidateDesiredSnapshot(snapshot, nil); err != nil {
 		return err
 	}
+	if err := ValidateDesiredSnapshotKeys(cluster, snapshot); err != nil {
+		return err
+	}
 	return b.db.Update(func(tx *bolt.Tx) error {
-		if err := checkRestoreFresh(tx, cluster); err != nil {
+		return restoreDesired(tx, cluster, snapshot)
+	})
+}
+
+func restoreDesired(tx *bolt.Tx, cluster string, snapshot *DesiredSnapshot) error {
+	if err := checkRestoreFresh(tx, cluster); err != nil {
+		return err
+	}
+	bucket := tx.Bucket(bucketName)
+	jobsPrefix := fmt.Appendf(nil, "trellis/%s/jobs/", cluster)
+	revisionsPrefix := fmt.Appendf(nil, "trellis/%s/job-revisions/", cluster)
+	secretsPrefix := fmt.Appendf(nil, "trellis/%s/secrets/", cluster)
+	volumesPrefix := fmt.Appendf(nil, "trellis/%s/volume-registrations/", cluster)
+	networkPortsPrefix := fmt.Appendf(nil, "trellis/%s/network-port-registrations/", cluster)
+	networkSubnetsPrefix := fmt.Appendf(nil, "trellis/%s/network-subnet-registrations/", cluster)
+	if len(snapshot.Cluster) > 0 {
+		if err := bucket.Put(fmt.Appendf(nil, "trellis/%s/meta", cluster), snapshot.Cluster); err != nil {
 			return err
 		}
-		bucket := tx.Bucket(bucketName)
-		jobsPrefix := fmt.Appendf(nil, "trellis/%s/jobs/", cluster)
-		revisionsPrefix := fmt.Appendf(nil, "trellis/%s/job-revisions/", cluster)
-		secretsPrefix := fmt.Appendf(nil, "trellis/%s/secrets/", cluster)
-		volumesPrefix := fmt.Appendf(nil, "trellis/%s/volume-registrations/", cluster)
-		networkPortsPrefix := fmt.Appendf(nil, "trellis/%s/network-port-registrations/", cluster)
-		networkSubnetsPrefix := fmt.Appendf(nil, "trellis/%s/network-subnet-registrations/", cluster)
-		if len(snapshot.Cluster) > 0 {
-			if err := bucket.Put(fmt.Appendf(nil, "trellis/%s/meta", cluster), snapshot.Cluster); err != nil {
-				return err
+	}
+	for key, value := range snapshot.JobRevisions {
+		if err := bucket.Put(append(append([]byte(nil), revisionsPrefix...), key...), value); err != nil {
+			return err
+		}
+	}
+	for key, value := range snapshot.Jobs {
+		if key == "" {
+			return fmt.Errorf("backup contains an empty job key")
+		}
+		if err := bucket.Put(append(append([]byte(nil), jobsPrefix...), key...), value); err != nil {
+			return err
+		}
+	}
+	for key, value := range snapshot.Secrets {
+		if key == "" {
+			return fmt.Errorf("backup contains an empty secret key")
+		}
+		if err := bucket.Put(append(append([]byte(nil), secretsPrefix...), key...), value); err != nil {
+			return err
+		}
+	}
+	for key, value := range snapshot.VolumeRegistrations {
+		if key == "" {
+			return fmt.Errorf("backup contains an empty volume registration key")
+		}
+		if err := bucket.Put(append(append([]byte(nil), volumesPrefix...), key...), value); err != nil {
+			return err
+		}
+	}
+	for key, value := range snapshot.NetworkPortRegistrations {
+		if key == "" {
+			return fmt.Errorf("backup contains an empty network port registration key")
+		}
+		if err := bucket.Put(append(append([]byte(nil), networkPortsPrefix...), key...), value); err != nil {
+			return err
+		}
+	}
+	for key, value := range snapshot.NetworkSubnetRegistrations {
+		if key == "" {
+			return fmt.Errorf("backup contains an empty network subnet registration key")
+		}
+		if err := bucket.Put(append(append([]byte(nil), networkSubnetsPrefix...), key...), value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ValidateDesiredSnapshotKeys checks the complete storage key, including the
+// destination cluster prefix, before a restore can enter the replicated log.
+func ValidateDesiredSnapshotKeys(cluster string, snapshot *DesiredSnapshot) error {
+	for resource, entries := range map[string]map[string][]byte{
+		"jobs": snapshot.Jobs, "job-revisions": snapshot.JobRevisions,
+		"secrets": snapshot.Secrets, "volume-registrations": snapshot.VolumeRegistrations,
+		"network-port-registrations":   snapshot.NetworkPortRegistrations,
+		"network-subnet-registrations": snapshot.NetworkSubnetRegistrations,
+	} {
+		prefix := "trellis/" + cluster + "/" + resource + "/"
+		for key := range entries {
+			if len(prefix)+len(key) > bolt.MaxKeySize {
+				return fmt.Errorf("backup %s key exceeds storage limit", resource)
 			}
 		}
-		for key, value := range snapshot.JobRevisions {
-			if err := bucket.Put(append(append([]byte(nil), revisionsPrefix...), key...), value); err != nil {
-				return err
-			}
-		}
-		for key, value := range snapshot.Jobs {
-			if key == "" {
-				return fmt.Errorf("backup contains an empty job key")
-			}
-			if err := bucket.Put(append(append([]byte(nil), jobsPrefix...), key...), value); err != nil {
-				return err
-			}
-		}
-		for key, value := range snapshot.Secrets {
-			if key == "" {
-				return fmt.Errorf("backup contains an empty secret key")
-			}
-			if err := bucket.Put(append(append([]byte(nil), secretsPrefix...), key...), value); err != nil {
-				return err
-			}
-		}
-		for key, value := range snapshot.VolumeRegistrations {
-			if key == "" {
-				return fmt.Errorf("backup contains an empty volume registration key")
-			}
-			if err := bucket.Put(append(append([]byte(nil), volumesPrefix...), key...), value); err != nil {
-				return err
-			}
-		}
-		for key, value := range snapshot.NetworkPortRegistrations {
-			if key == "" {
-				return fmt.Errorf("backup contains an empty network port registration key")
-			}
-			if err := bucket.Put(append(append([]byte(nil), networkPortsPrefix...), key...), value); err != nil {
-				return err
-			}
-		}
-		for key, value := range snapshot.NetworkSubnetRegistrations {
-			if key == "" {
-				return fmt.Errorf("backup contains an empty network subnet registration key")
-			}
-			if err := bucket.Put(append(append([]byte(nil), networkSubnetsPrefix...), key...), value); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	}
+	if len("trellis/"+cluster+"/meta") > bolt.MaxKeySize {
+		return fmt.Errorf("backup cluster key exceeds storage limit")
+	}
+	return nil
 }
 
 // checkRestoreFresh is shared by leader preflight and atomic FSM installation.
@@ -558,11 +591,16 @@ func ValidateDesiredSnapshot(snapshot *DesiredSnapshot, additionalJobValidation 
 			return fmt.Errorf("invalid volume registration %q", key)
 		}
 	}
+	portSlots := make(map[int]string, len(snapshot.NetworkPortRegistrations))
 	for key, raw := range snapshot.NetworkPortRegistrations {
 		var record networkPortRegistration
 		if key == "" || json.Unmarshal(raw, &record) != nil || !spec.ValidDiscoveryIdentifier(record.Namespace) || record.Slot < 0 || key != url.QueryEscape(record.Namespace) {
 			return fmt.Errorf("invalid network port registration %q", key)
 		}
+		if previous, exists := portSlots[record.Slot]; exists {
+			return fmt.Errorf("network port registrations %q and %q share slot %d", previous, key, record.Slot)
+		}
+		portSlots[record.Slot] = key
 	}
 	subnetIndexes := make(map[int]string, len(snapshot.NetworkSubnetRegistrations))
 	for key, raw := range snapshot.NetworkSubnetRegistrations {

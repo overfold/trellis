@@ -294,9 +294,10 @@ wait_for_local_node() {
 
 wait_for_local_allocations_to_stop() {
     command -v ctr >/dev/null 2>&1 || return 1
-    local deadline=$((SECONDS + 300))
+    local deadline=$((SECONDS + 300)) tasks
     while [ "$SECONDS" -lt "$deadline" ]; do
-        if [ -z "$(ctr -n trellis tasks ls -q 2>/dev/null || true)" ]; then
+        tasks="$(ctr --address "${CONTAINERD_SOCKET:-/run/containerd/containerd.sock}" -n trellis tasks ls -q)" || return 1
+        if [ -z "$tasks" ]; then
             return 0
         fi
         sleep 2

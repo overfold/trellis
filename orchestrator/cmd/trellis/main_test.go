@@ -501,6 +501,16 @@ func TestAdministratorRequestSignatures(t *testing.T) {
 		}
 		return c.NoContent(http.StatusNoContent)
 	})
+	e.POST("/v1/backup/restore", func(c *echo.Context) error {
+		if admin, _ := c.Request().Context().Value(server.AdminContextKey).(bool); !admin {
+			t.Fatal("restore not authenticated")
+		}
+		count, err := io.Copy(io.Discard, c.Request().Body)
+		if err != nil || count != (64<<20)+1 {
+			t.Fatalf("staged body = %d bytes, %v", count, err)
+		}
+		return c.NoContent(http.StatusNoContent)
+	})
 
 	challenge := func() string {
 		req := httptest.NewRequest(http.MethodPost, "/v1/auth/administrator/challenge", nil)
@@ -522,6 +532,31 @@ func TestAdministratorRequestSignatures(t *testing.T) {
 		req.Header.Set(adminsign.SignatureHeader, base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, payload)))
 		return req
 	}
+	t.Run("large restore signature and spool cleanup", func(t *testing.T) {
+		t.Setenv("TMPDIR", t.TempDir())
+		body := bytes.Repeat([]byte("x"), (64<<20)+1)
+		for _, valid := range []bool{false, true} {
+			value := challenge()
+			signedBody := body
+			if !valid {
+				signedBody = []byte("different")
+			}
+			req := signedRequest(http.MethodPost, "/v1/backup/restore", body, http.MethodPost, "/v1/backup/restore", signedBody, privateKey, value)
+			rec := httptest.NewRecorder()
+			e.ServeHTTP(rec, req)
+			want := http.StatusUnauthorized
+			if valid {
+				want = http.StatusNoContent
+			}
+			if rec.Code != want {
+				t.Fatalf("restore signature status = %d: %s", rec.Code, rec.Body.String())
+			}
+			files, err := os.ReadDir(os.Getenv("TMPDIR"))
+			if err != nil || len(files) != 0 {
+				t.Fatalf("restore spool leaked: %v, %v", files, err)
+			}
+		}
+	})
 
 	validChallenge := challenge()
 	valid := signedRequest(http.MethodPost, "/v1/root?mode=safe", []byte(`{"value":1}`), http.MethodPost, "/v1/root?mode=safe", []byte(`{"value":1}`), privateKey, validChallenge)

@@ -16,15 +16,15 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
-// Request body limits. Every JSON request body is bounded; routes whose
-// payloads can legitimately be large use a dedicated limit.
+// Request body limits. Administrator-only aggregate restores have no byte cap:
+// legal cluster state and pretty-printed backups can exceed any per-write cap.
 const (
 	maxSmallRequestBytes    = 64 << 10
 	maxDefaultRequestBytes  = 1 << 20
 	maxJobRequestBytes      = 4 << 20
 	maxSecretRequestBytes   = 96 << 10
 	maxExecInputRequestSize = 128 << 10
-	maxBackupRequestBytes   = 64 << 20
+	maxBackupRequestBytes   = 0
 )
 
 // decodeJSON strictly decodes exactly one JSON value from the request body
@@ -37,7 +37,11 @@ func decodeJSON(c *echo.Context, dst any, limit int64) error {
 	if mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type")); err != nil || mediaType != "application/json" {
 		return echo.NewHTTPError(http.StatusUnsupportedMediaType, "request body must be application/json")
 	}
-	decoder := json.NewDecoder(http.MaxBytesReader(c.Response(), request.Body, limit))
+	var reader io.Reader = request.Body
+	if limit > 0 {
+		reader = http.MaxBytesReader(c.Response(), request.Body, limit)
+	}
+	decoder := json.NewDecoder(reader)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(dst); err != nil {
 		return decodeError(err, limit)

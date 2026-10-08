@@ -23,6 +23,27 @@ func mustNew(t *testing.T, config Config) *Client {
 	return c
 }
 
+func TestBackupResponseExceedsOrdinaryResponseLimit(t *testing.T) {
+	record := json.RawMessage(`{"value":"` + strings.Repeat("x", 1<<20) + `"}`)
+	snapshot := api.BackupSnapshot{FormatVersion: api.BackupFormatVersion, Jobs: map[string]json.RawMessage{}}
+	for i := range 65 {
+		snapshot.Jobs[string(rune('A'+i))] = record
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if err := json.NewEncoder(w).Encode(snapshot); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer server.Close()
+	got, err := mustNew(t, Config{Address: server.URL}).CreateBackup(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Jobs) != 65 || string(got.Jobs["A"]) != string(record) {
+		t.Fatal("large backup truncated or changed")
+	}
+}
+
 func TestNewValidatesConfig(t *testing.T) {
 	_, key, err := ed25519.GenerateKey(nil)
 	if err != nil {

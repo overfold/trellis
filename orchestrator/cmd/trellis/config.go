@@ -1,14 +1,38 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 
 	"github.com/overfold/trellis/orchestrator/internal/nodecapacity"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
+	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"gopkg.in/yaml.v3"
 )
+
+// Maintenance uses the same YAML decoder as the daemon, not shell parsing of
+// scalars (which would misinterpret quotes, comments, escapes, and aliases).
+func newConfigPathsCommand() *cobra.Command {
+	var path string
+	cmd := &cobra.Command{
+		Use: "config-paths", Hidden: true, Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg := &config{DataDir: "/var/lib/trellis/data", ContainerdSock: "/run/containerd/containerd.sock"}
+			if err := loadNodeConfig(path, cfg, cmd.Flags()); err != nil {
+				return err
+			}
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(struct {
+				DataDir          string `json:"data_dir"`
+				SecretsKey       string `json:"secrets_key"`
+				ContainerdSocket string `json:"containerd_socket"`
+			}{cfg.DataDir, cfg.SecretsKey, cfg.ContainerdSock})
+		},
+	}
+	cmd.Flags().StringVar(&path, "config", "", "Node configuration YAML")
+	return cmd
+}
 
 type reservedResourcesConfig struct {
 	CPU    *int    `yaml:"cpu"`

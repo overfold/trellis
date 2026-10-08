@@ -5,18 +5,67 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"net/http"
+	"net/netip"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	secretstore "github.com/overfold/trellis/orchestrator/internal/secrets"
 	"github.com/overfold/trellis/orchestrator/internal/state"
 )
+
+func TestRestoreNetworkCapacityAndCollisions(t *testing.T) {
+	settings := DefaultClusterSettings()
+	settings.WireGuardPool = netip.MustParsePrefix("10.64.0.0/16") // 256 /24 subnets.
+	settings.WireGuardPortCount = 2
+	for _, tc := range []struct {
+		name        string
+		slot, index int
+		duplicate   bool
+		valid       bool
+	}{
+		{"last valid", 1, 255, false, true},
+		{"port overflow", 2, 255, false, false},
+		{"subnet overflow", 1, 256, false, false},
+		{"link address overflow", 1, 254 * 256, false, false},
+		{"duplicate port", 1, 255, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			settings := settings
+			if tc.name == "link address overflow" {
+				settings.WireGuardPool = netip.MustParsePrefix("10.0.0.0/8")
+			}
+			store := &backupStore{data: memoryStore{}, snapshot: &state.DesiredSnapshot{}}
+			s := newBackupTestServer(t, store, settings)
+			backup := mustBackup(t, s)
+			backup.NetworkPortRegistrations = map[string]json.RawMessage{"acme": json.RawMessage(fmt.Sprintf(`{"namespace":"acme","slot":%d}`, tc.slot))}
+			if tc.duplicate {
+				backup.NetworkPortRegistrations["other"] = json.RawMessage(fmt.Sprintf(`{"namespace":"other","slot":%d}`, tc.slot))
+			}
+			node := uuid.NewString()
+			backup.NetworkSubnetRegistrations = map[string]json.RawMessage{"acme/" + node: json.RawMessage(fmt.Sprintf(`{"namespace":"acme","node_id":%q,"index":%d}`, node, tc.index))}
+			before := store.snapshot
+			err := s.Restore(t.Context(), backup)
+			if tc.valid && err != nil {
+				t.Fatal(err)
+			}
+			if !tc.valid && (err == nil || store.snapshot != before) {
+				t.Fatalf("invalid restore installed state: %v", err)
+			}
+		})
+	}
+	// The link-address range can be smaller than an otherwise valid pool.
+	if got := networkSubnetCapacity(netip.MustParsePrefix("10.0.0.0/8")); got != 254*256 {
+		t.Fatalf("link capacity = %d", got)
+	}
+}
 
 // Exercise the operator preflight against both atomic Bolt installation and
 // actual Raft submission. A rejected backup must not consume a fresh target.

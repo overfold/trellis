@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +11,29 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/nodecapacity"
 	"github.com/spf13/pflag"
 )
+
+func TestMaintenanceConfigPathsUsesYAML(t *testing.T) {
+	for _, data := range []string{`"/tmp/custom data" # comment`, `'/tmp/custom data'`, `&path /tmp/custom data`} {
+		path := filepath.Join(t.TempDir(), "trellis.yaml")
+		if err := os.WriteFile(path, []byte("data_dir: "+data+"\nsecrets_key: '/tmp/key file'\ncontainerd_socket: \"/tmp/custom.sock\"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cmd := newConfigPathsCommand()
+		var output bytes.Buffer
+		cmd.SetOut(&output)
+		cmd.SetArgs([]string{"--config", path})
+		if err := cmd.Execute(); err != nil {
+			t.Fatal(err)
+		}
+		var paths map[string]string
+		if err := json.Unmarshal(output.Bytes(), &paths); err != nil {
+			t.Fatal(err)
+		}
+		if paths["data_dir"] != "/tmp/custom data" || paths["secrets_key"] != "/tmp/key file" || paths["containerd_socket"] != "/tmp/custom.sock" {
+			t.Fatalf("paths = %v", paths)
+		}
+	}
+}
 
 func TestLoadNodeConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "trellis.yaml")

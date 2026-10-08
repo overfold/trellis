@@ -2,7 +2,9 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 
@@ -181,9 +183,18 @@ func (c *Client) UpdateReconciliationSettings(ctx context.Context, settings api.
 // CreateBackup downloads a desired-state backup. It requires the
 // administrator key.
 func (c *Client) CreateBackup(ctx context.Context) (*api.BackupSnapshot, error) {
+	body, err := c.transport.Stream(ctx, c.clusterPath("/v1/backup"))
+	if err != nil {
+		return nil, fmt.Errorf("create backup: %w", publicError(err))
+	}
+	defer func() { _ = body.Close() }()
 	var snapshot api.BackupSnapshot
-	if err := c.request(ctx, http.MethodGet, c.clusterPath("/v1/backup"), nil, &snapshot); err != nil {
+	decoder := json.NewDecoder(body)
+	if err := decoder.Decode(&snapshot); err != nil {
 		return nil, fmt.Errorf("create backup: %w", err)
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, fmt.Errorf("create backup: unexpected trailing data")
 	}
 	return &snapshot, nil
 }

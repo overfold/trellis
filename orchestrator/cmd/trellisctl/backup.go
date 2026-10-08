@@ -12,8 +12,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const maxBackupFileSize = 64 << 20
-
 func NewBackupCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "backup", Short: "Create and restore desired-state backups"}
 	cmd.AddCommand(newBackupCreateCmd(), newBackupRestoreCmd())
@@ -95,7 +93,7 @@ func newBackupRestoreCmd() *cobra.Command {
 				reader = file
 			}
 			var snapshot api.BackupSnapshot
-			decoder := json.NewDecoder(io.LimitReader(reader, maxBackupFileSize+1))
+			decoder := json.NewDecoder(reader)
 			if err := decoder.Decode(&snapshot); err != nil {
 				return fmt.Errorf("decode backup: %w", err)
 			}

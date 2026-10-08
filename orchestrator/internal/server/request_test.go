@@ -30,6 +30,17 @@ func decodeRequest(t *testing.T, contentType, body string, limit int64, dst any)
 	return decodeJSON(echo.New().NewContext(req, httptest.NewRecorder()), dst, limit)
 }
 
+func TestDecodeBackupBeyondOrdinaryBodyLimit(t *testing.T) {
+	body := strings.Repeat(" ", (64<<20)+1) + `{"format_version":6,"jobs":{"marker":{}}}`
+	var backup api.BackupSnapshot
+	if err := decodeRequest(t, "application/json", body, maxBackupRequestBytes, &backup); err != nil {
+		t.Fatal(err)
+	}
+	if backup.FormatVersion != api.BackupFormatVersion || string(backup.Jobs["marker"]) != "{}" {
+		t.Fatal("backup truncated")
+	}
+}
+
 func TestDecodeJSONRejectsLooseRequests(t *testing.T) {
 	tests := []struct {
 		name        string
