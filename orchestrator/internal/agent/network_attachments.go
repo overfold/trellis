@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/overfold/trellis/orchestrator/internal/network"
 )
@@ -63,6 +64,9 @@ func (a *Agent) removeOrphanedNetworkAttachments(ctx context.Context) {
 		return
 	}
 	for _, id := range ids {
+		if ctx.Err() != nil {
+			return
+		}
 		if _, owned := records[allocationFileName(id)]; owned {
 			continue
 		}
@@ -70,18 +74,66 @@ func (a *Agent) removeOrphanedNetworkAttachments(ctx context.Context) {
 	}
 }
 
-// detachOrphanedNetwork detaches an unowned attachment. It holds the
-// allocation lock so a start cannot register the same allocation between the
-// ownership check and the detach.
+// detachOrphanedNetwork reserves a task ID atomically with checking ownership.
+// Neither storage nor external cleanup holds Agent.mu. Cancellation bounds
+// the caller's wait, not the reservation: a noncooperative manager must return
+// before a start may reuse this ID. Other tasks and agent writers remain free.
 func (a *Agent) detachOrphanedNetwork(ctx context.Context, recovery network.AttachmentRecovery, id string) {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	if a.allocations[id] != nil {
+	if ctx.Err() != nil {
 		return
 	}
-	if err := recovery.DetachAllocation(ctx, id); err != nil {
-		a.log.Error("remove orphaned network attachment", "allocation", id, "error", err)
+	a.mu.Lock()
+	if a.allocations[id] != nil || a.orphanDetaches[id] {
+		a.mu.Unlock()
 		return
 	}
-	a.log.Info("removed orphaned network attachment", "allocation", id)
+	for allocationID, start := range a.starts {
+		for _, task := range start.tasks {
+			if taskRecordID(allocationID, start.generation, task) == id {
+				a.mu.Unlock()
+				return
+			}
+		}
+	}
+	if a.orphanDetaches == nil {
+		a.orphanDetaches = make(map[string]bool)
+	}
+	a.orphanDetaches[id] = true
+	a.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer func() {
+			a.mu.Lock()
+			delete(a.orphanDetaches, id)
+			a.mu.Unlock()
+		}()
+		// Recheck durable ownership after reservation: the sweep's snapshot
+		// may predate a start which has since finished or failed.
+		if a.local != nil {
+			records, errs := a.local.ListRaw("agent/allocations")
+			if len(errs) != 0 {
+				a.log.Error("skip orphaned network detach: allocation records are unreadable", "error", errors.Join(errs...))
+				return
+			}
+			if _, owned := records[allocationFileName(id)]; owned {
+				return
+			}
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		if err := recovery.DetachAllocation(ctx, id); err != nil {
+			a.log.Error("remove orphaned network attachment", "allocation", id, "error", err)
+			return
+		}
+		a.log.Info("removed orphaned network attachment", "allocation", id)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
 }

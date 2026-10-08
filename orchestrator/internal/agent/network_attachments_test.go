@@ -8,6 +8,8 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/overfold/trellis/orchestrator/internal/client"
 	"github.com/overfold/trellis/orchestrator/internal/network"
@@ -28,6 +30,7 @@ type recoveringNetworkManager struct {
 	detachErr    error
 	listErr      error
 	beforeAttach func(network.AttachRequest)
+	beforeDetach func(context.Context, string) error
 }
 
 func newRecoveringNetworkManager(attached ...string) *recoveringNetworkManager {
@@ -69,7 +72,12 @@ func (m *recoveringNetworkManager) Detach(_ context.Context, attachment *network
 	return nil
 }
 
-func (m *recoveringNetworkManager) DetachAllocation(_ context.Context, id string) error {
+func (m *recoveringNetworkManager) DetachAllocation(ctx context.Context, id string) error {
+	if m.beforeDetach != nil {
+		if err := m.beforeDetach(ctx, id); err != nil {
+			return err
+		}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.byID = append(m.byID, id)
@@ -374,4 +382,198 @@ func TestRecoveryRetrySweepsOrphanedNetworkAttachmentsAfterLateListing(t *testin
 	if !slices.Equal(manager.byID, []string{"orphan"}) {
 		t.Fatalf("detached by ID = %v, want the orphan swept once listing completed", manager.byID)
 	}
+}
+
+func TestHungOrphanDetachDoesNotBlockAgentOrReleaseOwnershipOnCancellation(t *testing.T) {
+	manager := newRecoveringNetworkManager("allocation-g2-first")
+	agent, local := newDurableNetworkTestAgent(t, &reconcilerRuntime{}, manager)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(release) }) })
+	manager.beforeDetach = func(context.Context, string) error {
+		close(entered)
+		<-release // Deliberately ignore cancellation, like a hung external operation.
+		return errors.New("detach failed")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	swept := make(chan struct{})
+	go func() {
+		agent.removeOrphanedNetworkAttachments(ctx)
+		close(swept)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("detach did not enter")
+	}
+
+	// Exercise actual writers and persistence, not just TryLock. The same-ID
+	// start is refused promptly, while stop/drain and other starts can proceed.
+	progress := make(chan error, 1)
+	go func() {
+		request := operationTestRequest()
+		if err := agent.StartGroup(context.Background(), request); err == nil {
+			progress <- errors.New("same-ID start accepted during detach")
+			return
+		}
+		if err := agent.StopGroup(context.Background(), &nodeapi.StopAllocationRequest{AllocationID: "allocation", Generation: 2, Epoch: 1}); err != nil {
+			progress <- err
+			return
+		}
+		if err := agent.DrainGroup(context.Background(), &nodeapi.DrainAllocationRequest{AllocationID: "allocation", Generation: 2, Epoch: 1}); err != nil {
+			progress <- err
+			return
+		}
+		request.AllocationID = "unrelated"
+		if err := runGroup(context.Background(), agent, request); err != nil {
+			progress <- err
+			return
+		}
+		agent.OnReconciledStatus("unrelated-g2-first", "exited")
+		_ = agent.allocationStatuses()
+		var record Allocation
+		if err := local.Get(allocationRecordKey("unrelated-g2-first"), &record); err != nil {
+			progress <- err
+			return
+		}
+		if record.Status != "exited" {
+			progress <- errors.New("status writer did not persist")
+			return
+		}
+		progress <- nil
+	}()
+	select {
+	case err := <-progress:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("hung detach blocked agent progress")
+	}
+	cancel() // Agent shutdown must not wait for the noncooperative manager.
+	select {
+	case <-swept:
+	case <-time.After(3 * time.Second):
+		t.Fatal("shutdown did not end the sweep")
+	}
+	// A second sweep cannot launch another worker or release the reservation.
+	agent.detachOrphanedNetwork(context.Background(), manager, "allocation-g2-first")
+	if err := agent.StartGroup(context.Background(), operationTestRequest()); err == nil {
+		t.Fatal("cancelled wait released ownership before detach returned")
+	}
+	once.Do(func() { close(release) })
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		agent.mu.RLock()
+		pending := agent.orphanDetaches["allocation-g2-first"]
+		agent.mu.RUnlock()
+		if !pending {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("completed detach retained its reservation")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// A failed detach leaves the attachment journal for retry. Once it returns,
+	// retry cleanup can succeed and the previously refused start can run.
+	manager.beforeDetach = nil
+	agent.removeOrphanedNetworkAttachments(context.Background())
+	if manager.isAttached("allocation-g2-first") {
+		t.Fatal("retry did not remove attachment")
+	}
+	if err := runGroup(context.Background(), agent, operationTestRequest()); err != nil {
+		t.Fatalf("start after cleanup: %v", err)
+	}
+}
+
+func TestOrphanSweepRechecksOwnershipAfterSnapshot(t *testing.T) {
+	for _, owner := range []string{"durable", "in-memory", "accepted-start"} {
+		t.Run(owner, func(t *testing.T) {
+			manager := newRecoveringNetworkManager("a-orphan", "allocation-g2-first")
+			agent, local := newDurableNetworkTestAgent(t, &reconcilerRuntime{}, manager)
+			manager.beforeDetach = func(_ context.Context, id string) error {
+				if id != "a-orphan" {
+					return nil
+				}
+				// The sweep already took its durable ownership snapshot.
+				switch owner {
+				case "durable":
+					return local.Put(allocationRecordKey("allocation-g2-first"), "malformed but owned")
+				case "in-memory":
+					agent.mu.Lock()
+					agent.allocations["allocation-g2-first"] = &Allocation{ID: "allocation-g2-first"}
+					agent.mu.Unlock()
+				case "accepted-start":
+					agent.mu.Lock()
+					agent.starts = map[string]*groupStart{"allocation": {generation: 2, tasks: []string{"first"}}}
+					agent.mu.Unlock()
+				}
+				return nil
+			}
+			agent.removeOrphanedNetworkAttachments(context.Background())
+			if !slices.Equal(manager.byID, []string{"a-orphan"}) || !manager.isAttached("allocation-g2-first") {
+				t.Fatalf("new owner lost attachment: detached %v", manager.byID)
+			}
+		})
+	}
+}
+
+func TestOrphanDetachCancellationAndRetry(t *testing.T) {
+	manager := newRecoveringNetworkManager("orphan")
+	agent, _ := newDurableNetworkTestAgent(t, &reconcilerRuntime{}, manager)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	agent.detachOrphanedNetwork(ctx, manager, "orphan")
+	if len(manager.byID) != 0 {
+		t.Fatal("cancelled detach touched network")
+	}
+	manager.detachErr = context.DeadlineExceeded
+	agent.detachOrphanedNetwork(context.Background(), manager, "orphan")
+	if !manager.isAttached("orphan") {
+		t.Fatal("failed detach lost retry evidence")
+	}
+	manager.detachErr = nil
+	agent.detachOrphanedNetwork(context.Background(), manager, "orphan")
+	if manager.isAttached("orphan") || len(manager.byID) != 2 {
+		t.Fatal("detach retry did not converge")
+	}
+}
+
+func TestOrphanDetachTimeoutKeepsReservationUntilWorkerReturns(t *testing.T) {
+	agent := newOperationTestAgent(t, &reconcilerRuntime{})
+	manager := newRecoveringNetworkManager("orphan")
+	synctest.Test(t, func(t *testing.T) {
+		entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+		manager.beforeDetach = func(context.Context, string) error {
+			close(entered)
+			<-release
+			return nil
+		}
+		started := time.Now()
+		go func() {
+			agent.detachOrphanedNetwork(context.Background(), manager, "orphan")
+			close(done)
+		}()
+		<-entered
+		<-done // Fake time advances to the production timeout, no wall-clock sleep.
+		if elapsed := time.Since(started); elapsed != 30*time.Second {
+			t.Fatalf("detach wait = %v, want 30s", elapsed)
+		}
+		agent.mu.RLock()
+		pending := agent.orphanDetaches["orphan"]
+		agent.mu.RUnlock()
+		if !pending {
+			t.Fatal("timeout released the live worker's reservation")
+		}
+		close(release)
+		synctest.Wait()
+		agent.mu.RLock()
+		pending = agent.orphanDetaches["orphan"]
+		agent.mu.RUnlock()
+		if pending || manager.isAttached("orphan") {
+			t.Fatal("late successful cleanup did not release reservation and attachment")
+		}
+	})
 }

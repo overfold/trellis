@@ -370,11 +370,14 @@ func humanDuration(base schema) schema {
 }
 
 func humanByteSize(base schema) schema {
+	// Surrounding whitespace follows strings.TrimSpace; whitespace between
+	// amount and unit follows ParseByteSize's RE2 \s (not JavaScript's \s).
+	space := "[\\t\\n\\v\\f\\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]*"
 	return schema{
 		"description": "A byte count or human-readable decimal/binary size such as 64MB or 64MiB.",
 		"oneOf": []schema{
 			cloneSchema(base),
-			{"type": "string", "pattern": `^[0-9]+(?:\.[0-9]+)?\s*(?:[Bb]|[KkMmGgTt][Bb]|[KkMmGgTt]i[Bb]?)?$`},
+			{"type": "string", "pattern": "^" + space + `[0-9]+(?:\.[0-9]+)?[ \t\n\f\r]*(?:[Bb]|[KkMmGgTt][Bb]|[KkMmGgTt][Ii][Bb]?)?` + space + "$"},
 		},
 	}
 }

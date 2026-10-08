@@ -149,26 +149,45 @@ func TestHTTPHealthCheckPathUsesProbePathRules(t *testing.T) {
 }
 
 func TestByteSizeSchemaMatchesParser(t *testing.T) {
-	_, yamlRaw, err := Generate()
+	apiRaw, yamlRaw, err := Generate()
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := regexp.MustCompile(`"pattern":\s*"(\^\[0-9\]\+\(\?:\\\\\.\[0-9\]\+\)\?\\\\s\*[^"]*)"`).FindSubmatch(yamlRaw)
-	if m == nil {
-		t.Fatal("byte-size pattern not found in schema")
-	}
-	var pattern string
-	if err := json.Unmarshal([]byte(`"`+string(m[1])+`"`), &pattern); err != nil {
+	var api, yaml map[string]any
+	if err := json.Unmarshal(apiRaw, &api); err != nil {
 		t.Fatal(err)
 	}
+	if err := json.Unmarshal(yamlRaw, &yaml); err != nil {
+		t.Fatal(err)
+	}
+	if memory := property(t, api["$defs"].(map[string]any), "ResourcesSpec", "memory"); memory["type"] != "integer" {
+		t.Fatalf("canonical memory is not numeric: %v", memory)
+	}
+	memory := property(t, yaml["$defs"].(map[string]any), "ResourcesSpec", "memory")
+	pattern := memory["oneOf"].([]any)[1].(map[string]any)["pattern"].(string)
 	re := regexp.MustCompile(pattern)
-	for _, v := range []string{"64", "1B", "7K", "7KB", "7Ki", "7KiB", "64M", "64MB", "64Mi", "64MiB", "5G", "5GB", "2T", "2TB", "0.5GB", "64 MB", "1x", "64MBB", "64kk"} {
-		_, err := spec.ParseByteSize(v)
-		if re.MatchString(v) && err != nil {
-			t.Errorf("schema accepts %q but parser rejects it: %v", v, err)
-		}
-		if !re.MatchString(v) && err == nil {
-			t.Errorf("parser accepts %q but schema rejects it", v)
+	// Exhaust every casing of every supported unit, and plausible invalid
+	// units. Amounts are bounded: overflow remains semantic parser validation,
+	// not something a JSON Schema string pattern can enforce.
+	for _, unit := range []string{"", "b", "kb", "mb", "gb", "tb", "ki", "kib", "mi", "mib", "gi", "gib", "ti", "tib", "k", "m", "g", "t", "ib", "mibb", "kk", "pb", "pib", "x"} {
+		for casing := 0; casing < 1<<len(unit); casing++ {
+			letters := []byte(unit)
+			for i := range letters {
+				if casing&(1<<i) != 0 {
+					letters[i] -= 'a' - 'A'
+				}
+			}
+			for _, amount := range []string{"0", "64", "0.5", "01.25", "-1", "+1", ".5", "1.", "1e2", ""} {
+				for _, inner := range []string{"", " ", "\t\n\f\r", "\v", "\u00a0"} {
+					for _, outer := range []string{"", " \t\n", "\v\u0085\u00a0\u1680\u2000\u200a\u2028\u2029\u202f\u205f\u3000", "\u200b", "\ufeff"} {
+						v := outer + amount + inner + string(letters) + outer
+						_, err := spec.ParseByteSize(v)
+						if re.MatchString(v) != (err == nil) {
+							t.Errorf("schema/parser mismatch for %q: parser error %v", v, err)
+						}
+					}
+				}
+			}
 		}
 	}
 }

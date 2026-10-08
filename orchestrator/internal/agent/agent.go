@@ -73,6 +73,9 @@ type Agent struct {
 	mu          sync.RWMutex
 	operationMu sync.Mutex
 	operations  map[string]*allocationOperation
+	// orphanDetaches reserves task-record IDs until cleanup really returns,
+	// even if its caller stops waiting. Guarded by mu, like task registration.
+	orphanDetaches map[string]bool
 	// starts holds accepted allocation starts running in the background, and
 	// failed ones until the control plane retries; guarded by mu.
 	starts map[string]*groupStart
@@ -1643,6 +1646,10 @@ func (a *Agent) startTask(ctx context.Context, task *taskStart) (runErr error) {
 	alloc := &Allocation{ID: task.ID, ContainerID: task.ID, AllocationID: task.AllocationID, Generation: task.Generation, JobRevision: task.JobRevision, ExecutionHash: task.ExecutionHash, Restart: task.Restart, RestartAttempts: restartAttempts, RestartWindow: restartWindow, Namespace: task.Namespace, JobName: task.JobName, GroupName: task.GroupName, TaskName: task.Spec.Name, Spec: task.Spec, Status: "starting", Health: "unknown", Draining: task.Draining, DrainSequence: task.DrainSequence}
 	starting := *alloc
 	a.mu.Lock()
+	if a.orphanDetaches[task.ID] {
+		a.mu.Unlock()
+		return fmt.Errorf("orphaned network cleanup for task %s is still in progress; retry the start", task.ID)
+	}
 	a.allocations[task.ID] = &starting
 	a.mu.Unlock()
 	if err := a.persistAllocation(alloc); err != nil {

@@ -162,6 +162,10 @@ func (a *Agent) acceptStartLocked(request *nodeapi.AllocationRequest) (*groupSta
 	tasks := make([]string, len(request.Tasks))
 	for i := range request.Tasks {
 		tasks[i] = request.Tasks[i].Name
+		id := taskRecordID(request.AllocationID, request.Generation, tasks[i])
+		if a.orphanDetaches[id] {
+			return nil, nil, fmt.Errorf("orphaned network cleanup for task %s is still in progress; retry the start", id)
+		}
 	}
 	ctx, cancel := context.WithTimeout(a.lifetimeContext(), maxStartDuration)
 	start := &groupStart{

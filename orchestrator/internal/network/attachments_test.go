@@ -79,6 +79,61 @@ func assertAttachments(t *testing.T, manager *WireGuardManager, want ...string) 
 	}
 }
 
+type cancelledDetachRunner struct {
+	recordingRunner
+	entered chan struct{}
+}
+
+func (r *cancelledDetachRunner) Run(ctx context.Context, name string, args ...string) error {
+	_ = r.recordingRunner.Run(ctx, name, args...)
+	if len(r.commands) == 1 {
+		close(r.entered)
+		<-ctx.Done()
+	}
+	return ctx.Err()
+}
+
+func TestDetachAllocationCancelledCommandRetainsJournalAndLeaseForRetry(t *testing.T) {
+	manager, runner := newRecoveryTestManager(t)
+	attachment := attachForRecovery(t, manager, "alloc-cancel")
+	blocked := &cancelledDetachRunner{entered: make(chan struct{})}
+	manager.run = blocked
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := make(chan error, 1)
+	go func() { done <- manager.DetachAllocation(ctx, attachment.AllocationID) }()
+	select {
+	case <-blocked.entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("detach did not enter external command")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("detach error = %v, want cancellation", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("detach command did not honor cancellation")
+	}
+	assertAttachments(t, manager, "alloc-cancel")
+	leaseDir := filepath.Join(manager.stateDir, attachment.Network)
+	if leases, err := os.ReadDir(leaseDir); err != nil || len(leases) == 0 {
+		t.Fatalf("cancelled detach lost address reservation: %v, %v", leases, err)
+	}
+	manager.run = runner
+	if err := manager.DetachAllocation(context.Background(), attachment.AllocationID); err != nil {
+		t.Fatalf("retry detach: %v", err)
+	}
+	assertAttachments(t, manager)
+	if _, err := os.Stat(leaseDir); !os.IsNotExist(err) {
+		t.Fatalf("retry retained lease directory: %v", err)
+	}
+	if err := manager.DetachAllocation(context.Background(), attachment.AllocationID); err != nil {
+		t.Fatalf("idempotent retry: %v", err)
+	}
+}
+
 func TestAttachRecordsAttachmentBeforeCreatingResources(t *testing.T) {
 	manager, runner := newRecoveryTestManager(t)
 	recorded := false
