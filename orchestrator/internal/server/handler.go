@@ -850,20 +850,16 @@ type jobRequest struct {
 	ResolvedImages map[string]string
 }
 
-// decodeJobRequest decodes and canonicalizes a job submission addressed to
-// the {namespace} path parameter, whose spec must name the same namespace. A
-// nil request with a nil error means the validation response was written.
+// decodeJobRequest decodes a job submission addressed to the {namespace}
+// path parameter. PlanJob and RegisterJob own canonicalization.
 func (h *Handler) decodeJobRequest(c *echo.Context, ns string) (*jobRequest, error) {
 	var body api.JobRegistrationRequest
 	if err := decodeJSON(c, &body, maxJobRequestBytes); err != nil {
 		return nil, err
 	}
-	request := &jobRequest{Preconditions: JobPreconditions{Version: body.ExpectedVersion, Incarnation: body.ExpectedIncarnation}, ResolvedImages: body.ResolvedImages}
+	request := &jobRequest{Preconditions: JobPreconditions{Version: body.ExpectedVersion, Incarnation: body.ExpectedIncarnation, Settings: body.ExpectedSettings}, ResolvedImages: body.ResolvedImages}
 	if err := decodeJobSpec(body.Spec, &request.Spec); err != nil {
 		return nil, err
-	}
-	if err := h.server.CanonicalizeJob(&request.Spec); err != nil {
-		return nil, validationResponse(c, err)
 	}
 	if request.Spec.Namespace != ns {
 		return nil, echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("spec.namespace %q does not match request namespace %q", request.Spec.Namespace, ns))
@@ -880,13 +876,13 @@ func (h *Handler) handlePlanJob(c *echo.Context) error {
 	if err != nil || request == nil {
 		return err
 	}
-	if err := h.server.ValidateNamespaceAllocationLimit(request.Spec.Namespace, &request.Spec); err != nil {
-		return validationResponse(c, err)
-	}
 	if err := requireAPIAccessDelegation(c, &request.Spec); err != nil {
 		return err
 	}
 	result, err := h.server.PlanJob(c.Request().Context(), &request.Spec)
+	if errors.Is(err, ErrJobVersionConflict) {
+		return echo.NewHTTPError(http.StatusConflict, err.Error())
+	}
 	if err != nil {
 		return validationResponse(c, err)
 	}

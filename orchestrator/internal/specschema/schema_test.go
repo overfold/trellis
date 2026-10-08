@@ -10,6 +10,33 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/probepath"
 )
 
+func TestResourcesAndHostPortSchemaMatchAdmission(t *testing.T) {
+	apiRaw, yamlRaw, err := Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range [][]byte{apiRaw, yamlRaw} {
+		var root map[string]any
+		if err := json.Unmarshal(raw, &root); err != nil {
+			t.Fatal(err)
+		}
+		defs := root["$defs"].(map[string]any)
+		required := defs["ResourcesSpec"].(map[string]any)["required"].([]any)
+		if !contains(required, "cpu") || !contains(required, "memory") {
+			t.Fatal("supplied resources must require both CPU and memory")
+		}
+		port := property(t, defs, "PortSpec", "host_port")
+		if port["minimum"] != float64(0) || port["maximum"] != float64(65535) {
+			t.Fatalf("host_port must allow the zero sentinel: %+v", port)
+		}
+		conditions := defs["TaskNetworkingSpec"].(map[string]any)["allOf"].([]any)
+		host := conditions[1].(map[string]any)["then"].(map[string]any)["properties"].(map[string]any)["ports"].(map[string]any)["items"].(map[string]any)
+		if host["properties"].(map[string]any)["host_port"].(map[string]any)["const"] != float64(0) {
+			t.Fatal("host networking must allow omission or zero, not nonzero host_port")
+		}
+	}
+}
+
 func TestGenerateDeterministic(t *testing.T) {
 	apiA, yamlA, err := Generate()
 	if err != nil {

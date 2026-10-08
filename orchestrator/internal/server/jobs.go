@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,7 +42,18 @@ func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spe
 	if err := preconditions.validate(); err != nil {
 		return nil, err
 	}
-	if err := s.CanonicalizeJob(jobSpec); err != nil {
+	s.mu.RLock()
+	settings := s.clusterSettingsLocked()
+	s.mu.RUnlock()
+	if preconditions.Settings != "" && preconditions.Settings != settingsFingerprint(settings) {
+		return nil, fmt.Errorf("%w: cluster settings changed; plan the manifest again", ErrJobVersionConflict)
+	}
+	if preconditions.Settings != "" {
+		if err := spec.ValidateCanonical(jobSpec); err != nil {
+			return nil, fmt.Errorf("planned spec must contain resolved defaults: %w", err)
+		}
+	}
+	if err := spec.Canonicalize(jobSpec, settings.JobLimits); err != nil {
 		return nil, fmt.Errorf("validate job: %w", err)
 	}
 	if jobSpec.Namespace != namespace {
@@ -61,7 +73,11 @@ func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spe
 	// so existing can be compared without holding s.mu.
 	s.mu.RLock()
 	existing := s.jobs[key]
+	settingsMatch := preconditions.Settings == "" || preconditions.Settings == settingsFingerprint(s.clusterSettingsLocked())
 	s.mu.RUnlock()
+	if !settingsMatch {
+		return nil, fmt.Errorf("%w: cluster settings changed; plan the manifest again", ErrJobVersionConflict)
+	}
 	if err := preconditions.check(existing); err != nil {
 		return nil, err
 	}
@@ -151,6 +167,8 @@ type JobPreconditions struct {
 	Version *int
 	// Incarnation requires that the job exists with this incarnation.
 	Incarnation string
+	// Settings is the fingerprint returned by planning.
+	Settings string
 }
 
 func (p *JobPreconditions) validate() error {
@@ -372,6 +390,12 @@ func (s *Server) jobStatus(namespace, name string) (*api.JobStatusResponse, *spe
 
 // PlanJob returns the semantic plan for applying desired, a canonical job.
 func (s *Server) PlanJob(ctx context.Context, desired *spec.JobSpec) (api.JobPlanResponse, error) {
+	s.mu.RLock()
+	settings := s.clusterSettingsLocked()
+	s.mu.RUnlock()
+	if err := spec.Canonicalize(desired, settings.JobLimits); err != nil {
+		return api.JobPlanResponse{}, err
+	}
 	images, err := s.resolveJobImages(ctx, desired, nil)
 	if err != nil {
 		return api.JobPlanResponse{}, err
@@ -379,6 +403,14 @@ func (s *Server) PlanJob(ctx context.Context, desired *spec.JobSpec) (api.JobPla
 	execution := executionSpec(desired, images)
 	s.mu.RLock()
 	current := s.jobs[jobKey(desired.Namespace, desired.Name)]
+	if settings != s.clusterSettingsLocked() {
+		s.mu.RUnlock()
+		return api.JobPlanResponse{}, fmt.Errorf("%w: cluster settings changed; plan the manifest again", ErrJobVersionConflict)
+	}
+	if err := s.validateNamespaceAllocationLimitLocked(desired.Namespace, desired, jobKey(desired.Namespace, desired.Name)); err != nil {
+		s.mu.RUnlock()
+		return api.JobPlanResponse{}, err
+	}
 	s.mu.RUnlock()
 	var result api.JobPlanResponse
 	if current == nil {
@@ -392,7 +424,14 @@ func (s *Server) PlanJob(ctx context.Context, desired *spec.JobSpec) (api.JobPla
 		}
 	}
 	result.ResolvedImages = images
+	result.Spec, _ = json.Marshal(desired)
+	result.SettingsFingerprint = settingsFingerprint(settings)
 	return result, nil
+}
+
+func settingsFingerprint(settings ClusterSettings) string {
+	raw, _ := json.Marshal(settings.API())
+	return fmt.Sprintf("%x", sha256.Sum256(raw))
 }
 
 // DeleteJob removes desired job state.

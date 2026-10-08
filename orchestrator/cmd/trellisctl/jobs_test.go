@@ -84,8 +84,8 @@ func TestPrintJobPlanFormatsHumanDurations(t *testing.T) {
 		Changes: []api.JobPlanChange{{
 			Operation: "change",
 			Path:      "task_groups[frontend].restart.window",
-			Before:    float64(60_000_000_000),
-			After:     float64(120_000_000_000),
+			Before:    json.Number("60000000000"),
+			After:     json.Number("120000000000"),
 		}},
 	}
 	var out strings.Builder
@@ -94,6 +94,12 @@ func TestPrintJobPlanFormatsHumanDurations(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "1m0s -> 2m0s") {
 		t.Fatalf("plan output did not humanize duration: %q", out.String())
+	}
+	if got := formatChangeValue("task_groups[api].restart.window", json.Number("9007199254740993")); got != "2501h59m59.254740993s" {
+		t.Fatalf("duration lost nanosecond precision: %s", got)
+	}
+	if got := formatChangeValue("task_groups[api].tasks[0].resources.memory", json.Number("9007199254740993")); got != "9007199254740993" {
+		t.Fatalf("byte count lost precision: %s", got)
 	}
 }
 
@@ -290,10 +296,11 @@ func TestJobsApplySendsPlannedVersionAndReportsConflict(t *testing.T) {
 			var expected *int
 			var expectedIncarnation string
 			pinned := "docker.io/library/app:v1@sha256:" + strings.Repeat("a", 64)
+			resolvedSpec := json.RawMessage(`{"name":"web","namespace":"default","task_groups":[{"name":"api","count":3,"tasks":[{"name":"app","image":"app:v1","resources":{"cpu":250,"memory":134217728}}]}]}`)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/v1/namespaces/default/jobs/plan":
-					_ = json.NewEncoder(w).Encode(api.JobPlanResponse{Action: "update", Namespace: "default", Job: "web", BaseIncarnation: "inc-1", BaseVersion: 4, BaseRevision: 2, ResolvedImages: map[string]string{"app:v1": pinned}, Changes: []api.JobPlanChange{{Operation: "change", Path: "task_groups[api].count", Before: 1, After: 3}}})
+					_ = json.NewEncoder(w).Encode(api.JobPlanResponse{Action: "update", Namespace: "default", Job: "web", BaseIncarnation: "inc-1", BaseVersion: 4, BaseRevision: 2, Spec: resolvedSpec, SettingsFingerprint: "settings-1", ResolvedImages: map[string]string{"app:v1": pinned}, Changes: []api.JobPlanChange{{Operation: "change", Path: "task_groups[api].count", Before: 1, After: 3}}})
 				case "/v1/namespaces/default/jobs":
 					var request api.JobRegistrationRequest
 					decoder := json.NewDecoder(r.Body)
@@ -304,6 +311,9 @@ func TestJobsApplySendsPlannedVersionAndReportsConflict(t *testing.T) {
 					expected, expectedIncarnation = request.ExpectedVersion, request.ExpectedIncarnation
 					if request.ResolvedImages["app:v1"] != pinned {
 						t.Errorf("apply lost the plan's image pin: %+v", request.ResolvedImages)
+					}
+					if string(request.Spec) != string(resolvedSpec) || request.ExpectedSettings != "settings-1" {
+						t.Errorf("apply lost resolved defaults or settings fence: %+v", request)
 					}
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(tc.status)

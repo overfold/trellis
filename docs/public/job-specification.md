@@ -61,6 +61,7 @@ The YAML layer accepts human-readable quantities:
 
 ```yaml
 resources:
+  cpu: 250
   memory: 256MiB
 health_check:
   interval: 10s
@@ -70,12 +71,14 @@ The canonical JSON representation uses machine values instead:
 
 ```json
 {
-  "resources": { "memory": 268435456 },
+  "resources": { "cpu": 250, "memory": 268435456 },
   "health_check": { "interval": 10000000000 }
 }
 ```
 
 Memory is bytes and durations are nanoseconds in the current API model. Parsing strings such as `256MiB`, `4GB`, or `10s` is therefore a responsibility of the authoring consumer, not the Trellis HTTP API. Omitted values and their effective defaults remain Trellis semantics; a consumer should not duplicate those rules.
+
+A manifest must contain exactly one YAML document; additional documents, even empty ones, are rejected. Integer fields require in-range integers, not booleans, fractional numbers, or numeric strings. Human memory and duration strings remain supported; fractional human quantities such as `0.5MiB` and `500.5ms` are intentional authoring syntax. Negative fractions cannot be truncated into zero to select a default.
 
 ### Defaults and the stored job
 
@@ -87,8 +90,8 @@ Before a job is planned or stored, Trellis resolves omitted defaults to their ef
 | task group `restart` | `max_restarts: 3`, `window: 10m` |
 | task group `update` | `strategy: recreate`, `max_parallel: 1` (zero also means one) |
 | task `networking` or `networking.mode` | `mode: namespace` |
-| namespace-mode port `host_port` | the port's `port` |
-| task `resources` | the cluster's `default_task_cpu` and `default_task_memory` job limits at apply time |
+| namespace-mode port `host_port` | the port's `port` (zero also selects this default) |
+| task `resources` | the cluster's `default_task_cpu` and `default_task_memory` job limits at plan or direct-apply time; a reviewed plan pins these values |
 | `health_check.interval`, `timeout`, `threshold` | `10s`, `5s`, `3` (zero also selects the default) |
 | HTTP `health_check.path` | `/` |
 | file secret `mode` | `0400` (zero also selects the default) |
@@ -224,15 +227,15 @@ Each namespace-mode task has its own network attachment and address; tasks in on
 
 **`namespace`** gives the task a private address on the namespace network, which spans every node running an allocation of that namespace. Tasks reach each other by address or through [service discovery](core-concepts.md#networking-and-discovery) DNS; the network is not reachable from other namespaces. Traffic to anything beyond the namespace network, such as the internet, leaves through the node with its source address translated to the node's (masquerade). That egress reaches whatever the node can reach, including its local network, other nodes' addresses, and link-local services such as cloud metadata endpoints. Trellis currently realizes this mode with WireGuard, which every node runs.
 
-Each namespace-mode `ports` entry publishes node port `host_port` to `port`, the port the process listens on inside its network. Omitting `host_port` publishes the same number; the stored job shows the resolved value. Published ports forward TCP and UDP from any of the node's addresses, preserve the client's source address, and are also reachable from the node itself, from host-networked tasks, and from namespace-networked tasks, including other namespaces' and the publishing task's own, through a node address. They are not reachable on `127.0.0.1`. A published port does not need to be declared for namespace-network peers, which reach every listening port directly. Published ports are forwarded before the node's own forwarding rules, like Docker's, so a host firewall does not filter them.
+Each namespace-mode `ports` entry publishes node port `host_port` to `port`, the port the process listens on inside its network. Omitting `host_port` or setting it to zero publishes the same number; the stored job shows the resolved value. Published ports forward TCP and UDP from any of the node's addresses, preserve the client's source address, and are also reachable from the node itself, from host-networked tasks, and from namespace-networked tasks, including other namespaces' and the publishing task's own, through a node address. They are not reachable on `127.0.0.1`. A published port does not need to be declared for namespace-network peers, which reach every listening port directly. Published ports are forwarded before the node's own forwarding rules, like Docker's, so a host firewall does not filter them.
 
 Namespace networking is IPv4-only. IPv6 is disabled on its host-side links, including automatic link-local addresses; this does not change IPv6 access in host mode. Direct host-bound traffic from a local namespace bridge is limited to workload DNS, enabled API access on its gateway, and replies. Decrypted remote WireGuard traffic may reply to host-initiated connections but cannot initiate connections to host services. Published-port forwarding remains available under the policy above.
 
-**`host`** joins the node's network namespace. Each `ports` entry reserves `port` on the node for scheduling; `host_port` is not allowed because there is no translation. Host networking is node-level network access: the task can bind any node port, reach every service listening on the node, and open connections into every namespace network present on the node — the namespace bridges and WireGuard interfaces live in the node's network namespace — including namespaces other than its own. See [Multitenancy and trust boundaries](multitenancy.md#networking) before accepting host networking from less-trusted authors.
+**`host`** joins the node's network namespace. Each `ports` entry reserves `port` on the node for scheduling; `host_port` must be omitted or zero because there is no translation. Host networking is node-level network access: the task can bind any node port, reach every service listening on the node, and open connections into every namespace network present on the node — the namespace bridges and WireGuard interfaces live in the node's network namespace — including namespaces other than its own. See [Multitenancy and trust boundaries](multitenancy.md#networking) before accepting host networking from less-trusted authors.
 
 **`none`** gives the task only loopback. Use it for batch work that needs no network. API access and published ports require another mode.
 
-`port` and `host_port` must be 1–65535. `port` must be unique within a task. The node port of every entry — `host_port` in namespace mode, `port` in host mode — must be unique across all tasks in the task group, and the scheduler places an allocation only on a node where none of its node ports is held by another allocation, in either mode. Node ports in a node's namespace WireGuard UDP range (`wireguard_port` onward, `51820`–`52075` by default) are reserved for Trellis and never offered to tasks. Replicas publishing or reserving the same node port therefore need distinct nodes, and a rolling replacement needs another node with the port free while old and new allocations overlap.
+`port` and nonzero `host_port` must be 1–65535. `port` must be unique within a task. The node port of every entry — `host_port` in namespace mode, `port` in host mode — must be unique across all tasks in the task group, and the scheduler places an allocation only on a node where none of its node ports is held by another allocation, in either mode. Node ports in a node's namespace WireGuard UDP range (`wireguard_port` onward, `51820`–`52075` by default) are reserved for Trellis and never offered to tasks. Replicas publishing or reserving the same node port therefore need distinct nodes, and a rolling replacement needs another node with the port free while old and new allocations overlap.
 
 ### Resources
 
@@ -242,7 +245,7 @@ resources:
   memory: 256MiB
 ```
 
-CPU is expressed in millicores, with a minimum of 10 millicores to satisfy the runtime's minimum CFS quota. The first-party YAML representation accepts a raw byte count or readable binary/decimal size such as `256MiB`, `1GiB`, or `500MB`; canonical JSON represents memory as integer bytes. The scheduler multiplies each task request by its group count when considering desired capacity. A task may omit `resources`; Trellis resolves it to the operator-configured default CPU and memory before persistence and scheduling. When supplied, CPU must be at least 10 and memory must be positive; zero never requests the default. Operator-configured default and maximum CPU must also be at least 10 millicores.
+CPU is expressed in millicores, with a minimum of 10 millicores to satisfy the runtime's minimum CFS quota. The first-party YAML representation accepts a raw byte count or readable binary/decimal size such as `256MiB`, `1GiB`, or `500MB`; canonical JSON represents memory as integer bytes. The scheduler multiplies each task request by its group count when considering desired capacity. A task may omit `resources`; Trellis resolves it to the operator-configured default CPU and memory before persistence and scheduling. When supplied, both `cpu` and `memory` are required: CPU must be at least 10 and memory must be positive; zero never requests the default. Operator-configured default and maximum CPU must also be at least 10 millicores.
 
 Memory units are case-insensitive: decimal `B`, `KB`, `MB`, `GB`, `TB`, and binary `Ki`/`KiB`, `Mi`/`MiB`, `Gi`/`GiB`, `Ti`/`TiB`. Whitespace between the amount and unit and surrounding whitespace are accepted (quote surrounding whitespace in YAML), so `64MIB`, `64 MI`, and `" 64MiB "` all mean 67,108,864 bytes. Bare `K`, `M`, `G`, and `T` are not valid units. The generated authoring schema checks these spellings; parsing also checks numeric range before canonical integer-byte validation.
 

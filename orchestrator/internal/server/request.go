@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/labstack/echo/v5"
+	"github.com/overfold/trellis/orchestrator/api"
 	"github.com/overfold/trellis/orchestrator/internal/auth"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
@@ -43,7 +44,13 @@ func decodeJSON(c *echo.Context, dst any, limit int64) error {
 	}
 	decoder := json.NewDecoder(reader)
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(dst); err != nil {
+	var raw json.RawMessage
+	_, jobRequest := dst.(*api.JobRegistrationRequest)
+	value := dst
+	if jobRequest {
+		value = &raw
+	}
+	if err := decoder.Decode(value); err != nil {
 		return decodeError(err, limit)
 	}
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
@@ -51,6 +58,16 @@ func decodeJSON(c *echo.Context, dst any, limit int64) error {
 			return decodeError(err, limit)
 		}
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body: unexpected data after the JSON value")
+	}
+	if jobRequest {
+		if err := validateJSONShape(raw, reflect.TypeOf(dst).Elem(), "request body", true); err != nil {
+			return decodeError(err, limit)
+		}
+		valueDecoder := json.NewDecoder(bytes.NewReader(raw))
+		valueDecoder.DisallowUnknownFields()
+		if err := valueDecoder.Decode(dst); err != nil {
+			return decodeError(err, limit)
+		}
 	}
 	return nil
 }
@@ -60,6 +77,9 @@ func decodeJobSpec(raw json.RawMessage, jobSpec *spec.JobSpec) error {
 	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body: spec is required")
 	}
+	if err := validateJSONShape(raw, reflect.TypeFor[spec.JobSpec](), "spec", false); err != nil {
+		return decodeError(err, maxJobRequestBytes)
+	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(jobSpec); err != nil {
@@ -68,6 +88,64 @@ func decodeJobSpec(raw json.RawMessage, jobSpec *spec.JobSpec) error {
 			mismatch.Field = strings.TrimSuffix("spec."+mismatch.Field, ".")
 		}
 		return decodeError(err, maxJobRequestBytes)
+	}
+	return nil
+}
+
+// encoding/json accepts case-folded struct names and null scalar values.
+// Check the structural contract before decoding; RawMessage is owned by its
+// subsequent decoder. Job specs forbid explicit null, just like their schema.
+func validateJSONShape(raw json.RawMessage, t reflect.Type, path string, nullable bool) error {
+	if t == reflect.TypeFor[json.RawMessage]() {
+		return nil
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		if nullable && (t.Kind() == reflect.Pointer || t.Kind() == reflect.Map || t.Kind() == reflect.Slice) {
+			return nil
+		}
+		return fmt.Errorf("%s must not be null", path)
+	}
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	switch t.Kind() {
+	case reflect.Struct, reflect.Map:
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			return err
+		}
+		for key, value := range fields {
+			var child reflect.Type
+			if t.Kind() == reflect.Map {
+				child = t.Elem()
+			} else {
+				for field := range t.Fields() {
+					name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+					if name == key {
+						child = field.Type
+						break
+					}
+				}
+				if child == nil {
+					return fmt.Errorf("unknown field %q in %s", key, path)
+				}
+			}
+			if err := validateJSONShape(value, child, path+"."+key, nullable); err != nil {
+				return err
+			}
+		}
+	case reflect.Slice, reflect.Array:
+		var items []json.RawMessage
+		if err := json.Unmarshal(raw, &items); err != nil {
+			return err
+		}
+		for i, value := range items {
+			if err := validateJSONShape(value, t.Elem(), fmt.Sprintf("%s[%d]", path, i), nullable); err != nil {
+				return err
+			}
+		}
+	default:
+		// Scalar type/range checking remains encoding/json's responsibility.
 	}
 	return nil
 }

@@ -21,6 +21,36 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
+func TestJobJSONRejectsSchemaProhibitedShapes(t *testing.T) {
+	for _, field := range []string{
+		`"Name":"web"`, `"NAME":"web"`, `"TaskGroups":[]`,
+		`"task_groups":[{"name":"api","count":1,"tasks":[{"name":"app","image":"app","env":{"TOKEN":null}}]}]`,
+		`"task_groups":[{"name":"api","count":1,"tasks":[{"name":"app","image":"app","Resources":{"cpu":100,"memory":128}}]}]`,
+		`"task_groups":[{"name":"api","count":1,"tasks":[{"name":"app","image":"app","resources":null}]}]`,
+		`"task_groups":[{"name":"api","count":1,"constraints":null,"tasks":[{"name":"app","image":"app"}]}]`,
+		`"namespace":null`,
+	} {
+		var job spec.JobSpec
+		if err := decodeJobSpec(json.RawMessage(`{`+field+`}`), &job); err == nil {
+			t.Fatalf("schema-prohibited job shape accepted: %s", field)
+		}
+	}
+	for _, raw := range []string{`{"Spec":{}}`, `{"spec":{},"ResolvedImages":{}}`, `{"spec":{},"EXPECTED_VERSION":0}`} {
+		var request api.JobRegistrationRequest
+		if err := decodeRequest(t, "application/json", raw, maxJobRequestBytes, &request); err == nil {
+			t.Fatalf("alternate envelope field accepted: %s", raw)
+		}
+	}
+	// Empty strings and exact-case map keys remain literal values, not null.
+	var job spec.JobSpec
+	if err := decodeJobSpec(json.RawMessage(`{"name":"web","namespace":"default","task_groups":[{"name":"api","count":1,"tasks":[{"name":"app","image":"app","env":{"EMPTY":"","MixedCase":"literal"}}]}]}`), &job); err != nil {
+		t.Fatal(err)
+	}
+	if job.TaskGroups[0].Tasks[0].Env["MixedCase"] != "literal" {
+		t.Fatal("literal map key was changed")
+	}
+}
+
 func decodeRequest(t *testing.T, contentType, body string, limit int64, dst any) error {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))

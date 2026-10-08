@@ -10,6 +10,8 @@ Namespace, job, and task-group identifiers must be single components without dot
 
 JSON request bodies must be sent with `Content-Type: application/json` (otherwise `415`) and are decoded strictly, with the same rules as YAML manifests and the published schemas: a body must contain exactly one JSON value, and unknown fields, trailing data, and an empty body are rejected with `400` and a `message` naming the problem (for example `invalid request body: json: unknown field "imgae"`). Ordinary bodies are size-limited per route; an oversized body returns `413`. Job submissions and plans are limited to 4 MiB, secret writes to 96 KiB, and other JSON requests to 64 KiB or 1 MiB. Administrator-only backup creation and restore have no aggregate byte cap: legal cluster state can exceed per-write limits, and pretty-printing can expand the file further. Restore signatures cover the entire body, staged in a private temporary file before decoding; see [backup resource requirements](operations.md#backups). Exec uses the WebSocket frame limits described below, not a JSON request body.
 
+Job envelopes and specifications require the exact published JSON field names: `name`, not `Name`, and `task_groups`, not `TaskGroups`. Explicit `null` is not a job-specification value, including in `env` and `labels`; omit optional fields instead. Literal map keys retain their case. Integer byte counts and nanosecond durations are preserved exactly in semantic diffs; Go plan consumers receive numeric `before`/`after` values as `json.Number`.
+
 Trellis distinguishes three credential kinds:
 
 - `administrator` — the root request context granted after verification of an operator-held Ed25519 key;
@@ -100,8 +102,15 @@ with task context and leaves desired state unchanged. Multi-platform images are
 pinned by their top-level index digest, not the control-plane node's platform.
 
 Submission accepts optional `resolved_images`. Omission resolves images afresh.
-To apply a reviewed plan, pass its complete map alongside the original `spec`
-and base preconditions; apply validates the pins without resolving tags again.
+To apply a reviewed plan, pass its complete map alongside the returned `spec`
+(which contains resolved defaults), base preconditions, and
+`expected_settings: settings_fingerprint`. Apply validates the pins without
+resolving tags again. The settings fingerprint covers cluster job limits,
+reconciliation settings, and fixed network settings. A settings change during
+planning or before apply commits returns `409`; plan again. With
+`expected_settings`, the submitted spec must already contain all resolved
+defaults. Without it, direct submissions still resolve omitted defaults and
+validate against current limits, but do not promise a previously reviewed plan.
 Every supplied reference must include a valid digest and retain the authored
 repository, tag (including implicit `latest`), and any explicit digest. Missing,
 extra, or mismatched pins are rejected with `422`. Explicit pins are desired
@@ -115,9 +124,10 @@ The job submitted to `POST /v1/namespaces/{ns}/jobs` or `.../jobs/plan` must nam
 - `expected_version: 0` requires that the job does not exist. It cannot be combined with `expected_incarnation`.
 - `expected_version: N` (N > 0) requires that the job is at version `N`. Versions restart at 1 when a job is deleted and recreated, so a version alone cannot tell the job that was read from a recreated one; a nonzero `expected_version` therefore requires `expected_incarnation`, and is rejected with `400` without it.
 - `expected_incarnation` alone requires that the job exists and has not been deleted and recreated since it was read, at any version.
-- Omitting both applies unconditionally.
+- `expected_settings` requires that cluster settings still match the plan's `settings_fingerprint`, including for a no-op apply.
+- Omitting all preconditions applies unconditionally.
 
-Malformed preconditions (a negative version, or the combinations above) return `400`. The leader checks the preconditions and commits the change under the same serialized job-mutation lock, so of several concurrent applies against the same version exactly one succeeds; the others receive `409 Conflict` with a `message` naming the expected and current versions, or saying that the job was deleted and recreated. A successful submit returns `202` with `{"namespace", "name", "incarnation", "version", "revision"}` describing the committed job, so clients need not re-read it. `trellisctl jobs apply` always sends the `base_incarnation` and `base_version` of the plan it showed (or `expected_version: 0` for a create). `job.registered` events on the event streams fire for every apply that changes a job and carry its new `version` and `revision`.
+Malformed preconditions (a negative version, or the combinations above) return `400`. The leader checks the preconditions and commits the change under the same serialized job-mutation lock, so of several concurrent applies against the same version exactly one succeeds; the others receive `409 Conflict` with a `message` naming the expected and current versions, or saying that the job was deleted and recreated. A successful submit returns `202` with `{"namespace", "name", "incarnation", "version", "revision"}` describing the committed job, so clients need not re-read it. `trellisctl jobs apply` always sends the plan's resolved `spec`, image pins, settings fingerprint, `base_incarnation`, and `base_version` (or `expected_version: 0` for a create). `job.registered` events on the event streams fire for every apply that changes a job and carry its new `version` and `revision`.
 
 `GET /v1/namespaces/{ns}/jobs/{name}/versions` returns the retained history in ascending version order; each entry has `version`, the `revision` that version ran, the full canonical `spec`, `resolved_images`, and `created_at`. To roll back to an exact historical deployment, submit that entry's `spec` and `resolved_images` together; submitting its tagged spec alone selects today's tag content instead. Trellis retains at most the 10 newest versions for each live job, and every changed apply compacts that job's history. A newly elected leader also compacts all histories and removes records orphaned by older job deletions. Deleting a job atomically deletes all of its history, so recreating the same name starts again at version 1 and revision 1. Backups use format version 6, which records the producing `trellis_version`, carries the replicated `cluster_settings`, and holds canonical job and history records with resolved image pins. Restore validates those pins without registry lookups. `POST /v1/backup/restore` accepts only the current format version; a backup in any other format is refused with an error that names its format and the Trellis release that created it, so it can be restored with a release that uses the same format. Formats are never migrated.
 

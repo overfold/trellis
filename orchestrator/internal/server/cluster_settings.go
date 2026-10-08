@@ -263,7 +263,11 @@ func (s *Server) ClusterSettings() ClusterSettings {
 
 // clusterSettingsLocked returns the in-memory settings. The caller holds s.mu.
 func (s *Server) clusterSettingsLocked() ClusterSettings {
-	return ClusterSettings{JobLimits: s.jobLimits, Reconciliation: s.reconciliation, WireGuardPool: s.networkPool, WireGuardPortCount: s.wireGuardPortCount}
+	limits := s.jobLimits
+	if limits == (spec.Limits{}) {
+		limits = spec.DefaultLimits()
+	}
+	return ClusterSettings{JobLimits: limits, Reconciliation: s.reconciliation, WireGuardPool: s.networkPool, WireGuardPortCount: s.wireGuardPortCount}
 }
 
 // reconciliationSettingsLocked returns the reconciliation settings, using

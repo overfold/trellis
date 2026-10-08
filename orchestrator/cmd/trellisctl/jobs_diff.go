@@ -53,6 +53,11 @@ func formatChangeValue(path string, value any) string {
 	if number, ok := value.(float64); ok && isDurationPath(path) {
 		return time.Duration(int64(number)).String()
 	}
+	if number, ok := value.(json.Number); ok && isDurationPath(path) {
+		if nanos, err := number.Int64(); err == nil {
+			return time.Duration(nanos).String()
+		}
+	}
 	switch typed := value.(type) {
 	case string:
 		return fmt.Sprintf("%q", typed)

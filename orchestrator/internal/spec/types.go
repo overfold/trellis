@@ -2,6 +2,7 @@ package spec
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"time"
 )
@@ -231,9 +232,9 @@ func TaskGroupContentHash(g *TaskGroupSpec) string {
 		Tasks       []TaskSpec         `json:"Tasks"`
 		APIAccess   *APIAccessSpec     `json:"APIAccess"`
 		Restart     *RestartPolicySpec `json:"Restart"`
-		Constraints []ConstraintSpec   `json:"Constraints"`
+		Constraints []ConstraintSpec   `json:"Constraints,omitempty"`
 	}{Name: g.Name, Runtime: g.Runtime, Tasks: g.Tasks, APIAccess: g.APIAccess, Restart: g.Restart, Constraints: g.Constraints}
 	raw, _ := json.Marshal(hashable)
 	h := sha256.Sum256(raw)
-	return string(h[:])
+	return hex.EncodeToString(h[:])
 }

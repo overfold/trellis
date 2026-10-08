@@ -2,6 +2,7 @@
 package plan
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -54,8 +55,12 @@ func Diff(before, after *spec.JobSpec) []api.JobPlanChange {
 	var right any
 	leftRaw, _ := json.Marshal(before)
 	rightRaw, _ := json.Marshal(after)
-	_ = json.Unmarshal(leftRaw, &left)
-	_ = json.Unmarshal(rightRaw, &right)
+	leftDecoder := json.NewDecoder(bytes.NewReader(leftRaw))
+	leftDecoder.UseNumber()
+	_ = leftDecoder.Decode(&left)
+	rightDecoder := json.NewDecoder(bytes.NewReader(rightRaw))
+	rightDecoder.UseNumber()
+	_ = rightDecoder.Decode(&right)
 	changes := make([]api.JobPlanChange, 0)
 	walk("", left, right, &changes)
 	return changes

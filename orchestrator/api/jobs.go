@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"time"
 )
@@ -27,6 +28,8 @@ type JobRegistrationRequest struct {
 	// recreated since the caller read it. It must not be combined with an
 	// ExpectedVersion of 0.
 	ExpectedIncarnation string `json:"expected_incarnation,omitempty"`
+	// ExpectedSettings fences the cluster settings used to compute a plan.
+	ExpectedSettings string `json:"expected_settings,omitempty"`
 }
 
 // JobRegistrationResponse reports the job version and revision after an apply.
@@ -105,6 +108,10 @@ type JobPlanResponse struct {
 	DesiredAllocations int               `json:"desired_allocations"`
 	Changes            []JobPlanChange   `json:"changes"`
 	ResolvedImages     map[string]string `json:"resolved_images"`
+	// Spec contains the authored references with all defaults resolved.
+	Spec json.RawMessage `json:"spec"`
+	// SettingsFingerprint is passed as expected_settings when applying Spec.
+	SettingsFingerprint string `json:"settings_fingerprint"`
 }
 
 // JobPlanChange describes one semantic change to a job specification.
@@ -114,4 +121,13 @@ type JobPlanChange struct {
 	Path      string `json:"path"`
 	Before    any    `json:"before,omitempty"`
 	After     any    `json:"after,omitempty"`
+}
+
+// UnmarshalJSON preserves exact numeric changes, including int64 nanoseconds
+// and byte counts, for Go consumers of a plan.
+func (c *JobPlanChange) UnmarshalJSON(raw []byte) error {
+	type change JobPlanChange
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	return decoder.Decode((*change)(c))
 }

@@ -33,6 +33,7 @@ var requiredFields = map[reflect.Type][]string{
 	reflect.TypeFor[spec.ConstraintSpec]():    {"attribute", "value"},
 	reflect.TypeFor[spec.RestartPolicySpec](): {"window"},
 	reflect.TypeFor[spec.TaskSpec]():          {"name", "image"},
+	reflect.TypeFor[spec.ResourcesSpec]():     {"cpu", "memory"},
 	reflect.TypeFor[spec.SecretRefSpec]():     {"name", "target"},
 	reflect.TypeFor[spec.PortSpec]():          {"port"},
 	reflect.TypeFor[spec.HealthCheckSpec]():   {"type"},
@@ -204,7 +205,7 @@ func applySemanticConstraints(root schema) {
 	patchDef(root, "ResourcesSpec", "memory", schema{"minimum": 1})
 
 	patchDef(root, "PortSpec", "port", schema{"minimum": 1, "maximum": 65535})
-	patchDef(root, "PortSpec", "host_port", schema{"minimum": 1, "maximum": 65535})
+	patchDef(root, "PortSpec", "host_port", schema{"minimum": 0, "maximum": 65535})
 	patchDef(root, "HealthCheckSpec", "port", schema{"minimum": 0, "maximum": 65535})
 	patchDef(root, "HealthCheckSpec", "interval", schema{"minimum": 0})
 	patchDef(root, "HealthCheckSpec", "timeout", schema{"minimum": 0})
@@ -278,7 +279,7 @@ func addNetworkingConditions(networking schema) {
 				"required":   []string{"mode"},
 				"properties": schema{"mode": schema{"const": "host"}},
 			},
-			"then": schema{"properties": schema{"ports": schema{"items": schema{"not": schema{"required": []string{"host_port"}}}}}},
+			"then": schema{"properties": schema{"ports": schema{"items": schema{"properties": schema{"host_port": schema{"const": 0}}}}}},
 		},
 	}
 }
@@ -335,7 +336,7 @@ func describeAuthoringFields(root schema) {
 	describeDef(root, "TaskNetworkingSpec", "mode", "Network attachment: none (loopback only), namespace (the private Trellis namespace network with service DNS, NAT egress, and published ports), or host (the node's network stack). Omit for namespace; Trellis stores the resolved mode.")
 	describeDef(root, "TaskNetworkingSpec", "ports", "Ports the task listens on, unique on the node within the task group. Namespace mode publishes each on the node; host mode reserves each node port for scheduling. Not allowed with mode none.")
 	describeDef(root, "PortSpec", "port", "Port the task process listens on. In host mode it is also the node port Trellis reserves.")
-	describeDef(root, "PortSpec", "host_port", "Namespace mode only: node port that forwards to port, preserving the client source address. Omit to publish on the same number as port; Trellis stores the resolved value.")
+	describeDef(root, "PortSpec", "host_port", "Namespace mode: node port that forwards to port, preserving the client source address. Omit or use zero to publish on the same number as port; Trellis stores the resolved value. Host mode permits only omission or zero.")
 	describeDef(root, "ResourcesSpec", "cpu", "CPU request in millicores; 1000 represents one CPU core.")
 	describeDef(root, "ResourcesSpec", "memory", "Memory request as bytes or a readable decimal/binary size such as 500MB or 256MiB.")
 

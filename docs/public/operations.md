@@ -376,6 +376,14 @@ Both scripts require `jq` and `sha256sum` (GNU coreutils), in addition to their 
 
 The artifact and digest are trusted through the same GitHub release account/channel. This detects corruption and substitution relative to the metadata, but **does not protect against release-account compromise**, a malicious authorized release, or compromise of GitHub/TLS trust. There are no independently signed checksums or verified build provenance in this flow. The entrypoint scripts and shared helpers fetched from `main` are also trusted executable inputs; archive verification does not authenticate those scripts. Inspect and pin scripts through your own trusted delivery process when stronger assurance is required.
 
+### Canonical specification and content-hash upgrades
+
+Upgrade control-plane binaries together and use a matching `trellisctl`; mixed old/new leaders do not provide consistent plan/default and hash semantics. Save a desired-state backup and normal recovery copies first. New plans include a resolved `spec` and `settings_fingerprint`; consumers must submit that spec, its image pins, and `expected_settings` along with job-version preconditions to apply the reviewed plan. There is no fallback in the new CLI for older plan responses. Direct applies without the new precondition remain supported but are not pinned to a prior review.
+
+Previously persisted task-group hashes could contain raw binary bytes corrupted by JSON encoding. No manual database edit or forced redeployment is needed: every job reload rebuilds these derived hashes from the canonical specification and stored image pins, including after backup restore. Reload itself does not write state, change job versions/revisions, or replace allocations; subsequent changed applies persist safe hexadecimal hashes. Snapshot and backup format versions are unchanged. Agent execution identities remain unchanged.
+
+Fix manifests or API producers that relied on lossy YAML numeric coercion, trailing YAML documents, case-insensitive JSON job fields, or explicit null job values before submitting them. Existing canonical stored specifications remain readable; strict author-input decoding is not retroactively applied to storage records. Omit optional JSON fields rather than sending null. Supplied resources require both CPU and memory; omitting the whole resources object still selects cluster defaults. `host_port: 0` remains the supported omission sentinel, reflected in both schemas.
+
 ### Discovery identifier upgrades
 
 Older versions accepted dots in namespace, job, and task-group names even though their discovery names did not resolve. These names are now rejected; there is no automatic dot-to-hyphen conversion, escaping, or identity-boundary reinterpretation. Task, secret, and volume names are unchanged.

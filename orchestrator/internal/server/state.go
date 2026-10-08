@@ -128,6 +128,14 @@ func (s *StateController) ListJobs(ctx context.Context) (map[string]*Job, error)
 		if err := spec.ValidateCanonical(job.Spec); err != nil {
 			return nil, fmt.Errorf("invalid persisted job (repair before upgrading): %w", err)
 		}
+		// Hashes are derived, not authoritative. Rebuild even legacy raw-byte
+		// digests damaged by JSON's UTF-8 replacement, without a state mutation.
+		execution := executionSpec(job.Spec, job.ResolvedImages)
+		job.ContentHashes = make(map[string]string, len(execution.TaskGroups))
+		for i := range execution.TaskGroups {
+			group := &execution.TaskGroups[i]
+			job.ContentHashes[group.Name] = spec.TaskGroupContentHash(group)
+		}
 		result[jobKey(job.Spec.Namespace, job.Spec.Name)] = job
 	}
 	return result, nil

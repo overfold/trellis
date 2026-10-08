@@ -40,7 +40,8 @@ func (c *Client) GetJob(ctx context.Context, name string) (*api.JobStatusRespons
 // JSON job specification in the client's namespace. Passing the plan's
 // BaseVersion and BaseIncarnation as the preconditions of ApplyJob applies
 // the specification only if the job has not changed since it was planned.
-// Also pass ResolvedImages to deploy the reviewed digests even if tags move.
+// Apply the returned Spec and ResolvedImages, and pass SettingsFingerprint
+// as ExpectedSettings, to pin defaults and digests and fence policy changes.
 func (c *Client) PlanJob(ctx context.Context, spec json.RawMessage) (*api.JobPlanResponse, error) {
 	path, err := c.namespacedPath("/jobs/plan")
 	if err != nil {

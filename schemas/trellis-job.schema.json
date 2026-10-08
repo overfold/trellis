@@ -180,9 +180,9 @@
       "additionalProperties": false,
       "properties": {
         "host_port": {
-          "description": "Namespace mode only: node port that forwards to port, preserving the client source address. Omit to publish on the same number as port; Trellis stores the resolved value.",
+          "description": "Namespace mode: node port that forwards to port, preserving the client source address. Omit or use zero to publish on the same number as port; Trellis stores the resolved value. Host mode permits only omission or zero.",
           "maximum": 65535,
-          "minimum": 1,
+          "minimum": 0,
           "type": "integer"
         },
         "port": {
@@ -220,6 +220,10 @@
           ]
         }
       },
+      "required": [
+        "cpu",
+        "memory"
+      ],
       "type": "object"
     },
     "RestartPolicySpec": {
@@ -426,10 +430,10 @@
             "properties": {
               "ports": {
                 "items": {
-                  "not": {
-                    "required": [
-                      "host_port"
-                    ]
+                  "properties": {
+                    "host_port": {
+                      "const": 0
+                    }
                   }
                 }
               }

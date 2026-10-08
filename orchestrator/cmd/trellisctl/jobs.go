@@ -97,10 +97,11 @@ func NewJobsApplyCmd() *cobra.Command {
 			// recreate, makes the server reject it.
 			expectedVersion := jobPlan.BaseVersion
 			applied, err := serverClient.ApplyJob(cmd.Context(), &api.JobRegistrationRequest{
-				Spec:                rawSpec,
+				Spec:                jobPlan.Spec,
 				ResolvedImages:      jobPlan.ResolvedImages,
 				ExpectedVersion:     &expectedVersion,
 				ExpectedIncarnation: jobPlan.BaseIncarnation,
+				ExpectedSettings:    jobPlan.SettingsFingerprint,
 			})
 			if err != nil {
 				var httpErr *client.HTTPError

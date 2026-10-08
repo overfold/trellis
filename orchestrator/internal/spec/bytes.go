@@ -3,8 +3,8 @@ package spec
 import (
 	"fmt"
 	"math"
+	"math/big"
 	"regexp"
-	"strconv"
 	"strings"
 )
 
@@ -22,11 +22,11 @@ func ParseByteSize(value string) (ByteSize, error) {
 	if matches == nil {
 		return 0, fmt.Errorf("invalid byte size %q", value)
 	}
-	amount, err := strconv.ParseFloat(matches[1], 64)
-	if err != nil || math.IsNaN(amount) || math.IsInf(amount, 0) || amount < 0 {
+	amount, ok := new(big.Rat).SetString(matches[1])
+	if !ok {
 		return 0, fmt.Errorf("invalid byte size %q", value)
 	}
-	units := map[string]float64{
+	units := map[string]int64{
 		"": 1, "b": 1,
 		"kb": 1_000, "mb": 1_000_000, "gb": 1_000_000_000, "tb": 1_000_000_000_000,
 		"ki": 1 << 10, "kib": 1 << 10,
@@ -38,11 +38,15 @@ func ParseByteSize(value string) (ByteSize, error) {
 	if !ok {
 		return 0, fmt.Errorf("invalid byte-size unit %q", matches[2])
 	}
-	bytes := amount * multiplier
-	if bytes > math.MaxInt64 {
+	amount.Mul(amount, new(big.Rat).SetInt64(multiplier))
+	if amount.Cmp(new(big.Rat).SetInt64(math.MaxInt64)) > 0 {
 		return 0, fmt.Errorf("byte size %q is too large", value)
 	}
-	return ByteSize(math.Round(bytes)), nil
+	// Preserve nearest-byte rounding for human quantities without float64
+	// rounding overflowing MaxInt64 or losing exact bare byte counts.
+	amount.Add(amount, big.NewRat(1, 2))
+	bytes := new(big.Int).Quo(amount.Num(), amount.Denom())
+	return ByteSize(bytes.Int64()), nil
 }
 
 func (b ByteSize) String() string {
