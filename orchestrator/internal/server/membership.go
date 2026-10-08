@@ -47,11 +47,19 @@ type raftProgress struct {
 
 // RecordRaftProgress records the Raft applied index a node reported in its
 // heartbeat, together with the leader's own applied index at receipt.
-func (s *Server) RecordRaftProgress(id uuid.UUID, applied uint64) {
+func (s *Server) RecordRaftProgress(ctx context.Context, id uuid.UUID, applied uint64) {
+	ctx, release := s.bindTerm(ctx)
+	defer release()
 	if s.joiner == nil || applied == 0 {
 		return
 	}
-	s.liveness.recordRaftProgress(id, raftProgress{applied: applied, leaderApplied: s.joiner.AppliedIndex(), at: s.now()})
+	progress := raftProgress{applied: applied, leaderApplied: s.joiner.AppliedIndex(), at: s.now()}
+	s.termMu.RLock()
+	defer s.termMu.RUnlock()
+	if s.checkTermLocked(ctx) != nil {
+		return
+	}
+	s.liveness.recordRaftProgress(id, progress)
 }
 
 // voterTarget returns the desired number of voters for a membership size: the

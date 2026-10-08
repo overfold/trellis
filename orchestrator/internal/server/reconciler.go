@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"maps"
 	"net"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -49,6 +50,9 @@ type Action struct {
 	ID         string
 	Generation uint64
 	RetainLogs bool
+	// Planned control state must not be replaced with a later resume's sequence.
+	drainSequence  uint64
+	controlPlanned bool
 }
 
 const (
@@ -131,9 +135,18 @@ func applyReconciledAllocation(allocation, update *Allocation, node *Node) {
 }
 
 func (s *Server) persistAllocationUpdate(ctx context.Context, allocation *Allocation, update func(*Allocation) error) error {
+	ctx, release := s.bindTerm(ctx)
+	defer release()
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
+	if err := s.checkTerm(ctx); err != nil {
+		return err
+	}
 	s.mu.RLock()
+	if !slices.Contains(s.allocations, allocation) {
+		s.mu.RUnlock()
+		return context.Canceled
+	}
 	allocation.mu.Lock()
 	next := allocation.cloneRecord()
 	allocation.mu.Unlock()
@@ -164,6 +177,7 @@ func (s *Server) Reconcile(ctx context.Context) {
 // queueing pass waits for a node busy with an earlier pass instead of skipping
 // its actions. The returned channel closes once the pass's actions finish.
 func (s *Server) reconcile(ctx context.Context, queue bool) (finished <-chan struct{}) {
+	ctx, release := s.bindTerm(ctx)
 	start := time.Now()
 	var executable []Action
 	planned := false
@@ -179,13 +193,20 @@ func (s *Server) reconcile(ctx context.Context, queue bool) (finished <-chan str
 			s.metrics.ReconcileDuration.Observe(time.Since(start).Seconds())
 		}
 		if !planned {
+			release()
 			closed := make(chan struct{})
 			close(closed)
 			finished = closed
 			return
 		}
-		finished = s.dispatchReconcileActions(ctx, executable, queue)
+		done := s.dispatchReconcileActions(ctx, executable, queue)
+		joined := make(chan struct{})
+		go func() { <-done; release(); close(joined) }()
+		finished = joined
 	}()
+	if s.checkTerm(ctx) != nil {
+		return
+	}
 	s.mu.RLock()
 	registeredNodes := make(map[uuid.UUID]struct{}, len(s.nodes))
 	for nodeID := range s.nodes {
@@ -308,6 +329,10 @@ func (s *Server) reconcile(ctx context.Context, queue bool) (finished <-chan str
 	unlockUpdates()
 	actions := plan.Actions
 	for i := range actions {
+		if allocation := actions[i].Allocation; allocation != nil {
+			actions[i].drainSequence = allocation.DrainSequence
+			actions[i].controlPlanned = true
+		}
 		if original := originalOf(actions[i].Allocation); original != nil {
 			actions[i].Allocation = original
 		}
@@ -485,6 +510,7 @@ func (s *Server) reconcilePlanInputLocked(now time.Time, heartbeats map[uuid.UUI
 // an unreachable agent delays only its own queue. The returned channel closes
 // once the dispatched actions finish and the catalog is refreshed.
 func (s *Server) dispatchReconcileActions(ctx context.Context, actions []Action, queue bool) <-chan struct{} {
+	ctx, release := s.bindTerm(ctx)
 	var nodes []uuid.UUID
 	byNode := make(map[uuid.UUID][]Action)
 	for _, action := range actions {
@@ -534,6 +560,7 @@ func (s *Server) dispatchReconcileActions(ctx context.Context, actions []Action,
 		s.refreshNetworkPlans()
 		s.refreshCatalog()
 		s.refreshMu.Unlock()
+		release()
 		close(done)
 	}()
 	return done
@@ -889,9 +916,14 @@ func terminalStartFailureCode(code nodeapi.OperationCode) bool {
 
 // Execute performs a reconciliation action.
 func (s *Server) Execute(ctx context.Context, action *Action) error {
+	ctx, release := s.bindTerm(ctx)
+	defer release()
+	if err := s.checkTerm(ctx); err != nil {
+		return err
+	}
+	epoch := ctx.Value(leadershipContextKey{}).(leadershipFence).epoch
 	if action.Type == ActionStopObserved {
 		s.mu.RLock()
-		epoch := s.controlEpoch
 		node := action.Node
 		nodeStatus := node.Status
 		address := fmt.Sprintf("%s:%d", node.Host, node.Port)
@@ -965,10 +997,12 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 	generation := alloc.Generation
 	drainSequence := alloc.DrainSequence
 	draining := alloc.Draining
-	epoch := s.controlEpoch
 	serverAddr := s.serverAddr
 	nodeStatus := alloc.Node.Status
 	attempt := alloc.Attempt
+	if action.controlPlanned && drainSequence != action.drainSequence {
+		return nil
+	}
 
 	switch action.Type {
 	case ActionStart:
@@ -1117,6 +1151,9 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 		// failure of this attempt, which recordStartFailure counts.
 	case ActionDrain:
 		unlockState()
+		if !draining {
+			return nil
+		}
 		if nodeStatus != NodeStatusHealthy && nodeStatus != NodeStatusDraining {
 			return fmt.Errorf("node %s is unavailable for allocation drain", requestNodeID)
 		}
@@ -1138,6 +1175,9 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 		unlockState()
 
 		if err := s.persistAllocationUpdate(ctx, alloc, func(next *Allocation) error {
+			if action.controlPlanned && next.DrainSequence != action.drainSequence {
+				return context.Canceled
+			}
 			if next.Phase != lifecycle.PhaseStopping {
 				return next.Transition(lifecycle.PhaseStopping, now, "", "")
 			}

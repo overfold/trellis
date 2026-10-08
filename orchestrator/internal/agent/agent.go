@@ -268,6 +268,11 @@ func (a *Agent) AcceptEpoch(epoch uint64) error {
 		}
 	}
 	a.epoch = epoch
+	for _, session := range a.execSessions {
+		if session.Epoch < epoch {
+			session.cancel(errExecLeaderChanged)
+		}
+	}
 	return nil
 }
 
@@ -1482,7 +1487,7 @@ func (a *Agent) applyDrain(ctx context.Context, allocationID string, generation,
 		if allocation.Generation != generation {
 			continue
 		}
-		if sequence < allocation.DrainSequence {
+		if sequence < allocation.DrainSequence || sequence == allocation.DrainSequence && !allocation.Draining {
 			continue
 		}
 		previousDraining, previousSequence := allocation.Draining, allocation.DrainSequence
@@ -1551,7 +1556,7 @@ func (a *Agent) applyResume(allocationID string, generation, sequence uint64, sk
 		if allocation.Generation != generation {
 			continue
 		}
-		if sequence < allocation.DrainSequence {
+		if sequence < allocation.DrainSequence || sequence == allocation.DrainSequence && allocation.Draining {
 			continue
 		}
 		if allocation.Status != "running" && allocation.Status != "starting" && allocation.Status != "failed" {

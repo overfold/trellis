@@ -649,3 +649,25 @@ func TestRaftStore_LeadershipTransferTargetsVotersOnly(t *testing.T) {
 	}
 	t.Fatal("leadership did not move to the voter")
 }
+
+func TestCanceledWritesDoNotSubmitRaftCommands(t *testing.T) {
+	store := newTestRaftStore(t)
+	waitLeader(t, store)
+	if err := store.Put(t.Context(), "retained", []byte("original")); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	for _, write := range []func() error{
+		func() error { return store.Put(ctx, "retained", []byte("stale")) },
+		func() error { return store.Delete(ctx, "retained") },
+		func() error { return store.Batch(ctx, []Mutation{{Key: "retained", Value: []byte("stale")}}) },
+	} {
+		if err := write(); !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled write error = %v", err)
+		}
+	}
+	if got, err := store.Get(t.Context(), "retained"); err != nil || string(got) != "original" {
+		t.Fatalf("retained = %q, err=%v", got, err)
+	}
+}

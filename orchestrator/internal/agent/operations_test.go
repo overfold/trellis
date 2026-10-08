@@ -1564,7 +1564,7 @@ func TestRecoverCreatedAllocationCanBeRetriedByControlPlane(t *testing.T) {
 	if state := second.reconciler.states[id]; state == nil || !state.stopping {
 		t.Fatal("recovered draining allocation is not restart-suppressed")
 	}
-	drain := &nodeapi.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: request.Epoch}
+	drain := &nodeapi.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: request.Epoch, Sequence: 1}
 	if err := second.ResumeGroup(drain); err != nil {
 		t.Fatalf("undrain recovered allocation: %v", err)
 	}

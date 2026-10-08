@@ -82,6 +82,7 @@ func TestStartExecutionHashIgnoresNetworkPeerChanges(t *testing.T) {
 	task := spec.TaskSpec{Name: "app", Image: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard}}
 	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Tasks: []spec.TaskSpec{task}}}}), Revision: 1}
 	alloc := &Allocation{ID: "allocation", Namespace: "default", JobName: "web", TaskGroupName: "app", Tasks: []spec.TaskSpec{task}, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhasePlaced}
+	s.allocations = []*Allocation{alloc}
 	start := &Action{Type: ActionStart, Allocation: alloc}
 	if err := s.Execute(context.Background(), start); err != nil {
 		t.Fatal(err)
@@ -119,6 +120,7 @@ func TestStartRequestCarriesDrainOutsideExecutionHash(t *testing.T) {
 	task := spec.TaskSpec{Name: "app", Image: "app"}
 	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Tasks: []spec.TaskSpec{task}}}}), Revision: 1}
 	alloc := &Allocation{ID: "allocation", Namespace: "default", JobName: "web", TaskGroupName: "app", Tasks: []spec.TaskSpec{task}, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhasePlaced}
+	s.allocations = []*Allocation{alloc}
 	start := &Action{Type: ActionStart, Allocation: alloc}
 	if err := s.Execute(context.Background(), start); err != nil {
 		t.Fatal(err)
@@ -157,6 +159,7 @@ func TestStartExecutionHashChangesWithNetworkPool(t *testing.T) {
 	task := spec.TaskSpec{Name: "app", Image: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard}}
 	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Tasks: []spec.TaskSpec{task}}}}), Revision: 1}
 	alloc := &Allocation{ID: "allocation", Namespace: "default", JobName: "web", TaskGroupName: "app", Tasks: []spec.TaskSpec{task}, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhasePlaced}
+	s.allocations = []*Allocation{alloc}
 	start := &Action{Type: ActionStart, Allocation: alloc}
 	if err := s.Execute(context.Background(), start); err != nil {
 		t.Fatal(err)

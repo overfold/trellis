@@ -70,7 +70,7 @@ type Server struct {
 	// Locking contract. Locks are acquired in this order, and a lock is never
 	// acquired while one later in the order is held:
 	//
-	//	reconcileMu -> mutationMu -> mu -> allocation.mu -> leaf locks
+	//	reconcileMu -> mutationMu -> termMu -> mu -> allocation.mu -> leaf locks
 	//
 	//   - reconcileMu serializes reconciliation planning and its durable
 	//     commit; a pass's agent actions run after it is released.
@@ -78,6 +78,9 @@ type Server struct {
 	//     commits, API mutations, agent action outcomes, and the observation
 	//     applier. Each reads the committed state, commits through Raft, and
 	//     applies the result while holding it, so no two overwrite each other.
+	//   - termMu orders term admission and renewable receipt against epoch
+	//     publication and observation reset, without network or storage I/O.
+	//     Epoch writes hold both termMu and mu; either lock admits a read.
 	//   - mu protects the in-memory cluster, node, job, allocation, epoch, and
 	//     leadership snapshots. It must never be held during network or storage
 	//     I/O.
@@ -94,10 +97,8 @@ type Server struct {
 	//   - membershipMu serializes Raft membership changes and is never
 	//     acquired while mu is held.
 	//
-	// Heartbeats acquire only the liveness and observations leaf locks, one
-	// at a time, so neither a reconciliation pass nor a slow Raft commit can
-	// delay the liveness stamp; the observation applier takes mutationMu on
-	// their behalf.
+	// Heartbeats take termMu for short admission checks and then the
+	// liveness and observations leaf locks, never mutationMu or Raft.
 	mu                 sync.RWMutex
 	reconcileMu        sync.Mutex
 	refreshMu          sync.Mutex
@@ -116,6 +117,11 @@ type Server struct {
 	secrets            *secretstore.Store
 	events             *EventBus
 	logStreams         *transport.StreamLimiter
+
+	// termWork joins admitted requests and dispatched work before reload.
+	termMu   sync.RWMutex
+	term     context.Context
+	termWork *sync.WaitGroup
 
 	// resumeMu guards the per-term record of acknowledged allocation
 	// resumes. It is a leaf lock: nothing else is acquired while it is held.
@@ -205,6 +211,8 @@ func (s *Server) AcquireLeadership(ctx context.Context) error {
 	if err := s.state.ActivateLeadership(ctx, cluster, jobs); err != nil {
 		return fmt.Errorf("persist leadership activation: %w", err)
 	}
+	s.termMu.Lock()
+	defer s.termMu.Unlock()
 	s.mu.Lock()
 	s.controlEpoch = epoch
 	// Job limits and reconciliation settings may have changed under a
@@ -263,12 +271,14 @@ func (s *Server) Init(ctx context.Context, bootstrap ClusterBootstrap) error {
 		}
 	}
 
+	s.termMu.Lock()
 	s.mu.Lock()
 	s.controlEpoch = cluster.ControlEpoch
 	s.loadClusterLocked(cluster)
 	s.networkPool = cluster.Settings.WireGuardPool
 	s.wireGuardPortCount = cluster.Settings.WireGuardPortCount
 	s.mu.Unlock()
+	s.termMu.Unlock()
 	s.client = client.NewAgentClient("", s.clientTLS)
 	return nil
 }
@@ -299,7 +309,13 @@ func (s *Server) ClusterCA() (certPEM, keyPEM string, err error) {
 // channel closes after all leader-owned loops stop; callers must join the old
 // term before reloading state or starting another one.
 func (s *Server) Run(ctx context.Context) <-chan struct{} {
+	work := &sync.WaitGroup{}
+	s.termMu.Lock()
+	s.term = ctx
+	s.termWork = work
+	s.termMu.Unlock()
 	s.exec.startTerm(ctx)
+	ctx, release := s.bindTerm(ctx)
 	var group sync.WaitGroup
 	for _, run := range []func(context.Context){s.runReconcileLoop, s.runNetworkPlanLoop, s.runMembershipLoop, s.runObservationApplier} {
 		group.Go(func() { run(ctx) })
@@ -307,9 +323,85 @@ func (s *Server) Run(ctx context.Context) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		group.Wait()
+		release()
+		work.Wait()
 		close(done)
 	}()
 	return done
+}
+
+type leadershipContextKey struct{}
+
+type leadershipFence struct {
+	term  context.Context
+	epoch uint64
+	work  *sync.WaitGroup
+}
+
+type leadershipContext struct {
+	context.Context
+	term context.Context
+}
+
+func (c leadershipContext) Err() error {
+	if err := c.term.Err(); err != nil {
+		return err
+	}
+	return c.Context.Err()
+}
+
+// bindTerm preserves the originating term even through WithoutCancel. Only
+// request cancellation may be discarded by action outcome accounting.
+func (s *Server) bindTerm(ctx context.Context) (context.Context, func()) {
+	s.termMu.RLock()
+	fence, ok := ctx.Value(leadershipContextKey{}).(leadershipFence)
+	if !ok {
+		fence = leadershipFence{term: s.term, epoch: s.controlEpoch, work: s.termWork}
+	}
+	tracked := fence.work != nil && fence.term.Err() == nil
+	if tracked {
+		fence.work.Add(1)
+	}
+	s.termMu.RUnlock()
+	ctx = context.WithValue(ctx, leadershipContextKey{}, fence)
+	if fence.term == nil {
+		return ctx, func() {}
+	}
+	bound, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(fence.term, cancel)
+	if fence.term.Err() != nil {
+		cancel()
+	}
+	return leadershipContext{Context: bound, term: fence.term}, func() {
+		stop()
+		cancel()
+		if tracked {
+			fence.work.Done()
+		}
+	}
+}
+
+func (s *Server) checkTerm(ctx context.Context) error {
+	s.termMu.RLock()
+	defer s.termMu.RUnlock()
+	return s.checkTermLocked(ctx)
+}
+
+// checkTermLocked checks admission while the caller holds termMu, so a
+// heartbeat's stamp and queue submission cannot interleave with term reset.
+func (s *Server) checkTermLocked(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if fence, ok := ctx.Value(leadershipContextKey{}).(leadershipFence); ok {
+		if fence.term != nil && fence.term.Err() != nil {
+			return fence.term.Err()
+		}
+		if fence.epoch != s.controlEpoch {
+			return context.Canceled
+		}
+	}
+	return nil
 }
 
 // Reload reconstructs the durable control-plane state before a leadership term starts.

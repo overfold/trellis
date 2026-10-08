@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -711,4 +712,51 @@ func TestStoppingNewerGenerationDoesNotHideRunningGeneration(t *testing.T) {
 	if reservation.target.ID != "allocation-g1-web" {
 		t.Fatalf("exec target = %q, want running generation", reservation.target.ID)
 	}
+}
+
+func TestExecReservationCannotLaunchAfterEpochAdvance(t *testing.T) {
+	rt := newExecTestRuntime()
+	agent := newOperationTestAgent(t, rt)
+	addExecTestTask(agent, "allocation-g1-web", "web", 1, "running")
+	reservation, err := agent.ReserveExec(t.Context(), "allocation", execTestRequest("web", "sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.AcceptEpoch(2); err != nil {
+		t.Fatal(err)
+	}
+	server, peer := net.Pipe()
+	t.Cleanup(func() { _ = peer.Close() })
+	done := make(chan struct{})
+	go func() { agent.RunExec(server, reservation); close(done) }()
+	stream := &execTestStream{t: t, conn: peer, reader: execstream.NewReader(peer), writer: execstream.NewWriter(peer, 0)}
+	stream.expectError("leadership changed")
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("stale reservation did not finish")
+	}
+	if rt.processCount() != 0 || agent.execSlots() != 0 {
+		t.Fatal("stale reservation launched a process or leaked capacity")
+	}
+}
+
+func TestExecEpochAdvanceDuringLaunchCancelsPendingSession(t *testing.T) {
+	rt := newExecTestRuntime()
+	agent := newOperationTestAgent(t, rt)
+	addExecTestTask(agent, "allocation-g1-web", "web", 1, "running")
+	rt.onStart = func(string) {
+		if agent.execSessionTotal() != 1 {
+			t.Error("pending launch was not registered before runtime creation")
+		}
+		if err := agent.AcceptEpoch(2); err != nil {
+			t.Error(err)
+		}
+	}
+	stream := openExecTestStream(t, serveExecTestAgent(t, agent), "allocation", execTestRequest("web", "sh"))
+	stream.expectError("leadership changed")
+	if rt.process(t, "allocation-g1-web").killCount() != 1 {
+		t.Fatal("process racing epoch advance was not killed")
+	}
+	waitForExec(t, "session release", func() bool { return agent.execSlots() == 0 && agent.execSessionTotal() == 0 })
 }

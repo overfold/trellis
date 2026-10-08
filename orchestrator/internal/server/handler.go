@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -142,7 +143,30 @@ func NewHandler(server *Server) *Handler { return &Handler{server: server} }
 // Register adds server routes to an Echo instance.
 func (h *Handler) Register(e *echo.Echo) {
 	e.GET("/metrics", h.handleMetrics)
-	v1 := e.Group("/v1")
+	v1 := e.Group("/v1", func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c *echo.Context) error {
+			ctx, release := h.server.bindTerm(c.Request().Context())
+			defer release()
+			if err := h.server.checkTerm(ctx); err != nil {
+				return echo.NewHTTPError(http.StatusServiceUnavailable, "control-plane leadership changed")
+			}
+			// Cancellation alone does not unblock a handler reading a slow
+			// request body. Term shutdown must be able to join that handler.
+			rc := http.NewResponseController(c.Response())
+			readStopped := make(chan struct{})
+			stopRead := context.AfterFunc(ctx, func() {
+				_ = rc.SetReadDeadline(time.Now())
+				close(readStopped)
+			})
+			defer func() {
+				if !stopRead() {
+					<-readStopped
+				}
+			}()
+			c.SetRequest(c.Request().WithContext(ctx))
+			return next(c)
+		}
+	})
 	v1.POST("/credentials", h.handleCreateCredential)
 	v1.GET("/credentials", h.handleListCredentials)
 	v1.DELETE("/credentials/:id", h.handleRevokeCredential)
@@ -731,7 +755,7 @@ func (h *Handler) handleHeartbeat(c *echo.Context) error {
 	if err := h.server.Heartbeat(c.Request().Context(), id, request.Allocations, request.Version, request.Volumes, request.Capabilities, resources); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "unable to process heartbeat")
 	}
-	h.server.RecordRaftProgress(id, request.RaftAppliedIndex)
+	h.server.RecordRaftProgress(c.Request().Context(), id, request.RaftAppliedIndex)
 	return c.JSON(http.StatusOK, nodeapi.HeartbeatResponse{ControlPlaneResponse: h.server.ControlPlane(c.Request().Context())})
 }
 

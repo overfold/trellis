@@ -92,7 +92,7 @@ func (r *RaftStore) RestoreDesired(cluster string, snapshot *DesiredSnapshot) er
 }
 
 // Batch applies mutations as one Raft log entry and one Bolt transaction.
-func (r *RaftStore) Batch(_ context.Context, mutations []Mutation) error {
+func (r *RaftStore) Batch(ctx context.Context, mutations []Mutation) error {
 	if err := validateMutations(mutations); err != nil {
 		return err
 	}
@@ -100,6 +100,9 @@ func (r *RaftStore) Batch(_ context.Context, mutations []Mutation) error {
 	defer r.submitMu.RUnlock()
 	cmd := fsmCommand{Op: "batch", Mutations: mutations}
 	data, _ := json.Marshal(cmd)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	fut := r.raft.Apply(data, 10*time.Second)
 	if err := fut.Error(); err != nil {
 		return err
@@ -373,7 +376,7 @@ func (r *RaftStore) List(ctx context.Context, prefix string) (map[string][]byte,
 }
 
 // Put applies a replicated value update.
-func (r *RaftStore) Put(_ context.Context, key string, value []byte) error {
+func (r *RaftStore) Put(ctx context.Context, key string, value []byte) error {
 	if err := validateMutations([]Mutation{{Key: key, Value: value}}); err != nil {
 		return err
 	}
@@ -381,6 +384,9 @@ func (r *RaftStore) Put(_ context.Context, key string, value []byte) error {
 	defer r.submitMu.RUnlock()
 	cmd := fsmCommand{Op: "put", Key: key, Value: value}
 	data, _ := json.Marshal(cmd)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	fut := r.raft.Apply(data, 10*time.Second)
 	if err := fut.Error(); err != nil {
 		return err
@@ -392,11 +398,14 @@ func (r *RaftStore) Put(_ context.Context, key string, value []byte) error {
 }
 
 // Delete applies a replicated key deletion.
-func (r *RaftStore) Delete(_ context.Context, key string) error {
+func (r *RaftStore) Delete(ctx context.Context, key string) error {
 	r.submitMu.RLock()
 	defer r.submitMu.RUnlock()
 	cmd := fsmCommand{Op: "delete", Key: key}
 	data, _ := json.Marshal(cmd)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	fut := r.raft.Apply(data, 10*time.Second)
 	if err := fut.Error(); err != nil {
 		return err

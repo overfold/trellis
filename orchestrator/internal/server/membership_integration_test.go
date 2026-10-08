@@ -130,7 +130,7 @@ func TestRemovalPromotionLossAndRecovery(t *testing.T) {
 				for n, id := range ids {
 					if stores[n] != nil {
 						addTestNode(s, &Node{ID: id, Status: NodeStatusHealthy}, time.Now())
-						s.RecordRaftProgress(id, stores[i].AppliedIndex())
+						s.RecordRaftProgress(t.Context(), id, stores[i].AppliedIndex())
 					}
 				}
 				return s

@@ -220,6 +220,8 @@ func (s *Server) rebuildAllocationNodeIndexLocked() {
 // actions on the same node, and a pass follows it so the task group converges
 // on its desired count.
 func (s *Server) StopAllocationByID(ctx context.Context, namespace, id string) error {
+	ctx, release := s.bindTerm(ctx)
+	defer release()
 	s.mu.RLock()
 	var found *Allocation
 	for _, alloc := range s.allocations {

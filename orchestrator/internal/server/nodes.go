@@ -138,10 +138,17 @@ func (s *Server) RegisterNode(ctx context.Context, nodeRegistration *NodeRegistr
 // Heartbeats never wait for reconciliation or a Raft commit, so neither can
 // make a heartbeating node look silent. A heartbeat from a node that is not
 // registered fails with ErrNodeNotFound so the agent registers again.
-func (s *Server) Heartbeat(_ context.Context, nodeID uuid.UUID, actual []nodeapi.AllocationStatus, version string, volumes []string, capabilities []spec.NodeCapability, resources nodeResourceObservation) error {
+func (s *Server) Heartbeat(ctx context.Context, nodeID uuid.UUID, actual []nodeapi.AllocationStatus, version string, volumes []string, capabilities []spec.NodeCapability, resources nodeResourceObservation) error {
+	ctx, release := s.bindTerm(ctx)
+	defer release()
 	receivedAt := s.now().UTC()
 	observation, err := newNodeObservation(nodeID, receivedAt, actual, version, volumes, capabilities, resources)
 	if err != nil {
+		return err
+	}
+	s.termMu.RLock()
+	defer s.termMu.RUnlock()
+	if err := s.checkTermLocked(ctx); err != nil {
 		return err
 	}
 	registration, registered := s.liveness.stamp(nodeID, receivedAt)
@@ -314,6 +321,11 @@ func (s *Server) deliveredResumes(epoch uint64) map[resumeDeliveryKey]uint64 {
 }
 
 func (s *Server) recordResumeDelivered(request *nodeapi.DrainAllocationRequest) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if request.Epoch != s.controlEpoch {
+		return
+	}
 	s.resumeMu.Lock()
 	defer s.resumeMu.Unlock()
 	if s.resumes == nil || s.resumeEpoch != request.Epoch {

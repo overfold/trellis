@@ -50,7 +50,7 @@ func (s *groupStart) finished() bool {
 }
 
 func (s *groupStart) mergeDrain(draining bool, sequence uint64) {
-	if sequence >= s.drainSequence {
+	if sequence > s.drainSequence {
 		s.draining, s.drainSequence = draining, sequence
 	}
 }

@@ -121,7 +121,7 @@ func membershipTestServer(joiner *fakeMembership, leader uuid.UUID, healthy ...u
 	}
 	for _, id := range healthy {
 		addTestNode(s, &Node{ID: id, Status: NodeStatusHealthy}, now)
-		s.RecordRaftProgress(id, joiner.AppliedIndex())
+		s.RecordRaftProgress(context.Background(), id, joiner.AppliedIndex())
 	}
 	return s
 }
@@ -239,7 +239,7 @@ func TestReconcileMembershipPromotesHealthyCaughtUpNodes(t *testing.T) {
 	s := membershipTestServer(joiner, leader, b, c)
 	// d heartbeats but trails the leader's log too far to vote.
 	addTestNode(s, &Node{ID: d, Status: NodeStatusHealthy}, s.now())
-	s.RecordRaftProgress(d, joiner.AppliedIndex()-raftCatchUpLag-1)
+	s.RecordRaftProgress(t.Context(), d, joiner.AppliedIndex()-raftCatchUpLag-1)
 
 	if err := s.ReconcileMembership(context.Background()); err != nil {
 		t.Fatal(err)
@@ -250,7 +250,7 @@ func TestReconcileMembershipPromotesHealthyCaughtUpNodes(t *testing.T) {
 
 	// Once caught up, d stays a non-voter: four voters would not tolerate
 	// more failures than three.
-	s.RecordRaftProgress(d, joiner.AppliedIndex())
+	s.RecordRaftProgress(t.Context(), d, joiner.AppliedIndex())
 	if err := s.ReconcileMembership(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -412,7 +412,7 @@ func TestRemoveMemberRefusesQuorumLoss(t *testing.T) {
 	f := uuid.New()
 	joiner.members = append(joiner.members, fakeMember(f, false))
 	addTestNode(s, &Node{ID: f, Status: NodeStatusHealthy}, s.now())
-	s.RecordRaftProgress(f, joiner.AppliedIndex())
+	s.RecordRaftProgress(t.Context(), f, joiner.AppliedIndex())
 	setTestHeartbeat(s, e, s.now().Add(-time.Minute))
 	setTestHeartbeat(s, b, s.now().Add(-time.Minute))
 	if err := s.RemoveMember(context.Background(), leader.String()); !errors.Is(err, ErrMembershipUnsafe) {

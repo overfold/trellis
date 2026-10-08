@@ -50,6 +50,7 @@ func TestExecuteAcquiresServerLockBeforeAllocationLock(t *testing.T) {
 			TransitionedAt: s.now(),
 		},
 	}
+	s.allocations = []*Allocation{alloc}
 
 	// Block the server read lock. Execute must wait here before taking
 	// allocation.mu; taking allocation.mu first recreates the production

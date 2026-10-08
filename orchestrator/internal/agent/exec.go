@@ -79,6 +79,7 @@ type execSession struct {
 	AllocationID string
 	TaskID       string
 	ContainerID  string
+	Epoch        uint64
 	cancel       context.CancelCauseFunc
 	// finished is closed once the stream has ended and its process has been
 	// killed or has exited.
@@ -276,8 +277,33 @@ func (a *Agent) RunExec(conn net.Conn, reservation *ExecReservation) {
 	request, target := reservation.request, reservation.target
 	timing := a.execTiming
 	writer := execstream.NewWriter(conn, timing.idleTimeout)
+	if a.currentEpoch() != request.Epoch {
+		a.releaseExecSession(reservation.allocationID)
+		a.finishExecStream(conn, writer, execstream.FrameError, api.ExecStreamError{Message: errExecLeaderChanged.Error()}, execSessionCloseTimeout)
+		return
+	}
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
+	sessionID := uuid.NewString()
+	session := &execSession{
+		AllocationID: reservation.allocationID, TaskID: target.ID, ContainerID: target.ContainerID, Epoch: request.Epoch,
+		cancel: cancel, finished: make(chan struct{}),
+	}
+	// Track pending launches too: epoch advance and task stop cancel runtime
+	// creation, not just a process that has already been registered.
+	end := sync.OnceFunc(func() {
+		a.mu.Lock()
+		delete(a.execSessions, sessionID)
+		a.mu.Unlock()
+		close(session.finished)
+	})
+	defer end()
+	if err := a.registerExecSession(sessionID, session, target, request.Epoch); err != nil {
+		a.releaseExecSession(reservation.allocationID)
+		end()
+		a.finishExecStream(conn, writer, execstream.FrameError, api.ExecStreamError{Message: err.Error()}, execSessionCloseTimeout)
+		return
+	}
 	createdAt := time.Now()
 	activity := &execActivity{}
 	activity.touch()
@@ -299,30 +325,21 @@ func (a *Agent) RunExec(conn net.Conn, reservation *ExecReservation) {
 		defer func() { _ = stdinReader.Close() }()
 	}
 	startCtx, cancelStart := context.WithTimeout(ctx, agentExecStartTimeout)
-	process, err := a.runtime.StartExec(startCtx, target.ContainerID, options)
+	var process runtime.ExecProcess
+	err := startCtx.Err()
+	if err == nil {
+		process, err = a.runtime.StartExec(startCtx, target.ContainerID, options)
+	}
 	cancelStart()
 	if err != nil {
 		a.releaseExecSession(reservation.allocationID)
+		end()
 		a.log.Warn("start exec process", "allocation", reservation.allocationID, "task", target.TaskName, "error", err)
 		a.finishExecStream(conn, writer, execstream.FrameError, api.ExecStreamError{Message: fmt.Sprintf("start exec in task %s: %v", target.TaskName, err)}, execSessionCloseTimeout)
 		return
 	}
 
-	sessionID := uuid.NewString()
-	session := &execSession{
-		AllocationID: reservation.allocationID, TaskID: target.ID, ContainerID: target.ContainerID,
-		cancel: cancel, finished: make(chan struct{}),
-	}
-	// end forgets the session once its process is gone, so a stop waiting
-	// for it is not held up while the final frame is delivered.
-	end := sync.OnceFunc(func() {
-		a.mu.Lock()
-		delete(a.execSessions, sessionID)
-		a.mu.Unlock()
-		close(session.finished)
-	})
-	defer end()
-	if err := a.registerExecSession(sessionID, session, target); err != nil {
+	if err := a.registerExecSession(sessionID, session, target, request.Epoch); err != nil {
 		cancel(err)
 	} else {
 		go a.readExecInput(ctx, cancel, conn, request, process, stdinWriter, activity)
@@ -335,6 +352,10 @@ func (a *Agent) RunExec(conn net.Conn, reservation *ExecReservation) {
 		case <-process.Done():
 			a.releaseExecSession(reservation.allocationID)
 			end()
+			if cause := context.Cause(ctx); cause != nil {
+				a.finishExecStream(conn, writer, execstream.FrameError, api.ExecStreamError{Message: cause.Error()}, execSessionCloseTimeout)
+				return
+			}
 			code, err := process.ExitCode()
 			if err != nil {
 				a.finishExecStream(conn, writer, execstream.FrameError, api.ExecStreamError{Message: fmt.Sprintf("exec process status unavailable: %v", err)}, execSessionCloseTimeout)
@@ -374,9 +395,12 @@ func (a *Agent) currentEpoch() uint64 {
 // agent shutdown ends it. A stop marks the record stopping before it ends
 // the record's sessions, so a session registered here is either ended by
 // that stop or refused.
-func (a *Agent) registerExecSession(sessionID string, session *execSession, target execTarget) error {
+func (a *Agent) registerExecSession(sessionID string, session *execSession, target execTarget, epoch uint64) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.epoch != epoch {
+		return errExecLeaderChanged
+	}
 	if a.execSessionsClosed {
 		return errExecAgentShutdown
 	}

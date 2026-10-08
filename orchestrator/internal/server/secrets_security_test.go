@@ -111,6 +111,7 @@ func TestAllocationReceivesSecretFromMatchingNamespace(t *testing.T) {
 	task := spec.TaskSpec{Name: "app", Image: "app", Secrets: []spec.SecretRefSpec{{Name: "token", Target: spec.SecretTargetEnv, Env: "TOKEN"}}}
 	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Tasks: []spec.TaskSpec{task}}}}), Revision: 1}
 	allocation := &Allocation{ID: "allocation", Namespace: "default", JobName: "web", TaskGroupName: "app", Tasks: []spec.TaskSpec{task}, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhasePlaced}
+	s.allocations = []*Allocation{allocation}
 	if err := s.Execute(context.Background(), &Action{Type: ActionStart, Allocation: allocation}); err != nil {
 		t.Fatal(err)
 	}

@@ -93,6 +93,10 @@ func (q *observationQueue) submit(observation *nodeObservation) bool {
 	if q.pending == nil {
 		q.pending = make(map[uuid.UUID]*nodeObservation)
 	}
+	if previous := q.pending[observation.node]; previous != nil && observation.at.Before(previous.at) {
+		q.mu.Unlock()
+		return false
+	}
 	_, superseded := q.pending[observation.node]
 	q.pending[observation.node] = observation
 	q.mu.Unlock()

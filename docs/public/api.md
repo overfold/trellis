@@ -191,7 +191,9 @@ process. Additional requests receive `503 Service Unavailable` and
 `Retry-After: 1` without allocating a stream buffer. Subscriber admission does
 not alter authorization: `GET /v1/namespaces/{ns}/events` receives only that
 namespace's events, and only `GET /v1/events` spans namespaces. A stream with no events receives a `: keepalive` comment every 20 seconds, which clients should ignore; a client that stops reading is disconnected after 30 seconds, releasing its subscriber slot. Clients should reconnect with
-backoff after overload or a leader change.
+backoff after overload or a leader change. Existing streams close when their
+leader loses leadership, including streams reached through a follower proxy;
+reconnect and refresh current resources to resume observation.
 
 ## Cluster settings
 
