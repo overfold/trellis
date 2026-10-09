@@ -348,8 +348,9 @@ func (s *Server) applyMembershipChange(ctx context.Context, index uint64, change
 }
 
 // RemoveMember permanently removes a node. It first records a durable
-// tombstone for the node UUID, which revokes the node's certificate on every
-// node-authenticated path (control-plane API, agent API, enrollment, Raft
+// tombstone and deletes the registration atomically. The tombstone revokes
+// the node's certificate on every node-authenticated path (control-plane
+// API, agent API, enrollment, Raft
 // join, and inbound Raft streams), and then removes it from Raft. Before a
 // voter is removed, a healthy caught-up non-voter is promoted in its place so
 // the number of live voters does not shrink. The removal is refused, before
@@ -401,9 +402,23 @@ func (s *Server) RemoveMember(ctx context.Context, id string) error {
 	if err := s.checkTerm(ctx); err != nil {
 		return err
 	}
+	s.mutationMu.Lock()
 	if err := s.state.PutNodeTombstone(ctx, id, NodeTombstone{RemovedAt: s.now().UTC()}); err != nil {
+		s.mutationMu.Unlock()
 		return fmt.Errorf("record removal of node %s: %w", id, err)
 	}
+	s.mu.Lock()
+	delete(s.nodes, nodeID)
+	for _, allocation := range s.allocations {
+		allocation.mu.Lock()
+		if allocation.Node != nil && allocation.Node.ID == nodeID {
+			allocation.Node = &Node{ID: nodeID, Status: NodeStatusUnhealthy}
+		}
+		allocation.mu.Unlock()
+	}
+	s.liveness.forget(nodeID)
+	s.mu.Unlock()
+	s.mutationMu.Unlock()
 	s.revokeStaleWorkloadCredentials(ctx)
 	if index < 0 {
 		return nil
@@ -428,7 +443,6 @@ func (s *Server) RemoveMember(ctx context.Context, id string) error {
 	if err := s.joiner.ChangeMembership(ctx, current[0].ConfigurationIndex, raft.RemoveServer, id, ""); err != nil {
 		return fmt.Errorf("node %s is tombstoned but Raft removal is incomplete; restore reachable quorum and retry removal: %w", id, err)
 	}
-	s.liveness.forgetRaftProgress(nodeID)
 	s.wakeMembership()
 	return nil
 }

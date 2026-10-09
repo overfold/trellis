@@ -450,7 +450,13 @@ func (s *Server) Reload(ctx context.Context) error {
 	allocations := make([]*Allocation, 0, len(allocationMap))
 	for _, allocation := range allocationMap {
 		if allocation.Node != nil {
-			allocation.Node = nodes[allocation.Node.ID]
+			if node := nodes[allocation.Node.ID]; node != nil {
+				allocation.Node = node
+			} else {
+				// Keep placement identity for loss/recovery, never registration
+				// or liveness for a node that has left the cluster.
+				allocation.Node.Status = NodeStatusUnhealthy
+			}
 		}
 		allocations = append(allocations, allocation)
 	}

@@ -95,6 +95,13 @@ func (s *Server) RegisterNode(ctx context.Context, nodeRegistration *NodeRegistr
 	}
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
+	removed, err := s.state.NodeRemoved(ctx, nodeRegistration.ID.String())
+	if err != nil {
+		return stateUnavailable(err)
+	}
+	if removed {
+		return ErrNodeRemoved
+	}
 	s.mu.RLock()
 	existing := s.nodes[nodeRegistration.ID]
 	status := NodeStatusHealthy

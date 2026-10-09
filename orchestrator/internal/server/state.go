@@ -236,7 +236,20 @@ func (s *StateController) DeleteJob(ctx context.Context, id string) error {
 // ListNodes loads all persisted nodes.
 func (s *StateController) ListNodes(ctx context.Context) (map[string]*NodeSummary, error) {
 	prefix := fmt.Sprintf("%s/%s/nodes/", trellisNamespace, s.cluster)
-	return listValues[NodeSummary](ctx, s.store, prefix)
+	nodes, err := listValues[NodeSummary](ctx, s.store, prefix)
+	if err != nil {
+		return nil, err
+	}
+	for key, node := range nodes {
+		removed, err := s.NodeRemoved(ctx, node.ID.String())
+		if err != nil {
+			return nil, err
+		}
+		if removed {
+			delete(nodes, key)
+		}
+	}
+	return nodes, nil
 }
 
 // ListAllocations loads all persisted allocations.

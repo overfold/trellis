@@ -288,6 +288,15 @@ Workload-token storage includes its allocation lookup so authentication checks l
 
 `trellisctl nodes drain NODE` prevents new placement and migrates allocations to other nodes. `NODE` may be the host/address displayed by `nodes list`, a unique UUID prefix, or a complete UUID. Wait until workloads have healthy replacements before maintenance. `trellisctl nodes undrain NODE` re-enables scheduling. `nodes remove NODE` permanently removes a node from the cluster, requires the administrator key, and is different from draining; see [Multi-node clusters](multi-node.md#maintain-a-multi-node-cluster) before removing a member.
 
+Removal atomically revokes the identity and deletes its node registration. The
+node disappears from health/placement and no longer consumes namespace subnet
+capacity, including after a leadership reload. Allocation placement IDs and
+volume ownership remain for recovery; removal does not migrate or delete volume
+data, or prove that unreachable containers stopped. Stop or isolate the removed
+host before reusing network capacity. If a subsequent Raft membership step fails,
+revocation and registration removal remain committed: restore quorum and retry
+`nodes remove`, rather than attempting to rejoin with the revoked identity.
+
 ## Upgrade a node
 
 The upgrade entrypoint performs the node-maintenance sequence instead of asking the operator to remember it:
@@ -299,6 +308,12 @@ curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/upgra
 It downloads and verifies the new release before touching the running daemon, then swaps the binaries, refreshes the installer-owned systemd unit, and starts the daemon. Verification checks that systemd reports the service active and the local API can serve authentication requests; it does not verify worker registration or workload readiness. If this check fails, the previous binaries and unit are restored. Afterward, inspect `trellisctl nodes status NODE` and affected jobs for workload health.
 
 A service that was already stopped remains stopped. On a multi-node cluster the script also evacuates the node first; see [Multi-node clusters](multi-node.md#maintain-a-multi-node-cluster).
+
+The script captures the local node's drain status before maintenance. An already
+draining node stays draining on success, evacuation failure, rollback, and
+SIGINT/SIGTERM. Only a drain introduced by this invocation is undone (best-effort
+on failure or interruption). Missing, duplicate, or invalid local-node status
+fails closed before any drain or binary replacement.
 
 Current builds pin Go 1.26.9 (including the TLS post-handshake/KeyUpdate CPU-DoS
 fix in [GO-2026-6090](https://pkg.go.dev/vuln/GO-2026-6090), fixed in 1.26.6),
@@ -313,7 +328,7 @@ re-enrollment. Updating Trellis patches its embedded SDK, **not** the separately
 installed containerd daemon: update that daemon through your host maintenance
 process as well (the graph fix is in 1.7.36, 2.2.9, 2.3.6, and 2.4.1).
 
-The verified staged daemon decodes the installed node YAML with the same parser as normal startup, including quoted paths, comments, and aliases. Maintenance uses that `data_dir` and `containerd_socket`; an invalid configuration or missing/empty node identity on a running node stops the upgrade before binaries change. Containerd query failures are not evidence of evacuation: they abort the upgrade and attempt to undrain the node, just like an evacuation timeout.
+The verified staged daemon decodes the installed node YAML with the same parser as normal startup, including quoted paths, comments, and aliases. Maintenance uses that `data_dir` and `containerd_socket`; an invalid configuration or missing/empty node identity on a running node stops the upgrade before binaries change. Containerd query failures are not evidence of evacuation: they abort the upgrade and attempt to undo only this invocation's drain, just like an evacuation timeout.
 
 Upgrade and graceful uninstall require `jq` for structural parsing of the CLI's node-list JSON (on Debian/Ubuntu, `sudo apt-get install jq`). Membership must be a single nonempty JSON array of node objects with nonempty IDs; malformed, empty, or unexpected output stops maintenance before draining, replacing binaries, or deleting local state. Labels and pretty/compact formatting do not affect the count. Only a validated one-node list selects the single-node flow. Uninstall's explicit `--force` bypasses cluster inspection, not local resource cleanup.
 

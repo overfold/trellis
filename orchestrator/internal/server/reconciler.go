@@ -435,6 +435,11 @@ func (s *Server) lockReconcileTargetsLocked(plan *reconcilePlan, originals map[*
 		}
 		if updatedSet[allocation] && allocation.Node != nil {
 			canonicalNodes[allocation] = s.nodes[allocation.Node.ID]
+			if canonicalNodes[allocation] == nil && snapshot.Node != nil && snapshot.Node.ID == allocation.Node.ID {
+				// An existing execution on a removed node may still need a
+				// durable loss/cleanup transition. Preserve its placement ID.
+				canonicalNodes[allocation] = original.Node
+			}
 			if canonicalNodes[allocation] == nil {
 				original.mu.Unlock()
 				release()

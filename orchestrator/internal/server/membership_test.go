@@ -3,6 +3,9 @@ package server
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"net/netip"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -12,6 +15,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/hashicorp/raft"
 	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 	"github.com/overfold/trellis/orchestrator/internal/state"
 )
 
@@ -467,6 +472,147 @@ func TestRemoveMemberIsIdempotent(t *testing.T) {
 	}
 	if got := joiner.operations(); len(got) != 0 {
 		t.Fatalf("operations = %v, want none", got)
+	}
+}
+
+func TestRemoveMemberDurableRegistrationAndRecovery(t *testing.T) {
+	for _, scenario := range []string{"worker", "nonvoter", "raft-failure"} {
+		t.Run(scenario, func(t *testing.T) {
+			store, err := state.NewBoltStore(filepath.Join(t.TempDir(), "state.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			controller := NewStateController(store, "test")
+			leader, removed := uuid.New(), uuid.New()
+			joiner := newFakeMembership(fakeMember(leader, true))
+			if scenario != "worker" {
+				joiner.members = append(joiner.members, fakeMember(removed, false))
+			}
+			s := NewServer(slog.Default(), nil, controller, store, "test", "")
+			s.joiner, s.nodeID = joiner, leader
+			s.client = newTestAgentClient()
+			s.leaderSince = time.Now().Add(-time.Hour)
+			s.networkPool = netip.MustParsePrefix("10.64.0.0/24")
+			s.wireGuardPortCount = 8
+			for _, id := range []uuid.UUID{leader, removed} {
+				node := &Node{ID: id, Status: NodeStatusHealthy, CPUCapacity: 4000, CPUAllocatable: 4000, MemoryCapacity: 4 << 30, MemoryAllocatable: 4 << 30, WireGuardPortBase: 51820, WireGuardPortCount: 8}
+				addTestNode(s, node, time.Now())
+				if err := controller.PutNode(t.Context(), id.String(), nodeSummary(node)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			job := &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "acme", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app", Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkWireGuard}}}}}}), Revision: 1}
+			if err := controller.PutJob(t.Context(), jobKey("acme", "web"), job); err != nil {
+				t.Fatal(err)
+			}
+			s.jobs[jobKey("acme", "web")] = job
+			original := &Allocation{ID: "original", Namespace: "acme", JobName: "deleted", TaskGroupName: "api", Node: s.nodes[removed], Phase: lifecycle.PhaseRunning, Generation: 1, Tasks: job.Spec.TaskGroups[0].Tasks}
+			if err := controller.PutAllocation(t.Context(), original); err != nil {
+				t.Fatal(err)
+			}
+			s.allocations = append(s.allocations, original)
+			if err := controller.PutVolumeRegistration(t.Context(), &VolumeRegistration{Namespace: "acme", Name: "data", NodeID: removed}); err != nil {
+				t.Fatal(err)
+			}
+			if err := controller.put(t.Context(), controller.networkSubnetRegistrationKey("acme", removed), &NetworkSubnetRegistration{Namespace: "acme", NodeID: removed, Index: 0}); err != nil {
+				t.Fatal(err)
+			}
+			// One /24 cannot address both registrations, even though only one
+			// node is needed for the desired allocation.
+			s.Reconcile(t.Context())
+			if len(s.allocations) != 1 {
+				t.Fatal("placement bypassed exhausted subnet capacity")
+			}
+			if scenario == "raft-failure" {
+				joiner.err = errors.New("Raft unavailable")
+			}
+			err = s.RemoveMember(t.Context(), removed.String())
+			if (err != nil) != (scenario == "raft-failure") {
+				t.Fatalf("removal = %v", err)
+			}
+			if registration, err := store.Get(t.Context(), "trellis/test/nodes/"+removed.String()); err != nil || registration != nil {
+				t.Fatalf("registration survives removal: %s, %v", registration, err)
+			}
+			if err := s.RegisterNode(t.Context(), &NodeRegistration{ID: removed, Host: "localhost", Port: 8128}); !errors.Is(err, ErrNodeRemoved) {
+				t.Fatalf("removed identity registered: %v", err)
+			}
+			// Even a stale registration alongside a tombstone cannot reload.
+			if err := controller.PutNode(t.Context(), removed.String(), &NodeSummary{ID: removed, Draining: true}); err != nil {
+				t.Fatal(err)
+			}
+			for _, reload := range []bool{false, true} {
+				// Exercise loss both before reload and from a freshly loaded
+				// active allocation whose registration is already gone.
+				if reload || scenario == "nonvoter" {
+					if err := s.Reload(t.Context()); err != nil {
+						t.Fatal(err)
+					}
+					setTestHeartbeat(s, leader, time.Now())
+				}
+				if views := s.ListNodes(); len(views) != 1 || views[0].ID != leader || views[0].Status != NodeStatusHealthy {
+					t.Fatalf("removed node appears in API health after reload=%v: %+v", reload, views)
+				}
+				if err := s.Heartbeat(t.Context(), removed, nil, "", nil, nil, nodeResourceObservation{}); !errors.Is(err, ErrNodeNotFound) {
+					t.Fatalf("removed node heartbeated: %v", err)
+				}
+				s.Reconcile(t.Context())
+				subnets, err := controller.listNetworkSubnetRegistrations(t.Context())
+				if err != nil || len(subnets) != 1 || subnets[networkSubnetKey{namespace: "acme", node: leader}] != 0 {
+					t.Fatalf("removed registration consumed network capacity: %v, %v", subnets, err)
+				}
+				allocations, err := controller.ListAllocations(t.Context())
+				if err != nil {
+					t.Fatal(err)
+				}
+				lost := allocations["original"]
+				if lost == nil || lost.Phase != lifecycle.PhaseLost || lost.Node == nil || lost.Node.ID != removed {
+					t.Fatalf("lost allocation recovery identity not preserved: %+v", lost)
+				}
+				placed := false
+				for _, allocation := range allocations {
+					if allocation.JobName == "web" && allocation.Node != nil && allocation.Node.ID == leader {
+						placed = true
+					}
+				}
+				if !placed {
+					t.Fatal("remaining node did not receive desired allocation")
+				}
+				owners, err := controller.ListVolumeRegistrations(t.Context())
+				if err != nil || owners[volumeRegistrationKey("acme", "data")] != removed {
+					t.Fatalf("removal lost volume ownership: %v, %v", owners, err)
+				}
+				placements := Schedule(&PlacementIntent{Namespace: "acme", Count: 1, Nodes: []*Node{s.nodes[leader]}, Tasks: []spec.TaskSpec{{Volumes: []spec.VolumeSpec{{Name: "data", HostPath: "@/data", ContainerPath: "/data"}}}}, VolumeOwners: owners})
+				if len(placements) != 0 {
+					t.Fatalf("removal reassigned durable volume ownership: %v", placements)
+				}
+			}
+			joiner.err = nil
+			if err := s.RemoveMember(t.Context(), removed.String()); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestRemoveMemberPersistenceFailurePreservesRegistration(t *testing.T) {
+	leader, removed := uuid.New(), uuid.New()
+	joiner := newFakeMembership(fakeMember(leader, true), fakeMember(removed, false))
+	s := membershipTestServer(joiner, leader, removed)
+	store := &failingBatchStore{memoryStore: memoryStore{}}
+	s.state = NewStateController(store, "test")
+	if err := s.state.PutNode(t.Context(), removed.String(), nodeSummary(s.nodes[removed])); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RemoveMember(t.Context(), removed.String()); err == nil {
+		t.Fatal("removal succeeded despite failed persistence")
+	}
+	nodes, err := s.state.ListNodes(t.Context())
+	if err != nil || len(nodes) != 1 || s.nodes[removed] == nil || s.liveness.lastHeartbeat(removed).IsZero() {
+		t.Fatalf("failed removal forgot registration/liveness: nodes=%v error=%v", nodes, err)
+	}
+	if tombstoned, err := s.state.NodeRemoved(t.Context(), removed.String()); err != nil || tombstoned || len(joiner.operations()) != 0 {
+		t.Fatalf("failed persistence revoked identity or changed Raft: tombstoned=%v error=%v operations=%v", tombstoned, err, joiner.operations())
 	}
 }
 

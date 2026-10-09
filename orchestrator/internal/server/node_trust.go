@@ -190,9 +190,15 @@ func (s *StateController) NodeRemoved(ctx context.Context, id string) (bool, err
 	return found, nil
 }
 
-// PutNodeTombstone records that a node UUID was removed.
+// PutNodeTombstone atomically revokes a node UUID and removes its registration.
+// Allocation records and volume ownership remain available for recovery.
 func (s *StateController) PutNodeTombstone(ctx context.Context, id string, tombstone NodeTombstone) error {
-	if err := s.put(ctx, s.nodeTombstoneKey(id), tombstone); err != nil {
+	mutation, err := jsonMutation(s.nodeTombstoneKey(id), tombstone)
+	if err != nil {
+		return err
+	}
+	key := fmt.Sprintf("%s/%s/nodes/%s", trellisNamespace, s.cluster, id)
+	if err := s.batch(ctx, []state.Mutation{mutation, {Key: key}}); err != nil {
 		return fmt.Errorf("put node tombstone: %w", err)
 	}
 	return nil

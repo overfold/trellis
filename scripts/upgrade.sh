@@ -29,6 +29,8 @@ cleanup() {
     return "$rc"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 load_common() {
     local script_dir
@@ -121,13 +123,20 @@ if [ "$was_running" = true ] && [ -n "$node_id" ]; then
     if ! node_count="$(printf '%s' "$node_json" | count_nodes_json)"; then
         ui_die "Invalid cluster membership output; no binaries were changed."
     fi
+    if ! original_status="$(printf '%s' "$node_json" | jq -er --arg id "$node_id" '
+        [.[] | select(.id == $id)] | select(length == 1) | .[0].status |
+        select(. == "healthy" or . == "unhealthy" or . == "draining")')"; then
+        ui_die "Invalid local node status in cluster membership output; no binaries were changed."
+    fi
     if [ "${node_count:-0}" -gt 1 ]; then
-        upgrade_ctl nodes drain "$node_id" >/dev/null
-        drained=true
+        if [ "$original_status" != draining ]; then
+            # A failed/interrupted response may still have committed the drain.
+            drained=true
+            upgrade_ctl nodes drain "$node_id" >/dev/null
+        fi
         ui_step "Drain started"
         if ! wait_for_local_allocations_to_stop; then
-            upgrade_ctl nodes undrain "$node_id" >/dev/null 2>&1 || true
-            ui_die "Could not verify evacuation (containerd query failed or timed out); undrain was attempted and no binaries were changed."
+            ui_die "Could not verify evacuation (containerd query failed or timed out); no binaries were changed."
         fi
         ui_step "Allocations moved to healthy replacements"
     else

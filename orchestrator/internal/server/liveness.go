@@ -124,13 +124,11 @@ func (l *nodeLiveness) recordRaftProgress(id uuid.UUID, progress raftProgress) {
 	}
 }
 
-// forgetRaftProgress drops a node's Raft progress, as when it leaves Raft.
-func (l *nodeLiveness) forgetRaftProgress(id uuid.UUID) {
+// forget rejects subsequent heartbeats and queued observations of a removed node.
+func (l *nodeLiveness) forget(id uuid.UUID) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if record := l.nodes[id]; record != nil {
-		record.raft, record.hasRaft = raftProgress{}, false
-	}
+	delete(l.nodes, id)
 }
 
 // heartbeats copies the latest heartbeat time of every node that has

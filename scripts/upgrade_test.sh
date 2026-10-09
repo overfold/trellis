@@ -44,12 +44,22 @@ getent() { printf 'operator:x:1000:1000::%s:/bin/bash\n' "$OPERATOR_HOME"; }
 systemctl() { printf '%s\n' "$*" >>"$SERVICE_LOG"; }
 write_service() { :; }
 write_state_version() { printf '%s\n' "$1" >"$VERSION_LOG"; }
-wait_for_service() { [ "$SCENARIO" != rollback ]; }
-wait_for_local_allocations_to_stop() { [ "$SCENARIO" != timeout ]; }
+wait_for_service() {
+    case "$SCENARIO" in *signal-install) kill -TERM $$ ;; *interrupt-install) kill -INT $$ ;; esac
+    [[ "$SCENARIO" != *rollback ]]
+}
+wait_for_local_allocations_to_stop() {
+    case "$SCENARIO" in *signal) kill -TERM $$ ;; *interrupt) kill -INT $$ ;; esac
+    [[ "$SCENARIO" != *timeout ]]
+}
+cp() {
+    if [[ "$SCENARIO" = *failure && "${*: -1}" = *.old ]]; then return 1; fi
+    command cp "$@"
+}
 journalctl() { :; }
 sleep() { :; }
 MOCKS
-for scenario in single single-label single-pretty multi multi-compact malformed wrong-shape empty explicit missing unauthorized timeout rollback root quoted-data missing-id invalid-config; do
+for scenario in single single-label single-pretty multi multi-compact malformed wrong-shape empty explicit missing unauthorized timeout rollback root quoted-data missing-id invalid-config draining-success draining-timeout draining-rollback draining-signal draining-interrupt draining-signal-install draining-interrupt-install draining-failure multi-signal multi-interrupt multi-signal-install multi-interrupt-install multi-failure multi-drain-error absent-local missing-status duplicate-local; do
     (
         export SCENARIO="$scenario"
         export INSTALL_DIR="$tmp/$scenario/bin" CONFIG_DIR="$tmp/$scenario/etc"
@@ -103,45 +113,59 @@ case "$*" in
             exit 1
         fi
         case "$SCENARIO" in
-            single-label) printf '[\n{"id":"node-a",\n"labels":{"id":"rack-a"}}\n]\n'; exit 0 ;;
-            single-pretty) printf '[\n{"id":"node-a"}\n]\n'; exit 0 ;;
-            multi-compact) printf '[{"id":"node-a"},{"id":"node-b"}]\n'; exit 0 ;;
+            single-label) printf '[\n{"id":"node-a","status":"healthy",\n"labels":{"id":"rack-a"}}\n]\n'; exit 0 ;;
+            single-pretty) printf '[\n{"id":"node-a","status":"healthy"}\n]\n'; exit 0 ;;
+            multi-compact) printf '[{"id":"node-a","status":"healthy"},{"id":"node-b"}]\n'; exit 0 ;;
+            draining-*) printf '[{"id":"node-a","status":"draining"},{"id":"node-b"}]\n'; exit 0 ;;
+            absent-local) printf '[{"id":"node-b","status":"healthy"}]\n'; exit 0 ;;
+            missing-status) printf '[{"id":"node-a"}]\n'; exit 0 ;;
+            duplicate-local) printf '[{"id":"node-a","status":"healthy"},{"id":"node-a","status":"draining"}]\n'; exit 0 ;;
             malformed) printf '[{"id":'; exit 0 ;;
             wrong-shape) printf '{"id":"node-a"}\n'; exit 0 ;;
             empty) printf '[]\n'; exit 0 ;;
         esac
         if [ "$SCENARIO" = single ] || [ "$SCENARIO" = root ]; then
-            printf '[{"id":"node-a"}]\n'
+            printf '[{"id":"node-a","status":"healthy"}]\n'
         else
-            printf '[\n{"id":"node-a"},\n{"id":"node-b"}\n]\n'
+            printf '[\n{"id":"node-a","status":"healthy"},\n{"id":"node-b"}\n]\n'
         fi
         ;;
-    'nodes drain node-a'|'nodes undrain node-a') ;;
+    'nodes drain node-a') [ "$SCENARIO" != multi-drain-error ] ;;
+    'nodes undrain node-a') ;;
     *) exit 1 ;;
 esac
 CTL
         chmod +x "$INSTALL_DIR/trellisctl"
         printf '#!/bin/sh\necho v-old\n' >"$INSTALL_DIR/trellis"
         chmod +x "$INSTALL_DIR/trellis"
-        if bash "$tmp/upgrade.sh" >"$tmp/$scenario.output" 2>&1; then
-            case "$scenario" in single*|multi*|explicit|root|quoted-data) ;; *) exit 1 ;; esac
+        # Test runners may inherit ignored SIGINT; Bash cannot trap a signal
+        # ignored at startup. Restore it so these exercise a real interrupt.
+        if env --default-signal=INT bash "$tmp/upgrade.sh" >"$tmp/$scenario.output" 2>&1; then
+            case "$scenario" in single*|multi|multi-compact|explicit|root|quoted-data|draining-success) ;; *) exit 1 ;; esac
             [ "$(cat "$VERSION_LOG")" = v-new ]
             if [[ "$scenario" = single* ]] || [ "$scenario" = root ]; then
                 ! grep -q 'nodes drain' "$CALL_LOG"
                 grep -q 'Single-node cluster' "$tmp/$scenario.output"
-            else
+            elif [[ "$scenario" != draining-* ]]; then
                 grep -qx 'nodes drain node-a' "$CALL_LOG"
                 grep -qx 'nodes undrain node-a' "$CALL_LOG"
             fi
         else
-            case "$scenario" in missing|unauthorized|timeout|rollback|malformed|wrong-shape|empty|missing-id|invalid-config) ;; *) cat "$tmp/$scenario.output"; exit 1 ;; esac
+            rc=$?
+            case "$scenario" in
+                *signal*) [ "$rc" -eq 143 ] ;;
+                *interrupt*) [ "$rc" -eq 130 ] ;;
+            esac
+            case "$scenario" in missing|unauthorized|timeout|rollback|malformed|wrong-shape|empty|missing-id|invalid-config|draining-*|multi-*|absent-local|missing-status|duplicate-local) ;; *) cat "$tmp/$scenario.output"; exit 1 ;; esac
             [ "$("$INSTALL_DIR/trellis" --version)" = v-old ]
             test ! -e "$VERSION_LOG"
-            if [ "$scenario" = rollback ]; then
+            if [[ "$scenario" = *rollback || "$scenario" = *-install ]]; then
                 grep -qx 'stop trellis' "$SERVICE_LOG"
-                grep -qx 'nodes undrain node-a' "$CALL_LOG"
             else
                 ! grep -q '^stop trellis$' "$SERVICE_LOG"
+            fi
+            if [[ "$scenario" = multi-* || "$scenario" = rollback ]]; then
+                grep -qx 'nodes undrain node-a' "$CALL_LOG"
             fi
             case "$scenario" in
                 missing) grep -q 'Operator config missing' "$tmp/$scenario.output" ;;
@@ -152,6 +176,9 @@ CTL
                     ;;
                 timeout) grep -qx 'nodes undrain node-a' "$CALL_LOG" ;;
             esac
+        fi
+        if [[ "$scenario" = draining-* ]]; then
+            ! grep -q 'nodes drain\|nodes undrain' "$CALL_LOG"
         fi
         printf 'PASS upgrade: %s\n' "$scenario"
     )
