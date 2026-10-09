@@ -193,6 +193,7 @@ func TestNamespacePathRemovalDeletesTrellisChainsAfterLastPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	manager.netnsDir = t.TempDir()
 	manager.run = model
 	manager.dnsAddress = WorkloadDNSAddress
 	first, err := manager.Attach(context.Background(), AttachRequest{

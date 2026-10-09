@@ -136,7 +136,7 @@ func TestDetachAllocationCancelledCommandRetainsJournalAndLeaseForRetry(t *testi
 		t.Fatal("detach command did not honor cancellation")
 	}
 	assertAttachments(t, manager, "alloc-cancel")
-	leaseDir := filepath.Join(manager.stateDir, attachment.Network)
+	leaseDir := filepath.Dir(attachment.LeasePath)
 	if leases, err := os.ReadDir(leaseDir); err != nil || len(leases) == 0 {
 		t.Fatalf("cancelled detach lost address reservation: %v, %v", leases, err)
 	}
@@ -339,7 +339,10 @@ func TestNamespaceForIPRecoversAfterJournalRepair(t *testing.T) {
 			}
 			// New attachments must not publish a partial cache while loading failed.
 			if fault != "unreadable-directory" {
-				if err := manager.recordAttachment(attachmentRecord{AllocationID: "alloc-three", Namespace: "third", Network: "third", CIDR: "10.42.3.0/24"}); err != nil {
+				err := manager.recordAttachment(attachmentRecord{AllocationID: "alloc-three", Namespace: "third", Network: "third", CIDR: "10.42.3.0/24"})
+				if fault == "corrupt" && err == nil {
+					t.Fatal("created ownership state alongside an unreadable journal")
+				} else if fault != "corrupt" && err != nil {
 					t.Fatal(err)
 				}
 				if _, ok := manager.NamespaceForIP(netip.MustParseAddr("10.42.3.9")); ok {
@@ -504,6 +507,9 @@ func TestDetachAllocationSucceedsWhenResourcesAreAlreadyGone(t *testing.T) {
 	if err := os.Remove(attachment.LeasePath); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Remove(manager.netnsPath("alloc-one")); err != nil {
+		t.Fatal(err)
+	}
 	// ip fails for a link or namespace that does not exist, and no named
 	// network namespace remains.
 	runner.fail = []string{"ip link del", "ip link show", "ip netns del", "iptables -D"}
@@ -569,11 +575,11 @@ func TestAttachFailureRollsBackAndRemovesRecord(t *testing.T) {
 			t.Fatalf("rollback did not run %q:\n%s", want, joined)
 		}
 	}
-	entries, err := os.ReadDir(filepath.Join(manager.stateDir, "acme"))
+	entries, err := os.ReadDir(filepath.Dir(other.LeasePath))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || filepath.Join(manager.stateDir, "acme", entries[0].Name()) != other.LeasePath {
+	if len(entries) != 1 || filepath.Join(filepath.Dir(other.LeasePath), entries[0].Name()) != other.LeasePath {
 		t.Fatalf("leases after rollback = %v, want only %s", entries, other.LeasePath)
 	}
 	assertAttachments(t, manager, "alloc-other")

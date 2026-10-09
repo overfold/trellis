@@ -50,7 +50,7 @@ valid, while expansion beyond the SDK's 10,000-reference budget is rejected.
 
 Namespace-network kernel regressions need root with network/mount namespace
 privileges, IPv6 and WireGuard kernel support, and `ip`, `wg`, `iptables`,
-`unshare`, `mount`, and `curl`. They isolate network tables, sysfs, and named
+`unshare`, `mount`, `umount`, and `curl`. They isolate network tables, sysfs, and named
 network namespaces in a child process, and do not require containerd:
 
 ```sh
@@ -62,6 +62,10 @@ The suite proves old 40-bit collision separation, refuses foreign ownership,
 exercises IPv6 link-local and real WireGuard host-input denial with working
 pre-fix baselines, preserves node/host-initiated and namespace-peer connections,
 repairs API reachability after a firewall flush, and checks final teardown.
+It also crashes after real bridge/WireGuard/veth creation and netns mounting,
+restarts cleanup before ownership aliases are installed, reuses the resources
+in namespace `plans`, refuses foreign veths and replacement namespaces, and
+repairs published-port connections after deleting all NAT chains and jumps.
 Normal unit runs skip this opt-in suite; a failure after opting in is not skipped.
 
 Multi-node integration uses the test/injected runtime and is separated in CI. The injected runtime is compiled into the node binary only under the `integration` build tag; the suite builds its own node binary with that tag:

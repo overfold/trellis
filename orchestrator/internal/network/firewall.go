@@ -141,6 +141,15 @@ func (m *WireGuardManager) reconcileFirewall(ctx context.Context, bridge, wg, ci
 				return err
 			}
 		}
+		if !record.Detaching && (record.PortsReady || record.Version == 2 && record.NetnsCreated) && len(record.Ports) > 0 {
+			address, err := m.publishedAddress(record)
+			if err != nil {
+				return err
+			}
+			if err := m.publishPorts(ctx, id, address, record.Ports); err != nil {
+				return err
+			}
+		}
 	}
 	for _, rule := range namespaceRules(bridge, wg, prefix.String(), gateway, m.dnsAddress, apiPort) {
 		flag := "-A"
@@ -306,8 +315,8 @@ var publishedPortProtocols = []string{"tcp", "udp"}
 
 // publishPorts forwards each mapping's node port to the allocation address.
 // The destination is rewritten but not the source, so the task sees the
-// client's address. The allocation's chain is rebuilt from scratch, so a
-// retry after a partial publish converges.
+// client's address. Allocation mappings are immutable; ensure missing rules
+// without flushing a live chain during periodic repair.
 func (m *WireGuardManager) publishPorts(ctx context.Context, allocationID, address string, ports []PortMapping) error {
 	if len(ports) == 0 {
 		return nil
@@ -320,13 +329,10 @@ func (m *WireGuardManager) publishPorts(ctx context.Context, allocationID, addre
 	if err := m.ensureChain(ctx, "nat", chain); err != nil {
 		return err
 	}
-	if err := m.iptables(ctx, "nat", "-F", chain); err != nil {
-		return fmt.Errorf("reset published ports: %w", err)
-	}
 	for _, port := range ports {
 		destination := fmt.Sprintf("%s:%d", prefix.Addr(), port.ContainerPort)
 		for _, protocol := range publishedPortProtocols {
-			if err := m.iptables(ctx, "nat", "-A", chain, "-p", protocol, "--dport", fmt.Sprint(port.HostPort), "-j", "DNAT", "--to-destination", destination); err != nil {
+			if err := m.ensureRule(ctx, "nat", "-A", chain, "-p", protocol, "--dport", fmt.Sprint(port.HostPort), "-j", "DNAT", "--to-destination", destination); err != nil {
 				return fmt.Errorf("publish port %d: %w", port.HostPort, err)
 			}
 		}

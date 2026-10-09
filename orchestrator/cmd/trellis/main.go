@@ -490,8 +490,8 @@ func run(parent context.Context, cfg *config) error {
 		if goruntime.GOOS != "linux" {
 			return fmt.Errorf("namespace networking requires Linux")
 		}
-		if err := requireCommands("wg", "ip", "iptables"); err != nil {
-			return fmt.Errorf("namespace networking: %w; install wireguard-tools, iproute2, and iptables", err)
+		if err := requireCommands("wg", "ip", "iptables", "unshare", "mount", "umount"); err != nil {
+			return fmt.Errorf("namespace networking: %w; install wireguard-tools, iproute2, iptables, util-linux, and mount", err)
 		}
 		if containerruntime.SwapUncapped() {
 			log.Warn("swap is active but swap accounting was not detected in the host memory cgroup; task memory limits may not cap swap")

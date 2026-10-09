@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -403,7 +404,7 @@ func TestAttachRollbackBeforePublishingPortsConverges(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager.netnsDir = t.TempDir()
-	manager.run = &failingModel{iptablesModel: model, fail: "ip netns add alloc-web"}
+	manager.run = &failingModel{iptablesModel: model, fail: "unshare --net -- mount --bind /proc/self/ns/net " + filepath.Join(manager.netnsStage("alloc-web"), "namespace")}
 	_, err = manager.Attach(context.Background(), AttachRequest{
 		Namespace: "acme", Network: "acme", AllocationID: "alloc-web",
 		Plan:  Plan{CIDR: "10.42.1.0/24", Gateway: "10.42.1.1", WireGuardAddress: "169.254.0.1/32", ListenPort: 51917},

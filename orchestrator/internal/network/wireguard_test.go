@@ -135,6 +135,7 @@ func TestUpdatePlanCancelsSlowCommandsAndRetries(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				manager.netnsDir = t.TempDir()
 				manager.run = &recordingRunner{}
 				plan := Plan{CIDR: "10.42.1.0/24", Gateway: "10.42.1.1", WireGuardAddress: "169.254.1.1/32", ListenPort: 51917}
 				if _, err := manager.Attach(context.Background(), AttachRequest{Namespace: "acme", Network: "acme", AllocationID: "alloc", Plan: plan}); err != nil {
@@ -214,6 +215,7 @@ func TestWireGuardAttachBuildsIsolatedNamespace(t *testing.T) {
 	manager := NewWireGuardManager(dir)
 	manager.run = runner
 	manager.stateDir = t.TempDir()
+	manager.netnsDir = t.TempDir()
 	if err := manager.ConfigureWorkloadDNS(context.Background(), WorkloadDNSAddress); err != nil {
 		t.Fatal(err)
 	}
@@ -221,11 +223,11 @@ func TestWireGuardAttachBuildsIsolatedNamespace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Attach() error = %v", err)
 	}
-	if a.Namespace != "acme" || a.NetworkNamespace != "/var/run/netns/alloc-1" || !strings.HasPrefix(a.Address, "10.42.1.") {
+	if a.Namespace != "acme" || a.NetworkNamespace != manager.netnsPath("alloc-1") || !strings.HasPrefix(a.Address, "10.42.1.") {
 		t.Fatalf("unexpected attachment: %#v", a)
 	}
 	joined := strings.Join(runner.commands, "\n")
-	for _, want := range []string{"type wireguard", "wg set", "ip netns add alloc-1", "netns alloc-1", "iptables -I FORWARD 1 -j TRELLIS-FORWARD", "ip addr replace 198.18.0.53/32 dev lo", "iptables -I INPUT 1 -j TRELLIS-INPUT", "iptables -C TRELLIS-INPUT -i tb"} {
+	for _, want := range []string{"type wireguard", "wg set", "unshare --net -- mount --bind /proc/self/ns/net", "netns alloc-1", "iptables -I FORWARD 1 -j TRELLIS-FORWARD", "ip addr replace 198.18.0.53/32 dev lo", "iptables -I INPUT 1 -j TRELLIS-INPUT", "iptables -C TRELLIS-INPUT -i tb"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("commands do not contain %q:\n%s", want, joined)
 		}
@@ -322,6 +324,7 @@ func TestAutomatedWireGuardUsesPlanListenPort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	manager.netnsDir = t.TempDir()
 	runner := &recordingRunner{}
 	manager.run = runner
 	_, err = manager.Attach(context.Background(), AttachRequest{
@@ -349,6 +352,7 @@ func TestWireGuardDetachRemovesNamespacePathAfterLastAllocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	manager.netnsDir = t.TempDir()
 	runner := &recordingRunner{}
 	manager.run = runner
 	plan := Plan{
@@ -408,6 +412,7 @@ func TestWireGuardDetachKeepsSharedFirewallChainForOtherNamespace(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	manager.netnsDir = t.TempDir()
 	runner := &recordingRunner{}
 	manager.run = runner
 	first, err := manager.Attach(context.Background(), AttachRequest{
@@ -554,6 +559,7 @@ func TestWireGuardDetachDoesNotTreatInspectionFailureAsAbsence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	manager.netnsDir = t.TempDir()
 	manager.run = &recordingRunner{}
 	attachment, err := manager.Attach(context.Background(), AttachRequest{
 		Namespace: "acme", Network: "acme", AllocationID: "alloc-one", Plan: Plan{
@@ -616,6 +622,7 @@ func TestAuthoritativePlanRemovesStalePeersAndRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	manager.netnsDir = t.TempDir()
 	runner := &recordingRunner{}
 	manager.run = runner
 	plan := Plan{CIDR: "10.42.1.0/24", Gateway: "10.42.1.1", WireGuardAddress: "169.254.1.1/32", ListenPort: 51917,
@@ -642,6 +649,7 @@ func TestUpdatePlanAddsPeerAndRouteWithoutNewAllocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	manager.netnsDir = t.TempDir()
 	runner := &recordingRunner{}
 	manager.run = runner
 	plan := Plan{CIDR: "10.42.1.0/24", Gateway: "10.42.1.1", WireGuardAddress: "169.254.1.1/32", ListenPort: 51917}
@@ -682,6 +690,7 @@ func TestUpdatePlanFailurePersistsConservativePeerPlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	manager.netnsDir = t.TempDir()
 	manager.run = &recordingRunner{}
 	oldPlan := Plan{
 		CIDR:             "10.42.1.0/24",
@@ -738,6 +747,7 @@ func TestUpdatePlanRetryConvergesAfterPartialRouteApply(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	manager.netnsDir = t.TempDir()
 	manager.run = &recordingRunner{}
 	oldPlan := Plan{
 		CIDR:             "10.42.1.0/24",
@@ -797,6 +807,7 @@ func TestUpdatePlanSupersessionCleansPartiallyAppliedPeersAndRoutes(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	manager.netnsDir = t.TempDir()
 	manager.run = &recordingRunner{}
 	p1 := Plan{
 		CIDR:             "10.42.1.0/24",
@@ -936,6 +947,7 @@ func TestUpdatePlanBatchesLargePeerSetWithinDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	manager.netnsDir = t.TempDir()
 	manager.run = &recordingRunner{}
 	plan := Plan{CIDR: "10.42.1.0/24", Gateway: "10.42.1.1", WireGuardAddress: "169.254.1.1/32", ListenPort: 51917}
 	attachment, err := manager.Attach(context.Background(), AttachRequest{Namespace: "acme", Network: "acme", AllocationID: "alloc-old", Plan: plan})
@@ -990,6 +1002,7 @@ func TestUpdatePlanWaitingForFinalDetachDoesNotRestorePlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	manager.netnsDir = t.TempDir()
 	manager.run = &recordingRunner{}
 	plan := Plan{CIDR: "10.42.1.0/24", Gateway: "10.42.1.1", WireGuardAddress: "169.254.1.1/32", ListenPort: 51917,
 		Peers: []PeerPlan{{PublicKey: "old-peer", AllowedIPs: []string{"10.42.2.0/24"}}}}

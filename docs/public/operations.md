@@ -329,21 +329,50 @@ sudo env TRELLIS_CONFIG="$HOME/.config/trellis/config.yaml" bash /tmp/trellis-up
 ### Namespace network resource upgrades
 
 Namespace network resources now use longer names and kernel ownership markers;
-attachment journals use resource version 2. Before crossing from the old 40-bit
-name scheme, evacuate each node **with the old binary still running**, and
+attachment journals use resource version 3 and still read version 2. Before
+crossing from the old 40-bit name scheme, evacuate each node **with the old binary still running**, and
 confirm its network attachment journals have been removed by successful stops.
 On a single-node cluster, stop the affected jobs and wait for allocation cleanup
 before replacing the binary; reapply them afterward. This transition requires
 workload downtime on a single node. Do not merely delete the journal files.
 
-The new binary refuses older journals instead of deriving new names and falsely
-reporting that the old resources were cleaned up. If upgraded prematurely, use
+The new binary refuses pre-version-2 journals instead of deriving new names and
+falsely reporting that the old resources were cleaned up. If upgraded prematurely, use
 the creating binary to finish cleanup first. An ownership mismatch also preserves
 the journal and resources: investigate the named link or network namespace.
 Never add ownership markers to an unrelated device to force adoption. A crash
 between resource creation and ownership recording may require operator removal
 of the confirmed orphan after its workload is stopped; Trellis fails closed
 rather than assuming that a matching device name proves ownership.
+
+Version 2 → 3 does not rename interfaces or require replacing healthy workloads.
+The new binary reads existing journals and moves legacy address leases on demand
+from `network/<network>/` to `network/.leases/<network>/`. A namespace named
+`plans` is supported: only its address-lease files move, while peer-plan JSON
+stays in `network/plans/`. Migration publishes and syncs each lease before
+removing its old name; interrupted migration retries safely. A different file
+already at the destination is a conflict, even if its contents match. Stop the
+daemon and investigate both files and their allocation owners before retrying;
+do not discard reservations or peer plans to bypass the error.
+
+New attachments journal random kernel group markers before creating links,
+then install their full ownership aliases. An empty alias is accepted only
+with the journal's exact creation-time group marker; a foreign nonempty alias
+is always refused. Named namespaces publish a symlink to a private journal-owned
+mount only after ownership is durable. Keep `network/.attachments/`, including
+its hidden staging directories, intact while workloads run. Restart/cleanup
+recovers interrupted new attachments; a version-2 creation that died before
+its alias or inode was recorded still requires investigating the confirmed
+orphan with the workload and daemon stopped. Never mark a foreign resource as
+owned or delete the journal as a substitute for cleanup.
+
+Use the current binary's `sudo trellis local-cleanup --config /etc/trellis/trellis.yaml`
+only after the daemon and all containers have stopped (the uninstall flow
+already does this). It retains journals and reservations when ownership or
+storage checks fail. Correct the reported problem and retry. Before downgrading
+to a version-2-only binary, evacuate/stop workloads and finish cleanup with the
+version-3 binary; old binaries cannot read new journals or the moved leases.
+Do not downgrade a node with live or partially cleaned version-3 attachments.
 
 ### Raft snapshot format upgrades
 
@@ -581,6 +610,10 @@ A scrape without a credential receives `401`. `GET /v1/auth/whoami` reports the 
 For normal workload diagnosis, start and usually finish with `jobs status`. `ready`, `converging`, and `degraded` summarize desired-versus-observed state without collapsing allocation lifecycle and health, and non-ready status output includes the allocations that need attention with reason/message, retry timing, and attempt count. Use `jobs status NAME --history` when you need the recorded lifecycle transitions, and `jobs logs NAME` for task output.
 
 ## Networking and TLS
+
+Namespace creation and cleanup also require `unshare`, `mount`, and `umount`
+(the Debian/Ubuntu `util-linux` and `mount` packages). Startup checks these tools
+along with WireGuard tools, iproute2, and iptables.
 
 Every node runs namespace networking, the default task network, and requires WireGuard tools, iproute2, and iptables; the installer sets them up and the daemon refuses to start without them. Trellis enables IPv4 forwarding and keeps its rules in its own iptables chains, jumped to first from `FORWARD`, `INPUT`, and the nat table's `PREROUTING`, `OUTPUT`, and `POSTROUTING`. Namespace-networked tasks reach beyond their namespace network through the node, masqueraded to its address, so they can reach whatever the node can, including its private network and cloud metadata endpoints; block destinations tasks must not reach with firewalling outside Trellis. Published task ports are forwarded to their task before your host `FORWARD` rules run, so a host firewall does not restrict who can reach them; restrict access to published ports at the network edge instead. See [Networking and ports](job-specification.md#networking-and-ports) and [Multitenancy](multitenancy.md#networking).
 

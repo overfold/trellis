@@ -19,7 +19,7 @@ func TestKernelNamespaceAudit(t *testing.T) {
 		t.Skip("set TRELLIS_NETWORK_E2E=1 on a privileged Linux host")
 	}
 	if os.Getenv("TRELLIS_NETWORK_E2E_CHILD") != "1" {
-		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, "unshare", "-nm", os.Args[0], "-test.run=^TestKernelNamespaceAudit$", "-test.v")
 		cmd.Env = append(os.Environ(), "TRELLIS_NETWORK_E2E_CHILD=1")
@@ -194,7 +194,176 @@ func TestKernelNamespaceAudit(t *testing.T) {
 	if err != nil || strings.Contains(output, "TRELLIS") {
 		t.Fatalf("owned chains survived final teardown: %v %s", err, output)
 	}
+	t.Run("convergence", testKernelNetworkConvergence)
 	t.Log("kernel verified collision isolation, IPv6 link-local denial, WireGuard host-input denial, API firewall repair, and ownership-safe teardown")
+}
+
+func testKernelNetworkConvergence(t *testing.T) {
+	run := execRunner{}
+	m, err := NewAutomatedWireGuardManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.dnsAddress = WorkloadDNSAddress
+	request := AttachRequest{Namespace: "plans", Network: "plans", AllocationID: "converge", Plan: recoveryTestPlan(), Ports: []PortMapping{{HostPort: 18080, ContainerPort: 8126}}}
+	for _, prefix := range []string{"ip link add tb", "ip link add tw", "unshare --net", "ip link add vh", "ip link set dev vh", "ip link set dev vc"} {
+		t.Run("crash-after-"+prefix, func(t *testing.T) {
+			m.run = crashRunner{commandRunner: run, match: func(command string) bool { return strings.HasPrefix(command, prefix) }}
+			expectNetworkCrash(t, func() {
+				if _, err := m.Attach(t.Context(), request); err != nil {
+					t.Fatalf("crash fixture attach: %v", err)
+				}
+			})
+			m = restartedManager(m, run)
+			if err := m.CleanupAttachments(t.Context(), WorkloadDNSAddress); err != nil {
+				t.Fatal(err)
+			}
+			assertAttachments(t, m)
+			for _, name := range []string{short("tb", "plans\x00plans"), short("tw", "plans\x00plans"), short("vh", "converge"), short("vc", "converge")} {
+				if run.Run(t.Context(), "ip", "link", "show", "dev", name) == nil {
+					t.Fatalf("crash cleanup left %s", name)
+				}
+			}
+			if _, err := os.Lstat(m.netnsStage("converge")); !os.IsNotExist(err) {
+				t.Fatalf("private stage survived: %v", err)
+			}
+		})
+	}
+	// Reuse all names, addresses, ports, and the formerly reserved namespace.
+	web, err := m.Attach(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.CleanupAttachments(context.Background(), WorkloadDNSAddress) })
+	otherRequest := request
+	otherRequest.AllocationID, otherRequest.Ports = "converge-other", nil
+	other, err := m.Attach(t.Context(), otherRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixtureCtx, stop := context.WithCancel(t.Context())
+	fixture := exec.CommandContext(fixtureCtx, "ip", "netns", "exec", "converge", os.Args[0], "-test.run=^TestKernelHTTPFixture$")
+	fixture.Env = append(os.Environ(), "TRELLIS_NETWORK_HTTP_FIXTURE=1")
+	if err := fixture.Start(); err != nil {
+		stop()
+		t.Fatal(err)
+	}
+	defer func() { stop(); _ = fixture.Wait() }()
+	connect := func(want bool) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, "curl", "--noproxy", "*", "--connect-timeout", "0.5", "--max-time", "1", "--fail", "--silent", "http://"+request.Plan.Gateway+":18080/").CombinedOutput()
+		if want && (err != nil || string(out) != "ok") || !want && err == nil {
+			t.Fatalf("published NAT reachable=%v, want %v: %v %s", err == nil, want, err, out)
+		}
+	}
+	// Readiness is independently checked on the allocation address.
+	deadline := time.Now().Add(3 * time.Second)
+	ip, _, _ := strings.Cut(web.Address, "/")
+	for {
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		err := run.Run(ctx, "curl", "--noproxy", "*", "--max-time", "0.5", "--fail", "--silent", "http://"+ip+":8126/")
+		cancel()
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal(err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	connect(true)
+	if err := run.Run(t.Context(), "iptables", "-t", "nat", "-F"); err != nil {
+		t.Fatal(err)
+	}
+	if err := run.Run(t.Context(), "iptables", "-t", "nat", "-X"); err != nil {
+		t.Fatal(err)
+	}
+	connect(false)
+	m = restartedManager(m, run)
+	for range 2 {
+		if err := m.UpdatePlan(t.Context(), "plans", request.Plan); err != nil {
+			t.Fatal(err)
+		}
+	}
+	connect(true)
+	for _, proto := range []string{"tcp", "udp"} {
+		if err := run.Run(t.Context(), "iptables", "-t", "nat", "-C", allocationPortsChain("converge"), "-p", proto, "--dport", "18080", "-j", "DNAT", "--to-destination", ip+":8126"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Foreign veth aliases and replacement netns prevent all destructive work.
+	if err := run.Run(t.Context(), "ip", "link", "set", "dev", web.HostVeth, "alias", "foreign"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.DetachAllocation(t.Context(), "converge"); err == nil {
+		t.Fatal("accepted foreign veth")
+	}
+	connect(true)
+	if err := run.Run(t.Context(), "ip", "link", "set", "dev", web.HostVeth, "alias", "", "group", "0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.DetachAllocation(t.Context(), "converge"); err == nil {
+		t.Fatal("accepted empty alias without its creation marker")
+	}
+	connect(true)
+	if err := run.Run(t.Context(), "ip", "link", "set", "dev", web.HostVeth, "alias", allocationOwner("converge")+":"+web.HostVeth); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(m.netnsPath("converge")); err != nil {
+		t.Fatal(err)
+	}
+	if err := run.Run(t.Context(), "ip", "netns", "add", "converge"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.DetachAllocation(t.Context(), "converge"); err == nil {
+		t.Fatal("accepted replacement namespace")
+	}
+	connect(true)
+	if err := run.Run(t.Context(), "ip", "netns", "del", "converge"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(m.netnsStage("converge"), "namespace"), m.netnsPath("converge")); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.DetachAllocation(t.Context(), "converge"); err != nil {
+		t.Fatal(err)
+	}
+	if exists, err := checkLinkOwner(other.Bridge, pathOwner("plans", "plans")); !exists || err != nil {
+		t.Fatalf("shared path lost with survivor: %v", err)
+	}
+	// Mount loss leaves the recorded underlying file; replacing that file is
+	// foreign ownership, not permission to tear down the survivor's path.
+	stage := filepath.Join(m.netnsStage(other.AllocationID), "namespace")
+	if err := run.Run(t.Context(), "umount", stage); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(stage, stage+"-saved"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stage, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Detach(t.Context(), other); err == nil {
+		t.Fatal("accepted a replaced private namespace file")
+	}
+	if err := os.Remove(stage); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(stage+"-saved", stage); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Detach(t.Context(), other); err != nil {
+		t.Fatal(err)
+	}
+	assertAttachments(t, m)
+	for _, table := range []string{"filter", "nat"} {
+		out, err := run.Output(t.Context(), "iptables", "-t", table, "-S")
+		if err != nil || strings.Contains(out, "TRELLIS") {
+			t.Fatalf("final teardown left %s rules: %v %s", table, err, out)
+		}
+	}
 }
 
 func TestKernelHTTPFixture(t *testing.T) {

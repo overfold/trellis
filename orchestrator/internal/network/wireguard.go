@@ -19,7 +19,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -79,6 +78,8 @@ type WireGuardManager struct {
 	namespaceCIDRsRetryAt time.Time
 	// netnsDir is where "ip netns" keeps named network namespaces.
 	netnsDir string
+	// journalWrite permits deterministic storage-failure tests.
+	journalWrite func(string, []byte) error
 }
 
 // ConfigureWorkloadDNS reserves an internal address on loopback for the Trellis
@@ -100,6 +101,10 @@ func (m *WireGuardManager) ConfigureWorkloadDNS(ctx context.Context, address str
 
 // NewAutomatedWireGuardManager creates a manager with an automatically generated identity.
 func NewAutomatedWireGuardManager(stateDir string) (*WireGuardManager, error) {
+	stateDir, err := filepath.Abs(stateDir)
+	if err != nil {
+		return nil, err
+	}
 	m := &WireGuardManager{stateDir: stateDir, run: execRunner{}}
 	if _, err := m.Identity(); err != nil {
 		return nil, err
@@ -250,9 +255,11 @@ func reserveAddress(leaseDir, cidr, allocation string) (address, lease string, e
 		f, openErr := os.OpenFile(lease, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if openErr == nil {
 			if _, err = f.WriteString(allocation); err == nil {
-				err = f.Close()
-			} else {
-				_ = f.Close()
+				err = f.Sync()
+			}
+			err = errors.Join(err, f.Close())
+			if err == nil {
+				err = syncDirectory(leaseDir)
 			}
 			if err != nil {
 				_ = os.Remove(lease)
@@ -275,15 +282,18 @@ func reserveAddress(leaseDir, cidr, allocation string) (address, lease string, e
 }
 
 func (m *WireGuardManager) ensureLink(ctx context.Context, name, owner string, args ...string) error {
-	exists, err := checkLinkOwner(name, owner)
+	exists, err := m.checkLinkOwner(name, owner)
 	if err != nil {
 		return err
 	}
-	if exists {
-		return nil
-	}
-	if err := m.run.Run(ctx, "ip", append([]string{"link", "add", name}, args...)...); err != nil {
-		return err // Never adopt a device after an ambiguous create.
+	if !exists {
+		group, err := m.ownerGroup(owner)
+		if err != nil {
+			return err
+		}
+		if err := m.run.Run(ctx, "ip", append([]string{"link", "add", name, "group", fmt.Sprint(group)}, args...)...); err != nil {
+			return err // Never adopt a device after an ambiguous create.
+		}
 	}
 	return m.run.Run(ctx, "ip", "link", "set", "dev", name, "alias", owner+":"+name)
 }
@@ -512,7 +522,11 @@ func (m *WireGuardManager) UpdatePlan(ctx context.Context, namespace string, pla
 	if !safeName.MatchString(namespace) {
 		return fmt.Errorf("namespace must be a safe identifier")
 	}
-	entries, err := os.ReadDir(filepath.Join(m.stateDir, namespace))
+	leaseDir, err := m.leaseDirectory(namespace)
+	if err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(leaseDir)
 	if os.IsNotExist(err) {
 		return nil
 	}
@@ -533,7 +547,7 @@ func (m *WireGuardManager) UpdatePlan(ctx context.Context, namespace string, pla
 		return fmt.Errorf("WireGuard listen port %d is invalid", plan.ListenPort)
 	}
 	for _, name := range []string{wg, short("tb", namespace+"\x00"+namespace)} {
-		if _, err := checkLinkOwner(name, pathOwner(namespace, namespace)); err != nil {
+		if _, err := m.checkLinkOwner(name, pathOwner(namespace, namespace)); err != nil {
 			return err
 		}
 		if err := m.disableIPv6(ctx, name); err != nil {
@@ -632,12 +646,28 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 			retErr = errors.Join(retErr, fmt.Errorf("roll back network attachment: %w", err))
 		}
 	}()
-	leaseDir := filepath.Join(m.stateDir, networkName)
+	leaseDir, err := m.leaseDirectory(networkName)
+	if err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(leaseDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create IPAM state: %w", err)
 	}
+	for _, dir := range []string{filepath.Dir(leaseDir), m.stateDir} {
+		if err := syncDirectory(dir); err != nil {
+			return nil, err
+		}
+	}
 	address, lease, err := reserveAddress(leaseDir, cfg.CIDR, allocation)
 	if err != nil {
+		return nil, err
+	}
+	record, err := m.readAttachmentRecord(allocation)
+	if err != nil {
+		return nil, err
+	}
+	record.Address = address
+	if err := m.saveAttachment(record); err != nil {
 		return nil, err
 	}
 	// Every command is idempotently reconciled; "replace" is used for routes.
@@ -700,28 +730,16 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 	if err = m.reconcileFirewall(ctx, bridge, wg, cfg.CIDR, cfg.Gateway, request.Plan.APIPort); err != nil {
 		return nil, fmt.Errorf("reconcile namespace firewall: %w", err)
 	}
-	if err = m.run.Run(ctx, "ip", "netns", "add", allocation); err != nil {
+	if err = m.createNetns(ctx, record); err != nil {
 		return nil, err
 	}
-	record, err := m.readAttachmentRecord(allocation)
-	if err != nil {
+	if err = m.run.Run(ctx, "ip", "link", "add", hostVeth, "group", fmt.Sprint(record.VethGroup), "type", "veth", "peer", "name", peerVeth, "group", fmt.Sprint(record.VethGroup)); err != nil {
 		return nil, err
 	}
-	record.NetnsCreated = true
-	if info, statErr := os.Stat(ns); statErr == nil {
-		record.NetnsInode = info.Sys().(*syscall.Stat_t).Ino
-	} else if !os.IsNotExist(statErr) {
-		return nil, statErr
-	}
-	raw, _ := json.Marshal(record)
-	if err = writeAtomicFile(m.journalPath(allocation), raw); err != nil {
-		return nil, err
-	}
-	if err = m.run.Run(ctx, "ip", "link", "add", hostVeth, "type", "veth", "peer", "name", peerVeth); err != nil {
-		return nil, err
-	}
-	if err = m.run.Run(ctx, "ip", "link", "set", "dev", hostVeth, "alias", allocationOwner(allocation)+":"+hostVeth); err != nil {
-		return nil, err
+	for _, name := range []string{hostVeth, peerVeth} {
+		if err = m.run.Run(ctx, "ip", "link", "set", "dev", name, "alias", allocationOwner(allocation)+":"+name); err != nil {
+			return nil, err
+		}
 	}
 	if err = m.disableIPv6(ctx, hostVeth); err != nil {
 		return nil, err
@@ -748,6 +766,10 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 		return nil, err
 	}
 	if err = m.run.Run(ctx, "ip", "-n", allocation, "route", "replace", "default", "via", cfg.Gateway); err != nil {
+		return nil, err
+	}
+	record.PortsReady = true
+	if err = m.saveAttachment(record); err != nil {
 		return nil, err
 	}
 	if err = m.publishPorts(ctx, allocation, address, ports); err != nil {

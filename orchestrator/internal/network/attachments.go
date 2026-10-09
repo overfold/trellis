@@ -2,6 +2,8 @@ package network
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -25,6 +28,10 @@ const defaultNetnsDir = "/var/run/netns"
 // journals below stateDir. Unlike the normal manager constructor, it does not
 // initialize or create network state when there is nothing to clean up.
 func CleanupJournaledAttachments(ctx context.Context, stateDir, dnsAddress string) error {
+	stateDir, err := filepath.Abs(stateDir)
+	if err != nil {
+		return err
+	}
 	manager := &WireGuardManager{stateDir: stateDir, run: execRunner{}}
 	return manager.CleanupAttachments(ctx, dnsAddress)
 }
@@ -42,6 +49,12 @@ type attachmentRecord struct {
 	APIPort      int    `json:"api_port"`
 	NetnsCreated bool   `json:"netns_created"`
 	NetnsInode   uint64 `json:"netns_inode"`
+	StageInode   uint64 `json:"stage_inode,omitempty"`
+	Address      string `json:"address,omitempty"`
+	PortsReady   bool   `json:"ports_ready,omitempty"`
+	Detaching    bool   `json:"detaching,omitempty"`
+	PathGroup    uint32 `json:"path_group,omitempty"`
+	VethGroup    uint32 `json:"veth_group,omitempty"`
 	// Ports are published node ports whose NAT rules detach removes.
 	Ports []PortMapping `json:"ports,omitempty"`
 }
@@ -66,6 +79,10 @@ func allocationOwner(allocation string) string { return "trellis:allocation:" + 
 
 // Kernel aliases retain the full identity: truncated names are never ownership.
 func checkLinkOwner(name, owner string) (bool, error) {
+	return checkLinkMarker(name, owner, 0)
+}
+
+func checkLinkMarker(name, owner string, group uint32) (bool, error) {
 	raw, err := os.ReadFile(filepath.Join("/sys/class/net", name, "ifalias"))
 	if errors.Is(err, fs.ErrNotExist) {
 		return false, nil
@@ -74,30 +91,71 @@ func checkLinkOwner(name, owner string) (bool, error) {
 		return false, fmt.Errorf("inspect link %s ownership: %w", name, err)
 	}
 	if strings.TrimSpace(string(raw)) != owner+":"+name {
+		if strings.TrimSpace(string(raw)) == "" && group != 0 {
+			rawGroup, err := os.ReadFile(filepath.Join("/sys/class/net", name, "netdev_group"))
+			if err == nil && strings.TrimSpace(string(rawGroup)) == strconv.FormatUint(uint64(group), 10) {
+				return true, nil
+			}
+		}
 		return true, fmt.Errorf("refuse unowned link %s", name)
 	}
 	return true, nil
 }
 
+func (m *WireGuardManager) ownerGroup(owner string) (uint32, error) {
+	ids, err := m.attachmentIDsLocked()
+	if err != nil {
+		return 0, err
+	}
+	for _, id := range ids {
+		record, err := m.readAttachmentRecord(id)
+		if err != nil {
+			return 0, err
+		}
+		if owner == pathOwner(record.Namespace, record.Network) && record.PathGroup != 0 {
+			return record.PathGroup, nil
+		}
+		if owner == allocationOwner(id) {
+			return record.VethGroup, nil
+		}
+	}
+	return 0, nil
+}
+
+func (m *WireGuardManager) checkLinkOwner(name, owner string) (bool, error) {
+	group, err := m.ownerGroup(owner)
+	if err != nil {
+		return false, err
+	}
+	return checkLinkMarker(name, owner, group)
+}
+
 func (m *WireGuardManager) checkResourceOwnership(namespace, network, allocation string) error {
+	if _, err := os.Lstat(m.journalPath(allocation)); err == nil {
+		return fmt.Errorf("network attachment for %s already exists; detach it first", allocation)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
 	key := namespace + "\x00" + network
 	existingPath := false
 	for _, prefix := range []string{"tb", "tw"} {
-		exists, err := checkLinkOwner(short(prefix, key), pathOwner(namespace, network))
+		exists, err := m.checkLinkOwner(short(prefix, key), pathOwner(namespace, network))
 		if err != nil {
 			return err
 		}
 		existingPath = existingPath || exists
 	}
 	for _, prefix := range []string{"vh", "vc"} {
-		if exists, err := checkLinkOwner(short(prefix, allocation), allocationOwner(allocation)); err != nil {
+		if exists, err := m.checkLinkOwner(short(prefix, allocation), allocationOwner(allocation)); err != nil {
 			return err
 		} else if exists {
 			return fmt.Errorf("allocation link already exists; detach first")
 		}
 	}
-	if _, err := os.Lstat(m.netnsPath(allocation)); !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("refuse existing or unreadable allocation network namespace %s", allocation)
+	for _, path := range []string{m.netnsPath(allocation), m.netnsStage(allocation)} {
+		if _, err := os.Lstat(path); !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("refuse existing or unreadable allocation network namespace %s", allocation)
+		}
 	}
 	ids, err := m.attachmentIDsLocked()
 	if err != nil {
@@ -176,7 +234,19 @@ func (m *WireGuardManager) validateAttachmentCIDR(namespace, network, cidr strin
 	}
 	// Leases can outlive a journal after interrupted or manual recovery. Their
 	// filenames retain the subnet even when no allocation record is readable.
-	networks, err := os.ReadDir(m.stateDir)
+	// Migrate all legacy directories before checking the separate lease tree.
+	legacy, err := os.ReadDir(m.stateDir)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	for _, entry := range legacy {
+		if entry.IsDir() && safeName.MatchString(entry.Name()) {
+			if _, err := m.leaseDirectory(entry.Name()); err != nil {
+				return err
+			}
+		}
+	}
+	networks, err := os.ReadDir(filepath.Join(m.stateDir, leaseStorageDir))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
@@ -184,10 +254,10 @@ func (m *WireGuardManager) validateAttachmentCIDR(namespace, network, cidr strin
 		return fmt.Errorf("inspect network leases: %w", err)
 	}
 	for _, entry := range networks {
-		if !entry.IsDir() || !safeName.MatchString(entry.Name()) || entry.Name() == "plans" || entry.Name() == network {
+		if !entry.IsDir() || !safeName.MatchString(entry.Name()) || entry.Name() == network {
 			continue
 		}
-		leases, err := os.ReadDir(filepath.Join(m.stateDir, entry.Name()))
+		leases, err := os.ReadDir(filepath.Join(m.stateDir, leaseStorageDir, entry.Name()))
 		if err != nil {
 			return fmt.Errorf("inspect network %q leases: %w", entry.Name(), err)
 		}
@@ -209,7 +279,35 @@ func (m *WireGuardManager) validateAttachmentCIDR(namespace, network, cidr strin
 // attach never adopts, and a failed attach never removes, another attempt's
 // resources.
 func (m *WireGuardManager) recordAttachment(record attachmentRecord) error {
-	record.Version = 2 // Long resource names and kernel ownership markers.
+	record.Version = 3 // Private netns staging and durable published-port destination.
+	ids, err := m.attachmentIDsLocked()
+	if err != nil {
+		return err
+	}
+	used := map[uint32]bool{0: true}
+	for _, id := range ids {
+		other, err := m.readAttachmentRecord(id)
+		if err != nil {
+			return err
+		}
+		used[other.PathGroup], used[other.VethGroup] = true, true
+		if other.Namespace == record.Namespace && other.Network == record.Network && other.PathGroup != 0 {
+			record.PathGroup = other.PathGroup
+		}
+	}
+	for _, group := range []*uint32{&record.PathGroup, &record.VethGroup} {
+		for *group == 0 {
+			var raw [4]byte
+			if _, err := rand.Read(raw[:]); err != nil {
+				return err
+			}
+			candidate := binary.BigEndian.Uint32(raw[:]) & 0x7fffffff
+			if !used[candidate] {
+				*group = candidate
+				used[candidate] = true
+			}
+		}
+	}
 	path := m.journalPath(record.AllocationID)
 	if _, err := os.Lstat(path); err == nil {
 		return fmt.Errorf("network attachment for %s already exists; detach it first", record.AllocationID)
@@ -219,8 +317,10 @@ func (m *WireGuardManager) recordAttachment(record attachmentRecord) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create network attachment records: %w", err)
 	}
-	raw, _ := json.Marshal(record)
-	if err := writeAtomicFile(path, raw); err != nil {
+	if err := syncDirectory(m.stateDir); err != nil {
+		return err
+	}
+	if err := m.saveAttachment(&record); err != nil {
 		return fmt.Errorf("record network attachment: %w", err)
 	}
 	m.namespaceCIDRsLoaded = false
@@ -238,7 +338,7 @@ func (m *WireGuardManager) readAttachmentRecord(allocationID string) (*attachmen
 	if err := json.Unmarshal(raw, &record); err != nil {
 		return nil, fmt.Errorf("parse network attachment record for %s: %w", allocationID, err)
 	}
-	if record.Version != 2 {
+	if record.Version != 2 && record.Version != 3 {
 		return nil, fmt.Errorf("network attachment %s has unsupported resource version %d; drain and clean up with the creating binary before upgrading", allocationID, record.Version)
 	}
 	if record.AllocationID != allocationID || !safeName.MatchString(record.Namespace) || !safeName.MatchString(record.Network) {
@@ -416,21 +516,44 @@ func (m *WireGuardManager) detachLocked(ctx context.Context, a Attachment) error
 		Address: record.CIDR, Gateway: record.Gateway, APIPort: record.APIPort, Ports: record.Ports}
 	for name, owner := range map[string]string{
 		short("vh", a.AllocationID):               allocationOwner(a.AllocationID),
+		short("vc", a.AllocationID):               allocationOwner(a.AllocationID),
 		short("tb", a.Namespace+"\x00"+a.Network): pathOwner(a.Namespace, a.Network),
 		short("tw", a.Namespace+"\x00"+a.Network): pathOwner(a.Namespace, a.Network),
 	} {
-		if _, err := checkLinkOwner(name, owner); err != nil {
+		if record.Version == 2 && name == short("vc", a.AllocationID) {
+			continue // Legacy peers were not marked; the owned host end removes them.
+		}
+		if _, err := m.checkLinkOwner(name, owner); err != nil {
 			return err
 		}
 	}
-	if info, err := os.Stat(m.netnsPath(a.AllocationID)); err == nil {
-		if !record.NetnsCreated || info.Sys().(*syscall.Stat_t).Ino != record.NetnsInode {
+	if info, err := os.Lstat(m.netnsPath(a.AllocationID)); err == nil {
+		owned := false
+		if record.Version == 3 && info.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(m.netnsPath(a.AllocationID))
+			owned = err == nil && target == filepath.Join(m.netnsStage(a.AllocationID), "namespace")
+			if owned {
+				info, err := os.Stat(target)
+				owned = errors.Is(err, fs.ErrNotExist)
+				if err == nil {
+					inode := info.Sys().(*syscall.Stat_t).Ino
+					owned = inode == record.NetnsInode || record.StageInode != 0 && inode == record.StageInode
+				}
+			}
+		} else {
+			owned = info.Sys().(*syscall.Stat_t).Ino == record.NetnsInode
+		}
+		if !record.NetnsCreated || !owned {
 			return fmt.Errorf("refuse unowned network namespace %s", a.AllocationID)
 		}
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
 	// Stop publishing ports before the address they forward to is released.
+	record.Detaching = true
+	if err := m.saveAttachment(record); err != nil {
+		return err
+	}
 	if len(a.Ports) > 0 {
 		if err := m.unpublishPorts(ctx, a.AllocationID); err != nil {
 			return err
@@ -444,14 +567,30 @@ func (m *WireGuardManager) detachLocked(ctx context.Context, a Attachment) error
 	if err := m.deleteLink(ctx, hostVeth, "allocation veth"); err != nil {
 		return err
 	}
+	if record.Version == 3 {
+		if err := m.deleteLink(ctx, short("vc", a.AllocationID), "allocation veth peer"); err != nil {
+			return err
+		}
+	}
 	if record.NetnsCreated {
 		if err := m.run.Run(ctx, "ip", "netns", "del", a.AllocationID); err != nil {
 			if _, statErr := os.Lstat(m.netnsPath(a.AllocationID)); !errors.Is(statErr, fs.ErrNotExist) {
 				return fmt.Errorf("remove allocation network namespace: %w", err)
 			}
 		}
+		if err := os.Remove(m.netnsPath(a.AllocationID)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
 	}
-	leaseDir := filepath.Join(m.stateDir, a.Network)
+	if record.Version == 3 {
+		if err := m.removeNetnsStage(ctx, a.AllocationID); err != nil {
+			return err
+		}
+	}
+	leaseDir, err := m.leaseDirectory(a.Network)
+	if err != nil {
+		return err
+	}
 	otherLeases, err := hasOtherAllocationLeases(leaseDir, a.AllocationID)
 	if err != nil {
 		return err
@@ -492,9 +631,19 @@ func (m *WireGuardManager) detachLocked(ctx context.Context, a Attachment) error
 		if err := os.Remove(leaseDir); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("remove empty network lease directory: %w", err)
 		}
+		if _, err := os.Stat(filepath.Dir(leaseDir)); err == nil {
+			if err := syncDirectory(filepath.Dir(leaseDir)); err != nil {
+				return err
+			}
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
 	}
 	if err := os.Remove(m.journalPath(a.AllocationID)); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove network attachment record: %w", err)
+	}
+	if err := syncDirectory(filepath.Dir(m.journalPath(a.AllocationID))); err != nil {
+		return err
 	}
 	m.namespaceCIDRsLoaded = false
 	m.namespaceCIDRsRetryAt = time.Time{}
@@ -554,7 +703,7 @@ func removeAllocationLeases(leaseDir, allocationID string) error {
 			return fmt.Errorf("remove address lease %s: %w", entry.Name(), err)
 		}
 	}
-	return nil
+	return syncDirectory(leaseDir)
 }
 
 // removeNamespacePathLocked tears down a namespace's bridge, WireGuard
