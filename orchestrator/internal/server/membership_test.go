@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/hashicorp/raft"
 	"github.com/overfold/trellis/orchestrator/api"
 	"github.com/overfold/trellis/orchestrator/internal/state"
 )
@@ -35,7 +36,35 @@ func fakeMember(id uuid.UUID, voter bool) state.RaftMember {
 func (f *fakeMembership) Membership() ([]state.RaftMember, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return slices.Clone(f.members), nil
+	members := slices.Clone(f.members)
+	for i := range members {
+		members[i].ConfigurationIndex = uint64(len(f.ops) + 1)
+	}
+	return members, nil
+}
+
+func (f *fakeMembership) ChangeMembership(ctx context.Context, index uint64, action raft.ConfigurationChangeCommand, id, address string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	current := uint64(len(f.ops) + 1)
+	f.mu.Unlock()
+	if index != current {
+		return errors.New("configuration changed")
+	}
+	switch action {
+	case raft.AddNonvoter:
+		return f.AddNonvoter(id, address)
+	case raft.AddVoter:
+		return f.PromoteVoter(id, address)
+	case raft.DemoteVoter:
+		return f.DemoteVoter(id)
+	case raft.RemoveServer:
+		return f.RemoveServer(id)
+	default:
+		return errors.New("unknown membership action")
+	}
 }
 
 func (f *fakeMembership) change(op string, apply func()) error {
@@ -452,5 +481,29 @@ func TestReconcileMembershipReplacesVoterThatNeverRegistered(t *testing.T) {
 	}
 	if got, want := joiner.voters(), sortedIDs(leader, b, d); !slices.Equal(got, want) {
 		t.Fatalf("voters = %v, want %v", got, want)
+	}
+}
+
+func TestMembershipRejectsOriginatingTermCancellation(t *testing.T) {
+	leader, removed := uuid.New(), uuid.New()
+	joiner := newFakeMembership(fakeMember(leader, true), fakeMember(removed, false))
+	s := membershipTestServer(joiner, leader, removed)
+	term, cancel := context.WithCancel(t.Context())
+	s.term = term
+	origin, release := s.bindTerm(t.Context())
+	defer release()
+	cancel()
+	ctx := context.WithoutCancel(origin)
+	if _, err := s.JoinMember(ctx, removed, "stale:8129"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("old join = %v", err)
+	}
+	if err := s.ReconcileMembership(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("old reconciliation = %v", err)
+	}
+	if err := s.RemoveMember(ctx, removed.String()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("old removal = %v", err)
+	}
+	if tombstoned, err := s.state.NodeRemoved(t.Context(), removed.String()); err != nil || tombstoned || len(joiner.operations()) != 0 {
+		t.Fatalf("old membership work mutated state: tombstoned=%v error=%v operations=%v", tombstoned, err, joiner.operations())
 	}
 }

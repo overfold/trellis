@@ -2,6 +2,8 @@ module github.com/overfold/trellis
 
 go 1.26.9
 
+replace github.com/hashicorp/raft => ./third_party/raft
+
 require (
 	github.com/coder/websocket v1.8.15
 	github.com/containerd/cgroups/v3 v3.1.3

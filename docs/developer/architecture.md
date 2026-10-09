@@ -8,6 +8,24 @@ The design is leader-driven. A Raft-backed state store persists jobs, secrets, a
 
 Raft leadership notifications can coalesce, including consecutive acquire notifications with no intervening loss. Every notification deactivates the leader API and cancels and joins the previous term's background loops, dispatched actions and admitted API work before any reload or epoch acquisition. Requests and actions retain their originating epoch; outcome callbacks cannot discard term cancellation or rewrite detached allocation objects. New terms apply a Raft barrier before reloading durable state.
 
+Leadership activation captures the Raft term before waiting for mutation ordering.
+An exclusive submission hold and a barrier establish the authoritative FSM view
+for both epoch advancement and job-history compaction; neither uses the follower's
+cached jobs or cluster record. Epoch exhaustion fails closed rather than wrapping.
+Caches are reloaded after activation. Restore retains originating-term cancellation
+even through detached request contexts and compares the exact target cluster
+record before submission and atomically at installation, preserving target
+authority and rejecting an intervening activation. Freshness conflicts remain
+`409`; canceled or superseded authority and infrastructure failures remain `503`.
+
+The local [Raft admission patch](../../third_party/raft/README.trellis.md) checks
+originating terms and cancellation inside Raft's leader loop, before appending
+commands or membership entries. This closes loss/reacquisition races that a
+caller-side leadership check cannot fence. Bolt prefix replacement re-seeks after
+each deletion, so different replica page layouts cannot leave different records.
+Raft wire and snapshot formats and operator backup formats are unchanged; no
+persisted-state migration or mixed-release safety guarantee is introduced.
+
 An unexpected committed FSM apply failure is process-fatal on leaders and followers. Raft can discard follower response errors and advance its applied index despite failure, so continuing would permit a divergent replica to serve, vote, or snapshot. The fatal diagnostic identifies the log index and term without dumping command contents. Ordinary mutation validation and restore freshness rejection happen before replication; restore preflight uses a barrier and shares submission ordering with writes, then installation rechecks freshness atomically. A failed replica requires storage repair or replacement from healthy replicated state, not treating `AppliedIndex` as proof of successful mutation.
 
 Each FSM command commits its changes and an internal applied-log-index checkpoint in one Bolt transaction. The checkpoint is part of full FSM snapshots, not desired-state backups. On restart, replay skips commands already covered by the persisted checkpoint; a restored snapshot rolls state and checkpoint back together. A committed desired-state restore is therefore not run again against its own populated state, and deleted jobs and node tombstones are not temporarily undone by older replayed commands. New restore requests still pass the barrier-backed freshness preflight and atomic installation check; failed commands never advance the checkpoint.

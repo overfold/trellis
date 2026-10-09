@@ -514,26 +514,44 @@ func (s *StateController) CompactJobRevisions(ctx context.Context, jobs map[stri
 
 // ActivateLeadership advances the fencing epoch and compacts legacy revision
 // history in one replicated state transition.
-func (s *StateController) ActivateLeadership(ctx context.Context, cluster *Cluster, jobs map[string]*Job) error {
-	clusterRaw, err := json.Marshal(cluster)
-	if err != nil {
-		return fmt.Errorf("marshal cluster: %w", err)
-	}
-	compaction, err := s.jobRevisionCompactionMutations(ctx, jobs)
-	if err != nil {
-		return err
-	}
-	mutations := make([]state.Mutation, 0, len(compaction)+1)
-	mutations = append(mutations, state.Mutation{Key: fmt.Sprintf("%s/%s/meta", trellisNamespace, s.cluster), Value: clusterRaw})
-	mutations = append(mutations, compaction...)
-	atomic, ok := s.store.(state.AtomicStore)
+func (s *StateController) ActivateLeadership(ctx context.Context) (*Cluster, error) {
+	atomic, ok := s.store.(state.UpdatingStore)
 	if !ok {
-		return fmt.Errorf("state store does not support atomic leadership activation")
+		return nil, fmt.Errorf("state store does not support atomic leadership activation")
 	}
-	if err := atomic.Batch(ctx, mutations); err != nil {
-		return fmt.Errorf("activate leadership: %w", err)
+	var cluster *Cluster
+	err := atomic.Update(ctx, func(view state.Store) ([]state.Mutation, error) {
+		controller := NewStateController(view, s.cluster)
+		var err error
+		cluster, err = controller.GetCluster(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if cluster == nil {
+			return nil, fmt.Errorf("cluster is not initialized")
+		}
+		if cluster.ControlEpoch == ^uint64(0) {
+			return nil, fmt.Errorf("control epoch exhausted")
+		}
+		cluster.ControlEpoch++
+		jobs, err := controller.ListJobs(ctx)
+		if err != nil {
+			return nil, err
+		}
+		compaction, err := controller.jobRevisionCompactionMutations(ctx, jobs)
+		if err != nil {
+			return nil, err
+		}
+		raw, err := json.Marshal(cluster)
+		if err != nil {
+			return nil, err
+		}
+		return append([]state.Mutation{{Key: fmt.Sprintf("%s/%s/meta", trellisNamespace, s.cluster), Value: raw}}, compaction...), nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("activate leadership: %w", err)
 	}
-	return nil
+	return cluster, nil
 }
 
 func (s *StateController) jobRevisionCompactionMutations(ctx context.Context, jobs map[string]*Job) ([]state.Mutation, error) {

@@ -67,6 +67,33 @@ func TestRestoreNetworkCapacityAndCollisions(t *testing.T) {
 	}
 }
 
+func TestRestoreRejectsOriginatingTermCancellationAndInterveningActivation(t *testing.T) {
+	for _, loss := range []string{"cancellation", "activation"} {
+		t.Run(loss, func(t *testing.T) {
+			store := &backupStore{data: memoryStore{}, snapshot: &state.DesiredSnapshot{}}
+			s := newBackupTestServer(t, store, DefaultClusterSettings())
+			backup := mustBackup(t, s)
+			term, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			s.term = term
+			origin, release := s.bindTerm(t.Context())
+			defer release()
+			if loss == "cancellation" {
+				cancel()
+			} else if err := s.AcquireLeadership(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			before := store.snapshot
+			if err := s.Restore(context.WithoutCancel(origin), backup); !errors.Is(err, context.Canceled) {
+				t.Fatalf("stale restore = %v", err)
+			}
+			if store.snapshot != before {
+				t.Fatal("stale restore installed desired state")
+			}
+		})
+	}
+}
+
 // Exercise the operator preflight against both atomic Bolt installation and
 // actual Raft submission. A rejected backup must not consume a fresh target.
 func TestRestoreSecretKeyAvailability(t *testing.T) {
@@ -197,14 +224,14 @@ type restoreFailureStore struct {
 	stage string
 }
 
-func (b *restoreFailureStore) RestoreDesired(cluster string, snapshot *state.DesiredSnapshot) error {
+func (b *restoreFailureStore) RestoreDesiredContext(ctx context.Context, cluster string, snapshot *state.DesiredSnapshot) error {
 	if b.stage == "barrier" {
 		return errors.New("raft barrier failed")
 	}
 	if b.stage == "commit" {
 		return errors.New("raft commit failed")
 	}
-	return b.backupStore.RestoreDesired(cluster, snapshot)
+	return b.backupStore.RestoreDesiredContext(ctx, cluster, snapshot)
 }
 
 func (b *restoreFailureStore) Get(ctx context.Context, key string) ([]byte, error) {

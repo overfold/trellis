@@ -20,6 +20,14 @@ type failingBatchStore struct {
 	batches [][]state.Mutation
 }
 
+func (s *failingBatchStore) Update(ctx context.Context, build func(state.Store) ([]state.Mutation, error)) error {
+	mutations, err := build(s.memoryStore)
+	if err != nil {
+		return err
+	}
+	return s.Batch(ctx, mutations)
+}
+
 func (s *failingBatchStore) Batch(_ context.Context, mutations []state.Mutation) error {
 	s.batches = append(s.batches, append([]state.Mutation(nil), mutations...))
 	return errors.New("storage unavailable")

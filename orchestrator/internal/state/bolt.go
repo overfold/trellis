@@ -25,6 +25,9 @@ var bucketName = []byte("trellis")
 // ErrRestoreNotFresh indicates a permanent conflict with retained target state.
 var ErrRestoreNotFresh = errors.New("restore requires a fresh cluster with no jobs, job revisions, secrets, volume registrations, network port or subnet registrations, allocations, or replacement backoffs")
 
+// ErrStateChanged rejects a restore prepared against superseded authority.
+var ErrStateChanged = errors.New("cluster state changed while preparing restore")
+
 // BoltStore persists state in a local Bolt database.
 type BoltStore struct {
 	db *bolt.DB
@@ -155,7 +158,7 @@ func applyMutations(tx *bolt.Tx, mutations []Mutation) error {
 		if mutation.DeletePrefix != "" {
 			cursor := bucket.Cursor()
 			prefix := []byte(mutation.DeletePrefix)
-			for key, _ := cursor.Seek(prefix); key != nil && strings.HasPrefix(string(key), mutation.DeletePrefix); key, _ = cursor.Next() {
+			for key, _ := cursor.Seek(prefix); key != nil && bytes.HasPrefix(key, prefix); key, _ = cursor.Seek(prefix) {
 				if err := cursor.Delete(); err != nil {
 					return err
 				}
@@ -174,6 +177,48 @@ func applyMutations(tx *bolt.Tx, mutations []Mutation) error {
 	}
 	return nil
 }
+
+// Update constructs and installs a mutation in one transaction.
+func (b *BoltStore) Update(ctx context.Context, build func(Store) ([]Mutation, error)) error {
+	return b.db.Update(func(tx *bolt.Tx) error {
+		mutations, err := build(bucketView{tx.Bucket(bucketName)})
+		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := validateMutations(mutations); err != nil {
+			return err
+		}
+		return applyMutations(tx, mutations)
+	})
+}
+
+type bucketView struct{ bucket *bolt.Bucket }
+
+func (v bucketView) Get(_ context.Context, key string) ([]byte, error) {
+	return bytes.Clone(v.bucket.Get([]byte(key))), nil
+}
+func (v bucketView) List(_ context.Context, prefix string) (map[string][]byte, error) {
+	return listBucket(v.bucket, prefix), nil
+}
+func (v bucketView) IteratePrefix(ctx context.Context, prefix string, visit func(string, []byte) error) error {
+	cursor := v.bucket.Cursor()
+	for key, value := cursor.Seek([]byte(prefix)); key != nil && bytes.HasPrefix(key, []byte(prefix)); key, value = cursor.Next() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := visit(string(key), value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+func (bucketView) Put(context.Context, string, []byte) error {
+	return errors.New("read-only state view")
+}
+func (bucketView) Delete(context.Context, string) error { return errors.New("read-only state view") }
 
 func validateMutations(mutations []Mutation) error {
 	for _, mutation := range mutations {
@@ -384,6 +429,11 @@ func (b *BoltStore) RestoreReader(r io.Reader) error {
 // namespace WireGuard port assignments, and, when present, the replacement
 // cluster record.
 func (b *BoltStore) RestoreDesired(cluster string, snapshot *DesiredSnapshot) error {
+	return b.RestoreDesiredContext(context.Background(), cluster, snapshot)
+}
+
+// RestoreDesiredContext checks cancellation inside the installation transaction.
+func (b *BoltStore) RestoreDesiredContext(ctx context.Context, cluster string, snapshot *DesiredSnapshot) error {
 	if err := ValidateDesiredSnapshot(snapshot, nil); err != nil {
 		return err
 	}
@@ -391,6 +441,9 @@ func (b *BoltStore) RestoreDesired(cluster string, snapshot *DesiredSnapshot) er
 		return err
 	}
 	return b.db.Update(func(tx *bolt.Tx) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		return restoreDesired(tx, cluster, snapshot)
 	})
 }
@@ -400,6 +453,9 @@ func restoreDesired(tx *bolt.Tx, cluster string, snapshot *DesiredSnapshot) erro
 		return err
 	}
 	bucket := tx.Bucket(bucketName)
+	if snapshot.ExpectedCluster != nil && !bytes.Equal(bucket.Get(fmt.Appendf(nil, "trellis/%s/meta", cluster)), snapshot.ExpectedCluster) {
+		return ErrStateChanged
+	}
 	jobsPrefix := fmt.Appendf(nil, "trellis/%s/jobs/", cluster)
 	revisionsPrefix := fmt.Appendf(nil, "trellis/%s/job-revisions/", cluster)
 	secretsPrefix := fmt.Appendf(nil, "trellis/%s/secrets/", cluster)

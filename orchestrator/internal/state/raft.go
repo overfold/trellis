@@ -1,6 +1,7 @@
 package state
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -48,6 +49,7 @@ type RaftStore struct {
 // state; a restore installs it in the same transaction, so settings and the
 // jobs they admit are never restored separately.
 type DesiredSnapshot struct {
+	ExpectedCluster            []byte            `json:"expected_cluster,omitempty"`
 	Cluster                    []byte            `json:"cluster,omitempty"`
 	Jobs                       map[string][]byte `json:"jobs"`
 	JobRevisions               map[string][]byte `json:"job_revisions,omitempty"`
@@ -70,6 +72,12 @@ func (r *RaftStore) BackupDesired(cluster string) (*DesiredSnapshot, error) {
 // and freshness rejections happen before replication; a committed installation
 // failing on any replica is a fatal state-machine failure.
 func (r *RaftStore) RestoreDesired(cluster string, snapshot *DesiredSnapshot) error {
+	return r.RestoreDesiredContext(context.Background(), cluster, snapshot)
+}
+
+// RestoreDesiredContext retains the request's originating leadership fence.
+func (r *RaftStore) RestoreDesiredContext(ctx context.Context, cluster string, snapshot *DesiredSnapshot) error {
+	ctx = r.LeaderContext(ctx)
 	if err := ValidateDesiredSnapshot(snapshot, nil); err != nil {
 		return err
 	}
@@ -84,9 +92,16 @@ func (r *RaftStore) RestoreDesired(cluster string, snapshot *DesiredSnapshot) er
 	if err := r.fsm.store.checkRestoreFresh(cluster); err != nil {
 		return err
 	}
+	current, err := r.Get(ctx, "trellis/"+cluster+"/meta")
+	if err != nil {
+		return err
+	}
+	if snapshot.ExpectedCluster != nil && !bytes.Equal(current, snapshot.ExpectedCluster) {
+		return ErrStateChanged
+	}
 	cmd := fsmCommand{Op: "restore_desired", Cluster: cluster, Snapshot: snapshot}
 	data, _ := json.Marshal(cmd)
-	fut := r.raft.Apply(data, 10*time.Second)
+	fut := r.raft.ApplyInTerm(ctx, raftTerm(ctx), data, 10*time.Second)
 	if err := fut.Error(); err != nil {
 		return err
 	}
@@ -98,6 +113,7 @@ func (r *RaftStore) RestoreDesired(cluster string, snapshot *DesiredSnapshot) er
 
 // Batch applies mutations as one Raft log entry and one Bolt transaction.
 func (r *RaftStore) Batch(ctx context.Context, mutations []Mutation) error {
+	ctx = r.LeaderContext(ctx)
 	if err := validateMutations(mutations); err != nil {
 		return err
 	}
@@ -108,12 +124,64 @@ func (r *RaftStore) Batch(ctx context.Context, mutations []Mutation) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	fut := r.raft.Apply(data, 10*time.Second)
+	fut := r.raft.ApplyInTerm(ctx, raftTerm(ctx), data, 10*time.Second)
 	if err := fut.Error(); err != nil {
 		return err
 	}
 	if resp, ok := fut.Response().(error); ok {
 		return resp
+	}
+	return nil
+}
+
+type raftTermKey struct{}
+
+// WithRaftTerm preserves authority even when request cancellation is detached.
+func WithRaftTerm(ctx context.Context, term uint64) context.Context {
+	return context.WithValue(ctx, raftTermKey{}, term)
+}
+
+func raftTerm(ctx context.Context) uint64 {
+	term, _ := ctx.Value(raftTermKey{}).(uint64)
+	return term
+}
+
+// LeaderContext captures the term before waiting on submission or reading state.
+func (r *RaftStore) LeaderContext(ctx context.Context) context.Context {
+	if _, ok := ctx.Value(raftTermKey{}).(uint64); !ok {
+		ctx = WithRaftTerm(ctx, r.raft.CurrentTerm())
+	}
+	return ctx
+}
+
+// Update reads after a barrier and builds its batch under exclusive submission
+// ordering. No local write can invalidate the read view before admission.
+func (r *RaftStore) Update(ctx context.Context, build func(Store) ([]Mutation, error)) error {
+	ctx = r.LeaderContext(ctx)
+	r.submitMu.Lock()
+	defer r.submitMu.Unlock()
+	if err := r.raft.Barrier(10 * time.Second).Error(); err != nil {
+		return err
+	}
+	var mutations []Mutation
+	err := r.fsm.store.db.View(func(tx *bolt.Tx) error {
+		var err error
+		mutations, err = build(bucketView{tx.Bucket(bucketName)})
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	if err := validateMutations(mutations); err != nil {
+		return err
+	}
+	data, _ := json.Marshal(fsmCommand{Op: "batch", Mutations: mutations})
+	future := r.raft.ApplyInTerm(ctx, raftTerm(ctx), data, 10*time.Second)
+	if err := future.Error(); err != nil {
+		return err
+	}
+	if err, ok := future.Response().(error); ok {
+		return err
 	}
 	return nil
 }
@@ -408,6 +476,7 @@ func (r *RaftStore) List(ctx context.Context, prefix string) (map[string][]byte,
 
 // Put applies a replicated value update.
 func (r *RaftStore) Put(ctx context.Context, key string, value []byte) error {
+	ctx = r.LeaderContext(ctx)
 	if err := validateMutations([]Mutation{{Key: key, Value: value}}); err != nil {
 		return err
 	}
@@ -418,7 +487,7 @@ func (r *RaftStore) Put(ctx context.Context, key string, value []byte) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	fut := r.raft.Apply(data, 10*time.Second)
+	fut := r.raft.ApplyInTerm(ctx, raftTerm(ctx), data, 10*time.Second)
 	if err := fut.Error(); err != nil {
 		return err
 	}
@@ -430,6 +499,7 @@ func (r *RaftStore) Put(ctx context.Context, key string, value []byte) error {
 
 // Delete applies a replicated key deletion.
 func (r *RaftStore) Delete(ctx context.Context, key string) error {
+	ctx = r.LeaderContext(ctx)
 	r.submitMu.RLock()
 	defer r.submitMu.RUnlock()
 	cmd := fsmCommand{Op: "delete", Key: key}
@@ -437,7 +507,7 @@ func (r *RaftStore) Delete(ctx context.Context, key string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	fut := r.raft.Apply(data, 10*time.Second)
+	fut := r.raft.ApplyInTerm(ctx, raftTerm(ctx), data, 10*time.Second)
 	if err := fut.Error(); err != nil {
 		return err
 	}
@@ -450,14 +520,14 @@ func (r *RaftStore) Delete(ctx context.Context, key string) error {
 // RaftMember is one server in the latest, possibly uncommitted, Raft
 // configuration.
 type RaftMember struct {
-	ID      string
-	Address string
-	Voter   bool
+	ID                 string
+	Address            string
+	Voter              bool
+	ConfigurationIndex uint64
 }
 
 // Membership returns the latest Raft configuration known to this server.
-// hashicorp/raft does not expose that configuration's log index, so callers
-// that plan changes from it must serialize their own reads and changes.
+// Every member carries the index of that same coherent configuration view.
 func (r *RaftStore) Membership() ([]RaftMember, error) {
 	fut := r.raft.GetConfiguration()
 	if err := fut.Error(); err != nil {
@@ -466,7 +536,7 @@ func (r *RaftStore) Membership() ([]RaftMember, error) {
 	servers := fut.Configuration().Servers
 	members := make([]RaftMember, 0, len(servers))
 	for _, server := range servers {
-		members = append(members, RaftMember{ID: string(server.ID), Address: string(server.Address), Voter: server.Suffrage == raft.Voter})
+		members = append(members, RaftMember{ID: string(server.ID), Address: string(server.Address), Voter: server.Suffrage == raft.Voter, ConfigurationIndex: fut.Index()})
 	}
 	return members, nil
 }
@@ -475,17 +545,20 @@ func (r *RaftStore) Membership() ([]RaftMember, error) {
 // existing voter with the same ID keeps its vote and only has its address
 // updated, so a rejoin never demotes a member.
 func (r *RaftStore) AddNonvoter(id, address string) error {
-	return r.raft.AddNonvoter(raft.ServerID(id), raft.ServerAddress(address), 0, 10*time.Second).Error()
+	ctx := r.LeaderContext(context.Background())
+	return r.ChangeMembership(ctx, r.raft.GetConfiguration().Index(), raft.AddNonvoter, id, address)
 }
 
 // PromoteVoter gives a member a vote.
 func (r *RaftStore) PromoteVoter(id, address string) error {
-	return r.raft.AddVoter(raft.ServerID(id), raft.ServerAddress(address), 0, 10*time.Second).Error()
+	ctx := r.LeaderContext(context.Background())
+	return r.ChangeMembership(ctx, r.raft.GetConfiguration().Index(), raft.AddVoter, id, address)
 }
 
 // DemoteVoter removes a member's vote, keeping it as a non-voter.
 func (r *RaftStore) DemoteVoter(id string) error {
-	return r.raft.DemoteVoter(raft.ServerID(id), 0, 10*time.Second).Error()
+	ctx := r.LeaderContext(context.Background())
+	return r.ChangeMembership(ctx, r.raft.GetConfiguration().Index(), raft.DemoteVoter, id, "")
 }
 
 // AppliedIndex returns the last log index applied to the local FSM.
@@ -493,8 +566,14 @@ func (r *RaftStore) AppliedIndex() uint64 { return r.raft.AppliedIndex() }
 
 // RemoveServer removes a member from Raft.
 func (r *RaftStore) RemoveServer(id string) error {
-	fut := r.raft.RemoveServer(raft.ServerID(id), 0, 10*time.Second)
-	return fut.Error()
+	ctx := r.LeaderContext(context.Background())
+	return r.ChangeMembership(ctx, r.raft.GetConfiguration().Index(), raft.RemoveServer, id, "")
+}
+
+// ChangeMembership retains both the originating term and the planned index.
+func (r *RaftStore) ChangeMembership(ctx context.Context, index uint64, action raft.ConfigurationChangeCommand, id, address string) error {
+	ctx = r.LeaderContext(ctx)
+	return r.raft.ChangeConfigurationInTerm(ctx, raftTerm(ctx), action, raft.ServerID(id), raft.ServerAddress(address), index, 10*time.Second).Error()
 }
 
 // LeadershipTransfer asks Raft to hand leadership to the most up-to-date

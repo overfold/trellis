@@ -3,6 +3,7 @@
 package server
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -25,9 +26,12 @@ type promotionFaultJoiner struct {
 	afterPromotion  func()
 }
 
-func (j *promotionFaultJoiner) PromoteVoter(id, address string) error {
+func (j *promotionFaultJoiner) ChangeMembership(ctx context.Context, index uint64, action raft.ConfigurationChangeCommand, id, address string) error {
+	if action != raft.AddVoter {
+		return j.RaftStore.ChangeMembership(ctx, index, action, id, address)
+	}
 	j.beforePromotion()
-	if err := j.RaftStore.PromoteVoter(id, address); err != nil {
+	if err := j.RaftStore.ChangeMembership(ctx, index, action, id, address); err != nil {
 		return err
 	}
 	if j.afterPromotion != nil {

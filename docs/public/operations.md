@@ -524,6 +524,12 @@ Backup download, CLI file decoding, and administrator restore do not impose a fi
 
 Restore into a freshly created cluster that has no jobs, job revisions, secrets, volume or network port/subnet registrations, allocations, or replacement backoffs. Backoffs are runtime scheduling state and are not backed up or carried into a restore. Deleting all jobs does not immediately make a used cluster fresh: retained backoffs must also have been cleaned up. A rejected restore leaves existing state unchanged. Create that cluster with the same `wireguard_pool` and `wireguard_port_count` as the backed-up cluster; the restore is refused otherwise, because namespace subnets and WireGuard ports are derived from them. The restore replaces the new cluster's job limits and reconciliation settings with the backed-up values, and refuses a backup whose jobs those limits would not admit.
 
+Restore preserves the target cluster's identity, administrator public key, control
+epoch, and fixed network settings. A leadership change or intervening activation
+invalidates a pending restore rather than allowing it to overwrite newer authority.
+Such failures return `503`; inspect the target before retrying, because leadership
+loss after admission can still leave a committed restore.
+
 Before committing, restore also rejects oversized destination storage keys, duplicated port slots or subnet indexes, and registrations outside the configured port range, subnet pool, or usable WireGuard link-address capacity. Orphaned records are validated too, before any history pruning or reconciliation cleanup.
 
 Before restoring a backup containing secrets, configure the original 32-byte `secrets_key` and the original `secrets_key_id` if explicitly set. Every potential leader must use the same key and ID. Restore authenticates every encrypted secret with the receiving leader's configured secrets store before committing state: an absent store, unavailable key ID, wrong key bytes (even with the same ID), or damaged ciphertext refuses the restore with an actionable error. Correct the key configuration before retrying; Trellis does not include keys in backups, rekey restored records, or search a keyring. A backup without secrets does not require a secrets store.

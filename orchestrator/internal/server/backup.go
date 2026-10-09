@@ -17,7 +17,7 @@ import (
 
 type desiredStore interface {
 	BackupDesired(cluster string) (*state.DesiredSnapshot, error)
-	RestoreDesired(cluster string, snapshot *state.DesiredSnapshot) error
+	RestoreDesiredContext(ctx context.Context, cluster string, snapshot *state.DesiredSnapshot) error
 }
 
 // Backup captures desired cluster state and the replicated cluster settings
@@ -91,6 +91,11 @@ func checkBackupFormat(backup *api.BackupSnapshot) error {
 // network settings, because namespace subnets and WireGuard port slots are
 // derived from them.
 func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error {
+	ctx, release := s.bindTerm(ctx)
+	defer release()
+	if err := s.checkTerm(ctx); err != nil {
+		return stateUnavailable(err)
+	}
 	if err := checkBackupFormat(backup); err != nil {
 		return err
 	}
@@ -212,12 +217,19 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 	snapshot.JobRevisions = retainedRevisions
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
-	cluster, err := s.state.GetCluster(ctx)
+	if err := s.checkTerm(ctx); err != nil {
+		return stateUnavailable(err)
+	}
+	snapshot.ExpectedCluster, err = s.state.store.Get(ctx, "trellis/"+s.clusterName+"/meta")
 	if err != nil {
 		return fmt.Errorf("load cluster settings: %w", stateUnavailable(err))
 	}
-	if cluster == nil {
+	if len(snapshot.ExpectedCluster) == 0 {
 		return fmt.Errorf("load cluster settings: cluster is not initialized")
+	}
+	var cluster Cluster
+	if err := json.Unmarshal(snapshot.ExpectedCluster, &cluster); err != nil {
+		return fmt.Errorf("decode cluster settings: %w", stateUnavailable(err))
 	}
 	// The restored record keeps this cluster's identity, administrator key,
 	// fencing epoch, and fixed network settings, and takes the backup's job
@@ -228,14 +240,17 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 	if err != nil {
 		return fmt.Errorf("encode restored cluster record: %w", err)
 	}
-	if err := s.backupStore.RestoreDesired(s.clusterName, snapshot); err != nil {
+	if err := s.backupStore.RestoreDesiredContext(ctx, s.clusterName, snapshot); err != nil {
 		if errors.Is(err, state.ErrRestoreNotFresh) {
 			return err
 		}
 		return stateUnavailable(err)
 	}
+	if err := s.checkTerm(ctx); err != nil {
+		return stateUnavailable(err)
+	}
 	s.mu.Lock()
-	s.loadClusterLocked(cluster)
+	s.loadClusterLocked(&cluster)
 	s.mu.Unlock()
 	return stateUnavailable(s.Reload(ctx))
 }

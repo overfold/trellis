@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/url"
 	"path/filepath"
 	"reflect"
@@ -474,6 +476,66 @@ func TestBoltBatchDeletesPrefixAtomically(t *testing.T) {
 	}
 }
 
+func TestBoltPrefixDeletionAcrossPageLayouts(t *testing.T) {
+	for _, fill := range []float64{0.1, 0.9} {
+		t.Run(fmt.Sprint(fill), func(t *testing.T) {
+			store, err := NewBoltStore(filepath.Join(t.TempDir(), "state.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			seedPrefixLayout(t, store, fill)
+			checkPrefixReplacement(t, store)
+		})
+	}
+}
+
+// Commit enough records to create real branch/leaf pages, at deliberately
+// different fill densities. Both stores have exactly the same logical data.
+func seedPrefixLayout(t *testing.T, store *BoltStore, fill float64) {
+	t.Helper()
+	if err := store.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketName)
+		bucket.FillPercent = fill
+		for i := range 512 {
+			key := fmt.Sprintf("revisions/job/%04d", i)
+			if err := bucket.Put([]byte(key), bytes.Repeat([]byte{byte(i)}, 192)); err != nil {
+				return err
+			}
+		}
+		for _, key := range []string{"revisions/job-keep", "revisions/job0-keep"} {
+			if err := bucket.Put([]byte(key), []byte("keep")); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.View(func(tx *bolt.Tx) error {
+		if stats := tx.Bucket(bucketName).Stats(); stats.BranchPageN == 0 || stats.LeafPageN < 2 {
+			t.Fatalf("fixture has no real multi-page tree: %+v", stats)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func checkPrefixReplacement(t *testing.T, store AtomicStore) {
+	t.Helper()
+	// Materialize a leaf before creating the deletion cursor. On an untouched
+	// page Next can appear correct; on a materialized node it skips survivors.
+	if err := store.Batch(t.Context(), []Mutation{{Key: "revisions/job/0000", Value: bytes.Repeat([]byte{0}, 192)}, {DeletePrefix: "revisions/job/"}, {Key: "revisions/job/new", Value: []byte("new")}}); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := store.List(t.Context(), "revisions/")
+	want := map[string][]byte{"revisions/job/new": []byte("new"), "revisions/job-keep": []byte("keep"), "revisions/job0-keep": []byte("keep")}
+	if err != nil || !reflect.DeepEqual(entries, want) {
+		t.Fatalf("prefix replacement left %d entries, want exactly three; error=%v", len(entries), err)
+	}
+}
+
 var _ Store = (*BoltStore)(nil)
 var _ AtomicStore = (*BoltStore)(nil)
 var _ PrefixIterator = (*BoltStore)(nil)
@@ -503,6 +565,15 @@ func TestDesiredSnapshotCarriesClusterRecord(t *testing.T) {
 	restored, err := store.Get(ctx, "trellis/new/meta")
 	if err != nil || string(restored) != `{"settings":{"a":2}}` {
 		t.Fatalf("restored cluster record = %q, %v", restored, err)
+	}
+	snapshot.ExpectedCluster = []byte(`{"settings":{"a":1}}`)
+	snapshot.Cluster = []byte(`{"settings":{"a":3}}`)
+	if err := store.RestoreDesiredContext(ctx, "new", snapshot); !errors.Is(err, ErrStateChanged) {
+		t.Fatalf("superseded restore = %v", err)
+	}
+	unchanged, err := store.Get(ctx, "trellis/new/meta")
+	if err != nil || !bytes.Equal(unchanged, restored) {
+		t.Fatalf("stale restore changed target authority: %q, %v", unchanged, err)
 	}
 	if err := store.RestoreDesired("other", &DesiredSnapshot{Cluster: []byte(`{`)}); err == nil {
 		t.Fatal("restored an invalid cluster record")

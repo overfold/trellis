@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log/slog"
-	"maps"
 	"net/netip"
 	"os"
 	"sort"
@@ -22,6 +21,7 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/transport"
 
 	"github.com/google/uuid"
+	"github.com/hashicorp/raft"
 )
 
 const reconcileInterval = 10 * time.Second
@@ -30,10 +30,7 @@ const heartbeatInterval = 10 * time.Second
 // ClusterJoiner reads and changes Raft cluster membership.
 type ClusterJoiner interface {
 	Membership() ([]state.RaftMember, error)
-	AddNonvoter(id, address string) error
-	PromoteVoter(id, address string) error
-	DemoteVoter(id string) error
-	RemoveServer(id string) error
+	ChangeMembership(context.Context, uint64, raft.ConfigurationChangeCommand, string, string) error
 	LeadershipTransfer() error
 	AppliedIndex() uint64
 }
@@ -122,6 +119,7 @@ type Server struct {
 	termMu   sync.RWMutex
 	term     context.Context
 	termWork *sync.WaitGroup
+	raftTerm uint64
 
 	// resumeMu guards the per-term record of acknowledged allocation
 	// resumes. It is a leaf lock: nothing else is acquired while it is held.
@@ -193,29 +191,34 @@ func NewServer(log *slog.Logger, storage *storage.LocalStorage, state *StateCont
 // can only succeed on the current leader, so no separate lock service is
 // required.
 func (s *Server) AcquireLeadership(ctx context.Context) error {
+	var raftTerm uint64
+	if store, ok := s.state.store.(*state.RaftStore); ok {
+		raftTerm = store.Raft().CurrentTerm()
+		ctx = state.WithRaftTerm(ctx, raftTerm)
+	}
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
 
-	cluster, err := s.state.GetCluster(ctx)
+	cluster, err := s.state.ActivateLeadership(ctx)
 	if err != nil {
-		return fmt.Errorf("load control-plane epoch: %w", err)
-	}
-	if cluster == nil {
-		return fmt.Errorf("load control-plane epoch: cluster is not initialized")
-	}
-	cluster.ControlEpoch++
-	epoch := cluster.ControlEpoch
-	s.mu.RLock()
-	jobs := make(map[string]*Job, len(s.jobs))
-	maps.Copy(jobs, s.jobs)
-	s.mu.RUnlock()
-	if err := s.state.ActivateLeadership(ctx, cluster, jobs); err != nil {
 		return fmt.Errorf("persist leadership activation: %w", err)
+	}
+	// The earlier reload may predate a loss/reacquisition. Rebuild caches from
+	// the FSM used for activation, never carry that earlier snapshot forward.
+	if err := s.Reload(ctx); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if store, ok := s.state.store.(*state.RaftStore); ok && (store.Raft().CurrentTerm() != raftTerm || store.Raft().State() != raft.Leader) {
+		return raft.ErrLeadershipLost
 	}
 	s.termMu.Lock()
 	defer s.termMu.Unlock()
+	s.raftTerm = raftTerm
 	s.mu.Lock()
-	s.controlEpoch = epoch
+	s.controlEpoch = cluster.ControlEpoch
 	// Job limits and reconciliation settings may have changed under a
 	// previous leader.
 	s.loadClusterLocked(cluster)
@@ -334,9 +337,10 @@ func (s *Server) Run(ctx context.Context) <-chan struct{} {
 type leadershipContextKey struct{}
 
 type leadershipFence struct {
-	term  context.Context
-	epoch uint64
-	work  *sync.WaitGroup
+	term     context.Context
+	epoch    uint64
+	work     *sync.WaitGroup
+	raftTerm uint64
 }
 
 type leadershipContext struct {
@@ -357,7 +361,7 @@ func (s *Server) bindTerm(ctx context.Context) (context.Context, func()) {
 	s.termMu.RLock()
 	fence, ok := ctx.Value(leadershipContextKey{}).(leadershipFence)
 	if !ok {
-		fence = leadershipFence{term: s.term, epoch: s.controlEpoch, work: s.termWork}
+		fence = leadershipFence{term: s.term, epoch: s.controlEpoch, work: s.termWork, raftTerm: s.raftTerm}
 	}
 	tracked := fence.work != nil && fence.term.Err() == nil
 	if tracked {
@@ -365,6 +369,9 @@ func (s *Server) bindTerm(ctx context.Context) (context.Context, func()) {
 	}
 	s.termMu.RUnlock()
 	ctx = context.WithValue(ctx, leadershipContextKey{}, fence)
+	if fence.raftTerm != 0 {
+		ctx = state.WithRaftTerm(ctx, fence.raftTerm)
+	}
 	if fence.term == nil {
 		return ctx, func() {}
 	}

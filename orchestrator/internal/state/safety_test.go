@@ -9,11 +9,153 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/hashicorp/raft"
 )
+
+func TestRaftLossReacquisitionRejectsOriginatingTerm(t *testing.T) {
+	store := newTestRaftStore(t)
+	waitLeader(t, store)
+	ctx := store.LeaderContext(t.Context())
+	meta := "trellis/test/meta"
+	// Reserve mmap capacity so a deliberately held read transaction does not
+	// block the new term's FSM write on a Bolt remap.
+	if err := store.Put(ctx, "mmap-reserve", bytes.Repeat([]byte("x"), 128*1024)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Delete(ctx, "mmap-reserve"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(ctx, meta, []byte(`{"ControlEpoch":7}`)); err != nil {
+		t.Fatal(err)
+	}
+	configuration := store.Raft().GetConfiguration()
+	if err := configuration.Error(); err != nil || configuration.Index() == 0 {
+		t.Fatalf("configuration index = %d, error = %v", configuration.Index(), err)
+	}
+	prepared, release := make(chan struct{}), make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	done := make(chan error, 1)
+	go func() {
+		done <- store.Update(ctx, func(view Store) ([]Mutation, error) {
+			old, err := view.Get(ctx, meta)
+			close(prepared)
+			<-release
+			return []Mutation{{Key: meta, Value: old}}, err
+		})
+	}()
+	<-prepared
+	// A real higher-term AppendEntries RPC forces loss; the single voter then
+	// elects itself again. The prepared update remains held throughout both.
+	member := configuration.Configuration().Servers[0]
+	var response raft.AppendEntriesResponse
+	if err := store.transport.AppendEntries(member.ID, member.Address, &raft.AppendEntriesRequest{
+		RPCHeader: raft.RPCHeader{ProtocolVersion: raft.ProtocolVersionMax, ID: []byte(member.ID), Addr: []byte(member.Address)},
+		Term:      raftTerm(ctx) + 1, Leader: []byte(member.Address),
+	}, &response); err != nil {
+		close(release)
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) && (store.Raft().State() != raft.Leader || store.Raft().CurrentTerm() <= raftTerm(ctx)+1) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if store.Raft().State() != raft.Leader || store.Raft().CurrentTerm() <= raftTerm(ctx)+1 {
+		close(release)
+		t.Fatal("leadership was not reacquired in a new election term")
+	}
+	newer := []byte(`{"ControlEpoch":9,"authority":"new"}`)
+	data, _ := json.Marshal(fsmCommand{Op: "put", Key: meta, Value: newer})
+	if err := store.Raft().Apply(data, time.Second).Error(); err != nil {
+		close(release)
+		t.Fatal(err)
+	}
+	close(release)
+	if err := <-done; !errors.Is(err, raft.ErrLeadershipLost) {
+		t.Fatalf("old activation result = %v", err)
+	}
+	if err := store.RestoreDesiredContext(ctx, "test", &DesiredSnapshot{Cluster: []byte(`{"ControlEpoch":7}`)}); !errors.Is(err, raft.ErrLeadershipLost) {
+		t.Fatalf("old restore result = %v", err)
+	}
+	for _, action := range []raft.ConfigurationChangeCommand{raft.AddVoter, raft.AddNonvoter, raft.DemoteVoter, raft.RemoveServer} {
+		if err := store.ChangeMembership(ctx, configuration.Index(), action, string(member.ID), string(member.Address)); !errors.Is(err, raft.ErrLeadershipLost) {
+			t.Fatalf("old membership action %v result = %v", action, err)
+		}
+	}
+	value, err := store.Get(t.Context(), meta)
+	if err != nil || !bytes.Equal(value, newer) {
+		t.Fatalf("old work replaced newer authority: %s, %v", value, err)
+	}
+	if err := store.Put(t.Context(), "fresh-term", []byte("accepted")); err != nil {
+		t.Fatalf("fresh term unusable: %v", err)
+	}
+}
+
+func TestRestoreAndMembershipRejectSupersededState(t *testing.T) {
+	store := newTestRaftStore(t)
+	waitLeader(t, store)
+	ctx := store.LeaderContext(t.Context())
+	old := []byte(`{"ControlEpoch":4}`)
+	newer := []byte(`{"ControlEpoch":5,"AdministratorPublicKey":"new"}`)
+	if err := store.Put(ctx, "trellis/test/meta", newer); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RestoreDesiredContext(ctx, "test", &DesiredSnapshot{ExpectedCluster: old, Cluster: old}); !errors.Is(err, ErrStateChanged) {
+		t.Fatalf("stale restore = %v", err)
+	}
+	configuration := store.Raft().GetConfiguration()
+	if err := configuration.Error(); err != nil {
+		t.Fatal(err)
+	}
+	follower, id := newTestRaftFollower(t)
+	if err := store.AddNonvoter(id, follower.LocalAddr()); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []raft.ConfigurationChangeCommand{raft.AddVoter, raft.AddNonvoter, raft.DemoteVoter, raft.RemoveServer} {
+		if err := store.ChangeMembership(ctx, configuration.Index(), action, id, follower.LocalAddr()); err == nil {
+			t.Fatalf("stale configuration accepted action %v", action)
+		}
+	}
+	if voter, found := memberVoter(t, store, id); !found || voter {
+		t.Fatalf("stale membership changed follower: voter=%v found=%v", voter, found)
+	}
+	if err := store.RestoreDesiredContext(ctx, "test", &DesiredSnapshot{ExpectedCluster: newer, Cluster: newer}); err != nil {
+		t.Fatalf("fresh restore = %v", err)
+	}
+}
+
+func TestRaftPrefixDeletionConvergesAcrossBoltLayouts(t *testing.T) {
+	leader := newTestRaftStore(t)
+	waitLeader(t, leader)
+	follower, id := newTestRaftFollower(t)
+	seedPrefixLayout(t, leader.fsm.store, 0.1)
+	seedPrefixLayout(t, follower.fsm.store, 0.9)
+	if err := leader.AddNonvoter(id, follower.LocalAddr()); err != nil {
+		t.Fatal(err)
+	}
+	checkPrefixReplacement(t, leader)
+	if err := leader.Put(t.Context(), "layout-synchronized", []byte("yes")); err != nil {
+		t.Fatal(err)
+	}
+	waitReplicatedValue(t, follower, "layout-synchronized", []byte("yes"))
+	left, err := leader.List(t.Context(), "revisions/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := follower.List(t.Context(), "revisions/")
+	if err != nil || !reflect.DeepEqual(left, right) {
+		t.Fatalf("replicas diverged after prefix deletion: leader=%d follower=%d error=%v", len(left), len(right), err)
+	}
+}
 
 // Run a real follower FSM on Raft's goroutine in a subprocess: recovering a
 // panic in the test goroutine would not prove the node actually fails stop.

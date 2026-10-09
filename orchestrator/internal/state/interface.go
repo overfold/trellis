@@ -30,3 +30,9 @@ type AtomicStore interface {
 	Store
 	Batch(ctx context.Context, mutations []Mutation) error
 }
+
+// UpdatingStore builds a mutation from an authoritative, stable read view.
+// Raft implementations serialize submissions and fence the originating term.
+type UpdatingStore interface {
+	Update(ctx context.Context, build func(Store) ([]Mutation, error)) error
+}

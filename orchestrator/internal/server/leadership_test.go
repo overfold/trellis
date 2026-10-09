@@ -60,6 +60,59 @@ func TestAcquireLeadershipAdvancesDurableEpoch(t *testing.T) {
 	}
 }
 
+func TestAcquireLeadershipUsesDurableJobsAndAuthority(t *testing.T) {
+	store, err := state.NewBoltStore(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	controller := NewStateController(store, "test")
+	cluster := &Cluster{AdministratorPublicKey: "current-key", ControlEpoch: 40, Settings: DefaultClusterSettings()}
+	if err := controller.PutCluster(t.Context(), cluster); err != nil {
+		t.Fatal(err)
+	}
+	job := &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "durable", TaskGroups: []spec.TaskGroupSpec{{Name: "web", Count: 1, Tasks: []spec.TaskSpec{{Name: "app", Image: "example/app:1"}}}}}), Revision: 12, Version: 12}
+	identity := jobKey("default", "durable")
+	if err := controller.PutJob(t.Context(), identity, job); err != nil {
+		t.Fatal(err)
+	}
+	for version := 1; version <= 12; version++ {
+		raw, err := json.Marshal(&JobRevisionRecord{Spec: job.Spec, Revision: version, Version: version, CreatedAt: time.Unix(int64(version), 0)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Put(t.Context(), "trellis/test/job-revisions/"+url.QueryEscape(identity)+"/"+fmt.Sprint(version), raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The follower cache omits a job accepted after its previous reload.
+	s := &Server{state: controller, cluster: &Cluster{AdministratorPublicKey: "stale-key", ControlEpoch: 2}, jobs: map[string]*Job{}, now: time.Now}
+	for expectedEpoch := uint64(41); expectedEpoch <= 42; expectedEpoch++ {
+		if err := s.AcquireLeadership(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		persisted, err := controller.GetCluster(t.Context())
+		if err != nil || persisted.ControlEpoch != expectedEpoch || persisted.AdministratorPublicKey != "current-key" || s.controlEpoch != expectedEpoch || s.jobs[identity] == nil {
+			t.Fatalf("activation lost durable authority/jobs: cluster=%+v error=%v", persisted, err)
+		}
+		records, err := controller.ListJobRevisions(t.Context(), identity)
+		if err != nil || len(records) != 10 || records[0].Version != 3 || records[9].Version != 12 {
+			t.Fatalf("stale cache removed durable history: %+v, %v", records, err)
+		}
+	}
+	cluster.ControlEpoch = ^uint64(0)
+	if err := controller.PutCluster(t.Context(), cluster); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AcquireLeadership(t.Context()); err == nil {
+		t.Fatal("exhausted control epoch wrapped and was reused")
+	}
+	persisted, err := controller.GetCluster(t.Context())
+	if err != nil || persisted.ControlEpoch != ^uint64(0) || s.controlEpoch != 42 {
+		t.Fatalf("exhaustion changed durable or active epoch: %+v active=%d error=%v", persisted, s.controlEpoch, err)
+	}
+}
+
 func TestAcquireLeadershipCompactionFailureLeavesEpochAndMemoryUnchanged(t *testing.T) {
 	ctx := context.Background()
 	store := &failingBatchStore{memoryStore: memoryStore{}}

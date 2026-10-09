@@ -30,7 +30,7 @@ func (b *backupStore) BackupDesired(cluster string) (*state.DesiredSnapshot, err
 	snapshot.Cluster = b.data["trellis/"+cluster+"/meta"]
 	return &snapshot, nil
 }
-func (b *backupStore) RestoreDesired(cluster string, snapshot *state.DesiredSnapshot) error {
+func (b *backupStore) RestoreDesiredContext(_ context.Context, cluster string, snapshot *state.DesiredSnapshot) error {
 	b.snapshot = snapshot
 	if len(snapshot.Cluster) > 0 {
 		b.data["trellis/"+cluster+"/meta"] = snapshot.Cluster
@@ -77,6 +77,13 @@ func (m memoryStore) Put(_ context.Context, key string, value []byte) error {
 	return nil
 }
 func (m memoryStore) Delete(_ context.Context, key string) error { delete(m, key); return nil }
+func (m memoryStore) Update(ctx context.Context, build func(state.Store) ([]state.Mutation, error)) error {
+	mutations, err := build(m)
+	if err != nil {
+		return err
+	}
+	return m.Batch(ctx, mutations)
+}
 func (m memoryStore) Batch(_ context.Context, mutations []state.Mutation) error {
 	for _, mutation := range mutations {
 		if mutation.Key == "" && mutation.DeletePrefix == "" {
@@ -285,6 +292,13 @@ func TestBackupRestoreRoundTripsPersistedJob(t *testing.T) {
 
 	target := &backupStore{data: memoryStore{}, snapshot: &state.DesiredSnapshot{}}
 	s := newBackupTestServer(t, target, DefaultClusterSettings())
+	if err := s.AcquireLeadership(ctx); err != nil {
+		t.Fatal(err)
+	}
+	targetAuthority, err := s.state.GetCluster(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := s.Restore(ctx, backup); err != nil {
 		t.Fatalf("restore backup containing persisted job: %v", err)
 	}
@@ -294,6 +308,9 @@ func TestBackupRestoreRoundTripsPersistedJob(t *testing.T) {
 	persisted, err := NewStateController(target.data, "test").GetCluster(ctx)
 	if err != nil || persisted == nil || persisted.Settings != source {
 		t.Fatalf("persisted restored cluster = %+v, %v; want settings %+v", persisted, err, source)
+	}
+	if persisted.ControlEpoch != targetAuthority.ControlEpoch || persisted.AdministratorPublicKey != targetAuthority.AdministratorPublicKey {
+		t.Fatalf("restore replaced target authority: got %+v, target %+v", persisted, targetAuthority)
 	}
 	store = target
 	var restored Job

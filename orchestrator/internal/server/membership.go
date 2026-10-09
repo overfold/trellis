@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/hashicorp/raft"
 	"github.com/overfold/trellis/orchestrator/api"
 	"github.com/overfold/trellis/orchestrator/internal/state"
 )
@@ -230,9 +231,8 @@ func (s *Server) memberStates(members []state.RaftMember) []memberState {
 
 // Every Raft configuration change in the cluster is made here, by the leader,
 // while holding membershipMu: a change is planned from the configuration read
-// under the same hold, so no other change can interleave. hashicorp/raft
-// allows one uncommitted configuration change at a time and fails in-flight
-// changes on leadership loss, and a new leader re-reads the configuration.
+// under the same hold. The originating term and configuration index also
+// travel to Raft's leader loop, so loss/reacquisition cannot admit old work.
 
 // JoinMember admits an authenticated node to Raft as a non-voter and returns
 // the member IDs after admission. The leader promotes it once it is healthy
@@ -240,11 +240,23 @@ func (s *Server) memberStates(members []state.RaftMember) []memberState {
 // under membershipMu, which RemoveMember holds while recording removals, so a
 // join cannot race a removal back into the configuration.
 func (s *Server) JoinMember(ctx context.Context, id uuid.UUID, raftAddress string) ([]string, error) {
+	ctx, release := s.bindTerm(ctx)
+	defer release()
 	if s.joiner == nil {
 		return nil, fmt.Errorf("cluster join not available")
 	}
 	s.membershipMu.Lock()
 	defer s.membershipMu.Unlock()
+	if err := s.checkTerm(ctx); err != nil {
+		return nil, err
+	}
+	current, err := s.joiner.Membership()
+	if err != nil {
+		return nil, fmt.Errorf("read Raft membership: %w", err)
+	}
+	if len(current) == 0 {
+		return nil, fmt.Errorf("raft membership is empty")
+	}
 	if removed, err := s.state.NodeRemoved(ctx, id.String()); err != nil {
 		return nil, err
 	} else if removed {
@@ -255,7 +267,10 @@ func (s *Server) JoinMember(ctx context.Context, id uuid.UUID, raftAddress strin
 	} else if !found || role != api.NodeRoleControlPlane {
 		return nil, fmt.Errorf("node %s is not control-plane eligible", id)
 	}
-	if err := s.joiner.AddNonvoter(id.String(), raftAddress); err != nil {
+	if err := s.checkTerm(ctx); err != nil {
+		return nil, err
+	}
+	if err := s.joiner.ChangeMembership(ctx, current[0].ConfigurationIndex, raft.AddNonvoter, id.String(), raftAddress); err != nil {
 		return nil, err
 	}
 	members, err := s.joiner.Membership()
@@ -276,6 +291,8 @@ func (s *Server) JoinMember(ctx context.Context, id uuid.UUID, raftAddress strin
 // change is planned from the configuration it applies to; joins and removals
 // can interleave between steps.
 func (s *Server) ReconcileMembership(ctx context.Context) error {
+	ctx, release := s.bindTerm(ctx)
+	defer release()
 	if s.joiner == nil {
 		return nil
 	}
@@ -283,7 +300,7 @@ func (s *Server) ReconcileMembership(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		changed, err := s.reconcileMembershipStep()
+		changed, err := s.reconcileMembershipStep(ctx)
 		if err != nil || !changed {
 			return err
 		}
@@ -291,9 +308,12 @@ func (s *Server) ReconcileMembership(ctx context.Context) error {
 	return nil
 }
 
-func (s *Server) reconcileMembershipStep() (bool, error) {
+func (s *Server) reconcileMembershipStep(ctx context.Context) (bool, error) {
 	s.membershipMu.Lock()
 	defer s.membershipMu.Unlock()
+	if err := s.checkTerm(ctx); err != nil {
+		return false, err
+	}
 	members, err := s.joiner.Membership()
 	if err != nil {
 		return false, fmt.Errorf("read Raft membership: %w", err)
@@ -302,16 +322,19 @@ func (s *Server) reconcileMembershipStep() (bool, error) {
 	if !ok {
 		return false, nil
 	}
-	return true, s.applyMembershipChange(change)
+	return true, s.applyMembershipChange(ctx, members[0].ConfigurationIndex, change)
 }
 
-func (s *Server) applyMembershipChange(change membershipChange) error {
+func (s *Server) applyMembershipChange(ctx context.Context, index uint64, change membershipChange) error {
+	if err := s.checkTerm(ctx); err != nil {
+		return err
+	}
 	var err error
 	switch change.Action {
 	case promoteMember:
-		err = s.joiner.PromoteVoter(change.ID, change.Address)
+		err = s.joiner.ChangeMembership(ctx, index, raft.AddVoter, change.ID, change.Address)
 	case demoteMember:
-		err = s.joiner.DemoteVoter(change.ID)
+		err = s.joiner.ChangeMembership(ctx, index, raft.DemoteVoter, change.ID, "")
 	default:
 		err = fmt.Errorf("unknown membership action %q", change.Action)
 	}
@@ -335,6 +358,8 @@ func (s *Server) applyMembershipChange(change membershipChange) error {
 // tombstone and succeeds, so retries are safe. Any resulting surplus voter is
 // demoted by the membership loop, which the removal wakes.
 func (s *Server) RemoveMember(ctx context.Context, id string) error {
+	ctx, release := s.bindTerm(ctx)
+	defer release()
 	nodeID, err := uuid.Parse(id)
 	if err != nil || nodeID == uuid.Nil || nodeID.String() != id {
 		return ErrInvalidNodeID
@@ -344,6 +369,9 @@ func (s *Server) RemoveMember(ctx context.Context, id string) error {
 	}
 	s.membershipMu.Lock()
 	defer s.membershipMu.Unlock()
+	if err := s.checkTerm(ctx); err != nil {
+		return err
+	}
 	current, err := s.joiner.Membership()
 	if err != nil {
 		return fmt.Errorf("read Raft membership: %w", err)
@@ -370,6 +398,9 @@ func (s *Server) RemoveMember(ctx context.Context, id string) error {
 	}
 	// Revoke before changing Raft: if a later step fails, the node is already
 	// unable to authenticate or rejoin, and a retry completes the removal.
+	if err := s.checkTerm(ctx); err != nil {
+		return err
+	}
 	if err := s.state.PutNodeTombstone(ctx, id, NodeTombstone{RemovedAt: s.now().UTC()}); err != nil {
 		return fmt.Errorf("record removal of node %s: %w", id, err)
 	}
@@ -379,12 +410,22 @@ func (s *Server) RemoveMember(ctx context.Context, id string) error {
 	}
 	if members[index].Voter {
 		if promote {
-			if err := s.applyMembershipChange(replacement); err != nil {
+			if err := s.applyMembershipChange(ctx, current[0].ConfigurationIndex, replacement); err != nil {
 				return fmt.Errorf("node %s is tombstoned but removal is incomplete during replacement %s promotion; restore reachable quorum and retry removal: %w", id, replacement.ID, err)
+			}
+			current, err = s.joiner.Membership()
+			if err != nil {
+				return err
+			}
+			if err := checkRemovalQuorum(s.memberStates(current), id); err != nil {
+				return err
 			}
 		}
 	}
-	if err := s.joiner.RemoveServer(id); err != nil {
+	if err := s.checkTerm(ctx); err != nil {
+		return err
+	}
+	if err := s.joiner.ChangeMembership(ctx, current[0].ConfigurationIndex, raft.RemoveServer, id, ""); err != nil {
 		return fmt.Errorf("node %s is tombstoned but Raft removal is incomplete; restore reachable quorum and retry removal: %w", id, err)
 	}
 	s.liveness.forgetRaftProgress(nodeID)
