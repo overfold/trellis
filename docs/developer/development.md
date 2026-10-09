@@ -97,7 +97,18 @@ From the repository root, `bash scripts/install-core_test.sh` checks secret/conf
 
 `bash scripts/security_test.sh` pipes all four lifecycle entrypoints into Bash from an attacker-controlled working directory, checks HTTPS-only helper downloads, and exercises verified full gVisor bundles, checksum failures, missing sidecars, incomplete/unrelated installations, resumed publication, owned removal, and unchanged Docker configuration. It uses real hashing/extraction and temporary installation paths, with mocked downloads and no package or service changes.
 
-The `installer-test` workflow runs these five shell suites and wrapper tests on pull requests and pushes to `main`, as both the runner user and root (including permission/ownership assertions). It explicitly installs Go, `jq`, OpenSSL, curl/CA certificates, tar/bzip2, GNU core utilities/text tools, and Python 3. Test output is grouped by suite and privilege; a ten-minute job timeout bounds failures. These tests use temporary paths and mocked host services, not live systemd/containerd or Vagrant VMs.
+The `installer-test` workflow runs these five shell suites and wrapper tests on pull requests and pushes to `main`, as both the runner user and root (including permission/ownership assertions). It explicitly installs Go, `jq`, OpenSSL, curl/CA certificates, tar/bzip2, GNU core utilities/text tools, binutils, and Python 3. Test output is grouped by suite and privilege; a twenty-minute job timeout bounds failures, including release builds and platform image pulls. These tests use temporary paths and mocked host services, not live systemd/containerd or Vagrant VMs.
+
+Resume regressions cover an active same-release restart, unknown running version, restart/version failures that keep installation incomplete, and changed-release delegation to maintenance with pinned metadata. Upgrade regressions also cover healthy APIs backed by the wrong executable version, including rollback and preservation of pre-existing drains. Release tests use a real process with an atomically replaced executable to distinguish `/proc/PID/exe` from the new file on disk; PTY tests simulate a moving latest release and assert that confirmation's tag, URL and digest reach execution unchanged.
+
+CI and release publication share `scripts/build-release.sh`: static baseline Linux amd64 builds, pinned Go, trimmed paths, no VCS/build-ID stamping, and deterministic tar/gzip metadata. CI compares two archives byte-for-byte, verifies the checksum sidecar, rejects dynamic ELF dependencies, and executes the packaged daemon/CLI/probe in Ubuntu 20.04, Ubuntu 24.04 and Debian 12 userspaces. Run locally from the repository root (platform execution needs Docker; omit image arguments for native ELF/execution checks):
+
+```sh
+VERSION=v-local-test bash scripts/build-release.sh /tmp/trellis-release
+bash scripts/release-platform_test.sh /tmp/trellis-release/trellis_linux_x64.tar.gz v-local-test ubuntu:20.04 ubuntu:24.04 debian:12
+```
+
+Userspace containers verify release binary compatibility, not systemd, containerd, networking, or older host kernels. Ubuntu 20.04's original kernel cannot implement recursive read-only volume staging; those operations fail closed without `mount_setattr`.
 
 ## Linting
 

@@ -9,7 +9,7 @@ permissions:
 jobs:
   lifecycle:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
@@ -21,7 +21,7 @@ jobs:
       - name: Install shell test prerequisites
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y bash sudo jq openssl curl ca-certificates tar gzip bzip2 coreutils gawk grep sed findutils libc-bin python3 util-linux
+          sudo apt-get install -y bash sudo jq openssl curl ca-certificates tar gzip bzip2 coreutils gawk grep sed findutils libc-bin python3 util-linux binutils
       - name: Check shell syntax
         run: for script in scripts/*.sh; do bash -n "$script"; done
       - name: Test lifecycle as runner user
@@ -48,3 +48,13 @@ jobs:
             echo '::endgroup::'
           done
           sudo env PATH="$PATH" python3 scripts/install_test.py
+      - name: Build and reproduce the published release artifact
+        env:
+          VERSION: v-ci-test
+        run: |
+          bash scripts/build-release.sh "$RUNNER_TEMP/release-a"
+          bash scripts/build-release.sh "$RUNNER_TEMP/release-b"
+          cmp "$RUNNER_TEMP/release-a/trellis_linux_x64.tar.gz" "$RUNNER_TEMP/release-b/trellis_linux_x64.tar.gz"
+          (cd "$RUNNER_TEMP/release-a" && sha256sum -c trellis_linux_x64.tar.gz.sha256)
+      - name: Execute release on supported userspaces
+        run: bash scripts/release-platform_test.sh "$RUNNER_TEMP/release-a/trellis_linux_x64.tar.gz" v-ci-test ubuntu:20.04 ubuntu:24.04 debian:12

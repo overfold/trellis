@@ -206,8 +206,13 @@ detect_distro() {
 fetch_latest_release() {
     require_commands curl jq sha256sum
     local release_json
-    release_json="$(curl --proto '=https' --proto-redir '=https' -fsSL "https://api.github.com/repos/${REPO}/releases/latest")" ||
-        ui_die "Failed to find the latest release."
+    if [ -n "${TRELLIS_RELEASE_METADATA:-}" ]; then
+        release_json="$(cat "$TRELLIS_RELEASE_METADATA")" || ui_die "Cannot read approved release metadata."
+    else
+        release_json="$(curl --proto '=https' --proto-redir '=https' -fsSL "https://api.github.com/repos/${REPO}/releases/latest")" ||
+            ui_die "Failed to find the latest release."
+    fi
+    RELEASE_METADATA="$release_json"
     RELEASE_TAG="$(jq -er '.tag_name | select(type == "string" and length > 0)' <<<"$release_json")" ||
         ui_die "Latest release is missing a valid tag name."
     local asset
@@ -238,6 +243,27 @@ download_release() {
     reported="$("${dir}/trellis" --version 2>/dev/null | awk '{print $NF}' || true)"
     [ "$reported" = "$RELEASE_TAG" ] ||
         ui_die "Downloaded binary reports ${reported:-unknown}, expected ${RELEASE_TAG}."
+}
+
+running_binary() {
+    local pid
+    pid="$(systemctl show trellis --property MainPID --value)" || return 1
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    printf '/proc/%s/exe\n' "$pid"
+}
+
+running_version() {
+    local binary reported
+    binary="$(running_binary)" || return 1
+    reported="$("$binary" --version | awk '{print $NF}')" || return 1
+    [ -n "$reported" ] || return 1
+    printf '%s\n' "$reported"
+}
+
+verify_running_version() {
+    local reported
+    reported="$(running_version)" || return 1
+    [ "$reported" = "$RELEASE_TAG" ]
 }
 
 write_service() {

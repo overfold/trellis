@@ -44,8 +44,11 @@ getent() { printf 'operator:x:1000:1000::%s:/bin/bash\n' "$OPERATOR_HOME"; }
 systemctl() { printf '%s\n' "$*" >>"$SERVICE_LOG"; }
 write_service() { :; }
 write_state_version() { printf '%s\n' "$1" >"$VERSION_LOG"; }
+running_binary() { printf '%s\n' "$INSTALL_DIR/trellis.running"; }
+verify_running_version() { [[ "$SCENARIO" != *version-rollback ]]; }
 wait_for_service() {
     case "$SCENARIO" in *signal-install) kill -TERM $$ ;; *interrupt-install) kill -INT $$ ;; esac
+    [[ "$SCENARIO" != *version-rollback ]] || return 0
     [[ "$SCENARIO" != *rollback ]]
 }
 wait_for_local_allocations_to_stop() {
@@ -53,13 +56,13 @@ wait_for_local_allocations_to_stop() {
     [[ "$SCENARIO" != *timeout ]]
 }
 cp() {
-    if [[ "$SCENARIO" = *failure && "${*: -1}" = *.old ]]; then return 1; fi
+    if [[ "$SCENARIO" = *failure && "${*: -1}" = */trellisctl.old ]]; then return 1; fi
     command cp "$@"
 }
 journalctl() { :; }
 sleep() { :; }
 MOCKS
-for scenario in single single-label single-pretty multi multi-compact malformed wrong-shape empty explicit missing unauthorized timeout rollback root quoted-data missing-id invalid-config draining-success draining-timeout draining-rollback draining-signal draining-interrupt draining-signal-install draining-interrupt-install draining-failure multi-signal multi-interrupt multi-signal-install multi-interrupt-install multi-failure multi-drain-error absent-local missing-status duplicate-local; do
+for scenario in single single-label single-pretty multi multi-compact malformed wrong-shape empty explicit missing unauthorized timeout rollback version-rollback disk-version-rollback draining-version-rollback root quoted-data missing-id invalid-config draining-success draining-timeout draining-rollback draining-signal draining-interrupt draining-signal-install draining-interrupt-install draining-failure multi-signal multi-interrupt multi-signal-install multi-interrupt-install multi-failure multi-drain-error absent-local missing-status duplicate-local; do
     (
         export SCENARIO="$scenario"
         export INSTALL_DIR="$tmp/$scenario/bin" CONFIG_DIR="$tmp/$scenario/etc"
@@ -138,6 +141,10 @@ CTL
         chmod +x "$INSTALL_DIR/trellisctl"
         printf '#!/bin/sh\necho v-old\n' >"$INSTALL_DIR/trellis"
         chmod +x "$INSTALL_DIR/trellis"
+        cp "$INSTALL_DIR/trellis" "$INSTALL_DIR/trellis.running"
+        if [ "$scenario" = disk-version-rollback ]; then
+            printf '#!/bin/sh\necho v-new\n' >"$INSTALL_DIR/trellis"
+        fi
         # Test runners may inherit ignored SIGINT; Bash cannot trap a signal
         # ignored at startup. Restore it so these exercise a real interrupt.
         if env --default-signal=INT bash "$tmp/upgrade.sh" >"$tmp/$scenario.output" 2>&1; then
@@ -156,7 +163,7 @@ CTL
                 *signal*) [ "$rc" -eq 143 ] ;;
                 *interrupt*) [ "$rc" -eq 130 ] ;;
             esac
-            case "$scenario" in missing|unauthorized|timeout|rollback|malformed|wrong-shape|empty|missing-id|invalid-config|draining-*|multi-*|absent-local|missing-status|duplicate-local) ;; *) cat "$tmp/$scenario.output"; exit 1 ;; esac
+            case "$scenario" in missing|unauthorized|timeout|*rollback|malformed|wrong-shape|empty|missing-id|invalid-config|draining-*|multi-*|absent-local|missing-status|duplicate-local) ;; *) cat "$tmp/$scenario.output"; exit 1 ;; esac
             [ "$("$INSTALL_DIR/trellis" --version)" = v-old ]
             test ! -e "$VERSION_LOG"
             if [[ "$scenario" = *rollback || "$scenario" = *-install ]]; then
@@ -164,7 +171,7 @@ CTL
             else
                 ! grep -q '^stop trellis$' "$SERVICE_LOG"
             fi
-            if [[ "$scenario" = multi-* || "$scenario" = rollback ]]; then
+            if [[ "$scenario" = multi-* || "$scenario" = rollback || "$scenario" = version-rollback || "$scenario" = disk-version-rollback ]]; then
                 grep -qx 'nodes undrain node-a' "$CALL_LOG"
             fi
             case "$scenario" in

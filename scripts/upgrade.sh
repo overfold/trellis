@@ -79,7 +79,8 @@ current_version="$("${INSTALL_DIR}/trellis" --version 2>/dev/null | awk '{print 
 fetch_latest_release
 
 ui_title "upgrade"
-if [ "$current_version" = "$RELEASE_TAG" ]; then
+if [ "$current_version" = "$RELEASE_TAG" ] && \
+   { ! systemctl is-active --quiet trellis || verify_running_version; }; then
     ui_step "Already on ${RELEASE_TAG}"
     exit 0
 fi
@@ -103,6 +104,12 @@ configured_key="$(printf '%s' "$paths" | jq -er '.secrets_key | select(type == "
 was_running=false
 if systemctl is-active --quiet trellis; then was_running=true; fi
 if [ "$was_running" = true ]; then
+    running_source="$(running_binary)" || ui_die "Cannot identify running daemon; no binaries were changed."
+    # Keep the actual old executable even if a prior interrupted installation
+    # already replaced its on-disk path. Dereference /proc's executable link.
+    cp -L "$running_source" "${WORK_TMP}/trellis.old"
+    current_version="$("${WORK_TMP}/trellis.old" --version | awk '{print $NF}')"
+    [ -n "$current_version" ] || ui_die "Cannot identify running version; no binaries were changed."
     [ -f "${DATA_DIR}/node-id" ] || ui_die "Running node has no node-id in ${DATA_DIR}; cannot perform maintenance safely. No binaries were changed."
     node_id="$(tr -d '[:space:]' <"${DATA_DIR}/node-id")"
     [ -n "$node_id" ] || ui_die "Running node has an empty node-id; no binaries were changed."
@@ -144,7 +151,7 @@ if [ "$was_running" = true ] && [ -n "$node_id" ]; then
     fi
 fi
 
-cp -a "${INSTALL_DIR}/trellis" "${WORK_TMP}/trellis.old"
+if [ "$was_running" = false ]; then cp -a "${INSTALL_DIR}/trellis" "${WORK_TMP}/trellis.old"; fi
 cp -a "${INSTALL_DIR}/trellisctl" "${WORK_TMP}/trellisctl.old"
 if [ "$had_health_probe" = true ]; then cp -a "${INSTALL_DIR}/trellis-health-probe" "${WORK_TMP}/trellis-health-probe.old"; fi
 [ ! -f "$SERVICE_FILE" ] || cp -a "$SERVICE_FILE" "${WORK_TMP}/trellis.service.old"
@@ -188,9 +195,9 @@ ui_step "Installed binaries and refreshed the systemd unit"
 
 if [ "$was_running" = true ]; then
     systemctl start trellis
-    if ! wait_for_service "$WORK_TMP"; then
+    if ! wait_for_service "$WORK_TMP" || ! verify_running_version; then
         journalctl -u trellis -n 20 --no-pager >&2 || true
-        ui_die "New Trellis version did not become healthy; rolling back."
+        ui_die "New Trellis version did not become healthy or running version mismatched; rolling back."
     fi
     ui_step "Trellis ${RELEASE_TAG} is healthy"
     ROLLBACK_NEEDED=false

@@ -24,12 +24,14 @@ load_common() {
         script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     fi
     if [ -n "$script_dir" ] && [ -f "${script_dir}/common.sh" ]; then
+        COMMON_SOURCE="${script_dir}/common.sh"
         # shellcheck source=common.sh
         source "${script_dir}/common.sh"
         return
     fi
     command -v curl >/dev/null 2>&1 || { echo "error: curl is required" >&2; exit 1; }
     COMMON_TMP="$(mktemp -d)"
+    COMMON_SOURCE="${COMMON_TMP}/common.sh"
     curl --proto '=https' --proto-redir '=https' -fsSL "$RAW_COMMON" -o "${COMMON_TMP}/common.sh"
     # shellcheck source=/dev/null
     source "${COMMON_TMP}/common.sh"
@@ -193,6 +195,25 @@ ui_step "Downloading Trellis ${RELEASE_TAG}"
 download_release "$WORK_TMP"
 STARTED=true
 
+# An active incomplete installation is still a live cluster member. Use the
+# upgrade owner's evacuation and rollback semantics before changing releases.
+release_upgraded=false
+if systemctl is-active --quiet trellis; then
+    active_version="$(running_version)" || ui_die "Cannot identify the running daemon; refusing unsafe resume."
+    if [ "$active_version" != "$RELEASE_TAG" ]; then
+        printf '%s\n' "$RELEASE_METADATA" >"$WORK_TMP/release.json"
+        upgrade_script="$(dirname "${BASH_SOURCE[0]}")/upgrade.sh"
+        if [ ! -f "$upgrade_script" ]; then
+            upgrade_script="$WORK_TMP/upgrade.sh"
+            curl --proto '=https' --proto-redir '=https' -fsSL \
+                "https://raw.githubusercontent.com/${REPO}/main/scripts/upgrade.sh" -o "$upgrade_script"
+            cp "$COMMON_SOURCE" "$WORK_TMP/common.sh"
+        fi
+        TRELLIS_RELEASE_METADATA="$WORK_TMP/release.json" bash "$upgrade_script"
+        release_upgraded=true
+    fi
+fi
+
 STATE_COMPLETE=false
 STATE_VERSION="$RELEASE_TAG"
 write_install_state
@@ -214,13 +235,15 @@ else
     install_networking
 fi
 
-install -d -m 0755 "$INSTALL_DIR"
-install -m 0755 "${WORK_TMP}/trellis" "${INSTALL_DIR}/.trellis.new"
-install -m 0755 "${WORK_TMP}/trellisctl" "${INSTALL_DIR}/.trellisctl.new"
-install -m 0755 "${WORK_TMP}/trellis-health-probe" "${INSTALL_DIR}/.trellis-health-probe.new"
-mv "${INSTALL_DIR}/.trellis.new" "${INSTALL_DIR}/trellis"
-mv "${INSTALL_DIR}/.trellisctl.new" "${INSTALL_DIR}/trellisctl"
-mv "${INSTALL_DIR}/.trellis-health-probe.new" "${INSTALL_DIR}/trellis-health-probe"
+if [ "$release_upgraded" = false ]; then
+    install -d -m 0755 "$INSTALL_DIR"
+    install -m 0755 "${WORK_TMP}/trellis" "${INSTALL_DIR}/.trellis.new"
+    install -m 0755 "${WORK_TMP}/trellisctl" "${INSTALL_DIR}/.trellisctl.new"
+    install -m 0755 "${WORK_TMP}/trellis-health-probe" "${INSTALL_DIR}/.trellis-health-probe.new"
+    mv "${INSTALL_DIR}/.trellis.new" "${INSTALL_DIR}/trellis"
+    mv "${INSTALL_DIR}/.trellisctl.new" "${INSTALL_DIR}/trellisctl"
+    mv "${INSTALL_DIR}/.trellis-health-probe.new" "${INSTALL_DIR}/trellis-health-probe"
+fi
 ui_step "Installed trellis, trellisctl, and trellis-health-probe"
 
 install -d -m 0750 "$DATA_DIR" "$CONFIG_DIR"
@@ -318,6 +341,7 @@ fi
 
 write_service
 systemctl enable --now trellis >/dev/null
+[ "$release_upgraded" = true ] || systemctl restart trellis
 if ! wait_for_service "$WORK_TMP"; then
     journalctl -u trellis -n 20 --no-pager >&2 || true
     ui_die "Trellis did not become healthy."
@@ -390,6 +414,7 @@ if [ -f "$operator_config" ]; then
 fi
 unset administrator_private_key administrator_public_key admin_public_key_config join_token
 
+verify_running_version || ui_die "Running Trellis version does not match ${RELEASE_TAG}; installation remains incomplete."
 STATE_COMPLETE=true
 STATE_VERSION="$RELEASE_TAG"
 write_install_state

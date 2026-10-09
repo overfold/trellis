@@ -19,20 +19,13 @@ jobs:
         with:
           go-version: 1.26.9
 
-      - name: Build binaries
-        working-directory: orchestrator
+      - name: Build reproducible static release
         env:
           VERSION: ${{ github.ref_name }}
-        run: |
-          mkdir -p bin
-          LDFLAGS="-X github.com/overfold/trellis/orchestrator/internal/version.version=${VERSION}"
-          go build -ldflags "${LDFLAGS}" -o bin/trellis ./cmd/trellis
-          go build -ldflags "${LDFLAGS}" -o bin/trellisctl ./cmd/trellisctl
-          CGO_ENABLED=0 go build -o bin/trellis-health-probe ./cmd/trellis-health-probe
+        run: bash scripts/build-release.sh "$RUNNER_TEMP/release"
 
-      - name: Package binaries
-        working-directory: orchestrator
-        run: tar -czf ../trellis_linux_x64.tar.gz -C bin trellis trellisctl trellis-health-probe
+      - name: Verify release platform compatibility
+        run: bash scripts/release-platform_test.sh "$RUNNER_TEMP/release/trellis_linux_x64.tar.gz" "${{ github.ref_name }}" ubuntu:20.04 ubuntu:24.04 debian:12
 
       - name: Log in to GitHub Container Registry
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
@@ -61,5 +54,9 @@ jobs:
         uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631
         with:
           files: |
-            trellis_linux_x64.tar.gz
+            ${{ runner.temp }}/release/trellis_linux_x64.tar.gz
+            ${{ runner.temp }}/release/trellis_linux_x64.tar.gz.sha256
+            ${{ runner.temp }}/release/trellis_linux_x64.build-info
+          body: |
+            Linux x86-64 assets are built with Go 1.26.9, CGO_ENABLED=0 and GOAMD64=v1; no host libc is required. Binary execution is checked on Ubuntu 20.04, Ubuntu 24.04 and Debian 12 userspace. Host kernel, systemd, networking and containerd prerequisites still apply. See the release-matched Operations guide for coordinated upgrade boundaries.
           generate_release_notes: true

@@ -54,10 +54,12 @@ resolve_engine() {
     fi
     if [ -n "$script_dir" ] && [ -f "$script_dir/install-core.sh" ] && [ -f "$script_dir/common.sh" ]; then
         cp "$script_dir/install-core.sh" "$TMP/install-core.sh"
+        cp "$script_dir/upgrade.sh" "$TMP/upgrade.sh"
         cp "$script_dir/common.sh" "$TMP/common-real.sh"
     else
         command -v curl >/dev/null 2>&1 || { echo "error: curl is required" >&2; exit 1; }
         curl --proto '=https' --proto-redir '=https' -fsSL "$RAW_BASE/install-core.sh" -o "$TMP/install-core.sh"
+        curl --proto '=https' --proto-redir '=https' -fsSL "$RAW_BASE/upgrade.sh" -o "$TMP/upgrade.sh"
         curl --proto '=https' --proto-redir '=https' -fsSL "$RAW_BASE/common.sh" -o "$TMP/common-real.sh"
     fi
     cat >"$TMP/common.sh" <<'SHIM'
@@ -129,12 +131,16 @@ fi
 [ -n "$advertise" ] || ui_die "Could not determine a routable IPv4 advertise address. Pass --advertise HOST explicitly."
 [ -z "$join" ] || [[ "$join" == *:* ]] || ui_die "Join address must look like node-a:8128"
 fetch_latest_release
+printf '%s\n' "$RELEASE_METADATA" >"$TMP/release.json"
+export TRELLIS_RELEASE_METADATA="$TMP/release.json"
 
 cluster_label() { [ -n "$join" ] && printf 'join %s' "$join" || printf 'create a new cluster'; }
 
 show_plan() {
     ui_section "Plan"
     ui_detail "Version       $RELEASE_TAG"
+    ui_detail "Asset         $BIN_URL"
+    ui_detail "Digest        $RELEASE_DIGEST"
     ui_detail "Node address  $advertise"
     ui_detail "Cluster       $(cluster_label)"
     ui_detail "Control plane $control_plane"

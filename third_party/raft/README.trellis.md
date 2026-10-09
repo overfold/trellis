@@ -4,6 +4,10 @@ This directory contains Hashicorp Raft **v1.7.3**, including its original tests
 and MPL-2.0 license. The root module replaces `github.com/hashicorp/raft` with
 this local module. Keep unchanged upstream files intact when updating it.
 
+The unchanged upstream `bench/bench.go` is included because raft-boltdb's tests
+import `github.com/hashicorp/raft/bench`; omitting it breaks root-module
+`go mod tidy`. It is benchmark support, not a change to the runtime patch.
+
 The patch is limited to `api.go`, `configuration.go`, `future.go`, and `raft.go`:
 
 - `ApplyInTerm` and `ChangeConfigurationInTerm` carry an originating term and

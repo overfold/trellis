@@ -16,14 +16,23 @@ class InstallWrapperTest(unittest.TestCase):
             root = Path(directory)
             scripts = Path(__file__).resolve().parent
             shutil.copy(scripts / "install.sh", root)
+            shutil.copy(scripts / "upgrade.sh", root)
             shutil.copy(scripts / "common.sh", root)
             with (root / "common.sh").open("a") as common:
                 common.write("\nrequire_root_linux_amd64() { :; }\n"
-                             "fetch_latest_release() { RELEASE_TAG=v-test; }\n"
+                             'curl() { local tag=v-test digest=1; [ ! -f "$CALL_LOG.fetch" ] || { tag=v-moved; digest=2; }; '
+                             'echo fetched >>"$CALL_LOG.fetch"; '
+                             'printf \'{"tag_name":"%s","assets":[{"name":"trellis_linux_x64.tar.gz",'
+                             '"browser_download_url":"https://example.test/%s",'
+                             '"digest":"sha256:%064d"}]}\\n\' "$tag" "$tag" "$digest"; }\n'
                              "detect_advertise_ipv4() { echo 192.0.2.10; }\n")
             (root / "install-core.sh").write_text(
                 '#!/bin/bash\nprintf "%s\\n" "$@" >"$CALL_LOG"\n'
-                'echo "confirmed=${TRELLIS_INSTALL_PLAN_CONFIRMED:-0}" >>"$CALL_LOG"\n')
+                'echo "confirmed=${TRELLIS_INSTALL_PLAN_CONFIRMED:-0}" >>"$CALL_LOG"\n'
+                'if [ -n "${TRELLIS_RELEASE_METADATA:-}" ]; then\n'
+                'source "$(dirname "$0")/common-real.sh"; fetch_latest_release\n'
+                'printf "approved=%s %s %s\\n" "$RELEASE_TAG" "$BIN_URL" "$RELEASE_DIGEST" >>"$CALL_LOG"\n'
+                '[ "$(wc -l <"$CALL_LOG.fetch")" = 1 ] || exit 99\nfi\n')
             (root / "bin").mkdir()
             if config:
                 (root / "config").write_text(config)
@@ -65,8 +74,11 @@ class InstallWrapperTest(unittest.TestCase):
         rc, output, log = self.run_wrapper(answers="\n")
         self.assertEqual(rc, 0, output)
         self.assertIn("Version       v-test", output)
+        self.assertIn("Asset         https://example.test/v-test", output)
+        self.assertIn("Digest        sha256:" + "0" * 63 + "1", output)
         self.assertIn("--advertise\n192.0.2.10\n", log)
         self.assertIn("--with-gvisor\nconfirmed=1", log)
+        self.assertIn("approved=v-test https://example.test/v-test sha256:" + "0" * 63 + "1", log)
 
     def test_cancel(self):
         rc, output, log = self.run_wrapper(answers="q\n")
@@ -101,6 +113,7 @@ class InstallWrapperTest(unittest.TestCase):
         for flag, value in zip(args[5::2], args[6::2]):
             self.assertIn(flag + "\n" + value + "\n", log)
         self.assertIn("confirmed=0", log)
+        self.assertIn("approved=v-test https://example.test/v-test", log)
 
     def test_completed_fast_path(self):
         rc, output, log = self.run_wrapper(config="control_plane: true\n", complete=True)

@@ -213,11 +213,15 @@ download_release() {
     done
 }
 write_service() { printf 'worker service\\n' >"\$SERVICE_FILE"; }
+running_version() { [ "\${RESUME_SCENARIO:-}" != unknown ] || return 1; printf '%s\\n' "\${ACTIVE_VERSION:-v-worker-test}"; }
+verify_running_version() { [ "\${RESUME_SCENARIO:-}" != mismatch ]; }
 wait_for_service() { printf 'relayed-local-api\\n' >>"\$CALL_LOG"; }
 wait_for_local_node() { printf 'registered-worker %s\\n' "\$2" >>"\$CALL_LOG"; }
 EOF
 cat >"$tmp/worker-bin/systemctl" <<'EOF'
 #!/bin/sh
+printf '%s\n' "$*" >>"$CALL_LOG"
+[ "$*" != 'restart trellis' ] || [ "${RESUME_SCENARIO:-}" != restart-failure ] || exit 1
 exit 0
 EOF
 cat >"$tmp/worker-bin/containerd" <<'EOF'
@@ -276,6 +280,54 @@ test ! -e "$tmp/worker/state/data/raft"
 grep -qx 'relayed-local-api' "$tmp/worker.calls"
 grep -qx 'registered-worker 192.0.2.20:8127' "$tmp/worker.calls"
 printf 'PASS executable worker install is keyless, joins, and verifies registration\n'
+
+# Reuse that installed worker as an active, incomplete node. Failed restarts and
+# version checks must never publish complete=true. A changed release goes through
+# the maintenance owner, with the very same approved metadata, before publication.
+cat >"$tmp/worker-installer/upgrade.sh" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+[ -f "$TRELLIS_RELEASE_METADATA" ]
+grep -qx approved-release "$TRELLIS_RELEASE_METADATA"
+echo maintenance >>"$CALL_LOG"
+[ "$RESUME_SCENARIO" != maintenance-failure ]
+EOF
+cat >>"$tmp/worker-installer/common.sh" <<'EOF'
+RELEASE_METADATA=approved-release
+journalctl() { :; }
+EOF
+for scenario in same mismatch unknown restart-failure changed maintenance-failure; do
+    (
+        export PATH="$tmp/worker-bin:$PATH" HOME="$tmp/worker/home" SUDO_USER=test-operator
+        export INSTALL_DIR="$tmp/worker/install" STATE_ROOT="$tmp/worker/state"
+        export CONFIG_DIR="$tmp/worker/etc" RUN_DIR="$tmp/worker/run"
+        export SERVICE_FILE="$tmp/worker/trellis.service" CALL_LOG="$tmp/resume-$scenario.calls"
+        export RESUME_SCENARIO="$scenario" ACTIVE_VERSION=v-worker-test
+        case "$scenario" in changed|maintenance-failure) ACTIVE_VERSION=v-old ;; esac
+        sed -i 's/^complete=.*/complete=false/' "$STATE_ROOT/install-state"
+        before="$(sha256sum "$INSTALL_DIR/trellis")"
+        if bash "$tmp/worker-installer/install-core.sh" --yes --worker --join control.example:8128 \
+            >"$tmp/resume-$scenario.output" 2>&1; then
+            [[ "$scenario" = same || "$scenario" = changed ]]
+            grep -qx complete=true "$STATE_ROOT/install-state"
+            if [ "$scenario" = same ]; then
+                grep -qx 'restart trellis' "$CALL_LOG"
+            else
+                ! grep -q 'restart trellis' "$CALL_LOG" # Upgrade already restarted under maintenance.
+            fi
+        else
+            [[ "$scenario" != same && "$scenario" != changed ]]
+            grep -qx complete=false "$STATE_ROOT/install-state"
+            case "$scenario" in unknown|maintenance-failure)
+                [ "$before" = "$(sha256sum "$INSTALL_DIR/trellis")" ]
+                ! grep -q 'restart trellis' "$CALL_LOG"
+                ;;
+            esac
+        fi
+        case "$scenario" in changed|maintenance-failure) grep -qx maintenance "$CALL_LOG" ;; esac
+        printf 'PASS active installation resume: %s\n' "$scenario"
+    )
+done
 awk '/^ui_section "Operator access"/ {copy=1} /^unset administrator_private_key administrator_public_key/ {copy=0} copy' \
     "$script_dir/install-core.sh" >"$tmp/operator-access.sh"
 mkdir "$tmp/bin"

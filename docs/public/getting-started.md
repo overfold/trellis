@@ -6,6 +6,8 @@ This is the shortest complete Trellis journey: install one node, use the CLI as 
 
 You need a systemd-based Debian or Ubuntu x86-64 host with `sudo`, `curl`, `jq`, OpenSSL, `tar`, `bzip2`, and `sha256sum`/`sha512sum` (GNU coreutils), and outbound access to GitHub, Google Cloud Storage, and the package repositories. If needed, install the download/verification prerequisites with `sudo apt-get update && sudo apt-get install -y curl ca-certificates jq openssl tar bzip2 coreutils`. The installer can install containerd when it is missing. Run it on the host, not inside a container; Trellis and containerd need the same host mount namespace.
 
+Published Linux x86-64 binaries are static (`CGO_ENABLED=0`, baseline `GOAMD64=v1`), so they do not require the release builder's glibc. CI executes the release archive on Ubuntu 20.04, Ubuntu 24.04, and Debian 12 userspace. This checks binary compatibility, not an entire systemd/containerd host installation. Kernel and runtime prerequisites still apply; in particular, recursive read-only host volumes require `mount_setattr` support (Linux 5.12 or newer), and fail closed on Ubuntu 20.04's original 5.4 kernel. Use a supported newer kernel for that feature, and maintain OS security updates independently of Trellis.
+
 Have a password manager ready before installing: the installer displays the administrator private key once, and Trellis does not retain it.
 
 ```sh
@@ -27,6 +29,8 @@ manual repair rather than being overwritten. Both service PATHs must find the
 runtime and shim; this is normally true for `/usr/local/bin`.
 
 Before changing host packages, services, or node state, the installer stages the Linux x64 release and verifies its SHA-256 digest from GitHub's HTTPS release API before extraction or execution. Missing, malformed, or mismatching digests stop installation. This detects corruption or artifact substitution relative to the release metadata, not compromise of the release account; see the [download trust model](operations.md#release-download-trust-model).
+
+The release tag, asset URL, and digest shown in the wrapper's plan are pinned through engine execution; a moving `latest` cannot change the approved release. An incomplete installation with an active daemon is explicitly restarted after binary publication, and its running executable must report the selected version before the installer records completion. If resuming changes the running release, the installer first uses the [upgrade maintenance flow](operations.md#upgrade-a-node), including operator credentials, multi-node evacuation, and rollback on failed verification. A failed resume remains incomplete; correct the reported failure and rerun. This is not a substitute for the coordinated control-plane procedure required at incompatible snapshot boundaries.
 
 The installer uses the administrator key transiently to mint a normal `cluster/write` operator credential and saves a `local` context for the user who invoked `sudo`. It displays the base64 PKCS#8 Ed25519 private key once so you can move it to an operator password manager; the daemon receives and replicates only the public key. Routine `trellisctl` commands therefore do **not** need `sudo` and do not receive the administrator key.
 

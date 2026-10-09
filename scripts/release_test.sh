@@ -113,3 +113,40 @@ for entrypoint in install-core upgrade; do
     grep -q v-old "$root/bin/trellis"
     printf 'PASS stage before mutation: %s\n' "$entrypoint"
 done
+
+# Real executable inode: atomically replacing the path must not fool the running
+# version check. Scripts cannot model /proc/PID/exe, which points to their shell.
+cat >"$tmp/daemon.go" <<'GO'
+package main
+import ("fmt"; "os"; "time")
+var version string
+func main() {
+    if len(os.Args) > 1 { fmt.Println("trellis", version); return }
+    _ = os.WriteFile(os.Getenv("READY_FILE"), []byte("ready"), 0600)
+    for { time.Sleep(time.Second) }
+}
+GO
+for version in old new; do
+    CGO_ENABLED=0 go build -ldflags "-X main.version=v-$version" -o "$tmp/daemon-$version" "$tmp/daemon.go"
+done
+python3 - "$tmp" "$script_dir/common.sh" <<'PY'
+import os, pathlib, shutil, subprocess, sys, time
+root = pathlib.Path(sys.argv[1])
+binary = root / 'daemon'
+shutil.copy(root / 'daemon-old', binary)
+env = dict(os.environ, READY_FILE=str(root / 'ready'))
+p = subprocess.Popen([str(binary)], env=env)
+try:
+    for _ in range(100):
+        if (root / 'ready').exists(): break
+        time.sleep(.02)
+    else: raise AssertionError('daemon failed to start')
+    os.replace(root / 'daemon-new', binary)
+    assert subprocess.check_output([str(binary), '--version'], text=True).strip() == 'trellis v-new'
+    script = 'set -euo pipefail; source "$1"; daemon_pid="$2"; systemctl() { echo "$daemon_pid"; }; RELEASE_TAG=v-new; ! verify_running_version; RELEASE_TAG=v-old; verify_running_version'
+    subprocess.run(['bash', '-c', script, 'sh', sys.argv[2], str(p.pid)], check=True)
+finally:
+    p.terminate()
+    p.wait(timeout=5)
+print('PASS running version uses retained executable inode, not replaced disk binary')
+PY
