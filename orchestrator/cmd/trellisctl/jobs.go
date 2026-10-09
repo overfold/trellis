@@ -88,7 +88,7 @@ func NewJobsApplyCmd() *cobra.Command {
 					return err
 				}
 				if wait {
-					return waitForJob(cmd.Context(), cmd.OutOrStdout(), serverClient, job.Name, interval, timeout)
+					return waitForJob(cmd.Context(), cmd.OutOrStdout(), serverClient, job.Name, interval, timeout, &api.JobRegistrationResponse{Incarnation: jobPlan.BaseIncarnation, Version: jobPlan.BaseVersion, Revision: jobPlan.BaseRevision})
 				}
 				return nil
 			}
@@ -120,7 +120,7 @@ func NewJobsApplyCmd() *cobra.Command {
 				}
 			}
 			if wait {
-				return waitForJob(cmd.Context(), cmd.OutOrStdout(), serverClient, job.Name, interval, timeout)
+				return waitForJob(cmd.Context(), cmd.OutOrStdout(), serverClient, job.Name, interval, timeout, applied)
 			}
 			return nil
 		},
@@ -202,7 +202,7 @@ func NewJobsStatusCmd() *cobra.Command {
 				if config.Output == "json" {
 					return fmt.Errorf("--watch does not support --output json")
 				}
-				return waitForJob(cmd.Context(), cmd.OutOrStdout(), serverClient, args[0], interval, timeout)
+				return waitForJob(cmd.Context(), cmd.OutOrStdout(), serverClient, args[0], interval, timeout, nil)
 			}
 			if history {
 				events, err := loadJobEvents(cmd.Context(), serverClient, args[0], allocation)
@@ -490,29 +490,45 @@ func shortID(id string) string {
 }
 
 func jobReady(status *api.JobStatusResponse) bool {
-	if status.Desired <= 0 {
+	var job spec.JobSpec
+	if err := json.Unmarshal(status.Spec, &job); err != nil || job.Name != status.Name || status.Incarnation == "" || status.Revision <= 0 || desiredAllocations(&job) <= 0 {
 		return false
 	}
-	if len(status.Allocations) == 0 {
-		return status.Running >= status.Desired && status.Healthy >= status.Desired
-	}
-	currentRunning, currentHealthy := 0, 0
+	healthy := make(map[string]int)
+	seen := make(map[string]bool)
 	for _, a := range status.Allocations {
-		if a.JobRevision != status.Revision || a.Draining {
+		if a.ID == "" || seen[a.ID] || a.Namespace != job.Namespace || a.Job != job.Name || a.JobIncarnation != status.Incarnation || a.JobRevision != status.Revision || a.Draining {
 			continue
 		}
-		if a.Phase == api.PhaseRunning {
-			currentRunning++
-		}
+		seen[a.ID] = true
 		if a.Phase == api.PhaseRunning && a.Health == api.HealthHealthy {
-			currentHealthy++
+			healthy[a.Group]++
 		}
 	}
-	return currentRunning >= status.Desired && currentHealthy >= status.Desired
+	for _, group := range job.TaskGroups {
+		if healthy[group.Name] < group.Count {
+			return false
+		}
+	}
+	return true
 }
 
 func jobState(status *api.JobStatusResponse) string {
-	if jobReady(status) {
+	// List responses omit the canonical spec; their server-side counters
+	// provide an aggregate summary, not a deployment completion check.
+	// Deployment waits always require the detailed response in jobReady.
+	summaryHealthy := 0
+	if len(status.Spec) == 0 {
+		for _, a := range status.Allocations {
+			if a.JobRevision == status.Revision && a.JobIncarnation == status.Incarnation && !a.Draining && a.Phase == api.PhaseRunning && a.Health == api.HealthHealthy {
+				summaryHealthy++
+			}
+		}
+		if len(status.Allocations) == 0 {
+			summaryHealthy = min(status.Running, status.Healthy)
+		}
+	}
+	if jobReady(status) || len(status.Spec) == 0 && status.Desired > 0 && summaryHealthy >= status.Desired {
 		return "ready"
 	}
 	for _, a := range status.Allocations {

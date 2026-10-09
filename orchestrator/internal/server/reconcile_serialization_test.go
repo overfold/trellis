@@ -171,12 +171,13 @@ func TestStopAllocationByIDWaitsForNodeActionsAndReplaces(t *testing.T) {
 func TestRestartJobReconcilesImmediately(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()
-	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
+	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy, CPUAllocatable: 1000, MemoryAllocatable: 1 << 30}
 	addTestNode(s, node, s.now())
-	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}
+	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app", Resources: &spec.ResourcesSpec{CPU: 1000, Memory: 64 << 20}}}}}}
 	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(jobSpec), Revision: 1}
-	original := &Allocation{ID: "original", Namespace: "default", JobName: "web", TaskGroupName: "api", Tasks: jobSpec.TaskGroups[0].Tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
+	original := &Allocation{ID: "original", Namespace: "default", JobName: "web", TaskGroupName: "api", Tasks: jobSpec.TaskGroups[0].Tasks, Node: node, Generation: 7, JobRevision: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
 	s.allocations = []*Allocation{original}
+	agent.failStop = true
 
 	if err := s.RestartJob(context.Background(), "default", "web"); err != nil {
 		t.Fatal(err)
@@ -185,14 +186,28 @@ func TestRestartJobReconcilesImmediately(t *testing.T) {
 	if !original.Draining || original.DrainReason != "restart" || original.DrainSequence != 1 {
 		t.Fatalf("restart intent = draining %t reason %q sequence %d", original.Draining, original.DrainReason, original.DrainSequence)
 	}
-	drained := false
+	if original.Phase != lifecycle.PhaseStopping || original.NextRetryAt == nil || original.Generation != 7 || len(s.allocations) != 1 {
+		t.Fatal("failed recreate restart stop did not preserve fenced old execution and block replacement")
+	}
+	agent.mu.Lock()
+	agent.failStop = false
+	agent.mu.Unlock()
+	original.mu.Lock()
+	original.NextRetryAt = nil
+	original.mu.Unlock()
+	s.Reconcile(context.Background())
+	stopped := false
 	for _, call := range agent.recordedCalls() {
-		if call.method == http.MethodPost && call.path == "/v1/allocations/original/drain" {
-			drained = true
+		if call.method == http.MethodDelete && call.path == "/v1/allocations/original" {
+			stopped = true
 		}
 	}
-	if !drained || len(s.allocations) != 2 {
-		t.Fatalf("restart did not reconcile: drained=%t allocations=%d", drained, len(s.allocations))
+	if !stopped || original.Phase != lifecycle.PhaseStopped || len(s.allocations) != 1 {
+		t.Fatalf("restart did not stop before placement: stopped=%t phase=%s allocations=%d", stopped, original.Phase, len(s.allocations))
+	}
+	s.Reconcile(context.Background())
+	if len(s.allocations) != 2 || s.allocations[1].Phase != lifecycle.PhaseStarting || original.Generation != 7 {
+		t.Fatal("restart did not place after successful stop")
 	}
 	persisted, err := s.state.ListAllocations(context.Background())
 	if err != nil {

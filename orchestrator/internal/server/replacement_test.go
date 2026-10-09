@@ -501,6 +501,10 @@ func TestReconcileNewRevisionReplacesImmediately(t *testing.T) {
 	job := s.jobs[jobKey("default", "web")]
 	job.Spec.TaskGroups[0].Tasks[0].Image = "app:v2"
 	job.Revision = 2
+	// A complete observation proves failed siblings have been cleaned up.
+	for _, node := range s.nodes {
+		node.observedAt = clock.now
+	}
 	s.Reconcile(ctx)
 	if active := activeAllocations(s); len(active) != 1 || active[0].JobRevision != 2 {
 		t.Fatalf("new revision placement = %d active allocations", len(active))

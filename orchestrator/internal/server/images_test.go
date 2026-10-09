@@ -92,12 +92,19 @@ func TestImageApplyPinsPlanAndRetainedHistory(t *testing.T) {
 			// Caller-owned maps must not mutate durable desired state.
 			planned.ResolvedImages[image] = third
 			s.Reconcile(ctx)
+			// Recreate releases old execution in one pass and places in the next.
+			s.Reconcile(ctx)
 			if s.allocations[len(s.allocations)-1].Tasks[0].Image != second {
 				t.Fatal("replacement did not use the reviewed image")
 			}
 			status, err := s.GetJob("default", "web")
 			if err != nil || status.ResolvedImages[image] != second {
 				t.Fatalf("status pins = %+v, %v", status, err)
+			}
+			for _, allocation := range status.Allocations {
+				if allocation.JobIncarnation == "" || allocation.JobIncarnation != applied.Incarnation {
+					t.Fatalf("allocation status lost canonical job identity: %+v", allocation)
+				}
 			}
 			var authored spec.JobSpec
 			if err := json.Unmarshal(status.Spec, &authored); err != nil || authored.TaskGroups[0].Tasks[0].Image != image {

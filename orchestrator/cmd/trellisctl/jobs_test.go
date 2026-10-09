@@ -15,6 +15,96 @@ import (
 	"github.com/overfold/trellis/orchestrator/api"
 )
 
+func TestApplyWaitReadinessAndSupersession(t *testing.T) {
+	previousConfig := config
+	t.Cleanup(func() { config = previousConfig })
+	manifest := filepath.Join(t.TempDir(), "web.yaml")
+	if err := os.WriteFile(manifest, []byte("name: web\nnamespace: default\ntask_groups:\n  - name: api\n    count: 2\n    tasks:\n      - name: server\n        image: app\n  - name: worker\n    count: 1\n    tasks:\n      - name: worker\n        image: app\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	canonical := json.RawMessage(`{"name":"web","namespace":"default","task_groups":[{"name":"api","count":2},{"name":"worker","count":1}]}`)
+	for _, action := range []string{"update", "none"} {
+		for _, kind := range []string{"ready", "group deficit", "old incarnation", "wrong namespace", "wrong job", "old revision", "draining", "duplicate", "missing detail", "new version", "new revision", "recreated", "deleted"} {
+			t.Run(action+"/"+kind, func(t *testing.T) {
+				polls := 0
+				version := 5
+				if action == "none" {
+					version = 4
+				}
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch r.URL.Path {
+					case "/v1/namespaces/default/jobs/plan":
+						_ = json.NewEncoder(w).Encode(api.JobPlanResponse{Action: action, BaseIncarnation: "inc", BaseVersion: 4, BaseRevision: 2, Spec: canonical})
+					case "/v1/namespaces/default/jobs":
+						_ = json.NewEncoder(w).Encode(api.JobRegistrationResponse{Namespace: "default", Name: "web", Incarnation: "inc", Version: version, Revision: 2})
+					case "/v1/namespaces/default/jobs/web":
+						polls++
+						status := api.JobStatusResponse{Name: "web", Incarnation: "inc", Version: version, Revision: 2, Desired: 3, Running: 3, Healthy: 3, Spec: canonical}
+						for i, group := range []string{"api", "api", "worker"} {
+							status.Allocations = append(status.Allocations, api.AllocationResponse{ID: group + string(rune('a'+i)), Namespace: "default", Job: "web", Group: group, JobIncarnation: "inc", JobRevision: 2, Phase: api.PhaseRunning, Health: api.HealthHealthy})
+						}
+						if polls == 1 {
+							a := &status.Allocations[2]
+							switch kind {
+							case "group deficit":
+								a.Group = "api"
+							case "old incarnation":
+								a.JobIncarnation = "old"
+							case "wrong namespace":
+								a.Namespace = "other"
+							case "wrong job":
+								a.Job = "other"
+							case "old revision":
+								a.JobRevision = 1
+							case "draining":
+								a.Draining = true
+							case "duplicate":
+								a.ID = status.Allocations[0].ID
+							case "missing detail":
+								status.Allocations = nil
+							case "new version":
+								status.Version++
+							case "new revision":
+								status.Revision++
+							case "recreated":
+								status.Incarnation = "new"
+							case "deleted":
+								http.Error(w, `{"message":"not found"}`, http.StatusNotFound)
+								return
+							}
+						}
+						_ = json.NewEncoder(w).Encode(status)
+					default:
+						t.Errorf("unexpected path %s", r.URL.Path)
+					}
+				}))
+				defer server.Close()
+				config = CLIConfig{ServerAddr: server.URL, Namespace: "default"}
+				cmd := NewJobsApplyCmd()
+				cmd.SetArgs([]string{"--file", manifest, "--wait", "--interval", "1ns", "--timeout", "1s"})
+				var output bytes.Buffer
+				cmd.SetOut(&output)
+				cmd.SetErr(&bytes.Buffer{})
+				err := cmd.Execute()
+				superseded := kind == "new version" || kind == "new revision" || kind == "recreated" || kind == "deleted"
+				if superseded {
+					if err == nil || !strings.Contains(err.Error(), "superseded") || strings.Contains(output.String(), "Ready:") {
+						t.Fatalf("superseded deployment: err=%v output=%s", err, &output)
+					}
+					return
+				}
+				wantPolls := 2
+				if kind == "ready" {
+					wantPolls = 1
+				}
+				if err != nil || polls != wantPolls || !strings.Contains(output.String(), "Ready:") {
+					t.Fatalf("readiness err=%v polls=%d want=%d output=%s", err, polls, wantPolls, &output)
+				}
+			})
+		}
+	}
+}
+
 func TestJobsCommandSurface(t *testing.T) {
 	previousConfig := config
 	config = CLIConfig{}

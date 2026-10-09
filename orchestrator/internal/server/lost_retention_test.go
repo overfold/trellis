@@ -338,7 +338,7 @@ func TestScheduleAroundRetainedDoesNotMutateInputs(t *testing.T) {
 	intent := PlacementIntent{Namespace: "default", JobName: "web", TaskGroupName: "app", Count: 1, Nodes: []*Node{node}, Allocations: valid, Tasks: tasks, VolumeOwners: owners}
 
 	retained := []*retainedOriginal{{allocation: original, node: node}}
-	placements, released := scheduleAroundRetained(intent, retained)
+	placements, released, _ := scheduleAroundRetained(intent, retained)
 	if len(placements) != 1 || placements[0].NodeID != node.ID || len(released) != 1 || released[0].allocation != original {
 		t.Fatalf("placements=%#v released=%#v, want one placement after releasing the original", placements, released)
 	}
@@ -354,7 +354,7 @@ func TestScheduleAroundRetainedDoesNotMutateInputs(t *testing.T) {
 
 	// The same inputs always yield the same decision.
 	again := []*retainedOriginal{{allocation: original, node: node}}
-	placementsAgain, releasedAgain := scheduleAroundRetained(intent, again)
+	placementsAgain, releasedAgain, _ := scheduleAroundRetained(intent, again)
 	if len(placementsAgain) != len(placements) || len(releasedAgain) != len(released) {
 		t.Fatalf("repeated decision differs: %#v/%#v", placementsAgain, releasedAgain)
 	}

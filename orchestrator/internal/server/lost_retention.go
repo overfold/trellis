@@ -110,18 +110,19 @@ func unreleasedAllocations(retained []*retainedOriginal) []*Allocation {
 // replacement can take their place.
 //
 // Neither the intent nor any allocation is mutated. It returns the
-// placements and the originals it released.
-func scheduleAroundRetained(intent PlacementIntent, retained []*retainedOriginal) ([]Placement, []*retainedOriginal) {
-	schedule := func(held []*Allocation) []Placement {
+// placements, the originals it released, and the diagnostic from the same
+// occupancy view that produced the placements.
+func scheduleAroundRetained(intent PlacementIntent, retained []*retainedOriginal) ([]Placement, []*retainedOriginal, *placementDiagnostic) {
+	withOccupancy := func(held []*Allocation) []Placement {
 		candidate := intent
 		candidate.Allocations = slices.Concat(intent.Allocations, held)
 		return Schedule(&candidate)
 	}
 	var released []*retainedOriginal
 	if held := unreleasedAllocations(retained); len(held) > 0 && intent.Count > 0 {
-		withHeld := len(schedule(held))
+		withHeld := len(withOccupancy(held))
 		if withHeld < intent.Count {
-			unblocked := schedule(nil)
+			unblocked := withOccupancy(nil)
 			if len(unblocked) > withHeld {
 				targets := make(map[uuid.UUID]bool, len(unblocked))
 				for _, placement := range unblocked {
@@ -140,12 +141,14 @@ func scheduleAroundRetained(intent PlacementIntent, retained []*retainedOriginal
 				for _, original := range candidates {
 					original.released = true
 					released = append(released, original)
-					if len(schedule(unreleasedAllocations(retained))) >= len(unblocked) {
+					if len(withOccupancy(unreleasedAllocations(retained))) >= len(unblocked) {
 						break
 					}
 				}
 			}
 		}
 	}
-	return schedule(unreleasedAllocations(retained)), released
+	intent.Allocations = slices.Concat(intent.Allocations, unreleasedAllocations(retained))
+	placements, diagnostic := schedule(&intent)
+	return placements, released, diagnostic
 }

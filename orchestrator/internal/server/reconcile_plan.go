@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"maps"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -198,6 +199,10 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 			continue
 		}
 		if node := in.Nodes[allocation.Node.ID]; node != nil && !lossTimedOut(node) {
+			// A completed stop is stronger proof than an older heartbeat.
+			if allocation.Phase == lifecycle.PhaseStopped && !node.observedAt.After(allocation.TransitionedAt) {
+				continue
+			}
 			if allocation.Phase == lifecycle.PhaseFailed && node.observedAt.Before(allocation.TransitionedAt) {
 				observedOccupancy[allocation] = true
 			}
@@ -313,6 +318,10 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 		}
 		if allocation.NextRetryAt != nil && now.Before(*allocation.NextRetryAt) {
 			valid = append(valid, allocation)
+			continue
+		}
+		if updateStrategy(job, allocation.TaskGroupName) == spec.UpdateRecreate && (allocation.JobRevision < job.Revision || allocation.DrainReason == "restart") {
+			actions = append(actions, Action{Type: ActionStop, Allocation: allocation})
 			continue
 		}
 		if allocation.Draining && allocation.Node != nil && (allocation.Node.Status == NodeStatusHealthy || allocation.Node.Status == NodeStatusDraining) {
@@ -462,7 +471,7 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 				if original.released || original.kept || !original.inGroup(namespace, jobName, group.Name) {
 					continue
 				}
-				if missing > 0 && original.allocation.JobIncarnation == job.Incarnation && (original.allocation.JobRevision == job.Revision || updateStrategy(job, group.Name) == spec.UpdateRolling) && !original.blocksPlacedAllocation(occupied) {
+				if missing > 0 && original.allocation.JobIncarnation == job.Incarnation && (original.allocation.JobRevision == job.Revision && original.allocation.DrainReason != "restart" || updateStrategy(job, group.Name) == spec.UpdateRolling) && !original.blocksPlacedAllocation(occupied) {
 					original.kept = true
 					missing--
 					retainedAvailable++
@@ -486,8 +495,25 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 					}
 				}
 			}
-			deficit := group.Count - len(current) - unavailable
+			deficit := max(group.Count-len(current)-unavailable, 0)
 			strategy := group.Update.Strategy
+			if strategy == spec.UpdateRecreate {
+				// Planned stops may fail or run concurrently on other nodes.
+				// Admit replacements only in a later pass after cleanup is proven.
+				blocked := false
+				for _, alloc := range allocationsByGroup[backoffKey] {
+					obsolete := alloc.JobIncarnation != job.Incarnation || alloc.JobRevision != job.Revision || alloc.DrainReason == "restart"
+					if obsolete && (observedOccupancy[alloc] || potentiallyLiveAllocation(alloc.Phase)) {
+						blocked = true
+					}
+				}
+				if blocked {
+					actions = slices.DeleteFunc(actions, func(action Action) bool {
+						return action.Type == ActionStart && replacementBackoffKey(action.Allocation.Namespace, action.Allocation.JobName, action.Allocation.TaskGroupName) == backoffKey
+					})
+					continue
+				}
+			}
 			parallel := 0
 			if strategy == spec.UpdateRolling {
 				parallel = group.Update.MaxParallel
@@ -546,7 +572,7 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 			}
 			requiredCapabilities := spec.GroupRequiredCapabilities(&group)
 			intent := PlacementIntent{Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Count: placeable, Nodes: nodes, Allocations: occupied, DesiredAllocations: valid, Tasks: group.Tasks, Constraints: group.Constraints, RequiredCapabilities: requiredCapabilities, VolumeOwners: volumeOwners}
-			placements, released := scheduleAroundRetained(intent, retained)
+			placements, released, diagnostic := scheduleAroundRetained(intent, retained)
 			for _, original := range released {
 				retainedStops = append(retainedStops, original.stopAction())
 			}
@@ -577,10 +603,6 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 			}
 			unplaced := placeable - len(placements)
 			if unplaced > 0 {
-				diagnosticIntent := intent
-				diagnosticIntent.Count = unplaced
-				diagnosticIntent.Allocations = occupied
-				_, diagnostic := schedule(&diagnosticIntent)
 				placedPending := min(len(placements), len(pending))
 				reusable := pending[placedPending:]
 				for i := 0; i < min(unplaced, len(reusable)); i++ {

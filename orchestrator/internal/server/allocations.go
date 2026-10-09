@@ -131,6 +131,7 @@ func (s *Server) allocationResponseLocked(allocation *Allocation) api.Allocation
 		Health:           api.AllocationHealth(allocation.Health),
 		Draining:         allocation.Draining,
 		Generation:       allocation.Generation,
+		JobIncarnation:   allocation.JobIncarnation,
 		JobRevision:      allocation.JobRevision,
 		CreatedAt:        allocation.CreatedAt,
 		LastTransitionAt: allocation.TransitionedAt,

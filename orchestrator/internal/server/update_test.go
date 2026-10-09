@@ -176,8 +176,11 @@ func TestReconcileEnforcesNamespaceDesiredAllocationLimit(t *testing.T) {
 func TestReconcileRecreateStopsOldAllocations(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()
-	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
-	addTestNode(s, node, s.now())
+	nodes := []*Node{planTestNode(1, NodeStatusHealthy), planTestNode(2, NodeStatusHealthy), planTestNode(3, NodeStatusHealthy)}
+	for _, node := range nodes {
+		node.Host, node.Port = agent.host, agent.port
+		addTestNode(s, node, s.now())
+	}
 	s.leaderSince = s.now().Add(-time.Minute)
 
 	jobSpec := &spec.JobSpec{
@@ -195,7 +198,7 @@ func TestReconcileRecreateStopsOldAllocations(t *testing.T) {
 		a := &Allocation{
 			ID:        "alloc-" + string(rune('a'+i)),
 			Namespace: "default", JobName: "web", TaskGroupName: "api",
-			Tasks: jobSpec.TaskGroups[0].Tasks, Node: node, Generation: 1,
+			Tasks: jobSpec.TaskGroups[0].Tasks, Node: nodes[i], Generation: 1,
 			JobRevision: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy,
 			Diagnostic: lifecycle.Diagnostic{CreatedAt: now, TransitionedAt: now}}
 		s.allocations = append(s.allocations, a)
@@ -212,14 +215,29 @@ func TestReconcileRecreateStopsOldAllocations(t *testing.T) {
 	newHashes := map[string]string{"api": spec.TaskGroupContentHash(&newSpec.TaskGroups[0])}
 	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(newSpec), Revision: 2, ContentHashes: newHashes}
 
+	agent.failStop = true
 	s.Reconcile(context.Background())
-
+	if len(s.allocations) != 2 {
+		t.Fatal("failed cross-node recreate stops admitted replacement on spare capacity")
+	}
 	for _, a := range s.allocations {
 		a.mu.Lock()
-		if a.JobRevision == 1 && a.Phase != lifecycle.PhaseStopped && a.Phase != lifecycle.PhaseStopping {
-			t.Errorf("old allocation %s still in phase %s", a.ID, a.Phase)
+		if a.Phase != lifecycle.PhaseStopping || a.Generation != 1 || a.NextRetryAt == nil {
+			t.Errorf("failed stop %s: phase=%s generation=%d retry=%v", a.ID, a.Phase, a.Generation, a.NextRetryAt)
 		}
+		a.NextRetryAt = nil
 		a.mu.Unlock()
+	}
+	agent.mu.Lock()
+	agent.failStop = false
+	agent.mu.Unlock()
+	s.Reconcile(context.Background())
+	if len(s.allocations) != 2 || s.allocations[0].Phase != lifecycle.PhaseStopped || s.allocations[1].Phase != lifecycle.PhaseStopped {
+		t.Fatal("successful stop pass did not release both old executions without same-pass starts")
+	}
+	s.Reconcile(context.Background())
+	if len(s.allocations) != 4 || s.allocations[2].JobRevision != 2 || s.allocations[3].JobRevision != 2 || s.allocations[2].Phase != lifecycle.PhaseStarting || s.allocations[3].Phase != lifecycle.PhaseStarting {
+		t.Fatal("recreate did not converge after cross-node cleanup")
 	}
 }
 

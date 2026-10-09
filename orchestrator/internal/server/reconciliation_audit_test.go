@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"net/http"
 	"testing"
@@ -10,6 +11,113 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
+
+func TestScaleDownWithUnavailableReplicas(t *testing.T) {
+	for _, pendingCount := range []int{0, 2} {
+		t.Run(fmt.Sprint(pendingCount), func(t *testing.T) {
+			node := planTestNode(1, NodeStatusUnhealthy)
+			allocations := []*Allocation{planTestAllocation("a", node, lifecycle.PhaseRunning, 1), planTestAllocation("b", node, lifecycle.PhaseRunning, 1)}
+			for i := range pendingCount {
+				allocations = append(allocations, planTestAllocation(fmt.Sprintf("pending-%d", i), nil, lifecycle.PhasePending, 1))
+			}
+			input := planTestInput(map[string]*Job{jobKey("default", "web"): planTestJob("web", 1, 1, "")}, []*Node{node}, allocations...)
+			plan, err := planReconciliation(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(plan.NewAllocations) != 0 || len(plan.Updated) != pendingCount {
+				t.Fatalf("new=%d updated=%d, want only surplus pending capacity removed", len(plan.NewAllocations), len(plan.Updated))
+			}
+			for _, update := range plan.Updated {
+				if update.Phase != lifecycle.PhaseStopped || update.Reason != "scaled_down" {
+					t.Fatalf("unexpected update: %#v", update)
+				}
+			}
+		})
+	}
+}
+
+func TestRecreateWaitsForOldExecutionCleanup(t *testing.T) {
+	for _, kind := range []string{"running", "stop retry", "restart", "failed siblings", "returned original", "previous incarnation"} {
+		t.Run(kind, func(t *testing.T) {
+			a, b := planTestNode(1, NodeStatusHealthy), planTestNode(2, NodeStatusHealthy)
+			job := planTestJob("web", 1, 2, spec.UpdateRecreate)
+			old := planTestAllocation("old", a, lifecycle.PhaseRunning, 1)
+			switch kind {
+			case "stop retry":
+				old.Phase = lifecycle.PhaseStopping
+				retry := planNow.Add(time.Minute)
+				old.NextRetryAt = &retry
+			case "restart":
+				old.JobRevision = job.Revision
+				old.Draining, old.DrainReason = true, "restart"
+			case "failed siblings":
+				old.Phase = lifecycle.PhaseFailed
+			case "returned original":
+				old.Phase = lifecycle.PhaseLost
+			case "previous incarnation":
+				old.JobRevision = job.Revision
+				old.JobIncarnation = "deleted"
+			}
+			if kind == "failed siblings" || kind == "returned original" {
+				a.observedAllocations = []observedAllocation{{ID: old.ID, Generation: old.Generation, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy, Tasks: map[string]bool{"server": true}}}
+			}
+			// Already placed replacements must not be redelivered either.
+			placed := planTestAllocation("replacement", b, lifecycle.PhasePlaced, job.Revision)
+			input := planTestInput(map[string]*Job{jobKey("default", "web"): job}, []*Node{a, b}, old, placed)
+			plan, err := planReconciliation(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, action := range plan.Actions {
+				if action.Type == ActionStart {
+					t.Fatalf("start admitted before cleanup: %#v", summarizeActions(plan.Actions))
+				}
+			}
+			if len(plan.NewAllocations) != 0 || old.Generation != 1 {
+				t.Fatal("replacement admitted or input generation changed")
+			}
+			old.Phase, old.NextRetryAt = lifecycle.PhaseStopped, nil
+			a.observedAllocations, a.observedAt = nil, planNow
+			input.Allocations = []*Allocation{old}
+			converged, err := planReconciliation(input)
+			if err != nil || len(converged.NewAllocations) != 1 || converged.NewAllocations[0].Phase != lifecycle.PhasePlaced {
+				t.Fatalf("cleanup did not release capacity: plan=%#v err=%v", converged, err)
+			}
+		})
+	}
+}
+
+func TestRetainedPlacementDiagnosticUsesPlacementOccupancy(t *testing.T) {
+	a, b := planTestNode(1, NodeStatusHealthy), planTestNode(2, NodeStatusHealthy)
+	a.CPUAllocatable, b.CPUAllocatable = 1000, 2000
+	job := rollingPlanJob(2, 2)
+	task := &job.Spec.TaskGroups[0].Tasks[0]
+	task.Resources = &spec.ResourcesSpec{CPU: 1000, Memory: 64 << 20}
+	task.Volumes = []spec.VolumeSpec{{Name: "data", HostPath: "@/data", ContainerPath: "/data"}}
+	oldA := planTestAllocation("old-a", a, lifecycle.PhaseLost, 1)
+	oldB := planTestAllocation("old-b", b, lifecycle.PhaseLost, 1)
+	for _, old := range []*Allocation{oldA, oldB} {
+		old.Tasks[0].Resources = &spec.ResourcesSpec{CPU: 1000, Memory: 64 << 20}
+		old.Node.observedAllocations = []observedAllocation{{ID: old.ID, Generation: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy, Tasks: map[string]bool{"server": true}}}
+	}
+	// Without retained occupancy the new volume binds to A and only one
+	// replica fits. With occupancy it binds to B and still only one fits.
+	// Neither original is released; diagnosing with B's retained CPU omitted
+	// would falsely place the second replica and return a nil diagnostic.
+	plan, err := planReconciliation(planTestInput(map[string]*Job{jobKey("default", "web"): job}, []*Node{a, b}, oldA, oldB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.NewAllocations) != 2 {
+		t.Fatalf("allocations = %d, want one placed and one pending", len(plan.NewAllocations))
+	}
+	for i, allocation := range plan.NewAllocations {
+		if i == 0 && (allocation.Phase != lifecycle.PhasePlaced || allocation.Node.ID != b.ID) || i == 1 && (allocation.Phase != lifecycle.PhasePending || allocation.Reason != "insufficient_capacity") {
+			t.Fatalf("allocation %d: %#v", i, allocation)
+		}
+	}
+}
 
 func TestPlanObsoleteExecutionsBecomeLost(t *testing.T) {
 	for _, kind := range []string{"deleted", "incarnation", "removed group", "recreate", "retry"} {

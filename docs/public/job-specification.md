@@ -168,6 +168,8 @@ When a node stops sending heartbeats for longer than the allocation loss timeout
 
 `update.strategy` is `recreate` (the default) or `rolling`. For rolling updates, `max_parallel` limits both the number of not-yet-healthy replacements in flight and temporary live capacity above `count`. A stop frees capacity only after it succeeds, so a failed stop cannot admit an excess replacement. Omission or zero resolves to one.
 
+Recreate updates stop the task group's old execution before admitting replacements, including across nodes and while stops are being retried. Explicit job restarts follow each group's strategy: recreate stops old work first and needs no spare capacity; rolling retains healthy old work while replacements become healthy. An unavailable node holds the recreate barrier until cleanup succeeds or the allocation loss timeout expires. That timeout is not proof that containers on a partitioned node have physically stopped.
+
 Task groups are the unit of placement, scaling, updates, restart behavior, and draining. Every task in a group is coupled to that lifecycle.
 
 ## Task fields

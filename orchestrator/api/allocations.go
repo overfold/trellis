@@ -69,6 +69,7 @@ type AllocationResponse struct {
 	Health           AllocationHealth     `json:"health"`
 	Draining         bool                 `json:"draining,omitempty"`
 	Generation       uint64               `json:"generation"`
+	JobIncarnation   string               `json:"job_incarnation"`
 	JobRevision      int                  `json:"job_revision"`
 	CreatedAt        time.Time            `json:"created_at"`
 	LastTransitionAt time.Time            `json:"last_transition_at"`

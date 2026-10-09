@@ -132,13 +132,12 @@ func TestPlanReconciliation(t *testing.T) {
 			actions: []plannedAction{{ActionStop, "a"}},
 		},
 		{
-			name: "recreate strategy stops outdated revisions and replaces them",
+			name: "recreate strategy stops outdated revisions before replacing them",
 			input: func() *reconcilePlanInput {
 				return planTestInput(map[string]*Job{jobKey("default", "web"): planTestJob("web", 1, 2, "")}, []*Node{healthy},
 					planTestAllocation("a", healthy, lifecycle.PhaseRunning, 1))
 			},
-			actions: []plannedAction{{ActionStop, "a"}, {ActionStart, "default-web-app-00000001"}},
-			created: []plannedUpdate{{ID: "default-web-app-00000001", Phase: lifecycle.PhasePlaced}},
+			actions: []plannedAction{{ActionStop, "a"}},
 		},
 		{
 			name: "rolling strategy drains outdated revisions before replacing them",

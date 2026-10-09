@@ -142,13 +142,13 @@ To make deployment completion part of the command result, wait for desired capac
 trellisctl jobs apply --file trellis.yaml --wait --timeout 5m
 ```
 
-The command prints only meaningful state changes while the job converges. Waiting follows the named job's latest state, not a pinned incarnation or revision: a concurrent apply can change the deployment being observed. The same observer is available from `status`:
+The command prints only meaningful state changes while the job converges. Apply waiting is pinned to the submitted incarnation, version, and revision (or the planned identity for an unchanged manifest). A concurrent change, deletion, or delete/recreate reports that the deployment was superseded rather than succeeding against different desired state. To follow the named job's latest state instead, use `status`:
 
 ```sh
 trellisctl jobs status web --watch --timeout 5m
 ```
 
-A job is reported as `ready` when at least its desired allocation count from the current revision is running and healthy. Old or draining allocations cannot make a new revision look complete. `converging` means Trellis is still placing, starting, or replacing work. `degraded` means a current allocation explicitly reports an unhealthy, failed, or lost state.
+A detailed job status is reported as `ready` when every task group has at least its desired allocation count running and healthy. Allocations must match the canonical namespace, job, incarnation, and current revision; old, duplicate, or draining allocations cannot make a deployment look complete. `converging` means Trellis is still placing, starting, or replacing work. `degraded` means a current allocation explicitly reports an unhealthy, failed, or lost state.
 
 ## Inspect status and history
 

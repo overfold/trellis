@@ -251,7 +251,11 @@ func TestReconcileChargesAllocationsQueuedForStop(t *testing.T) {
 			if obsolete.Phase != lifecycle.PhaseStopping || obsolete.NextRetryAt == nil {
 				t.Fatalf("obsolete allocation after failed stop: phase=%s retry=%v", obsolete.Phase, obsolete.NextRetryAt)
 			}
-			if len(s.allocations) != 2 || s.allocations[1].Phase != lifecycle.PhasePending || s.allocations[1].Reason == "" {
+			if tt.name == "recreate-obsolete static host port" {
+				if len(s.allocations) != 1 {
+					t.Fatal("recreate admitted replacement before stop completed")
+				}
+			} else if len(s.allocations) != 2 || s.allocations[1].Phase != lifecycle.PhasePending || s.allocations[1].Reason == "" {
 				t.Fatalf("allocations = %#v, want the obsolete allocation and one pending placement diagnostic", s.allocations)
 			}
 			var starts, stops int
@@ -272,7 +276,11 @@ func TestReconcileChargesAllocationsQueuedForStop(t *testing.T) {
 			agent.mu.Unlock()
 			obsolete.NextRetryAt = nil
 			s.Reconcile(context.Background())
-			if obsolete.Phase != lifecycle.PhaseStopped || len(s.allocations) != 2 || s.allocations[1].Phase != lifecycle.PhasePending {
+			wantCount := 2
+			if tt.name == "recreate-obsolete static host port" {
+				wantCount = 1
+			}
+			if obsolete.Phase != lifecycle.PhaseStopped || len(s.allocations) != wantCount || wantCount == 2 && s.allocations[1].Phase != lifecycle.PhasePending {
 				t.Fatalf("successful stop pass: phase=%s allocations=%d, want stopped without same-pass replacement", obsolete.Phase, len(s.allocations))
 			}
 

@@ -96,6 +96,8 @@ When desired capacity cannot be placed, job status includes one `pending` alloca
 
 A job has an identity and two counters, all reported by `GET /v1/namespaces/{ns}/jobs` and `GET /v1/namespaces/{ns}/jobs/{name}`. `incarnation` is an opaque ID assigned when the job is created; it never changes during the job's life, and a job deleted and recreated under the same name gets a new one. `version` advances on every accepted change to the specification or resolved images, including label, `count`, and update-policy changes. `revision` identifies execution content: it advances only when a task group's execution hash changes, and allocations carry it as `job_revision` for fencing and rolling updates. Submitting an identical specification with identical resolved images changes neither and writes nothing.
 
+Allocation responses also carry `job_incarnation`, identifying the lifetime that created them. Consumers checking convergence must match this field as well as the namespace, job, task group, and revision: an old incarnation can have the same revision number after delete/recreate. `trellisctl jobs apply --wait` binds completion to the returned incarnation, version, and revision, and reports supersession if any changes or the job disappears. Older servers without allocation incarnation metadata cannot satisfy the new CLI's detailed readiness check; no identity fallback is used.
+
 Planning resolves every distinct image tag to a digest-qualified reference and
 returns `resolved_images`, a map from authored image strings to those references.
 The plan's image changes compare pinned execution references, so an unchanged tag

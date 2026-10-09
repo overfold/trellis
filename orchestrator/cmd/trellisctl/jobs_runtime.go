@@ -21,7 +21,7 @@ func isHTTPStatus(err error, status int) bool {
 	return errors.As(err, &httpErr) && httpErr.Status == status
 }
 
-func waitForJob(parent context.Context, w io.Writer, serverClient *client.Client, name string, interval, timeout time.Duration) error {
+func waitForJob(parent context.Context, w io.Writer, serverClient *client.Client, name string, interval, timeout time.Duration, target *api.JobRegistrationResponse) error {
 	if interval <= 0 {
 		return fmt.Errorf("interval must be greater than zero")
 	}
@@ -36,8 +36,14 @@ func waitForJob(parent context.Context, w io.Writer, serverClient *client.Client
 	last := ""
 	for {
 		status, err := serverClient.GetJob(ctx, name)
+		if target != nil && isHTTPStatus(err, http.StatusNotFound) {
+			return fmt.Errorf("deployment of job %s superseded: job was deleted", name)
+		}
 		if err != nil {
 			return err
+		}
+		if target != nil && (status.Incarnation != target.Incarnation || status.Version != target.Version || status.Revision != target.Revision) {
+			return fmt.Errorf("deployment of job %s superseded: expected incarnation %s version %d revision %d, found incarnation %s version %d revision %d", name, target.Incarnation, target.Version, target.Revision, status.Incarnation, status.Version, status.Revision)
 		}
 		line := fmt.Sprintf("revision %d: %d/%d running, %d/%d healthy (%s)", status.Revision, status.Running, status.Desired, status.Healthy, status.Desired, jobState(status))
 		if line != last {
