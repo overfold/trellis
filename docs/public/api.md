@@ -12,6 +12,8 @@ JSON request bodies must be sent with `Content-Type: application/json` (otherwis
 
 Job envelopes and specifications require the exact published JSON field names: `name`, not `Name`, and `task_groups`, not `TaskGroups`. Explicit `null` is not a job-specification value, including in `env` and `labels`; omit optional fields instead. Literal map keys retain their case. Integer byte counts and nanosecond durations are preserved exactly in semantic diffs; Go plan consumers receive numeric `before`/`after` values as `json.Number`.
 
+All JSON request objects require unique keys recursively, including nested specifications, maps, arrays of objects, and backup records. Escaped spellings of the same key are duplicates too (`name` and `\u006eame`). Duplicates return `400` before shape or typed decoding; formerly accepted last-value-wins inputs must be corrected. Distinct objects may reuse keys, and case-distinct literal map keys remain distinct. Duplicate diagnostics do not echo keys or values.
+
 Trellis distinguishes three credential kinds:
 
 - `administrator` — the root request context granted after verification of an operator-held Ed25519 key;
@@ -276,6 +278,8 @@ Restore admits at most two concurrent requests per control-plane process through
 Package [`github.com/overfold/trellis/orchestrator/client`](../../orchestrator/client/) is the Go client for the endpoints in [Public/operator endpoints](#publicoperator-endpoints) and the administrator endpoints above, including administrator request signing and exec streams. Its wire types are in [`github.com/overfold/trellis/orchestrator/api`](../../orchestrator/api/). Job specifications cross that API as canonical JSON (`json.RawMessage`) described by the [published schemas](../../schemas/); the Go job model in `internal/spec` stays internal. `trellisctl` uses the package, and external consumers such as [`trellis-proxy-sync`](https://github.com/overfold/trellis-proxy-sync) import only these two public packages.
 
 External integrations must not import `internal/` packages. Their node-to-node protocols are private implementation details, documented in [internal APIs](../developer/api.md).
+
+Public client requests wait for responses under the caller's context, without a fixed response-header timeout. Set a context deadline appropriate for the operation: plan/apply resolves distinct images sequentially, and each registry resolution has a server-side 30-second budget, so valid multi-image work may exceed 30 seconds overall. Caller cancellation and leadership cancellation still stop that work. Connection and TLS handshake timeouts remain 10 seconds; a context without a deadline imposes no total client response-wait limit.
 
 The module is rooted at the repository, so `go get github.com/overfold/trellis@VERSION` resolves release tags directly. The package is pre-1.0 and changes with the wire format.
 

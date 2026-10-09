@@ -24,6 +24,43 @@ task_groups:
         secrets: [{name: key, target: file, path: /run/trellis-secrets/key, mode: 256}]
 `
 
+func TestYAMLRejectsNullsRecursively(t *testing.T) {
+	for _, value := range []string{"null", "Null", "NULL", "~", "", "!!null null"} {
+		for _, field := range []string{"namespace: default", "count: 1", "cpu: 100", "window: 600000000000", "image: app:1"} {
+			name, _, _ := strings.Cut(field, ":")
+			raw := strings.Replace(numericManifest, field, name+": "+value, 1)
+			if _, err := ParseYAML([]byte(raw)); err == nil || !strings.Contains(err.Error(), "YAML null") {
+				t.Fatalf("%s = %q: %v", name, value, err)
+			}
+		}
+	}
+	for _, raw := range []string{
+		"null\n", "task_groups: [null]\n", "task_groups: [{tasks: [null]}]\n",
+		"task_groups: [{labels: {tier: null}}]\n",
+		"task_groups: [{tasks: [{env: {TOKEN: null}}]}]\n",
+		"task_groups: [{tasks: [{resources: null}]}]\n",
+		"task_groups: [{tasks: [{command: [echo, null]}]}]\n",
+		"task_groups: [{labels: {first: &empty null, second: *empty}}]\n",
+		"task_groups: [{labels: {<<: &base {tier: null}, tier: web}}]\n",
+	} {
+		if _, err := ParseYAML([]byte(raw)); err == nil || !strings.Contains(err.Error(), "YAML null") {
+			t.Fatalf("null accepted in %s: %v", raw, err)
+		}
+	}
+	job, err := ParseYAML([]byte(numericManifest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.TaskGroups[0].Tasks[0].Env != nil {
+		t.Fatal("omitted env changed")
+	}
+	raw := strings.Replace(numericManifest, "image: app:1", "image: app:1\n        env: {EMPTY: \"\", TEXT: \"null\", FIRST: &literal value, SECOND: *literal}", 1)
+	job, err = ParseYAML([]byte(raw))
+	if err != nil || job.TaskGroups[0].Tasks[0].Env["TEXT"] != "null" || job.TaskGroups[0].Tasks[0].Env["SECOND"] != "value" {
+		t.Fatalf("literal strings/aliases changed: %+v, %v", job, err)
+	}
+}
+
 func TestYAMLRejectsLossyNumericCoercion(t *testing.T) {
 	for _, field := range []string{"count: 1", "max_parallel: 1", "max_restarts: 3", "window: 600000000000", "cpu: 100", "memory: 134217728", "port: 80", "host_port: 8080", "interval: 10000000000", "timeout: 5000000000", "threshold: 3", "mode: 256"} {
 		name, _, _ := strings.Cut(field, ":")

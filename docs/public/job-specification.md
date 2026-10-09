@@ -80,6 +80,8 @@ Memory is bytes and durations are nanoseconds in the current API model. Parsing 
 
 A manifest must contain exactly one YAML document; additional documents, even empty ones, are rejected. Integer fields require in-range integers, not booleans, fractional numbers, or numeric strings. Human memory and duration strings remain supported; fractional human quantities such as `0.5MiB` and `500.5ms` are intentional authoring syntax. Negative fractions cannot be truncated into zero to select a default.
 
+Explicit YAML nulls (`null`, `~`, or a key with no value) are rejected at every depth, including map values, sequence elements, and anchored/merged values. Omit optional fields instead; use `""` for an intentional empty string and `[]` or `{}` for empty collections. Quoted `"null"` remains a literal string. Inputs that previously coerced null into an omission or empty string must be corrected. Duplicate mapping keys are also rejected; JSON consumers must likewise provide unique object keys at every depth rather than relying on last-value-wins decoding.
+
 ### Defaults and the stored job
 
 Before a job is planned or stored, Trellis resolves omitted defaults to their effective values. Inspect the complete stored specification with `trellisctl jobs status NAME --output json`; table status and plan output are summaries, not the full specification. Later changes to cluster settings or Trellis defaults do not change a stored job. Reapplying a manifest is a no-op only when its effective specification and resolved image digests are unchanged; moved tags or changed defaults can produce an update.
@@ -122,7 +124,7 @@ There is no job-level networking block. Network attachment belongs to each task 
 
 ### Labels and constraints
 
-Label keys and constraint attributes must begin with a letter, may contain letters, digits, `.`, `_`, `/`, and `-`, and are limited to 63 characters. Label values are limited to 256 characters. Constraint values must not be blank, and a task group may constrain each attribute only once.
+Label keys and constraint attributes must begin with a letter, may contain letters, digits, `.`, `_`, `/`, and `-`, and are limited to 63 characters. Label values are limited to 256 Unicode code points, not UTF-8 bytes or grapheme clusters (combining marks count separately), matching the published schemas' `maxLength`. Constraint values must not be blank, and a task group may constrain each attribute only once.
 
 ### API access
 

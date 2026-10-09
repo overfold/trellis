@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/distribution/reference"
 	"github.com/overfold/trellis/orchestrator/internal/probepath"
@@ -159,7 +160,7 @@ func Validate(job *JobSpec) error {
 			if !labelKeyPattern.MatchString(key) {
 				add(groupPath+".labels", "invalid", fmt.Sprintf("invalid label key %q", key))
 			}
-			if len(value) > 256 {
+			if utf8.RuneCountInString(value) > 256 {
 				add(groupPath+".labels."+key, "too_long", "label value exceeds 256 characters")
 			}
 		}

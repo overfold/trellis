@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"net/url"
-	"time"
 
 	"github.com/overfold/trellis/orchestrator/internal/transport"
 )
@@ -50,7 +49,9 @@ type Client struct {
 // namespace.
 var ErrNamespaceRequired = errors.New("a namespace is required")
 
-// New creates a client from config.
+// New creates a client from config. Request contexts bound response waits;
+// callers should set deadlines appropriate for the operation. In particular,
+// multi-image plan/apply resolution can take longer than 30 seconds.
 func New(config Config) (*Client, error) {
 	baseURL := transport.NormalizeBaseURL(config.Address)
 	if baseURL == "" {
@@ -59,7 +60,7 @@ func New(config Config) (*Client, error) {
 	if _, err := url.Parse(baseURL); err != nil {
 		return nil, fmt.Errorf("trellis client: invalid address: %w", err)
 	}
-	t := &transport.Client{Token: config.Token, HTTP: transport.NewHTTPClient(config.TLSConfig, 30*time.Second)}
+	t := &transport.Client{Token: config.Token, HTTP: transport.NewHTTPClient(config.TLSConfig, 0)}
 	if config.AdministratorKey != nil {
 		if config.Token != "" {
 			return nil, errors.New("trellis client: a token and an administrator key are mutually exclusive")

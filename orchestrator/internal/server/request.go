@@ -45,14 +45,9 @@ func decodeJSON(c *echo.Context, dst any, limit int64) error {
 		reader = http.MaxBytesReader(c.Response(), request.Body, limit)
 	}
 	decoder := json.NewDecoder(reader)
-	decoder.DisallowUnknownFields()
 	var raw json.RawMessage
 	_, jobRequest := dst.(*api.JobRegistrationRequest)
-	value := dst
-	if jobRequest {
-		value = &raw
-	}
-	if err := decoder.Decode(value); err != nil {
+	if err := decoder.Decode(&raw); err != nil {
 		return decodeError(err, limit)
 	}
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
@@ -61,23 +56,75 @@ func decodeJSON(c *echo.Context, dst any, limit int64) error {
 		}
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body: unexpected data after the JSON value")
 	}
+	if err := rejectDuplicateJSONKeys(raw); err != nil {
+		return decodeError(err, limit)
+	}
 	if jobRequest {
 		if err := validateJSONShape(raw, reflect.TypeOf(dst).Elem(), "request body", true); err != nil {
 			return decodeError(err, limit)
 		}
-		valueDecoder := json.NewDecoder(bytes.NewReader(raw))
-		valueDecoder.DisallowUnknownFields()
-		if err := valueDecoder.Decode(dst); err != nil {
-			return decodeError(err, limit)
-		}
+	}
+	valueDecoder := json.NewDecoder(bytes.NewReader(raw))
+	valueDecoder.DisallowUnknownFields()
+	if err := valueDecoder.Decode(dst); err != nil {
+		return decodeError(err, limit)
 	}
 	return nil
+}
+
+// Walk tokens before map or typed decoding can discard duplicate object keys,
+// including inside RawMessage fields. Do not echo keys or values in errors:
+// arbitrary map keys can themselves contain sensitive author input.
+func rejectDuplicateJSONKeys(raw json.RawMessage) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var walk func() error
+	walk = func() error {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		switch token {
+		case json.Delim('{'):
+			keys := make(map[string]struct{})
+			for decoder.More() {
+				key, err := decoder.Token()
+				if err != nil {
+					return err
+				}
+				name := key.(string)
+				if _, exists := keys[name]; exists {
+					return errors.New("duplicate JSON object key")
+				}
+				keys[name] = struct{}{}
+				if err := walk(); err != nil {
+					return err
+				}
+			}
+			_, err = decoder.Token()
+			return err
+		case json.Delim('['):
+			for decoder.More() {
+				if err := walk(); err != nil {
+					return err
+				}
+			}
+			_, err = decoder.Token()
+			return err
+		default:
+			return nil
+		}
+	}
+	return walk()
 }
 
 // decodeJobSpec strictly decodes the spec of a job request.
 func decodeJobSpec(raw json.RawMessage, jobSpec *spec.JobSpec) error {
 	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body: spec is required")
+	}
+	if err := rejectDuplicateJSONKeys(raw); err != nil {
+		return decodeError(err, maxJobRequestBytes)
 	}
 	if err := validateJSONShape(raw, reflect.TypeFor[spec.JobSpec](), "spec", false); err != nil {
 		return decodeError(err, maxJobRequestBytes)

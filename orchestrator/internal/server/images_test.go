@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/distribution/reference"
 	"github.com/google/uuid"
@@ -41,6 +42,79 @@ func imageTestSpec(image string, count int) *spec.JobSpec {
 	job := versionTestSpec(image, count)
 	job.TaskGroups[0].Tasks[0].Networking = &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkHost}
 	return canonicalTestSpec(job)
+}
+
+func TestPublicClientSlowMultiImageResolution(t *testing.T) {
+	t.Parallel()
+	for _, operation := range []string{"plan", "apply"} {
+		for _, deadline := range []time.Duration{time.Minute, 100 * time.Millisecond} {
+			t.Run(fmt.Sprintf("%s/%s", operation, deadline), func(t *testing.T) {
+				t.Parallel()
+				s, agent := newTestServerWithAgent()
+				t.Cleanup(agent.server.Close)
+				s.SetImageResolver(func(ctx context.Context, image string) (string, error) {
+					// Two individually valid resolutions take 32 seconds total,
+					// beyond the former client-wide 30-second header timeout.
+					timer := time.NewTimer(16 * time.Second)
+					defer timer.Stop()
+					select {
+					case <-ctx.Done():
+						return "", ctx.Err()
+					case <-timer.C:
+						return testImageResolver(ctx, image)
+					}
+				})
+				httpServer := httptest.NewServer(authenticatedHandler(s, auth.AccessWrite))
+				t.Cleanup(httpServer.Close)
+				c, err := client.New(client.Config{Address: httpServer.URL, Token: "token", Namespace: "default"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				job := imageTestSpec("app:1", 1)
+				second := job.TaskGroups[0].Tasks[0]
+				second.Name, second.Image = "sidecar", "sidecar:2"
+				job.TaskGroups[0].Tasks = append(job.TaskGroups[0].Tasks, second)
+				raw, err := json.Marshal(job)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithTimeout(t.Context(), deadline)
+				defer cancel()
+				var pins map[string]string
+				if operation == "plan" {
+					var result *api.JobPlanResponse
+					result, err = c.PlanJob(ctx, raw)
+					if err == nil {
+						pins = result.ResolvedImages
+					}
+				} else {
+					_, err = c.ApplyJob(ctx, &api.JobRegistrationRequest{Spec: raw})
+					if err == nil {
+						status, statusErr := c.GetJob(ctx, job.Name)
+						if statusErr != nil || status.Version != 1 {
+							t.Fatalf("applied job status = %+v, %v", status, statusErr)
+						}
+						pins = status.ResolvedImages
+					}
+				}
+				if deadline < time.Second {
+					if !errors.Is(err, context.DeadlineExceeded) {
+						t.Fatalf("caller deadline lost: %v", err)
+					}
+					return
+				}
+				if err != nil || len(pins) != 2 {
+					t.Fatalf("slow %s failed or lost image pins: %v, %v", operation, pins, err)
+				}
+				for _, image := range []string{"app:1", "sidecar:2"} {
+					want, _ := testImageResolver(t.Context(), image)
+					if pins[image] != want {
+						t.Fatalf("pin for %s = %s, want %s", image, pins[image], want)
+					}
+				}
+			})
+		}
+	}
 }
 
 func TestImageApplyPinsPlanAndRetainedHistory(t *testing.T) {

@@ -10,6 +10,34 @@ import (
 	"testing"
 )
 
+func TestReadManifestNullsAndUnicodeLabels(t *testing.T) {
+	base := "namespace: default\nname: web\ntask_groups:\n  - name: api\n    count: 1\n    tasks:\n      - name: app\n        image: example/app:1\n"
+	for _, suffix := range []string{"        env: {TOKEN: null}\n", "    labels: {tier: ~}\n", "        resources:\n"} {
+		path := filepath.Join(t.TempDir(), "trellis.yaml")
+		if err := os.WriteFile(path, []byte(base+suffix), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readJobManifest(t.Context(), path); err == nil || !strings.Contains(err.Error(), "YAML null") {
+			t.Fatalf("CLI accepted null or lost diagnostic: %v", err)
+		}
+	}
+	for _, count := range []int{256, 257} {
+		path := filepath.Join(t.TempDir(), "trellis.yaml")
+		label := strings.Repeat("😀", count)
+		if err := os.WriteFile(path, []byte(base+"    labels: {title: '"+label+"'}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		job, err := readJobManifest(t.Context(), path)
+		if count == 256 {
+			if err != nil || job.TaskGroups[0].Labels["title"] != label {
+				t.Fatalf("Unicode boundary rejected or changed: %v", err)
+			}
+		} else if err == nil || !strings.Contains(err.Error(), "256 characters") {
+			t.Fatalf("overlong Unicode label accepted: %v", err)
+		}
+	}
+}
+
 func TestReadManifestRejectsDottedDiscoveryIdentity(t *testing.T) {
 	for _, field := range []string{"namespace", "job", "group"} {
 		t.Run(field, func(t *testing.T) {

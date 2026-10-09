@@ -5,10 +5,43 @@ import (
 	"encoding/json"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/overfold/trellis/orchestrator/internal/probepath"
 )
+
+func TestLabelUnicodeLengthMatchesSchemas(t *testing.T) {
+	apiRaw, yamlRaw, err := Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range [][]byte{apiRaw, yamlRaw} {
+		var root map[string]any
+		if err := json.Unmarshal(raw, &root); err != nil {
+			t.Fatal(err)
+		}
+		labels := property(t, root["$defs"].(map[string]any), "TaskGroupSpec", "labels")
+		valueSchema := labels["additionalProperties"].(map[string]any)
+		if valueSchema["type"] != "string" || valueSchema["maxLength"] != float64(256) {
+			t.Fatalf("unexpected label schema: %v", valueSchema)
+		}
+		for _, character := range []string{"a", "é", "界", "😀", "\u0301"} {
+			for _, count := range []int{255, 256, 257} {
+				job := &spec.JobSpec{Name: "web", Namespace: "default", TaskGroups: []spec.TaskGroupSpec{{
+					Name: "api", Count: 1, Labels: map[string]string{"title": strings.Repeat(character, count)},
+					Tasks: []spec.TaskSpec{{Name: "app", Image: "app:1"}},
+				}}}
+				// Each fixture character is one Unicode code point, including
+				// a combining mark: maxLength counts code points, not graphemes.
+				wantValid := float64(count) <= valueSchema["maxLength"].(float64)
+				if err := spec.Canonicalize(job, spec.DefaultLimits()); (err == nil) != wantValid {
+					t.Fatalf("%q × %d: schema valid=%v, admission error=%v", character, count, wantValid, err)
+				}
+			}
+		}
+	}
+}
 
 func TestResourcesAndHostPortSchemaMatchAdmission(t *testing.T) {
 	apiRaw, yamlRaw, err := Generate()

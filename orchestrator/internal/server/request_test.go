@@ -34,6 +34,15 @@ func TestJobJSONRejectsSchemaProhibitedShapes(t *testing.T) {
 		if err := decodeJobSpec(json.RawMessage(`{`+field+`}`), &job); err == nil {
 			t.Fatalf("schema-prohibited job shape accepted: %s", field)
 		}
+		for _, path := range []string{"/v1/namespaces/team/jobs/plan", "/v1/namespaces/team/jobs"} {
+			e := echo.New()
+			NewHandler(&Server{jobs: map[string]*Job{}}).Register(e)
+			rec := httptest.NewRecorder()
+			e.ServeHTTP(rec, scopedRequest(t, http.MethodPost, path, `{"spec":{`+field+`}}`, auth.AccessCluster, auth.AccessWrite))
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("POST %s accepted prohibited shape %s: %d %s", path, field, rec.Code, rec.Body.String())
+			}
+		}
 	}
 	for _, raw := range []string{`{"Spec":{}}`, `{"spec":{},"ResolvedImages":{}}`, `{"spec":{},"EXPECTED_VERSION":0}`} {
 		var request api.JobRegistrationRequest
@@ -60,6 +69,37 @@ func decodeRequest(t *testing.T, contentType, body string, limit int64, dst any)
 	return decodeJSON(echo.New().NewContext(req, httptest.NewRecorder()), dst, limit)
 }
 
+func TestJobRoutesRejectDuplicateKeysRecursively(t *testing.T) {
+	e := echo.New()
+	NewHandler(&Server{jobs: map[string]*Job{}}).Register(e)
+	for _, raw := range []string{
+		`{"spec":{},"spec":{}}`,
+		`{"spec":{"name":"first","name":"last"}}`,
+		`{"spec":{"name":"first","\u006eame":"last"}}`,
+		`{"spec":{"task_groups":[{"tasks":[{"image":"first","image":"last"}]}]}}`,
+		`{"spec":{"task_groups":[{"labels":{"tier":"first","tier":"last"}}]}}`,
+		`{"spec":{"task_groups":[{"tasks":[{"env":{"TOKEN":"first","TOKEN":"last"}}]}]}}`,
+		`{"spec":{},"resolved_images":{"app:1":"first","app:1":"last"}}`,
+	} {
+		for _, path := range []string{"/v1/namespaces/team/jobs/plan", "/v1/namespaces/team/jobs"} {
+			rec := httptest.NewRecorder()
+			e.ServeHTTP(rec, scopedRequest(t, http.MethodPost, path, raw, auth.AccessCluster, auth.AccessWrite))
+			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "duplicate JSON object key") {
+				t.Fatalf("POST %s with %s = %d %s", path, raw, rec.Code, rec.Body.String())
+			}
+		}
+	}
+	// Separate objects may reuse keys; case-distinct map keys stay distinct.
+	var job spec.JobSpec
+	raw := json.RawMessage(`{"task_groups":[{"name":"a","tasks":[{"name":"x","env":{"TOKEN":"a","token":"b"}}]},{"name":"b","tasks":[{"name":"x"}]}]}`)
+	if err := decodeJobSpec(raw, &job); err != nil || job.TaskGroups[0].Tasks[0].Env["token"] != "b" {
+		t.Fatalf("distinct objects/keys rejected or changed: %v", err)
+	}
+	if err := decodeJobSpec(json.RawMessage(`{"task_groups":[{"labels":{"x":"a","x":"b"}}]}`), &job); err == nil {
+		t.Fatal("standalone spec decoder accepted a nested duplicate")
+	}
+}
+
 func TestDecodeBackupBeyondOrdinaryBodyLimit(t *testing.T) {
 	body := strings.Repeat(" ", (64<<20)+1) + `{"format_version":6,"jobs":{"marker":{}}}`
 	var backup api.BackupSnapshot
@@ -68,6 +108,33 @@ func TestDecodeBackupBeyondOrdinaryBodyLimit(t *testing.T) {
 	}
 	if backup.FormatVersion != api.BackupFormatVersion || string(backup.Jobs["marker"]) != "{}" {
 		t.Fatal("backup truncated")
+	}
+	if err := decodeRequest(t, "application/json", `{"jobs":{"marker":{"spec":{"name":"first","name":"last"}}}}`, maxBackupRequestBytes, &backup); err == nil || !strings.Contains(err.Error(), "duplicate JSON object key") {
+		t.Fatalf("opaque backup record hid a nested duplicate: %v", err)
+	}
+}
+
+func TestJobRoutesUnicodeLabelBoundary(t *testing.T) {
+	for _, path := range []string{"/v1/namespaces/default/jobs/plan", "/v1/namespaces/default/jobs"} {
+		for _, count := range []int{256, 257} {
+			s, agent := newTestServerWithAgent()
+			t.Cleanup(agent.server.Close)
+			job := versionTestSpec("app:1", 1)
+			job.TaskGroups[0].Labels = map[string]string{"title": strings.Repeat("😀", count)}
+			raw, _ := json.Marshal(job)
+			rec := httptest.NewRecorder()
+			authenticatedHandler(s, auth.AccessWrite).ServeHTTP(rec, scopedRequest(t, http.MethodPost, path, `{"spec":`+string(raw)+`}`, auth.AccessCluster, auth.AccessWrite))
+			want := http.StatusOK
+			if path == "/v1/namespaces/default/jobs" {
+				want = http.StatusAccepted
+			}
+			if count == 257 {
+				want = http.StatusUnprocessableEntity
+			}
+			if rec.Code != want {
+				t.Fatalf("POST %s label length %d = %d %s, want %d", path, count, rec.Code, rec.Body.String(), want)
+			}
+		}
 	}
 }
 
@@ -81,6 +148,7 @@ func TestDecodeJSONRejectsLooseRequests(t *testing.T) {
 		message     string
 	}{
 		{name: "unknown field", body: `{"scope":"cluster","access":"read","acess":"write"}`, want: http.StatusBadRequest, message: `unknown field "acess"`},
+		{name: "duplicate field", body: `{"scope":"cluster","access":"read","access":"write"}`, want: http.StatusBadRequest, message: "duplicate JSON object key"},
 		{name: "trailing value", body: `{"scope":"cluster","access":"read"}{}`, want: http.StatusBadRequest, message: "unexpected data after the JSON value"},
 		{name: "trailing garbage", body: `{"scope":"cluster","access":"read"} x`, want: http.StatusBadRequest, message: "malformed JSON"},
 		{name: "empty body", body: ``, want: http.StatusBadRequest, message: "request body is empty"},
@@ -142,6 +210,8 @@ func TestDecodeJSONErrorsDoNotEchoSecretValues(t *testing.T) {
 		`{"value_base64":"` + sentinel + `"} "` + sentinel + `"`,
 		`{"value_base64":"` + sentinel + `","expected_version":"` + sentinel + `"}`,
 		`{"value_base64":"` + sentinel,
+		`{"value_base64":"` + sentinel + `","value_base64":"second"}`,
+		`{"` + sentinel + `":"first","` + sentinel + `":"second"}`,
 	} {
 		var request api.SecretWriteRequest
 		err := decodeRequest(t, "application/json", body, maxSecretRequestBytes, &request)
