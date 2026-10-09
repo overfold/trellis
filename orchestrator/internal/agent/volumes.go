@@ -24,7 +24,7 @@ type VolumeManager struct {
 	dataRootPath  string
 	mu            sync.RWMutex
 	registrations map[string]string
-	stage         func(sourceFD int, target string) error
+	stage         func(sourceFD int, target string, readOnly bool) error
 	unstage       func(target string) error
 	hasMounts     func(dir string) (bool, error)
 	stagingErr    error
@@ -69,7 +69,7 @@ func (vm *VolumeManager) Create(namespace string, _ string, allocationID string,
 	if stagingErr != nil {
 		return nil, fmt.Errorf("cleaning stale volume staging mounts: %w", stagingErr)
 	}
-	hostPath, err := vm.prepareDirectory(namespace, allocationID, volume.Name, volume.HostPath)
+	hostPath, err := vm.prepareDirectory(namespace, allocationID, volume.Name, volume.HostPath, volume.ReadOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -119,7 +119,7 @@ func (vm *VolumeManager) resolveHostPath(namespace, hostPath string) (string, bo
 // resolve again. The staging mount remains the container's OCI mount source,
 // so it must outlive every task started from that container, including
 // in-place restarts.
-func (vm *VolumeManager) prepareDirectory(namespace, allocationID, volumeName, hostPath string) (string, error) {
+func (vm *VolumeManager) prepareDirectory(namespace, allocationID, volumeName, hostPath string, readOnly bool) (string, error) {
 	if !spec.ValidIdentifier(volumeName) {
 		return "", fmt.Errorf("invalid volume name %q", volumeName)
 	}
@@ -133,7 +133,7 @@ func (vm *VolumeManager) prepareDirectory(namespace, allocationID, volumeName, h
 	if err := os.MkdirAll(target, 0o700); err != nil {
 		return "", fmt.Errorf("creating volume staging directory: %w", err)
 	}
-	if err := vm.stage(fd, target); err != nil {
+	if err := vm.stage(fd, target, readOnly); err != nil {
 		return "", fmt.Errorf("staging volume: %w", err)
 	}
 	return target, nil
@@ -188,7 +188,7 @@ func openDirectoryAt(parentFD int, name string, create bool) (int, error) {
 	return unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 }
 
-func stageDirectory(sourceFD int, target string) error {
+func stageDirectory(sourceFD int, target string, readOnly bool) error {
 	source := fmt.Sprintf("/proc/self/fd/%d", sourceFD)
 	if err := unix.Mount(source, target, "", unix.MS_BIND|unix.MS_REC, ""); err != nil {
 		return err
@@ -196,6 +196,15 @@ func stageDirectory(sourceFD int, target string) error {
 	if err := unix.Mount("", target, "", unix.MS_PRIVATE|unix.MS_REC, ""); err != nil {
 		_ = unix.Unmount(target, unix.MNT_DETACH)
 		return err
+	}
+	if readOnly {
+		// MS_BIND|MS_REMOUNT|MS_RDONLY changes only the top mount. Apply
+		// readonly recursively to the private staging clone instead, so
+		// writable source submounts cannot bypass read_only with either runc
+		// or runsc. Never downgrade when mount_setattr is unsupported.
+		if err := unix.MountSetattr(unix.AT_FDCWD, target, unix.AT_RECURSIVE, &unix.MountAttr{Attr_set: unix.MOUNT_ATTR_RDONLY}); err != nil {
+			return errors.Join(fmt.Errorf("recursive read-only volume requires mount_setattr support: %w", err), unix.Unmount(target, unix.MNT_DETACH))
+		}
 	}
 	return nil
 }

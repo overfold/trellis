@@ -22,6 +22,7 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/health"
 	"github.com/overfold/trellis/orchestrator/internal/runtime"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
+	"golang.org/x/sys/unix"
 )
 
 // This intentionally stays small: distributed behavior belongs in the
@@ -235,7 +236,7 @@ func TestContainerdAllocationAdoption(t *testing.T) {
 	}
 }
 
-func TestContainerdStopsCreatedTask(t *testing.T) {
+func TestContainerdRecoversCreatedTaskWithRestartBudget(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("containerd overlayfs E2E requires root; run this test with sudo")
 	}
@@ -290,21 +291,30 @@ func TestContainerdStopsCreatedTask(t *testing.T) {
 		t.Fatalf("task status before stop = %q, want created", status.Status)
 	}
 
-	if err := r.Stop(ctx, created); err != nil {
-		t.Fatalf("stop created task: %v", err)
+	// A daemon crash after NewTask but before Start leaves this exact state.
+	// Recovery must delete it and restart within the original policy budget.
+	reconciler := agent.NewAllocationReconciler(r, nil)
+	reconciler.TrackRecovered(created, false, &spec.RestartPolicySpec{MaxRestarts: 1, Window: time.Hour}, 0, time.Now(), false)
+	if err := reconciler.Reconcile(ctx, created); err != nil {
+		t.Fatalf("recover created task: %v", err)
 	}
 	observed, err := r.Inspect(ctx, created)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if observed.Status != runtime.StatusStopped {
-		t.Fatalf("status after stopping created task = %q, want stopped", observed.Status)
+	if observed.Status != runtime.StatusRunning {
+		t.Fatalf("status after recovering created task = %q, want running", observed.Status)
 	}
 
-	// Deleting the Created task must leave the container reusable: Start should
-	// create a fresh task rather than colliding with the interrupted one.
-	if err := r.Start(ctx, created); err != nil {
-		t.Fatalf("start after created-task cleanup: %v", err)
+	if err := r.Stop(ctx, created); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.Reconcile(ctx, created); err != nil {
+		t.Fatal(err)
+	}
+	observed, err = r.Inspect(ctx, created)
+	if err != nil || observed.Status != runtime.StatusStopped {
+		t.Fatalf("exhausted budget restarted real task: %+v, %v", observed, err)
 	}
 }
 
@@ -387,6 +397,77 @@ func TestContainerdRestartsTaskWithStagedVolume(t *testing.T) {
 			}
 			if _, err := os.Stat(filepath.Join(decoy, "after-restart")); !os.IsNotExist(err) {
 				t.Fatalf("restarted task wrote into the replacement: %v", err)
+			}
+		})
+	}
+}
+
+func TestContainerdReadOnlyVolumeIncludesWritableSubmount(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("containerd nested-mount E2E requires root")
+	}
+	socket := os.Getenv("CONTAINERD_ADDRESS")
+	if socket == "" {
+		socket = "/run/containerd/containerd.sock"
+	}
+	if _, err := os.Stat(socket); err != nil {
+		t.Skipf("containerd unavailable: %v", err)
+	}
+	r, err := runtime.NewContainerdRuntime(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+	defer cancel()
+	const image = "docker.io/library/nginx:1.27-alpine"
+	if err := r.Pull(ctx, image); err != nil {
+		t.Fatal(err)
+	}
+	for _, readOnly := range []bool{false, true} {
+		t.Run(fmt.Sprintf("read-only=%t", readOnly), func(t *testing.T) {
+			root := t.TempDir()
+			backing := filepath.Join(root, "source")
+			if err := os.MkdirAll(filepath.Join(backing, "nested"), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			nested := filepath.Join(backing, "nested")
+			if err := unix.Mount("tmpfs", nested, "tmpfs", 0, "size=1m"); err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = unix.Unmount(nested, unix.MNT_DETACH) }()
+			id := fmt.Sprintf("trellis-e2e-recursive-ro-%t", readOnly)
+			_ = r.Stop(ctx, id)
+			_ = r.Remove(ctx, id)
+			volumes := agent.NewVolumeManager(filepath.Join(root, "agent"))
+			mount, err := volumes.Create("e2e", "job", id, spec.VolumeSpec{Name: "data", HostPath: backing, ContainerPath: "/data", ReadOnly: readOnly})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = volumes.ReleaseStaging(id) }()
+			created, err := r.Create(ctx, runtime.CreateOptions{ID: id, Image: image, Runtime: "runc", Mounts: []*runtime.Mount{mount}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = r.Stop(context.Background(), created); _ = r.Remove(context.Background(), created) }()
+			if err := r.Start(ctx, created); err != nil {
+				t.Fatal(err)
+			}
+			for pass := range 2 {
+				if pass != 0 {
+					if err := r.Restart(ctx, created); err != nil {
+						t.Fatal(err)
+					}
+				}
+				for _, path := range []string{"write", "nested/write"} {
+					stdout, stderr, code, err := execOutput(ctx, r, created, runtime.ExecOptions{Command: []string{"touch", "/data/" + path}})
+					if err != nil || readOnly && (code == 0 || !strings.Contains(stderr, "Read-only file system")) || !readOnly && code != 0 {
+						t.Fatalf("write %s after restart=%d: stdout=%q stderr=%q code=%d err=%v", path, pass, stdout, stderr, code, err)
+					}
+					if err := os.WriteFile(filepath.Join(backing, path), []byte("host still writable"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
 			}
 		})
 	}

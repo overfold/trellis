@@ -15,7 +15,7 @@ import (
 
 func newTestVolumeManager(root string) *VolumeManager {
 	manager := NewVolumeManager(root)
-	manager.stage = func(int, string) error { return nil }
+	manager.stage = func(int, string, bool) error { return nil }
 	return manager
 }
 
@@ -65,7 +65,7 @@ func TestVolumeManagerStagesResolvedDirectoryBeforeRuntimeMount(t *testing.T) {
 
 			manager := newTestVolumeManager(root)
 			var staged unix.Stat_t
-			manager.stage = func(fd int, _ string) error {
+			manager.stage = func(fd int, _ string, _ bool) error {
 				if err := os.Remove(managedPath); err != nil {
 					return err
 				}
@@ -150,7 +150,7 @@ func TestVolumeManagerChecksAbsolutePathsWithoutSymlinks(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := newTestVolumeManager(filepath.Join(root, "agent"))
-	manager.stage = func(int, string) error { t.Fatal("unexpected staging mount"); return nil }
+	manager.stage = func(int, string, bool) error { t.Fatal("unexpected staging mount"); return nil }
 	for _, path := range []string{dir, "/"} {
 		ok, err := manager.Check("ns", "job", "task", spec.VolumeSpec{HostPath: path})
 		if err != nil || !ok {
@@ -244,5 +244,67 @@ func TestReleaseStagingIgnoresWrappedUnmountAbsence(t *testing.T) {
 
 	if err := manager.ReleaseStaging("allocation"); err != nil {
 		t.Fatalf("release staging: %v", err)
+	}
+}
+
+func TestKernelReadOnlyVolumeIncludesWritableSubmount(t *testing.T) {
+	if os.Getenv("TRELLIS_VOLUME_E2E") != "1" {
+		t.Skip("set TRELLIS_VOLUME_E2E=1 and run as root in a private mount namespace")
+	}
+	root := t.TempDir()
+	backing := filepath.Join(root, "source")
+	if err := os.Mkdir(backing, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mount("tmpfs", backing, "tmpfs", 0, "size=1m"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = unix.Unmount(backing, unix.MNT_DETACH) })
+	nested := filepath.Join(backing, "nested")
+	if err := os.Mkdir(nested, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mount("tmpfs", nested, "tmpfs", 0, "size=1m"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = unix.Unmount(nested, unix.MNT_DETACH) })
+	for _, readOnly := range []bool{false, true} {
+		t.Run(fmt.Sprintf("read-only=%t", readOnly), func(t *testing.T) {
+			manager := NewVolumeManager(filepath.Join(root, fmt.Sprintf("data-%t", readOnly)))
+			mount, err := manager.Create("ns", "job", "allocation", spec.VolumeSpec{Name: "data", HostPath: backing, ContainerPath: "/data", ReadOnly: readOnly})
+			if readOnly && os.Getenv("TRELLIS_VOLUME_NO_MOUNT_SETATTR") == "1" {
+				// Run under strace syscall fault injection to model an older
+				// kernel without replacing the production mount implementation.
+				if !errors.Is(err, unix.ENOSYS) || mount != nil {
+					t.Fatalf("unsupported recursive readonly did not fail closed: mount=%+v err=%v", mount, err)
+				}
+				if inUse, err := manager.StagingInUse("allocation"); err != nil || inUse {
+					t.Fatalf("failed readonly setup leaked staging mount: %t, %v", inUse, err)
+				}
+				if len(manager.AvailableHostVolumes()) != 0 {
+					t.Fatal("failed readonly setup registered the volume")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := manager.ReleaseStaging("allocation"); err != nil {
+					t.Error(err)
+				}
+			})
+			for _, relative := range []string{"write", "nested/write"} {
+				err := os.WriteFile(filepath.Join(mount.HostPath, relative), []byte("staging"), 0o600)
+				if readOnly && !errors.Is(err, unix.EROFS) || !readOnly && err != nil {
+					t.Fatalf("staging write %s: %v", relative, err)
+				}
+				// The recursive attribute changes only the staging clone, not
+				// the host volume, even when both share the same filesystem.
+				if err := os.WriteFile(filepath.Join(backing, relative), []byte("host"), 0o600); err != nil {
+					t.Fatalf("host write %s: %v", relative, err)
+				}
+			}
+		})
 	}
 }

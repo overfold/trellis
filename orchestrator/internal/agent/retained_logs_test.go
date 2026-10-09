@@ -17,6 +17,12 @@ type retainedLogsRuntime struct {
 	removeErr error
 }
 
+func (r *retainedLogsRuntime) Remove(_ context.Context, id string) error {
+	r.removeCount++
+	delete(r.logs, id)
+	return nil
+}
+
 func (r *retainedLogsRuntime) RemoveRetainingLogs(context.Context, string) error {
 	r.removeCount++
 	return nil

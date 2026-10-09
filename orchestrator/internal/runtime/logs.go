@@ -36,6 +36,9 @@ type logReader struct {
 	// offset the read position in it.
 	generation uint64
 	offset     int64
+	// end bounds non-follow reads at open time. Copy/truncate rotation can
+	// discard unread output, but a snapshot never follows a new generation.
+	end int64
 	// rotated is the unread rest of the rotated log, read before the active
 	// log.
 	rotated     *io.SectionReader
@@ -57,6 +60,7 @@ func openRuntimeLog(ctx context.Context, path string, rotation *logRotation, fol
 		_ = r.Close()
 		return nil, err
 	}
+	r.end = activeInfo.Size()
 	rotated, err := os.Open(path + rotatedLogSuffix)
 	if err != nil && !os.IsNotExist(err) {
 		_ = r.Close()
@@ -98,6 +102,7 @@ func newLogReader(ctx context.Context, file *os.File, follow bool, tail int) (io
 		_ = r.Close()
 		return nil, err
 	}
+	r.end = info.Size()
 	return r, nil
 }
 
@@ -111,6 +116,9 @@ func (r *logReader) Read(p []byte) (int, error) {
 		if r.closed {
 			return 0, os.ErrClosed
 		}
+		if r.ctx.Err() != nil {
+			return 0, io.EOF
+		}
 		if r.rotated != nil {
 			n, err := r.rotated.Read(p)
 			if n > 0 {
@@ -122,11 +130,24 @@ func (r *logReader) Read(p []byte) (int, error) {
 			r.closeRotated()
 			continue
 		}
+		if !r.follow {
+			if r.offset >= r.end {
+				return 0, io.EOF
+			}
+			p = p[:min(int64(len(p)), r.end-r.offset)]
+			if r.rotation != nil {
+				r.rotation.mu.Lock()
+				defer r.rotation.mu.Unlock()
+				if r.rotation.generation != r.generation {
+					return 0, io.EOF
+				}
+			}
+		}
 		n, err := r.active.ReadAt(p, r.offset)
 		if err != nil && err != io.EOF {
 			return 0, err
 		}
-		if r.rotation != nil {
+		if r.follow && r.rotation != nil {
 			rotated, err := r.followRotation()
 			if err != nil {
 				return 0, err

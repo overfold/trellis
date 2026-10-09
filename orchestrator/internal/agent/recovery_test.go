@@ -343,17 +343,14 @@ func TestRecoverUnreadableContainerKeepsRecordAndResources(t *testing.T) {
 	}
 	assertUnobservedAllocation(t, agent, "task", "stopping", 18083)
 
-	// Once readable, a stopping record stays stopping and restart-suppressed.
+	// Once readable and ownership-verified, interrupted cleanup finishes
+	// locally rather than leaving a stopping task stranded after recovery.
 	rt.containers = []runtime.ContainerInfo{{ID: "task", Status: runtime.StatusRunning, Labels: recoveryTestLabels(record)}}
 	if agent.retryRecovery(context.Background()) {
 		t.Fatal("retry left recovery work pending")
 	}
-	recovered := agent.allocations["task"]
-	if recovered == nil || recovered.unobserved || recovered.Status != "stopping" {
-		t.Fatalf("allocation after retry = %+v, want observed stopping", recovered)
-	}
-	if state := agent.reconciler.states["task"]; state == nil || !state.stopping {
-		t.Fatal("recovered stopping allocation regained local restarts")
+	if agent.allocations["task"] != nil || portClaimed(agent, 18083) || rt.stopCount != 1 || rt.restartCount != 0 {
+		t.Fatalf("cleanup did not converge: allocation=%+v stops=%d restarts=%d", agent.allocations["task"], rt.stopCount, rt.restartCount)
 	}
 }
 

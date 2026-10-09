@@ -3,13 +3,17 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/runtime"
+	"github.com/overfold/trellis/orchestrator/internal/spec"
 	"github.com/overfold/trellis/orchestrator/internal/storage"
 )
 
@@ -120,6 +124,100 @@ func TestStopWatermarkPersistencePrecedesTaskCleanup(t *testing.T) {
 	var stored Allocation
 	if err := local.Get(allocationRecordKey(record.ID), &stored); err != nil || stored.Status != "running" || rt.stopCount != 0 || rt.removeCount != 0 {
 		t.Fatalf("task cleanup preceded durable fence: record=%+v error=%v stops=%d removes=%d", stored, err, rt.stopCount, rt.removeCount)
+	}
+}
+
+func TestRecoveryAppliesStopFenceBeforeTaskRecordAndRetriesOwnedCleanup(t *testing.T) {
+	for _, retain := range []bool{false, true} {
+		for _, unavailable := range []bool{false, true} {
+			t.Run(fmt.Sprintf("retain=%t/list-unavailable=%t", retain, unavailable), func(t *testing.T) {
+				record := recoveryTestAllocation(0)
+				record.Ports = nil
+				record.Restart = &spec.RestartPolicySpec{MaxRestarts: 3, Window: time.Hour}
+				rt := &retainedLogsRuntime{listingRecoveryRuntime: &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusCreated}}, logs: map[string]string{"task": "retained"}}
+				rt.containers = []runtime.ContainerInfo{{ID: record.ID, Status: runtime.StatusCreated, Labels: recoveryTestLabels(record)}}
+				agent, local := newRecoveryTestAgent(t, rt, record)
+				agent.reconciler.Subscriber = agent
+				// Crash immediately after stop intent publication, before the
+				// still-running durable task record is marked stopping.
+				if retain {
+					if err := agent.persistRetainedLog(&retainedTaskLog{AllocationID: record.AllocationID, Generation: record.Generation, Namespace: record.Namespace, TaskName: record.TaskName, ContainerID: record.ContainerID}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := local.Put("agent/stopped-generations/"+allocationFileName(record.AllocationID), record.Generation); err != nil {
+					t.Fatal(err)
+				}
+				if unavailable {
+					rt.listErr = errors.New("listing unavailable")
+				}
+				if err := agent.recover(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+				if err := agent.reconciler.Reconcile(t.Context(), record.ID); err != nil || rt.restartCount != 0 {
+					t.Fatalf("stopped-intent restart: %v, count=%d", err, rt.restartCount)
+				}
+				rt.listErr = nil
+				rt.stopErr = errors.New("cleanup unavailable")
+				if !agent.retryRecovery(t.Context()) || agent.allocations[record.ID] == nil {
+					t.Fatal("failed cleanup was not retained for retry")
+				}
+				rt.stopErr = nil
+				// A reused container ID with foreign labels must not be deleted.
+				agent.allocations[record.ID].ContainerOwnershipUnverified = true
+				rt.containers[0].Labels = map[string]string{"trellis.execution-hash": "foreign"}
+				if !agent.retryRecovery(t.Context()) || rt.removeCount != 0 {
+					t.Fatal("cleanup ignored container ownership")
+				}
+				rt.containers[0].Labels = recoveryTestLabels(record)
+				if agent.retryRecovery(t.Context()) || agent.allocations[record.ID] != nil || rt.removeCount != 1 || rt.restartCount != 0 {
+					t.Fatal("owned cleanup did not converge without restarting")
+				}
+				if (agent.retainedLogs[record.ID] != nil) != retain {
+					t.Fatalf("retained logs = %v, want %t", agent.retainedLogs, retain)
+				}
+				if retain {
+					stream, err := agent.TaskLogs(t.Context(), record.AllocationID, record.TaskName, false, 0)
+					if err != nil {
+						t.Fatal(err)
+					}
+					output, err := io.ReadAll(stream)
+					_ = stream.Close()
+					if err != nil || string(output) != "retained" {
+						t.Fatalf("logs after recovery cleanup = %q, %v", output, err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestRecoveryStopWatermarkOnlyCoversItsGenerationAndOlder(t *testing.T) {
+	rt := &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusCreated}}
+	var records []*Allocation
+	for generation := uint64(1); generation <= 3; generation++ {
+		record := recoveryTestAllocation(0)
+		record.ID, record.ContainerID, record.Generation = fmt.Sprintf("task-g%d", generation), fmt.Sprintf("task-g%d", generation), generation
+		record.Ports = nil
+		record.Restart = &spec.RestartPolicySpec{MaxRestarts: 1, Window: time.Hour}
+		records = append(records, record)
+		rt.containers = append(rt.containers, runtime.ContainerInfo{ID: record.ID, Status: runtime.StatusCreated, Labels: recoveryTestLabels(record)})
+	}
+	agent, local := newRecoveryTestAgent(t, rt, records...)
+	agent.reconciler.Subscriber = agent
+	if err := local.Put("agent/stopped-generations/"+allocationFileName("allocation"), uint64(2)); err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.recover(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range records {
+		if err := agent.reconciler.Reconcile(t.Context(), record.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rt.restartCount != 1 || agent.retryRecovery(t.Context()) || agent.allocations["task-g1"] != nil || agent.allocations["task-g2"] != nil || agent.allocations["task-g3"] == nil {
+		t.Fatalf("watermark covered wrong generations: restarts=%d tasks=%v", rt.restartCount, agent.allocations)
 	}
 }
 

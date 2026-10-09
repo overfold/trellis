@@ -276,6 +276,8 @@ An absolute `host_path` such as `/srv/postgres` must already exist on the select
 
 Trellis mounts every volume `nosuid` and `nodev`: setuid bits and device nodes in the backing directory have no effect inside any container that mounts it, and tasks cannot create device nodes. Files in volumes remain executable. The flags do not rewrite stored files, so host users with access to an absolute `host_path` should treat its contents as untrusted.
 
+`read_only: true` makes the volume and its existing nested mounts recursively read-only. Trellis applies this to a private staging clone, leaving the host source writable and preventing later host mount propagation into the clone. It requires Linux `mount_setattr` support (Linux 5.12 or newer) and permission to apply recursive mount attributes; unsupported hosts fail the start rather than silently allowing writable submounts. This applies to both `runc` and `runsc`. Separately declared volumes mounted beneath a read-only volume keep their own explicit `read_only` setting. Recreate containers staged by an older Trellis version to obtain the strengthened guarantee; upgrading the agent alone does not change existing container mounts.
+
 Namespace resource routing does not prevent a manifest submitter from requesting an absolute path. A frontend serving untrusted tenants must reject this form; see [Multitenancy and trust boundaries](multitenancy.md).
 
 Changing `host_path` does not change the volume identity or move it to another node. A later revision may point the same name at another path on its registered node, but Trellis does not copy or migrate the bytes; preparing the new backing data is the operator's responsibility.

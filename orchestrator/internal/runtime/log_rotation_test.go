@@ -150,6 +150,49 @@ func TestLogTailSpansRotatedAndActiveLogs(t *testing.T) {
 	}
 }
 
+func TestLogSnapshotDoesNotChaseGrowthOrRotation(t *testing.T) {
+	for _, rotate := range []bool{false, true} {
+		t.Run(fmt.Sprintf("rotate=%t", rotate), func(t *testing.T) {
+			r := newRotationTestRuntime(t)
+			shim := openTaskLog(t, r)
+			write(t, shim, "old\n")
+			if err := r.EnforceLogLimit(4); err != nil {
+				t.Fatal(err)
+			}
+			write(t, shim, "initial\n")
+			stream, err := r.Logs(t.Context(), "task", false, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = stream.Close() }()
+			if got := readN(t, stream, 2); got != "in" {
+				t.Fatalf("initial read = %q", got)
+			}
+			write(t, shim, "later\n")
+			want := "itial\n"
+			if rotate {
+				for range 3 {
+					if err := r.EnforceLogLimit(4); err != nil {
+						t.Fatal(err)
+					}
+					write(t, shim, "new generation\n")
+				}
+				// Copy/truncate discarded the snapshot's active generation.
+				// It may close early, but must not consume newer generations.
+				want = ""
+			}
+			got, err := io.ReadAll(io.LimitReader(stream, 100))
+			if err != nil || string(got) != want {
+				t.Fatalf("snapshot remainder = %q, %v; want %q", got, err, want)
+			}
+			write(t, shim, "even later\n")
+			if n, err := stream.Read(make([]byte, 1)); n != 0 || err != io.EOF {
+				t.Fatalf("snapshot reopened after EOF: %d, %v", n, err)
+			}
+		})
+	}
+}
+
 func TestLogFollowContinuesAcrossRotation(t *testing.T) {
 	r := newRotationTestRuntime(t)
 	shim := openTaskLog(t, r)

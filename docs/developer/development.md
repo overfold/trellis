@@ -24,6 +24,16 @@ sudo env CONTAINERD_ADDRESS=/run/containerd/containerd.sock TRELLIS_HEALTH_PROBE
 
 Read the output for skipped tests: a green suite that skipped runtime tests is not containerd verification. These tests create and remove test containers and managed-volume fixtures; use a disposable development host.
 
+The volume kernel regression verifies recursive read-only staging with a real writable nested tmpfs, a writable-volume baseline, and continued host-source writes. Run it in a private mount namespace (unlike a production agent, this test never passes its mounts to a separate containerd daemon). With `strace` installed, the second invocation injects `ENOSYS` on `mount_setattr` and checks fail-closed behavior and staging cleanup:
+
+```sh
+go test -c -o /tmp/trellis-agent.test ./internal/agent
+sudo unshare -m env TRELLIS_VOLUME_E2E=1 /tmp/trellis-agent.test -test.run '^TestKernelReadOnlyVolumeIncludesWritableSubmount$' -test.v
+sudo unshare -m env TRELLIS_VOLUME_E2E=1 TRELLIS_VOLUME_NO_MOUNT_SETATTR=1 strace -f -e trace=mount_setattr -e inject=mount_setattr:error=ENOSYS /tmp/trellis-agent.test -test.run '^TestKernelReadOnlyVolumeIncludesWritableSubmount$' -test.v
+```
+
+The containerd suite additionally verifies parent and nested-mount writes inside a real task before and after restart, and recovers a real `Created` task through the budgeted agent reconciler.
+
 With a complete gVisor bundle installed and both `runsc` and
 `containerd-shim-runsc-v1` in the node/containerd service PATH, add
 `TRELLIS_RUNSC_E2E=1` to the `sudo env` command above. This enables

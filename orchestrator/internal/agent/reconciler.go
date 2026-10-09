@@ -305,7 +305,10 @@ func (r *AllocationReconciler) reconcile(ctx context.Context, allocID string, st
 		return err
 	}
 
-	if containerState.Status != runtime.StatusStopped {
+	// A crash between task creation and Start leaves Created behind. Only
+	// committed allocations are tracked here, so recover it with the same
+	// durable restart budget as an exited task, never an unbudgeted Start.
+	if containerState.Status != runtime.StatusStopped && containerState.Status != runtime.StatusCreated {
 		return nil
 	}
 	return r.restart(ctx, allocID, state)

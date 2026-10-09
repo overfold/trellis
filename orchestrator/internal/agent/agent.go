@@ -92,9 +92,8 @@ type Agent struct {
 	readiness    func() bool
 
 	recoveryListPending bool
-	// supersededStops holds retained older generations that recovery must
-	// stop itself because the control plane rejects their stops as stale.
-	supersededStops map[string]string
+	// recoveryStops holds interrupted cleanup that recovery retries locally.
+	recoveryStops map[string]string
 	// recoveryErr stops recovery once a late listing finds a container
 	// without an allocation record; failed delivers it to the caller of Init.
 	recoveryErr  error
@@ -649,46 +648,43 @@ func (a *Agent) recover(ctx context.Context) error {
 		}
 		a.recoverMissing(ctx, allocation)
 	}
-	a.queueSupersededStops()
+	a.queueRecoveryStops()
 	return nil
 }
 
-// queueSupersededStops rebuilds the set of retained stopping records whose
-// newer generation is known. The control plane rejects their stops as stale,
-// so recovery finishes them; a failed stop survives a restart only as its
-// stopping record.
-func (a *Agent) queueSupersededStops() {
+// queueRecoveryStops rebuilds recovery's cleanup queue. Durable stop intent
+// and interrupted cleanup must finish locally, including older generations
+// whose control-plane stops would now be rejected as stale.
+func (a *Agent) queueRecoveryStops() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.supersededStops = nil
+	a.recoveryStops = nil
 	for id, allocation := range a.allocations {
-		if a.pendingSupersededStopLocked(allocation) {
-			if a.supersededStops == nil {
-				a.supersededStops = make(map[string]string)
+		if a.pendingRecoveryStopLocked(allocation) {
+			if a.recoveryStops == nil {
+				a.recoveryStops = make(map[string]string)
 			}
-			a.supersededStops[id] = allocation.AllocationID
+			a.recoveryStops[id] = allocation.AllocationID
 		}
 	}
 }
 
-func (a *Agent) pendingSupersededStopLocked(allocation *Allocation) bool {
-	// Unverified ownership keeps its existing retained-record handling.
-	return allocation.Status == "stopping" && !allocation.unobserved && !allocation.ContainerOwnershipUnverified && a.supersededLocked(allocation)
-}
-
-// supersededLocked reports whether a newer generation of the allocation is
-// known.
-func (a *Agent) supersededLocked(allocation *Allocation) bool {
-	for _, known := range a.allocations {
-		if known.AllocationID == allocation.AllocationID && known.Generation > allocation.Generation {
-			return true
-		}
-	}
-	return false
+func (a *Agent) pendingRecoveryStopLocked(allocation *Allocation) bool {
+	// stopAllocation verifies ambiguous ownership on every retry before
+	// touching execution resources. Unknown runtime state still needs relisting.
+	return allocation.Status == "stopping" && !allocation.unobserved
 }
 
 // recoverContainer restores one observed container from its durable record.
 func (a *Agent) recoverContainer(container runtime.ContainerInfo, allocation *Allocation) {
+	a.mu.RLock()
+	stopped := a.stoppedGenerations[allocation.AllocationID] >= allocation.Generation && allocation.Generation != 0
+	a.mu.RUnlock()
+	if stopped {
+		// The fence may have committed before any task record was marked
+		// stopping. Apply it before classifying runtime observations.
+		allocation.Status = "stopping"
+	}
 	if !observedStatus(container.Status) {
 		a.recoverUnobserved(allocation)
 		return
@@ -901,15 +897,15 @@ func (a *Agent) retryRecovery(ctx context.Context) bool {
 			return true
 		}
 	}
-	a.queueSupersededStops()
+	a.queueRecoveryStops()
 	a.mu.RLock()
-	superseded := make(map[string]string, len(a.supersededStops))
-	maps.Copy(superseded, a.supersededStops)
+	stops := make(map[string]string, len(a.recoveryStops))
+	maps.Copy(stops, a.recoveryStops)
 	a.mu.RUnlock()
-	for id, allocationID := range superseded {
-		a.stopSuperseded(ctx, id, allocationID)
+	for id, allocationID := range stops {
+		a.stopRecovered(ctx, id, allocationID)
 	}
-	a.queueSupersededStops()
+	a.queueRecoveryStops()
 	return a.recoveryPending()
 }
 
@@ -966,7 +962,7 @@ func (a *Agent) recoveryFailed() bool {
 func (a *Agent) recoveryPending() bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	if a.recoveryListPending || len(a.supersededStops) > 0 {
+	if a.recoveryListPending || len(a.recoveryStops) > 0 {
 		return true
 	}
 	for _, allocation := range a.allocations {
@@ -1054,20 +1050,21 @@ func (a *Agent) Failed() <-chan error {
 	return a.failed
 }
 
-// stopSuperseded stops a retained older generation if it still qualifies; a
+// stopRecovered finishes interrupted cleanup if it still qualifies; a
 // start or stop may have replaced or removed it since it was queued.
-func (a *Agent) stopSuperseded(ctx context.Context, id, allocationID string) {
+func (a *Agent) stopRecovered(ctx context.Context, id, allocationID string) {
 	unlock := a.lockAllocationOperation(allocationID)
 	defer unlock()
 	a.mu.RLock()
 	allocation := a.allocations[id]
-	qualifies := allocation != nil && a.pendingSupersededStopLocked(allocation)
+	qualifies := allocation != nil && a.pendingRecoveryStopLocked(allocation)
+	retainLogs := allocation != nil && a.retainedLogs[allocation.ContainerID] != nil
 	a.mu.RUnlock()
 	if !qualifies {
 		return
 	}
-	if err := a.stopAllocation(context.WithoutCancel(ctx), id, false); err != nil {
-		a.log.Error("stop superseded allocation", "allocation", allocationID, "error", err)
+	if err := a.stopAllocation(ctx, id, retainLogs); err != nil {
+		a.log.Error("finish recovered allocation cleanup", "allocation", allocationID, "error", err)
 	}
 }
 
@@ -1433,6 +1430,23 @@ func (a *Agent) StopGroup(ctx context.Context, request *nodeapi.StopAllocationRe
 		containers, listErr = a.listUnrecorded(ctx, request)
 		if errors.Is(listErr, ErrStaleGeneration) {
 			return listErr
+		}
+	}
+	// Retention must survive a crash immediately after the stop fence, before
+	// stopAllocation has touched any task. These records do not stop execution.
+	if request.RetainLogs {
+		for _, id := range ids {
+			allocation, ok := a.snapshotAllocation(id)
+			if !ok {
+				continue
+			}
+			record := &retainedTaskLog{AllocationID: allocation.AllocationID, Generation: allocation.Generation, Namespace: allocation.Namespace, TaskName: allocation.TaskName, ContainerID: allocation.ContainerID}
+			if err := a.persistRetainedLog(record); err != nil {
+				return fmt.Errorf("persist retained log intent before stop fence: %w", err)
+			}
+			a.mu.Lock()
+			a.retainedLogs[record.ContainerID] = record
+			a.mu.Unlock()
 		}
 	}
 	// Persist the fence before deleting any task record. A crash during

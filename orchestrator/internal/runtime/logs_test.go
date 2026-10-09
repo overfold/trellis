@@ -24,6 +24,9 @@ func TestLogReaderTailsLines(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = reader.Close() }()
+	if _, err := file.WriteAt([]byte("later\n"), int64(len("one\ntwo\nthree\n"))); err != nil {
+		t.Fatal(err)
+	}
 	got, err := io.ReadAll(reader)
 	if err != nil {
 		t.Fatal(err)

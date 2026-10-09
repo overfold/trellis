@@ -1068,7 +1068,7 @@ func TestManagedVolumeStagingOutlivesStartUntilStop(t *testing.T) {
 	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image", Volumes: []spec.VolumeSpec{{Name: "data", HostPath: "@/data", ContainerPath: "/data"}}}}
 	id := "allocation-g2-first"
 	stagingPath := agent.volumes.stagingPath(id, "data")
-	agent.volumes.stage = func(_ int, target string) error {
+	agent.volumes.stage = func(_ int, target string, _ bool) error {
 		return os.WriteFile(filepath.Join(target, "block"), []byte("block"), 0o600)
 	}
 	unstaged := 0
@@ -1182,7 +1182,7 @@ func TestStartReleasesStagingOnlyWhenItsContainerIsGone(t *testing.T) {
 				_, err := os.Stat(filepath.Join(dir, "logs"))
 				return err == nil, tc.checkErr
 			}
-			agent.volumes.stage = func(int, string) error { return nil }
+			agent.volumes.stage = func(int, string, bool) error { return nil }
 			unstaged := 0
 			agent.volumes.unstage = func(string) error {
 				unstaged++
