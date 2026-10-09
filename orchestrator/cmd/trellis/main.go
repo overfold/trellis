@@ -1331,6 +1331,9 @@ func leaderAuthMiddleware(administrator *auth.AdministratorAuthenticator, admini
 	// Hold slots through downstream decoding/restore, not only body upload.
 	// At most 512 MiB of restore spools can exist per control-plane process.
 	restoreSlots := make(chan struct{}, 2)
+	// Non-restore buffers are route-sized (at most 32 MiB + 1 each).
+	// Fail admission immediately rather than retaining an unbounded waiter queue.
+	verificationSlots := make(chan struct{}, 4)
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c *echo.Context) error {
 			if c.Request().URL.Path == "/v1/auth/administrator/challenge" {
@@ -1413,19 +1416,92 @@ func leaderAuthMiddleware(administrator *auth.AdministratorAuthenticator, admini
 					}
 					c.Request().Body = spool
 				} else {
-					body, err := io.ReadAll(io.LimitReader(c.Request().Body, (64<<20)+1))
-					defer clear(body)
+					if !ok || !administrator.Preflight(publicKey, epoch, challenge, signature) {
+						c.Response().Header().Set(adminsign.ChallengeStatusHeader, adminsign.ChallengeInvalid)
+						return echo.NewHTTPError(http.StatusUnauthorized, "invalid administrator challenge or signature")
+					}
+					// The digest remains optional. When present it permits rejecting
+					// invalid signatures before upload, without burning the challenge.
+					if declared := c.Request().Header.Get(adminsign.DigestHeader); declared != "" {
+						if len(declared) != sha256.Size*2 {
+							c.Response().Header().Set(adminsign.ChallengeStatusHeader, adminsign.ChallengeInvalid)
+							return echo.NewHTTPError(http.StatusUnauthorized, "invalid administrator body digest")
+						}
+						digest, err := hex.DecodeString(declared)
+						if err != nil || len(digest) != sha256.Size || !administrator.VerifySignature(publicKey, epoch, challenge, signature, adminsign.PayloadDigest(challenge, c.Request().Method, c.Request().URL.RequestURI(), [sha256.Size]byte(digest))) {
+							c.Response().Header().Set(adminsign.ChallengeStatusHeader, adminsign.ChallengeInvalid)
+							return echo.NewHTTPError(http.StatusUnauthorized, "invalid administrator body digest or signature")
+						}
+					}
+					limit := server.RequestBodyLimit(c)
+					if c.Request().ContentLength > limit {
+						return echo.NewHTTPError(http.StatusRequestEntityTooLarge, "signed request body exceeds route limit")
+					}
+					select {
+					case verificationSlots <- struct{}{}:
+						defer func() { <-verificationSlots }()
+					default:
+						c.Response().Header().Set("Retry-After", "1")
+						return echo.NewHTTPError(http.StatusServiceUnavailable, "administrator verification admission limit reached")
+					}
+					ctx := c.Request().Context()
+					rc := http.NewResponseController(c.Response())
+					_ = rc.SetReadDeadline(time.Now().Add(15 * time.Second))
+					readStopped := make(chan struct{})
+					stopRead := context.AfterFunc(ctx, func() {
+						_ = rc.SetReadDeadline(time.Now())
+						close(readStopped)
+					})
+					finishUpload := func() {
+						if stopRead == nil {
+							return
+						}
+						if !stopRead() {
+							<-readStopped
+						}
+						stopRead = nil
+						_ = rc.SetReadDeadline(time.Time{})
+					}
+					defer finishUpload()
+					if ctx.Err() != nil {
+						return echo.NewHTTPError(http.StatusServiceUnavailable, "signed request canceled")
+					}
+					// Fixed capacity avoids ReadAll's transient growth copies. Keep
+					// the slot and wipe the entire buffer after downstream decoding.
+					buffer := make([]byte, limit+1)
+					defer clear(buffer)
+					hash := sha256.New()
+					n, err := io.Copy(io.MultiWriter(bytes.NewBuffer(buffer[:0]), hash), io.LimitReader(c.Request().Body, limit+1))
 					if err != nil {
 						c.Response().Header().Set(adminsign.ChallengeStatusHeader, adminsign.ChallengeInvalid)
 						return echo.NewHTTPError(http.StatusBadRequest, "unable to read signed request body")
 					}
-					if len(body) > 64<<20 {
+					if n > limit {
 						c.Response().Header().Set(adminsign.ChallengeStatusHeader, adminsign.ChallengeInvalid)
-						return echo.NewHTTPError(http.StatusRequestEntityTooLarge, "signed request body exceeds 64 MiB")
+						return echo.NewHTTPError(http.StatusRequestEntityTooLarge, "signed request body exceeds route limit")
 					}
+					if ctx.Err() != nil {
+						return echo.NewHTTPError(http.StatusServiceUnavailable, "signed request canceled")
+					}
+					body := buffer[:n]
 					c.Request().Body = io.NopCloser(bytes.NewReader(body))
-					payload = adminsign.Payload(challenge, c.Request().Method, c.Request().URL.RequestURI(), body)
-					publicKey, epoch, ok = administratorVerification()
+					digest := [sha256.Size]byte(hash.Sum(nil))
+					payload = adminsign.PayloadDigest(challenge, c.Request().Method, c.Request().URL.RequestURI(), digest)
+					if declared := c.Request().Header.Get(adminsign.DigestHeader); declared != "" {
+						if !strings.EqualFold(declared, hex.EncodeToString(digest[:])) {
+							return echo.NewHTTPError(http.StatusUnauthorized, "signed request body digest mismatch")
+						}
+					}
+					_, currentEpoch, available := administratorVerification()
+					if !available || currentEpoch != epoch {
+						return echo.NewHTTPError(http.StatusServiceUnavailable, "control-plane leadership changed")
+					}
+					// Do not carry the upload deadline or callback into an exec
+					// WebSocket upgrade or downstream term-bound read handling.
+					finishUpload()
+					if ctx.Err() != nil {
+						return echo.NewHTTPError(http.StatusServiceUnavailable, "signed request canceled")
+					}
 				}
 				if verified || (ok && challenge != "" && signature != "" && administrator.Verify(publicKey, epoch, challenge, signature, payload)) {
 					principal := auth.AdministratorPrincipal()

@@ -30,6 +30,28 @@ const (
 	maxBackupRequestBytes   = MaxRestoreRequestBytes
 )
 
+// RequestBodyLimit returns the route's upload budget for administrator signature
+// verification, using the same limits as JSON decoding. Unmatched and bodyless
+// routes receive only the small budget, never a large fallback.
+func RequestBodyLimit(c *echo.Context) int64 {
+	if c.Request().Method == http.MethodPost {
+		switch c.Path() {
+		case "/v1/backup/restore":
+			return MaxRestoreRequestBytes
+		case "/v1/namespaces/:namespace/jobs", "/v1/namespaces/:namespace/jobs/plan":
+			return maxJobRequestBytes
+		case "/v1/nodes":
+			return maxDefaultRequestBytes
+		case "/v1/nodes/:id/heartbeat":
+			return maxHeartbeatBodyBytes
+		}
+	}
+	if c.Request().Method == http.MethodPut && c.Path() == "/v1/namespaces/:namespace/secrets/:name" {
+		return maxSecretRequestBytes
+	}
+	return maxSmallRequestBytes
+}
+
 // decodeJSON strictly decodes exactly one JSON value from the request body
 // into dst. The API is as strict as the published schemas and YAML decoding:
 // unknown fields, trailing data, a missing body, and non-JSON media types are

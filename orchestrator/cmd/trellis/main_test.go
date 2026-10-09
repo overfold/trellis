@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/ed25519"
@@ -11,8 +12,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -70,6 +73,96 @@ type failingReader struct{}
 
 func (failingReader) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
 
+type countedReader struct {
+	reader io.Reader
+	reads  int
+	bytes  int64
+}
+
+func (r *countedReader) Read(p []byte) (int, error) {
+	r.reads++
+	if r.reader != nil {
+		n, err := r.reader.Read(p)
+		r.bytes += int64(n)
+		return n, err
+	}
+	return 0, io.ErrUnexpectedEOF
+}
+
+func TestAdministratorProofRejectedBeforeBodyRead(t *testing.T) {
+	t.Parallel()
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := auth.NewAdministratorAuthenticator()
+	e := echo.New()
+	e.Use(leaderAuthMiddleware(a, func() (ed25519.PublicKey, uint64, bool) { return publicKey, 7, true }, nil, nil))
+	e.POST("/v1/credentials", func(c *echo.Context) error { return c.NoContent(http.StatusNoContent) })
+	value, expiresAt, err := a.Issue(7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldEpoch, _, err := a.Issue(6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof := base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, adminsign.Payload(value, "POST", "/v1/credentials", nil)))
+	used, _, err := a.Issue(7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usedProof := base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, adminsign.Payload(used, "POST", "/v1/credentials", nil)))
+	valid := httptest.NewRequest(http.MethodPost, "/v1/credentials", nil)
+	valid.Header.Set(adminsign.ChallengeHeader, used)
+	valid.Header.Set(adminsign.SignatureHeader, usedProof)
+	validResponse := httptest.NewRecorder()
+	e.ServeHTTP(validResponse, valid)
+	if validResponse.Code != http.StatusNoContent {
+		t.Fatalf("legitimate request status=%d", validResponse.Code)
+	}
+	for _, test := range []struct{ name, challenge, signature string }{
+		{"incomplete", value, ""},
+		{"signature only", "", proof},
+		{"malformed signature", value, "invalid"},
+		{"malformed signature encoding", value, strings.Repeat("!", 86)},
+		{"malformed challenge", "invalid", proof},
+		{"invalid challenge", strings.Repeat("A", 107), proof},
+		{"old epoch", oldEpoch, proof},
+		{"replay", used, usedProof},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			body := &countedReader{}
+			req := httptest.NewRequest(http.MethodPost, "/v1/credentials", nil)
+			req.Body = io.NopCloser(body)
+			req.Header.Set(adminsign.ChallengeHeader, test.challenge)
+			req.Header.Set(adminsign.SignatureHeader, test.signature)
+			rec := httptest.NewRecorder()
+			e.ServeHTTP(rec, req)
+			t.Logf("status=%d body reads=%d", rec.Code, body.reads)
+			if rec.Code != http.StatusUnauthorized || body.reads != 0 {
+				t.Fatalf("want 401 with zero body reads")
+			}
+		})
+	}
+	t.Run("expired challenge", func(t *testing.T) {
+		t.Parallel()
+		time.Sleep(time.Until(expiresAt))
+		body := &countedReader{}
+		req := httptest.NewRequest(http.MethodPost, "/v1/credentials", nil)
+		req.Body = io.NopCloser(body)
+		req.Header.Set(adminsign.ChallengeHeader, value)
+		req.Header.Set(adminsign.SignatureHeader, proof)
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		t.Logf("expired challenge status=%d body reads=%d", rec.Code, body.reads)
+		if rec.Code != http.StatusUnauthorized || body.reads != 0 {
+			t.Fatal("expired challenge read body")
+		}
+	})
+}
+
 type endlessReader struct{}
 
 func (endlessReader) Read(p []byte) (int, error) {
@@ -77,6 +170,276 @@ func (endlessReader) Read(p []byte) (int, error) {
 		p[i] = 'x'
 	}
 	return len(p), nil
+}
+
+type heldRequestBody struct {
+	entered chan<- struct{}
+	release <-chan struct{}
+}
+
+func (r heldRequestBody) Read([]byte) (int, error) {
+	r.entered <- struct{}{}
+	<-r.release
+	return 0, io.EOF
+}
+
+type signalingBody struct {
+	io.ReadCloser
+	entered chan<- struct{}
+}
+
+func (r signalingBody) Read(p []byte) (int, error) {
+	select {
+	case r.entered <- struct{}{}:
+	default:
+	}
+	return r.ReadCloser.Read(p)
+}
+
+func TestAdministratorVerificationBudgets(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := auth.NewAdministratorAuthenticator()
+	var epoch atomic.Uint64
+	epoch.Store(7)
+	e := echo.New()
+	e.Use(leaderAuthMiddleware(a, func() (ed25519.PublicKey, uint64, bool) { return publicKey, epoch.Load(), true }, nil, nil))
+	for _, route := range []struct{ method, path string }{
+		{"POST", "/v1/credentials"}, {"POST", "/v1/namespaces/:namespace/jobs"},
+		{"POST", "/v1/namespaces/:namespace/jobs/plan"}, {"PUT", "/v1/namespaces/:namespace/secrets/:name"},
+		{"POST", "/v1/nodes"}, {"POST", "/v1/nodes/:id/heartbeat"},
+	} {
+		e.Add(route.method, route.path, func(c *echo.Context) error { return c.NoContent(http.StatusNoContent) })
+	}
+	request := func(method, target string, body []byte, valid bool) *http.Request {
+		value, _, err := a.Issue(epoch.Load())
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(method, target, bytes.NewReader(body))
+		req.Header.Set(adminsign.ChallengeHeader, value)
+		proof := make([]byte, ed25519.SignatureSize)
+		if valid {
+			proof = ed25519.Sign(privateKey, adminsign.Payload(value, method, target, body))
+		}
+		req.Header.Set(adminsign.SignatureHeader, base64.RawURLEncoding.EncodeToString(proof))
+		return req
+	}
+	t.Run("route boundaries without digest", func(t *testing.T) {
+		for _, route := range []struct {
+			method, target string
+			limit          int
+		}{
+			{"POST", "/v1/credentials", 64 << 10}, {"POST", "/v1/namespaces/default/jobs", 4 << 20},
+			{"POST", "/v1/namespaces/default/jobs/plan", 4 << 20}, {"PUT", "/v1/namespaces/default/secrets/key", 96 << 10},
+			{"POST", "/v1/nodes", 1 << 20}, {"POST", "/v1/nodes/node/heartbeat", 32 << 20},
+		} {
+			body := bytes.Repeat([]byte("x"), route.limit)
+			rec := httptest.NewRecorder()
+			e.ServeHTTP(rec, request(route.method, route.target, body, true))
+			if rec.Code != http.StatusNoContent {
+				t.Fatalf("legitimate boundary %s: %d", route.target, rec.Code)
+			}
+			req := request(route.method, route.target, nil, false)
+			incoming := &countedReader{reader: io.LimitReader(endlessReader{}, int64(route.limit+4096))}
+			req.Body = io.NopCloser(incoming)
+			rec = httptest.NewRecorder()
+			e.ServeHTTP(rec, req)
+			t.Logf("%s streamed overflow: status=%d bytes read=%d budget=%d", route.target, rec.Code, incoming.bytes, route.limit)
+			if rec.Code != http.StatusRequestEntityTooLarge || incoming.bytes != int64(route.limit+1) {
+				t.Errorf("well-formed invalid signature exceeded route budget")
+			}
+		}
+	})
+	t.Run("tampered body does not consume challenge", func(t *testing.T) {
+		for _, withDigest := range []bool{false, true} {
+			original := []byte("original")
+			req := request("POST", "/v1/credentials", original, true)
+			if withDigest {
+				digest := sha256.Sum256(original)
+				req.Header.Set(adminsign.DigestHeader, hex.EncodeToString(digest[:]))
+			}
+			req.Body = io.NopCloser(strings.NewReader("tampered"))
+			rec := httptest.NewRecorder()
+			e.ServeHTTP(rec, req)
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("tampered request status=%d", rec.Code)
+			}
+			req.Body = io.NopCloser(bytes.NewReader(original))
+			rec = httptest.NewRecorder()
+			e.ServeHTTP(rec, req)
+			if rec.Code != http.StatusNoContent {
+				t.Fatalf("valid retry after tampering status=%d", rec.Code)
+			}
+		}
+	})
+	t.Run("concurrent replay admits one request", func(t *testing.T) {
+		req := request("POST", "/v1/credentials", nil, true)
+		results := make(chan int, 8)
+		for range 8 {
+			go func() {
+				rec := httptest.NewRecorder()
+				e.ServeHTTP(rec, req.Clone(context.Background()))
+				results <- rec.Code
+			}()
+		}
+		admitted := 0
+		for range 8 {
+			switch status := <-results; status {
+			case http.StatusNoContent:
+				admitted++
+			case http.StatusUnauthorized, http.StatusServiceUnavailable:
+			default:
+				t.Errorf("unexpected replay status=%d", status)
+			}
+		}
+		if admitted != 1 {
+			t.Fatalf("concurrent replay admitted %d requests", admitted)
+		}
+	})
+	t.Run("invalid signature with digest and declared oversize read nothing", func(t *testing.T) {
+		for _, withDigest := range []bool{false, true} {
+			req := request("POST", "/v1/credentials", nil, false)
+			body := &countedReader{}
+			req.Body = io.NopCloser(body)
+			want := http.StatusRequestEntityTooLarge
+			if withDigest {
+				digest := sha256.Sum256(nil)
+				req.Header.Set(adminsign.DigestHeader, hex.EncodeToString(digest[:]))
+				want = http.StatusUnauthorized
+			} else {
+				req.ContentLength = (64 << 10) + 1
+			}
+			rec := httptest.NewRecorder()
+			e.ServeHTTP(rec, req)
+			if rec.Code != want || body.reads != 0 {
+				t.Fatalf("status=%d reads=%d, want %d and zero", rec.Code, body.reads, want)
+			}
+		}
+	})
+	t.Run("concurrent upload and downstream admission", func(t *testing.T) {
+		entered := make(chan struct{}, 4)
+		release := make(chan struct{})
+		results := make(chan int, 4)
+		e.POST("/v1/held", func(c *echo.Context) error {
+			entered <- struct{}{}
+			<-release
+			return c.NoContent(http.StatusNoContent)
+		})
+		t.Cleanup(func() {
+			close(release)
+			for range 4 {
+				<-results
+			}
+		})
+		for i := range 4 {
+			req := request("POST", "/v1/credentials", nil, false)
+			req.Body = io.NopCloser(heldRequestBody{entered, release})
+			if i >= 2 {
+				req = request("POST", "/v1/held", nil, true)
+			}
+			go func() {
+				rec := httptest.NewRecorder()
+				e.ServeHTTP(rec, req)
+				results <- rec.Code
+			}()
+		}
+		for range 4 {
+			select {
+			case <-entered:
+			case <-time.After(2 * time.Second):
+				t.Fatal("upload did not enter")
+			}
+		}
+		body := &countedReader{}
+		req := request("POST", "/v1/credentials", nil, false)
+		req.Body = io.NopCloser(body)
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		t.Logf("fifth concurrent request status=%d reads=%d retry=%s", rec.Code, body.reads, rec.Header().Get("Retry-After"))
+		if rec.Code != http.StatusServiceUnavailable || body.reads != 0 || rec.Header().Get("Retry-After") != "1" {
+			t.Error("aggregate admission did not reject fifth request before reading")
+		}
+	})
+	t.Run("recovered slot and canceled proof not consumed", func(t *testing.T) {
+		req := request("POST", "/v1/credentials", nil, true)
+		ctx, cancel := context.WithCancel(req.Context())
+		cancel()
+		body := &countedReader{}
+		req.Body = io.NopCloser(body)
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req.WithContext(ctx))
+		if rec.Code != http.StatusServiceUnavailable || body.reads != 0 {
+			t.Fatalf("canceled request status=%d reads=%d", rec.Code, body.reads)
+		}
+		req.Body = http.NoBody
+		rec = httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("recovered admission/reused unconsumed proof: %d", rec.Code)
+		}
+	})
+	t.Run("epoch changes during upload", func(t *testing.T) {
+		req := request("POST", "/v1/credentials", nil, true)
+		entered, release := make(chan struct{}, 1), make(chan struct{})
+		req.Body = io.NopCloser(heldRequestBody{entered, release})
+		done := make(chan int, 1)
+		go func() { rec := httptest.NewRecorder(); e.ServeHTTP(rec, req); done <- rec.Code }()
+		<-entered
+		epoch.Add(1)
+		close(release)
+		if got := <-done; got != http.StatusServiceUnavailable {
+			t.Fatalf("epoch changed during successful upload: status=%d", got)
+		}
+	})
+	for _, canceled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("slow wire upload canceled=%v", canceled), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			entered := make(chan struct{}, 1)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				r.Body = signalingBody{r.Body, entered}
+				e.ServeHTTP(w, r.WithContext(ctx))
+			}))
+			defer srv.Close()
+			conn, err := net.DialTimeout("tcp", srv.Listener.Addr().String(), time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = conn.Close() }()
+			req := request("POST", "/v1/credentials", nil, false)
+			if err := conn.SetDeadline(time.Now().Add(20 * time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			start := time.Now()
+			_, err = fmt.Fprintf(conn, "POST /v1/credentials HTTP/1.1\r\nHost: test\r\nContent-Length: 2\r\nConnection: close\r\n%s: %s\r\n%s: %s\r\n\r\nx", adminsign.ChallengeHeader, req.Header.Get(adminsign.ChallengeHeader), adminsign.SignatureHeader, req.Header.Get(adminsign.SignatureHeader))
+			if err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-entered:
+			case <-time.After(2 * time.Second):
+				t.Fatal("wire body read did not enter")
+			}
+			if canceled {
+				cancel()
+			}
+			response, err := http.ReadResponse(bufio.NewReader(conn), req)
+			if err != nil {
+				t.Fatalf("slow upload not bounded: %v", err)
+			}
+			defer func() { _ = response.Body.Close() }()
+			t.Logf("slow upload status=%d elapsed=%s", response.StatusCode, time.Since(start).Round(time.Millisecond))
+			if response.StatusCode != http.StatusBadRequest {
+				t.Fatalf("slow upload status=%d", response.StatusCode)
+			}
+			if canceled && time.Since(start) > 2*time.Second {
+				t.Fatal("cancellation did not unblock wire upload promptly")
+			}
+		})
+	}
 }
 
 func TestRunValidatesClusterNameBeforeStorage(t *testing.T) {
@@ -625,18 +988,14 @@ func TestAdministratorRequestSignatures(t *testing.T) {
 	})
 	t.Run("unreadable body does not burn challenge", func(t *testing.T) {
 		value := challenge()
-		req := httptest.NewRequest(http.MethodPost, "/v1/root", nil)
+		req := signedRequest(http.MethodPost, "/v1/root", nil, http.MethodPost, "/v1/root", nil, privateKey, value)
 		req.Body = io.NopCloser(failingReader{})
-		req.Header.Set(adminsign.ChallengeHeader, value)
-		req.Header.Set(adminsign.SignatureHeader, "invalid")
 		assertNotBurned(t, value, req, http.StatusBadRequest)
 	})
 	t.Run("oversized body does not burn challenge", func(t *testing.T) {
 		value := challenge()
-		req := httptest.NewRequest(http.MethodPost, "/v1/root", nil)
+		req := signedRequest(http.MethodPost, "/v1/root", nil, http.MethodPost, "/v1/root", nil, privateKey, value)
 		req.Body = io.NopCloser(io.LimitReader(endlessReader{}, (64<<20)+1))
-		req.Header.Set(adminsign.ChallengeHeader, value)
-		req.Header.Set(adminsign.SignatureHeader, "invalid")
 		assertNotBurned(t, value, req, http.StatusRequestEntityTooLarge)
 	})
 	t.Run("unavailable verification does not burn challenge", func(t *testing.T) {
