@@ -6,8 +6,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -154,7 +156,9 @@ func (c *Client) authenticate(ctx context.Context, request *http.Request, body [
 		if err != nil {
 			return err
 		}
-		payload := adminsign.Payload(challenge, request.Method, request.URL.RequestURI(), body)
+		digest := sha256.Sum256(body)
+		payload := adminsign.PayloadDigest(challenge, request.Method, request.URL.RequestURI(), digest)
+		request.Header.Set(adminsign.DigestHeader, hex.EncodeToString(digest[:]))
 		request.Header.Set(adminsign.ChallengeHeader, challenge)
 		request.Header.Set(adminsign.SignatureHeader, base64.RawURLEncoding.EncodeToString(ed25519.Sign(c.AdministratorKey, payload)))
 	}

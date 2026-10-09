@@ -36,6 +36,11 @@ func jobKey(namespace, name string) string {
 // RegisterJob creates or updates desired job state. A nil preconditions
 // applies unconditionally.
 func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spec.JobSpec, preconditions *JobPreconditions, resolvedImages map[string]string) (*api.JobRegistrationResponse, error) {
+	ctx, release := s.bindTerm(ctx)
+	defer release()
+	if err := s.checkTerm(ctx); err != nil {
+		return nil, err
+	}
 	if preconditions == nil {
 		preconditions = &JobPreconditions{}
 	}
@@ -66,6 +71,9 @@ func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spe
 	execution := executionSpec(jobSpec, images)
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
+	if err := s.checkTerm(ctx); err != nil {
+		return nil, err
+	}
 	key := jobKey(namespace, jobSpec.Name)
 	// The precondition is checked under mutationMu, which serializes every
 	// job mutation on the leader, so the job cannot change between this
@@ -390,6 +398,11 @@ func (s *Server) jobStatus(namespace, name string) (*api.JobStatusResponse, *spe
 
 // PlanJob returns the semantic plan for applying desired, a canonical job.
 func (s *Server) PlanJob(ctx context.Context, desired *spec.JobSpec) (api.JobPlanResponse, error) {
+	ctx, release := s.bindTerm(ctx)
+	defer release()
+	if err := s.checkTerm(ctx); err != nil {
+		return api.JobPlanResponse{}, err
+	}
 	s.mu.RLock()
 	settings := s.clusterSettingsLocked()
 	s.mu.RUnlock()
@@ -398,6 +411,9 @@ func (s *Server) PlanJob(ctx context.Context, desired *spec.JobSpec) (api.JobPla
 	}
 	images, err := s.resolveJobImages(ctx, desired, nil)
 	if err != nil {
+		return api.JobPlanResponse{}, err
+	}
+	if err := s.checkTerm(ctx); err != nil {
 		return api.JobPlanResponse{}, err
 	}
 	execution := executionSpec(desired, images)

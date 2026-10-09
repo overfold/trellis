@@ -883,6 +883,9 @@ func (h *Handler) handlePlanJob(c *echo.Context) error {
 	if errors.Is(err, ErrJobVersionConflict) {
 		return echo.NewHTTPError(http.StatusConflict, err.Error())
 	}
+	if isUnavailable(err) {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error())
+	}
 	if err != nil {
 		return validationResponse(c, err)
 	}
@@ -1143,6 +1146,9 @@ func (h *Handler) handleResetReplacementBackoff(c *echo.Context) error {
 	if err := h.server.ResetReplacementBackoff(c.Request().Context(), ns, name, group); err != nil {
 		if errors.Is(err, ErrTaskGroupNotFound) {
 			return echo.NewHTTPError(http.StatusNotFound, "task group not found")
+		}
+		if isUnavailable(err) {
+			return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error())
 		}
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}

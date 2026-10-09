@@ -5,8 +5,10 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -538,6 +540,8 @@ func TestAdministratorRequestSignatures(t *testing.T) {
 	signedRequest := func(actualMethod, actualTarget string, actualBody []byte, signedMethod, signedTarget string, signedBody []byte, key ed25519.PrivateKey, challenge string) *http.Request {
 		req := httptest.NewRequest(actualMethod, actualTarget, strings.NewReader(string(actualBody)))
 		payload := adminsign.Payload(challenge, signedMethod, signedTarget, signedBody)
+		digest := sha256.Sum256(signedBody)
+		req.Header.Set(adminsign.DigestHeader, hex.EncodeToString(digest[:]))
 		req.Header.Set(adminsign.ChallengeHeader, challenge)
 		req.Header.Set(adminsign.SignatureHeader, base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, payload)))
 		return req
@@ -599,7 +603,7 @@ func TestAdministratorRequestSignatures(t *testing.T) {
 		t.Fatalf("old leadership term challenge status = %d, want %d", rec.Code, http.StatusUnauthorized)
 	}
 
-	assertConsumed := func(t *testing.T, challenge string, attempt *http.Request, wantStatus int) {
+	assertNotBurned := func(t *testing.T, challenge string, attempt *http.Request, wantStatus int) {
 		t.Helper()
 		rec := httptest.NewRecorder()
 		e.ServeHTTP(rec, attempt)
@@ -608,34 +612,34 @@ func TestAdministratorRequestSignatures(t *testing.T) {
 		}
 		rec = httptest.NewRecorder()
 		e.ServeHTTP(rec, signedRequest(http.MethodPost, "/v1/root", nil, http.MethodPost, "/v1/root", nil, privateKey, challenge))
-		if rec.Code != http.StatusUnauthorized {
-			t.Fatalf("challenge retry status = %d, want %d", rec.Code, http.StatusUnauthorized)
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("challenge retry status = %d, want %d", rec.Code, http.StatusNoContent)
 		}
 	}
 
-	t.Run("incomplete headers consume challenge", func(t *testing.T) {
+	t.Run("incomplete headers do not burn challenge", func(t *testing.T) {
 		value := challenge()
 		req := httptest.NewRequest(http.MethodPost, "/v1/root", nil)
 		req.Header.Set(adminsign.ChallengeHeader, value)
-		assertConsumed(t, value, req, http.StatusUnauthorized)
+		assertNotBurned(t, value, req, http.StatusUnauthorized)
 	})
-	t.Run("unreadable body consumes challenge", func(t *testing.T) {
+	t.Run("unreadable body does not burn challenge", func(t *testing.T) {
 		value := challenge()
 		req := httptest.NewRequest(http.MethodPost, "/v1/root", nil)
 		req.Body = io.NopCloser(failingReader{})
 		req.Header.Set(adminsign.ChallengeHeader, value)
 		req.Header.Set(adminsign.SignatureHeader, "invalid")
-		assertConsumed(t, value, req, http.StatusBadRequest)
+		assertNotBurned(t, value, req, http.StatusBadRequest)
 	})
-	t.Run("oversized body consumes challenge", func(t *testing.T) {
+	t.Run("oversized body does not burn challenge", func(t *testing.T) {
 		value := challenge()
 		req := httptest.NewRequest(http.MethodPost, "/v1/root", nil)
 		req.Body = io.NopCloser(io.LimitReader(endlessReader{}, (64<<20)+1))
 		req.Header.Set(adminsign.ChallengeHeader, value)
 		req.Header.Set(adminsign.SignatureHeader, "invalid")
-		assertConsumed(t, value, req, http.StatusRequestEntityTooLarge)
+		assertNotBurned(t, value, req, http.StatusRequestEntityTooLarge)
 	})
-	t.Run("unavailable verification consumes challenge", func(t *testing.T) {
+	t.Run("unavailable verification does not burn challenge", func(t *testing.T) {
 		value := challenge()
 		verificationAvailable = false
 		attempt := signedRequest(http.MethodPost, "/v1/root", nil, http.MethodPost, "/v1/root", nil, privateKey, value)
@@ -647,8 +651,8 @@ func TestAdministratorRequestSignatures(t *testing.T) {
 		verificationAvailable = true
 		rec = httptest.NewRecorder()
 		e.ServeHTTP(rec, signedRequest(http.MethodPost, "/v1/root", nil, http.MethodPost, "/v1/root", nil, privateKey, value))
-		if rec.Code != http.StatusUnauthorized {
-			t.Fatalf("challenge retry status = %d, want %d", rec.Code, http.StatusUnauthorized)
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("challenge retry status = %d, want %d", rec.Code, http.StatusNoContent)
 		}
 	})
 
@@ -945,5 +949,123 @@ func TestDetectRunscRequiresContainerdShim(t *testing.T) {
 		if name != "runsc" && (len(got) != 1 || got[0] != "runtime.runsc") {
 			t.Fatalf("containerd shim capabilities = %v", got)
 		}
+	}
+}
+
+type restoreCountingReader struct {
+	reader io.Reader
+	bytes  int64
+}
+
+func (r *restoreCountingReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	r.bytes += int64(n)
+	return n, err
+}
+
+func TestRestoreAdmissionBoundsAndClient(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	publicKey, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := auth.NewAdministratorAuthenticator()
+	e := echo.New()
+	e.Use(leaderAuthMiddleware(a, func() (ed25519.PublicKey, uint64, bool) { return publicKey, 7, true }, nil, nil))
+	entered, release := make(chan struct{}, 2), make(chan struct{})
+	e.POST("/v1/backup/restore", func(c *echo.Context) error {
+		entered <- struct{}{}
+		<-release
+		return c.NoContent(http.StatusNoContent)
+	})
+	sign := func() *http.Request {
+		value, _, err := a.Issue(7)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/v1/backup/restore", nil)
+		digest := sha256.Sum256(nil)
+		req.Header.Set(adminsign.DigestHeader, hex.EncodeToString(digest[:]))
+		req.Header.Set(adminsign.ChallengeHeader, value)
+		req.Header.Set(adminsign.SignatureHeader, base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, adminsign.Payload(value, req.Method, req.URL.RequestURI(), nil))))
+		return req
+	}
+	for _, name := range []string{"missing digest", "invalid signature", "forged challenge", "different process challenge", "known oversize", "stream oversize"} {
+		t.Run(name, func(t *testing.T) {
+			req := sign()
+			reader := &restoreCountingReader{reader: endlessReader{}}
+			req.Body = io.NopCloser(reader)
+			want, wantBytes := http.StatusUnauthorized, int64(0)
+			switch name {
+			case "missing digest":
+				req.Header.Del(adminsign.DigestHeader)
+			case "invalid signature":
+				req.Header.Set(adminsign.SignatureHeader, "invalid")
+			case "forged challenge":
+				req.Header.Set(adminsign.ChallengeHeader, strings.Repeat("x", 107))
+			case "different process challenge":
+				old := auth.NewAdministratorAuthenticator() // Different process key.
+				value, _, _ := old.Issue(7)
+				req.Header.Set(adminsign.ChallengeHeader, value)
+			case "known oversize":
+				req.ContentLength = server.MaxRestoreRequestBytes + 1
+				want = http.StatusRequestEntityTooLarge
+			case "stream oversize":
+				req.ContentLength = -1
+				want, wantBytes = http.StatusRequestEntityTooLarge, server.MaxRestoreRequestBytes+1
+			}
+			rec := httptest.NewRecorder()
+			e.ServeHTTP(rec, req)
+			if rec.Code != want || reader.bytes != wantBytes {
+				t.Fatalf("status %d, read %d bytes; want %d, %d: %s", rec.Code, reader.bytes, want, wantBytes, rec.Body.String())
+			}
+			files, err := os.ReadDir(os.Getenv("TMPDIR"))
+			if err != nil || len(files) != 0 {
+				t.Fatalf("spools leaked: %v, %v", files, err)
+			}
+		})
+	}
+	// Keep two admitted restores in downstream execution. The third must
+	// fail without reading its body; slots cover the entire spool lifetime.
+	done := make(chan *httptest.ResponseRecorder, 2)
+	for range 2 {
+		req := sign()
+		go func() {
+			rec := httptest.NewRecorder()
+			e.ServeHTTP(rec, req)
+			done <- rec
+		}()
+	}
+	for range 2 {
+		<-entered
+	}
+	req := sign()
+	reader := &restoreCountingReader{reader: endlessReader{}}
+	req.Body = io.NopCloser(reader)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	close(release)
+	for range 2 {
+		if result := <-done; result.Code != http.StatusNoContent {
+			t.Fatalf("admitted restore status = %d", result.Code)
+		}
+	}
+	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "1" || reader.bytes != 0 {
+		t.Fatalf("overload status %d, read %d bytes: %s", rec.Code, reader.bytes, rec.Body.String())
+	}
+	// Exercise the public client against real authentication after releasing
+	// capacity: it must send the signed digest automatically.
+	httpServer := httptest.NewServer(e)
+	defer httpServer.Close()
+	c, err := client.New(client.Config{Address: httpServer.URL, AdministratorKey: privateKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RestoreBackup(t.Context(), &api.BackupSnapshot{}); err != nil {
+		t.Fatal(err)
+	}
+	files, err := os.ReadDir(os.Getenv("TMPDIR"))
+	if err != nil || len(files) != 0 {
+		t.Fatalf("spools leaked: %v, %v", files, err)
 	}
 }

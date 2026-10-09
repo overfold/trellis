@@ -320,7 +320,13 @@ var ErrTaskGroupNotFound = errors.New("task group not found")
 // record is committed through the state store, like every other backoff
 // change, before the leader uses it.
 func (s *Server) ResetReplacementBackoff(ctx context.Context, namespace, job, group string) error {
+	ctx, release := s.bindTerm(ctx)
+	defer release()
 	s.mutationMu.Lock()
+	if err := s.checkTerm(ctx); err != nil {
+		s.mutationMu.Unlock()
+		return err
+	}
 	s.mu.RLock()
 	current := s.jobs[jobKey(namespace, job)]
 	if current == nil || !slices.ContainsFunc(current.Spec.TaskGroups, func(g spec.TaskGroupSpec) bool { return g.Name == group }) {
@@ -338,7 +344,7 @@ func (s *Server) ResetReplacementBackoff(ctx context.Context, namespace, job, gr
 	next := previous.reset()
 	if err := s.state.PutReplacementBackoff(ctx, next); err != nil {
 		s.mutationMu.Unlock()
-		return fmt.Errorf("persist replacement backoff reset: %w", err)
+		return stateUnavailable(fmt.Errorf("persist replacement backoff reset: %w", err))
 	}
 	s.mu.Lock()
 	backoffs := make(map[string]*ReplacementBackoff, len(s.replacementBackoffs))

@@ -30,6 +30,9 @@ func resolveRegistryImage(ctx context.Context, image string) (string, error) {
 	}
 	_, descriptor, err := docker.NewResolver(docker.ResolverOptions{}).Resolve(ctx, named.String())
 	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
 		// Registry errors can contain authentication URLs or response bodies.
 		return "", fmt.Errorf("registry resolution failed; check image availability and registry access")
 	}
@@ -55,6 +58,9 @@ func (s *Server) resolveJobImages(ctx context.Context, job *spec.JobSpec, suppli
 				pinned = supplied[task.Image]
 			} else {
 				pinned, err = s.resolveImage(ctx, task.Image)
+			}
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
 			}
 			if err == nil {
 				pinned, err = validateImagePin(task.Image, pinned)

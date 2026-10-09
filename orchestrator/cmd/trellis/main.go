@@ -1328,6 +1328,9 @@ func nodeControlPlaneRoute(r *http.Request) bool {
 }
 
 func leaderAuthMiddleware(administrator *auth.AdministratorAuthenticator, administratorVerification func() (ed25519.PublicKey, uint64, bool), tokenManager *auth.TokenManager, authorizeNodeCertificate func(context.Context, uuid.UUID, *x509.Certificate) bool) echo.MiddlewareFunc {
+	// Hold slots through downstream decoding/restore, not only body upload.
+	// At most 512 MiB of restore spools can exist per control-plane process.
+	restoreSlots := make(chan struct{}, 2)
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c *echo.Context) error {
 			if c.Request().URL.Path == "/v1/auth/administrator/challenge" {
@@ -1356,29 +1359,59 @@ func leaderAuthMiddleware(administrator *auth.AdministratorAuthenticator, admini
 			challenge := c.Request().Header.Get(adminsign.ChallengeHeader)
 			signature := c.Request().Header.Get(adminsign.SignatureHeader)
 			if challenge != "" || signature != "" {
-				if challenge != "" {
-					defer administrator.Consume(challenge)
-				}
+				publicKey, epoch, ok := administratorVerification()
 				isRestore := c.Request().Method == http.MethodPost && c.Request().URL.Path == "/v1/backup/restore"
+				verified := false
 				var payload []byte
 				if isRestore {
-					// Authenticate the entire aggregate without buffering an
-					// unauthenticated, arbitrarily large body in memory. The
-					// private spool is deleted on every return path.
+					if len(c.Request().Header.Get(adminsign.DigestHeader)) != sha256.Size*2 {
+						c.Response().Header().Set(adminsign.ChallengeStatusHeader, adminsign.ChallengeInvalid)
+						return echo.NewHTTPError(http.StatusUnauthorized, "restore requires a signed SHA-256 body digest")
+					}
+					digest, err := hex.DecodeString(c.Request().Header.Get(adminsign.DigestHeader))
+					if err != nil || len(digest) != sha256.Size || !ok || !administrator.Verify(publicKey, epoch, challenge, signature, adminsign.PayloadDigest(challenge, c.Request().Method, c.Request().URL.RequestURI(), [sha256.Size]byte(digest))) {
+						c.Response().Header().Set(adminsign.ChallengeStatusHeader, adminsign.ChallengeInvalid)
+						return echo.NewHTTPError(http.StatusUnauthorized, "invalid administrator challenge, digest or signature")
+					}
+					verified = true
+					if c.Request().ContentLength > server.MaxRestoreRequestBytes {
+						return echo.NewHTTPError(http.StatusRequestEntityTooLarge, "restore body exceeds 256 MiB")
+					}
+					select {
+					case restoreSlots <- struct{}{}:
+						defer func() { <-restoreSlots }()
+					default:
+						c.Response().Header().Set("Retry-After", "1")
+						return echo.NewHTTPError(http.StatusServiceUnavailable, "restore admission limit reached")
+					}
+					// Bound slow authenticated uploads as well as spool bytes.
+					rc := http.NewResponseController(c.Response())
+					_ = rc.SetReadDeadline(time.Now().Add(2 * time.Minute))
+					defer func() { _ = rc.SetReadDeadline(time.Time{}) }()
 					spool, err := os.CreateTemp("", "trellis-restore-*")
 					if err != nil {
 						return echo.NewHTTPError(http.StatusServiceUnavailable, "unable to stage restore body")
 					}
 					defer func() { _ = spool.Close(); _ = os.Remove(spool.Name()) }()
 					hash := sha256.New()
-					if _, err := io.Copy(io.MultiWriter(spool, hash), c.Request().Body); err != nil {
+					if _, err := io.Copy(io.MultiWriter(spool, hash), http.MaxBytesReader(c.Response(), c.Request().Body, server.MaxRestoreRequestBytes)); err != nil {
+						var tooLarge *http.MaxBytesError
+						if errors.As(err, &tooLarge) {
+							return echo.NewHTTPError(http.StatusRequestEntityTooLarge, "restore body exceeds 256 MiB")
+						}
 						return echo.NewHTTPError(http.StatusBadRequest, "unable to read signed restore body")
+					}
+					if !bytes.Equal(hash.Sum(nil), digest) {
+						return echo.NewHTTPError(http.StatusUnauthorized, "restore body digest mismatch")
+					}
+					_, currentEpoch, available := administratorVerification()
+					if !available || currentEpoch != epoch {
+						return echo.NewHTTPError(http.StatusServiceUnavailable, "control-plane leadership changed")
 					}
 					if _, err := spool.Seek(0, io.SeekStart); err != nil {
 						return echo.NewHTTPError(http.StatusServiceUnavailable, "unable to read staged restore body")
 					}
 					c.Request().Body = spool
-					payload = adminsign.PayloadDigest(challenge, c.Request().Method, c.Request().URL.RequestURI(), [sha256.Size]byte(hash.Sum(nil)))
 				} else {
 					body, err := io.ReadAll(io.LimitReader(c.Request().Body, (64<<20)+1))
 					defer clear(body)
@@ -1392,9 +1425,9 @@ func leaderAuthMiddleware(administrator *auth.AdministratorAuthenticator, admini
 					}
 					c.Request().Body = io.NopCloser(bytes.NewReader(body))
 					payload = adminsign.Payload(challenge, c.Request().Method, c.Request().URL.RequestURI(), body)
+					publicKey, epoch, ok = administratorVerification()
 				}
-				publicKey, epoch, ok := administratorVerification()
-				if ok && challenge != "" && signature != "" && administrator.Verify(publicKey, epoch, challenge, signature, payload) {
+				if verified || (ok && challenge != "" && signature != "" && administrator.Verify(publicKey, epoch, challenge, signature, payload)) {
 					principal := auth.AdministratorPrincipal()
 					ctx := context.WithValue(c.Request().Context(), server.AdminContextKey, true)
 					ctx = context.WithValue(ctx, server.PrincipalContextKey, principal)

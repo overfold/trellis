@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"github.com/labstack/echo/v5"
 	"github.com/opencontainers/go-digest"
 	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/client"
 	"github.com/overfold/trellis/orchestrator/internal/auth"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
@@ -264,5 +266,47 @@ func TestRegistryResolutionAndHTTPApply(t *testing.T) {
 	handler.ServeHTTP(applyResponse, scopedRequest(t, http.MethodPost, "/v1/namespaces/default/jobs", string(requestBody), auth.AccessCluster, auth.AccessWrite))
 	if applyResponse.Code != http.StatusAccepted {
 		t.Fatalf("planned apply contacted unavailable registry: %d %s", applyResponse.Code, applyResponse.Body.String())
+	}
+}
+
+func TestImageResolutionLeadershipCancellationThroughClient(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := resolveRegistryImage(ctx, "127.0.0.1:1/app:main"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("registry resolver lost cancellation identity: %v", err)
+	}
+	for _, operation := range []string{"plan", "apply"} {
+		t.Run(operation, func(t *testing.T) {
+			s, agent := newTestServerWithAgent()
+			t.Cleanup(agent.server.Close)
+			term, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			s.term, s.controlEpoch = term, 7
+			registry := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				cancel() // Lose leadership during the real registry round trip.
+				<-r.Context().Done()
+			}))
+			t.Cleanup(registry.Close)
+			s.SetImageResolver(resolveRegistryImage)
+			httpServer := httptest.NewServer(authenticatedHandler(s, auth.AccessWrite))
+			t.Cleanup(httpServer.Close)
+			c, err := client.New(client.Config{Address: httpServer.URL, Token: "token", Namespace: "default"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, _ := json.Marshal(imageTestSpec(strings.TrimPrefix(registry.URL, "http://")+"/app:main", 1))
+			if operation == "plan" {
+				_, err = c.PlanJob(t.Context(), raw)
+			} else {
+				_, err = c.ApplyJob(t.Context(), &api.JobRegistrationRequest{Spec: raw})
+			}
+			var status *client.HTTPError
+			if !errors.As(err, &status) || status.Status != http.StatusServiceUnavailable {
+				t.Fatalf("%s cancellation = %v, want retryable HTTP 503", operation, err)
+			}
+			if len(s.jobs) != 0 {
+				t.Fatal("canceled resolution installed desired state")
+			}
+		})
 	}
 }

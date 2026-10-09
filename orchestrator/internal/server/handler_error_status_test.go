@@ -12,6 +12,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/client"
+	"github.com/overfold/trellis/orchestrator/internal/auth"
 	"github.com/overfold/trellis/orchestrator/internal/state"
 )
 
@@ -184,5 +186,49 @@ func TestUndrainNodeStateFailureIsUnavailable(t *testing.T) {
 	rec := requestAdmin(context.Background(), t, s, http.MethodDelete, "/v1/nodes/"+node.ID.String()+"/drain", nil)
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("undrain with failed save status = %d, want 503; body %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestResetReplacementBackoffFailureStatusesThroughClient(t *testing.T) {
+	s, agent := newTestServerWithAgent()
+	defer agent.server.Close()
+	if _, err := s.RegisterJob(t.Context(), "default", versionTestSpec("app:v1", 1), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	key := replacementBackoffKey("default", "web", "api")
+	previous := &ReplacementBackoff{Namespace: "default", JobName: "web", TaskGroupName: "api", JobIncarnation: s.jobs[jobKey("default", "web")].Incarnation, Failures: 3}
+	s.replacementBackoffs = map[string]*ReplacementBackoff{key: previous}
+	track := httptest.NewServer(authenticatedHandler(s, auth.AccessWrite))
+	defer track.Close()
+	c, err := client.New(client.Config{Address: track.URL, Token: "token", Namespace: "default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failStateWrites(s)
+	for _, tc := range []struct {
+		group string
+		want  int
+	}{{"missing", http.StatusNotFound}, {"api", http.StatusServiceUnavailable}} {
+		err := c.ResetReplacementBackoff(t.Context(), "web", tc.group)
+		var status *client.HTTPError
+		if !errors.As(err, &status) || status.Status != tc.want {
+			t.Fatalf("reset %s = %v, want HTTP %d", tc.group, err, tc.want)
+		}
+	}
+	if s.replacementBackoffs[key] != previous || previous.Failures != 3 {
+		t.Fatal("uncommitted reset changed in-memory backoff")
+	}
+	term, cancel := context.WithCancel(t.Context())
+	s.termMu.Lock()
+	s.term = term
+	s.termMu.Unlock()
+	cancel()
+	if err := s.ResetReplacementBackoff(t.Context(), "default", "web", "api"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("lost leadership reset = %v", err)
+	}
+	err = c.ResetReplacementBackoff(t.Context(), "web", "api")
+	var status *client.HTTPError
+	if !errors.As(err, &status) || status.Status != http.StatusServiceUnavailable {
+		t.Fatalf("lost leadership reset = %v, want HTTP 503", err)
 	}
 }

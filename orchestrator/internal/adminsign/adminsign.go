@@ -15,6 +15,8 @@ const (
 	ChallengeHeader = "X-Trellis-Admin-Challenge"
 	// SignatureHeader carries the Ed25519 request signature.
 	SignatureHeader = "X-Trellis-Admin-Signature"
+	// DigestHeader carries the hex SHA-256 body digest for early restore admission.
+	DigestHeader = "X-Trellis-Admin-Body-SHA256"
 	// ChallengeStatusHeader tells clients to obtain a new challenge.
 	ChallengeStatusHeader = "X-Trellis-Admin-Challenge-Status"
 	// ChallengeInvalid is returned when a challenge cannot be used.

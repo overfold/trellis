@@ -17,15 +17,17 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
-// Request body limits. Administrator-only aggregate restores have no byte cap:
-// legal cluster state and pretty-printed backups can exceed any per-write cap.
+// MaxRestoreRequestBytes bounds the aggregate restore body and its private spool.
+const MaxRestoreRequestBytes = 256 << 20
+
+// Request body limits.
 const (
 	maxSmallRequestBytes    = 64 << 10
 	maxDefaultRequestBytes  = 1 << 20
 	maxJobRequestBytes      = 4 << 20
 	maxSecretRequestBytes   = 96 << 10
 	maxExecInputRequestSize = 128 << 10
-	maxBackupRequestBytes   = 0
+	maxBackupRequestBytes   = MaxRestoreRequestBytes
 )
 
 // decodeJSON strictly decodes exactly one JSON value from the request body
