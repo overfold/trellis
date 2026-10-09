@@ -3,9 +3,13 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/overfold/trellis/orchestrator/internal/network"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 )
 
 // detachAllocationNetwork removes an allocation's network attachment. A
@@ -136,4 +140,116 @@ func (a *Agent) detachOrphanedNetwork(ctx context.Context, recovery network.Atta
 	case <-done:
 	case <-ctx.Done():
 	}
+}
+
+func allocationNetworkAddress(allocation *Allocation) string {
+	if allocation == nil || allocation.Network == nil {
+		return ""
+	}
+	address := allocation.Network.Address
+	if host, _, ok := strings.Cut(address, "/"); ok {
+		return host
+	}
+	return address
+}
+
+func (a *Agent) lockNetworkPlan(ctx context.Context) (func(), error) {
+	a.operationMu.Lock()
+	if a.planOperation == nil {
+		a.planOperation = make(chan struct{}, 1)
+	}
+	operation := a.planOperation
+	a.operationMu.Unlock()
+	select {
+	case operation <- struct{}{}:
+		return func() { <-operation }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// UpdateNetworkPlan refreshes the network shared by running allocations.
+func (a *Agent) UpdateNetworkPlan(ctx context.Context, request *nodeapi.NetworkPlanRequest) error {
+	unlock, err := a.lockNetworkPlan(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := a.AcceptEpoch(request.Epoch); err != nil {
+		return err
+	}
+	active := false
+	if err := func() error {
+		a.mu.RLock()
+		defer a.mu.RUnlock()
+		if request.Epoch < a.epoch {
+			return fmt.Errorf("%w: received %d, highest accepted %d", ErrStaleEpoch, request.Epoch, a.epoch)
+		}
+		var desiredCIDR netip.Prefix
+		if request.Plan.CIDR != "" {
+			var err error
+			desiredCIDR, err = netip.ParsePrefix(request.Plan.CIDR)
+			if err != nil {
+				return fmt.Errorf("invalid network plan CIDR %q: %w", request.Plan.CIDR, err)
+			}
+			desiredCIDR = desiredCIDR.Masked()
+		}
+		for _, allocation := range a.allocations {
+			if allocation.Namespace != request.Namespace || allocation.Network == nil {
+				continue
+			}
+			active = true
+			if request.Plan.Gateway != "" && allocation.Network.Gateway != "" && request.Plan.Gateway != allocation.Network.Gateway {
+				return fmt.Errorf("network plan would change active namespace gateway from %s to %s", allocation.Network.Gateway, request.Plan.Gateway)
+			}
+			if desiredCIDR.IsValid() && allocation.Network.Address != "" {
+				current, err := netip.ParsePrefix(allocation.Network.Address)
+				if err != nil {
+					return fmt.Errorf("invalid active network address %q: %w", allocation.Network.Address, err)
+				}
+				if current.Masked() != desiredCIDR {
+					return fmt.Errorf("network plan would change active namespace CIDR from %s to %s", current.Masked(), desiredCIDR)
+				}
+			}
+		}
+		return nil
+	}(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	if a.networkPlans == nil {
+		a.networkPlans = make(map[string]network.Plan)
+	}
+	a.networkPlans[request.Namespace] = request.Plan
+	a.mu.Unlock()
+	// Retain the accepted desired topology even after a partial apply failure;
+	// a delayed start must not roll it back while reconciliation retries.
+	if active {
+		if err := a.network.UpdatePlan(ctx, request.Namespace, request.Plan); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
+}
+
+// The caller holds mu. Pending pulls and retained failed-cleanup records own
+// the plan too; a recreated idle namespace must bootstrap from its new start.
+func (a *Agent) forgetIdleNetworkPlanLocked(namespace string) {
+	for _, allocation := range a.allocations {
+		if allocation.Namespace == namespace && (allocation.Network != nil || allocation.NetworkIntent != nil) {
+			return
+		}
+	}
+	for _, start := range a.starts {
+		if start.namespace == namespace && !start.finished() {
+			return
+		}
+	}
+	delete(a.networkPlans, namespace)
 }

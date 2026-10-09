@@ -108,3 +108,28 @@ node, and allocation mutations and reconciliation commits share the coordinator'
 mutation ordering and leadership fencing. `StateController` in `state.go` owns
 typed persistence; the existing liveness, observation-queue, and exec-relay
 components own their local synchronization.
+
+## Agent source organization
+
+Within `internal/agent`, `agent.go` owns the shared coordinator, construction,
+configuration, initialization, and per-allocation operation locking. Related
+workflows are grouped by responsibility:
+
+- `state.go`: local allocation and retained-log records, epoch acceptance,
+  persistence, queries, and health/restart observation callbacks.
+- `recovery.go`: durable-state recovery, runtime ownership verification,
+  re-observation, and interrupted-cleanup retries.
+- `start.go` / `task_start.go`: background group-start admission and fencing /
+  task preparation, resource acquisition, launch, commit, and rollback.
+- `stop.go` / `drain.go`: generation-fenced stops and task cleanup / sequenced
+  drain and resume intent, including starts still in progress.
+- `heartbeat.go`: node registration and complete allocation-status reporting.
+- `network_attachments.go`: network-plan application and attachment cleanup.
+- `task_logs.go` / `exec.go`: log access, retention, usage, and limit enforcement /
+  exec streams.
+
+These files remain one package and one `Agent`, not independently synchronized
+services. Starts, stops, drains, and recovery retain shared allocation state,
+epoch and generation fencing, and the existing per-allocation operation locks.
+The reconciler, health manager, ports, volumes, and secrets keep their existing
+responsibilities and synchronization.
