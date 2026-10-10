@@ -282,6 +282,16 @@ trellisctl --administrator-key ./trellis-administrator.pem nodes remove 9cf13a2b
 
 Ambiguous prefixes are rejected and the CLI shows the matching nodes rather than guessing.
 
+Use `trellisctl nodes leader` to show the serving control-plane leader's full UUID, or add `--output json` for `{"leader_id":"<node UUID>"}`. The query needs cluster-scoped read access and works through a follower's API. Before gracefully uninstalling a multi-node cluster's leader, transfer leadership explicitly with the administrator credential and verify that it moved:
+
+```sh
+trellisctl --context local nodes leader
+trellisctl --context local --administrator-key ./trellis-administrator.pem nodes transfer-leadership
+trellisctl --context local nodes leader
+```
+
+Transfer selects another voter; failure to transfer or a subsequent election requires operator intervention. Uninstall refuses a known leader before draining, and still fails safely if the target becomes leader after that check. See [Uninstall a node](operations.md#uninstall-a-node) for exceptions and interrupted-removal recovery.
+
 ## Inspect and change cluster settings
 
 Job limits, reconciliation settings, and namespace-network settings apply to the whole cluster and are replicated with the rest of its state, so they do not change when leadership moves. Show them with:
@@ -315,7 +325,7 @@ Current structured-output commands are:
 ```text
 jobs list, status
 namespaces list
-nodes list, status
+nodes list, status, leader
 cluster settings
 secrets set, list, describe
 credentials create, list

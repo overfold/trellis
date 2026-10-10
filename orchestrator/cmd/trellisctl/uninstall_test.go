@@ -34,6 +34,11 @@ func TestUninstallRealCLIAuthentication(t *testing.T) {
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, output)
 	}
+	daemon := filepath.Join(tmp, "trellis")
+	build = exec.CommandContext(t.Context(), "go", "build", "-o", daemon, "../trellis")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build daemon: %v\n%s", err, output)
+	}
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -55,9 +60,10 @@ func TestUninstallRealCLIAuthentication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id := uuid.New()
+	id, other := uuid.New(), uuid.New()
 	var mu sync.Mutex
 	var calls []string
+	var activeScenario string
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -79,7 +85,30 @@ func TestUninstallRealCLIAuthentication(t *testing.T) {
 		}
 		calls = append(calls, fmt.Sprintf("%s %s admin=%t", r.Method, r.URL.Path, admin))
 		if r.Method == http.MethodGet && r.URL.Path == "/v1/nodes" {
-			_ = json.NewEncoder(w).Encode(api.NodeListResponse{{ID: id, Host: "local"}, {ID: uuid.New(), Host: "other"}})
+			_ = json.NewEncoder(w).Encode(api.NodeListResponse{{ID: id, Host: "local"}, {ID: other, Host: "other"}})
+			return
+		}
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/cluster/leader" {
+			if activeScenario == "leader-unavailable" {
+				http.Error(w, "leader unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			leader := other
+			switch activeScenario {
+			case "leader":
+				leader = id
+			case "leader-unknown":
+				leader = uuid.Nil
+			}
+			_ = json.NewEncoder(w).Encode(api.ClusterLeaderResponse{LeaderID: leader})
+			return
+		}
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/raft/leadership-transfer" {
+			http.Error(w, "uninstall must not transfer leadership", http.StatusConflict)
+			return
+		}
+		if activeScenario == "leader-race" && r.Method == http.MethodDelete && r.URL.Path == "/v1/raft/members/"+id.String() {
+			http.Error(w, "node is the current leader; transfer leadership first", http.StatusConflict)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -92,10 +121,11 @@ func TestUninstallRealCLIAuthentication(t *testing.T) {
 	server.TLS = &tls.Config{Certificates: []tls.Certificate{pair}, MinVersion: tls.VersionTLS12}
 	server.StartTLS()
 	defer server.Close()
-	for _, scenario := range []string{"sudo-user", "explicit", "missing-config", "missing-token", "rejected-token", "missing-admin", "rejected-admin"} {
+	for _, scenario := range []string{"sudo-user", "explicit", "leader", "leader-unavailable", "leader-unknown", "leader-race", "missing-config", "missing-token", "rejected-token", "missing-admin", "rejected-admin"} {
 		t.Run(scenario, func(t *testing.T) {
 			mu.Lock()
 			calls = nil
+			activeScenario = scenario
 			mu.Unlock()
 			root := filepath.Join(tmp, scenario)
 			write := func(path, value string, mode os.FileMode) {
@@ -111,10 +141,12 @@ func TestUninstallRealCLIAuthentication(t *testing.T) {
 			write(filepath.Join(data, "node-id"), id.String(), 0600)
 			write(filepath.Join(data, "retained"), "durable", 0600)
 			write(filepath.Join(root, "state", "install-state"), "complete=true\n", 0600)
+			write(filepath.Join(root, "etc", "trellis.yaml"), fmt.Sprintf("data_dir: %q\n", data), 0600)
 			write(filepath.Join(run, "ca.crt"), string(ca), 0644)
 			for _, name := range []string{"systemctl", "ctr", "trellis", "sleep"} {
 				write(filepath.Join(bin, name), "#!/bin/sh\nprintf '%s\\n' \"$0 $*\" >>\"$HOST_LOG\"\n", 0700)
 			}
+			write(filepath.Join(bin, "trellis"), fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = config-paths ]; then exec %q \"$@\"; fi\n", daemon), 0700)
 			write(filepath.Join(bin, "getent"), "#!/bin/sh\nprintf 'operator:x:1000:1000::%s:/bin/bash\\n' \"$OPERATOR_HOME\"\n", 0700)
 			if err := os.Symlink(ctl, filepath.Join(bin, "trellisctl")); err != nil {
 				t.Fatal(err)
@@ -164,8 +196,11 @@ func TestUninstallRealCLIAuthentication(t *testing.T) {
 			mu.Lock()
 			got := strings.Join(calls, "\n")
 			mu.Unlock()
+			if strings.Contains(got, "/raft/leadership-transfer") {
+				t.Fatalf("uninstall initiated a leadership transfer: %s", got)
+			}
 			if success {
-				for _, want := range []string{"GET /v1/nodes admin=false", "POST /v1/nodes/" + id.String() + "/drain admin=false", "POST /v1/raft/leadership-transfer admin=true", "DELETE /v1/raft/members/" + id.String() + " admin=true"} {
+				for _, want := range []string{"GET /v1/nodes admin=false", "GET /v1/cluster/leader admin=false", "POST /v1/nodes/" + id.String() + "/drain admin=false", "DELETE /v1/raft/members/" + id.String() + " admin=true"} {
 					if !strings.Contains(got, want) {
 						t.Fatalf("missing %s in %s\n%s", want, got, output)
 					}
@@ -183,6 +218,18 @@ func TestUninstallRealCLIAuthentication(t *testing.T) {
 				}
 				if scenario == "rejected-admin" && !strings.Contains(string(output), "rejected credential") {
 					t.Fatalf("hidden auth error: %s", output)
+				}
+				if strings.HasPrefix(scenario, "leader") {
+					drained := strings.Contains(got, "/drain")
+					if drained != (scenario == "leader-race") {
+						t.Fatalf("leader preflight/race drained=%t: %s\n%s", drained, got, output)
+					}
+					if scenario == "leader" && !strings.Contains(string(output), "Transfer leadership") {
+						t.Fatalf("leader refusal lacks operator instructions: %s", output)
+					}
+					if scenario == "leader-race" && !strings.Contains(string(output), "node remains drained") {
+						t.Fatalf("race refusal lacks recovery instructions: %s", output)
+					}
 				}
 			}
 		})

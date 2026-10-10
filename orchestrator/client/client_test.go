@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/overfold/trellis/orchestrator/api"
 )
 
@@ -84,6 +85,27 @@ func TestRemoveRaftMember(t *testing.T) {
 	}
 	if path != "/v1/raft/members/node-2.example:8128" {
 		t.Fatalf("path = %q, want %q", path, "/v1/raft/members/node-2.example:8128")
+	}
+}
+
+func TestClusterLeader(t *testing.T) {
+	leader := uuid.New()
+	for _, body := range []string{`{"leader_id":"` + leader.String() + `"}`, `{}`, `{"leader_id":null}`, `{"leader_id":"00000000-0000-0000-0000-000000000000"}`, `{"leader_id":"invalid"}`} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet || r.URL.Path != "/v1/cluster/leader" {
+				t.Errorf("unexpected leader query %s %s", r.Method, r.URL.Path)
+			}
+			_, _ = io.WriteString(w, body)
+		}))
+		got, err := mustNew(t, Config{Address: server.URL, Token: "token"}).ClusterLeader(t.Context())
+		server.Close()
+		if strings.Contains(body, leader.String()) {
+			if err != nil || got.LeaderID != leader {
+				t.Fatalf("leader = %v, %v", got, err)
+			}
+		} else if err == nil {
+			t.Fatalf("accepted unknown/malformed leader %s", body)
+		}
 	}
 }
 

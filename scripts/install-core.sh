@@ -135,7 +135,6 @@ fi
 existing_config=false
 existing_join=""
 if [ -f "$CONFIG_FILE" ]; then
-    load_node_config_paths
     existing_config=true
     configured_advertise="$(awk -F': ' '$1 == "agent_advertise" {sub(/:8127$/, "", $2); print $2; exit}' "$CONFIG_FILE")"
     existing_join="$(awk -F': ' '$1 == "join" {print $2; exit}' "$CONFIG_FILE")"
@@ -193,6 +192,8 @@ fi
 WORK_TMP="$(mktemp -d)"
 ui_step "Downloading Trellis ${RELEASE_TAG}"
 download_release "$WORK_TMP"
+# A config-only interrupted install may not have an installed decoder yet.
+load_node_config_paths "${WORK_TMP}/trellis"
 STARTED=true
 
 # An active incomplete installation is still a live cluster member. Use the

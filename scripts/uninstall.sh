@@ -44,6 +44,9 @@ and archives its config, secrets key, and local state together under
 /var/lib/trellis/recovery/. This keeps the data recoverable while removing the
 active installation.
 
+Graceful multi-node removal refuses this node if it is the leader. Transfer
+leadership explicitly and verify the new leader before rerunning uninstall.
+
 Options:
   --force       Skip cluster operations; stop local workloads without evacuation
                 Membership is left unchanged; data is still archived unless --purge
@@ -77,7 +80,18 @@ if [ ! -x "${INSTALL_DIR}/trellis" ] && [ ! -f "$SERVICE_FILE" ] && [ ! -d "$CON
     exit 0
 fi
 load_install_state
+[ "$STATE_COMPLETE" != true ] || [ -f "$CONFIG_FILE" ] ||
+    ui_die "Completed installation configuration is missing; restore its trusted copy before uninstall. No local files were deleted."
 load_node_config_paths
+# Recovery must be outside the source tree, and purge must not erase active
+# installer ownership through the data path before dependency cleanup succeeds.
+data_path="$(realpath -m -- "$DATA_DIR")"
+state_path="$(realpath -m -- "$STATE_ROOT")"
+case "${state_path}/" in
+    "${data_path}/"*) ui_die "Node data contains installer state; cannot archive or purge it safely. No local files were deleted." ;;
+esac
+[ ! -e "$DATA_DIR" ] || [ -d "$DATA_DIR" ] || ui_die "Configured data_dir is not a directory. No local files were deleted."
+[ ! -e "$SECRETS_KEY_FILE" ] || [ -f "$SECRETS_KEY_FILE" ] || ui_die "Configured secrets_key is not a file. No local files were deleted."
 
 ui_title "uninstall"
 ui_section "Plan"
@@ -112,6 +126,11 @@ node_id=""
 [ ! -f "${DATA_DIR}/node-id" ] || node_id="$(tr -d '[:space:]' <"${DATA_DIR}/node-id")"
 was_running=false
 systemctl is-active --quiet trellis 2>/dev/null && was_running=true
+if [ "$was_running" = true ]; then
+    [ -f "$CONFIG_FILE" ] || ui_die "Running node configuration is missing; restore it before uninstall. Nothing local has been deleted."
+    [ -n "$node_id" ] || ui_die "Running node has no readable, nonempty node-id in ${DATA_DIR}; cannot uninstall safely. Nothing local has been deleted."
+    [ "$force" = true ] || [ -x "${INSTALL_DIR}/trellisctl" ] || ui_die "trellisctl is required for graceful removal of a running node. Nothing local has been deleted."
+fi
 
 if [ "$force" = true ]; then
     ui_section "Cluster"
@@ -135,6 +154,14 @@ elif [ "$was_running" = true ] && [ -x "${INSTALL_DIR}/trellisctl" ] && [ -n "$n
         ui_die "Invalid cluster membership output. Nothing local has been deleted. Use --force only to skip cluster operations explicitly."
     fi
     if [ "${node_count:-0}" -gt 1 ]; then
+        if ! leader_json="$(uninstall_ctl nodes leader --output json)"; then
+            ui_die "Could not identify the cluster leader. Nothing has been drained or deleted; verify cluster availability and retry."
+        fi
+        if ! leader_id="$(printf '%s' "$leader_json" | jq -ers 'select(length == 1) | .[0].leader_id |
+            select(type == "string" and length > 0 and . != "00000000-0000-0000-0000-000000000000")')"; then
+            ui_die "Invalid cluster leader output. Nothing has been drained or deleted."
+        fi
+        [ "$leader_id" != "$node_id" ] || ui_die "Node ${node_id} is the cluster leader. Transfer leadership with 'trellisctl nodes transfer-leadership' using the administrator credential, verify the new leader with 'trellisctl nodes leader', then rerun uninstall. Nothing has been drained or deleted."
         [ -n "${TRELLIS_ADMINISTRATOR_KEY:-}" ] || ui_die "Multi-node removal requires explicit TRELLIS_ADMINISTRATOR_KEY (private-key file path or base64 PKCS#8 key). Supply it transiently alongside the local operator context; nothing has been drained or deleted."
         uninstall_ctl nodes drain "$node_id" >/dev/null || ui_die "Could not drain this node; check the local context has cluster/write authority. Nothing local has been deleted."
         ui_step "Drain started"
@@ -143,9 +170,8 @@ elif [ "$was_running" = true ] && [ -x "${INSTALL_DIR}/trellisctl" ] && [ -n "$n
             ui_die "Timed out waiting for allocations to move. The node was undrained and uninstall stopped before deleting anything. To uninstall without evacuation, rerun with --force."
         fi
         ui_step "Allocations moved to healthy replacements"
-        # A non-leader need not transfer; removal below reports any authority
-        # failure and refuses local deletion. Do not hide the CLI diagnostic.
-        uninstall_ctl nodes transfer-leadership >/dev/null || true
+        # Leadership may change after preflight. Removal remains authoritative
+        # and refuses a current leader or unsafe quorum; never transfer here.
         removed=false
         for _ in $(seq 1 20); do
             if uninstall_ctl nodes remove "$node_id" >/dev/null; then
@@ -154,7 +180,7 @@ elif [ "$was_running" = true ] && [ -x "${INSTALL_DIR}/trellisctl" ] && [ -n "$n
             fi
             sleep 1
         done
-        [ "$removed" = true ] || ui_die "Could not remove the node from cluster membership; check TRELLIS_ADMINISTRATOR_KEY and cluster quorum. The node remains drained; use 'trellisctl nodes undrain' if abandoning removal. Nothing local has been deleted. To uninstall without changing membership, rerun with --force."
+        [ "$removed" = true ] || ui_die "Could not remove the node from cluster membership; check TRELLIS_ADMINISTRATOR_KEY, cluster quorum, and 'trellisctl nodes leader'. If this node became leader, transfer leadership and retry. The node remains drained; use 'trellisctl nodes undrain' if abandoning removal. Nothing local has been deleted. To uninstall without changing membership, rerun with --force."
         ui_step "Removed node from cluster membership"
     else
         ui_detail "Single-node cluster; there is no remaining member to remove this node from."
@@ -173,25 +199,25 @@ if ! systemctl stop trellis; then
 fi
 
 if command -v ctr >/dev/null 2>&1; then
-    if ! tasks="$(ctr -n trellis tasks ls -q)"; then
+    if ! tasks="$(ctr --address "${CONTAINERD_SOCKET:-/run/containerd/containerd.sock}" -n trellis tasks ls -q)"; then
         ui_die "Could not inspect Trellis tasks. The containerd error is shown above; installed files and node data were retained for retry."
     fi
     for tid in $tasks; do
         # --force registers an exit waiter, kills all processes, waits for exit,
         # and only then deletes the task. A separate kill/delete races shutdown.
-        if ! ctr -n trellis tasks delete --force "$tid"; then
+        if ! ctr --address "${CONTAINERD_SOCKET:-/run/containerd/containerd.sock}" -n trellis tasks delete --force "$tid"; then
             ui_die "Could not stop and delete Trellis task ${tid}. The containerd error is shown above; installed files and node data were retained for retry."
         fi
     done
-    if ! containers="$(ctr -n trellis containers ls -q)"; then
+    if ! containers="$(ctr --address "${CONTAINERD_SOCKET:-/run/containerd/containerd.sock}" -n trellis containers ls -q)"; then
         ui_die "Could not inspect Trellis containers. Network state and installed files were retained for retry."
     fi
     for cid in $containers; do
-        if ! ctr -n trellis containers rm "$cid"; then
+        if ! ctr --address "${CONTAINERD_SOCKET:-/run/containerd/containerd.sock}" -n trellis containers rm "$cid"; then
             ui_die "Could not remove Trellis container ${cid}. The containerd error is shown above; installed files and node data were retained for retry."
         fi
     done
-    if ! remaining="$(ctr -n trellis containers ls -q)"; then
+    if ! remaining="$(ctr --address "${CONTAINERD_SOCKET:-/run/containerd/containerd.sock}" -n trellis containers ls -q)"; then
         ui_die "Could not verify Trellis container removal. Network state and installed files were retained for retry."
     fi
     if [ -n "$remaining" ]; then
@@ -211,44 +237,62 @@ if ! "${INSTALL_DIR}/trellis" local-cleanup "${cleanup_args[@]}"; then
 fi
 ui_step "Removed journaled Trellis network resources, volume staging mounts, and delivered secrets"
 
+# Keep the active config, data and ownership record through fallible dependency
+# cleanup. A retry must use recorded ownership, never infer it from host files.
+ui_section "Dependencies"
+remove_owned_dependencies
+
 if [ "$purge" = true ]; then
     ui_section "Data"
     if [ -n "$DATA_DIR" ] && [ "$DATA_DIR" != "/" ]; then
         if ! rm -rf "$DATA_DIR"; then
-            ui_die "Could not purge node data at ${DATA_DIR}. Data may be partially deleted; the binary, service, configuration, and dependencies were retained. Fix the error above and rerun uninstall."
+            ui_die "Could not purge node data at ${DATA_DIR}. Data may be partially deleted; the binary, service, configuration, and ownership record were retained. Fix the error above and rerun uninstall."
         fi
     fi
     if [ -n "$SECRETS_KEY_FILE" ] && [ "$SECRETS_KEY_FILE" != "/" ]; then rm -f "$SECRETS_KEY_FILE"; fi
-    if ! rm -rf "$STATE_ROOT" "$CONFIG_DIR"; then
-        ui_die "Could not finish purging Trellis state and configuration. The binary, service, and dependencies were retained for retry; data may be partially deleted."
+    # Purge recovery and other installer state without deleting active ownership
+    # or the configuration needed to select the correct runtime on retry.
+    (
+        shopt -s nullglob dotglob
+        for entry in "$STATE_ROOT"/*; do
+            [ "$entry" = "$STATE_FILE" ] || rm -rf "$entry" || exit 1
+        done
+    )
+    if ! rm -rf "$CONFIG_DIR"; then
+        ui_die "Could not finish purging Trellis configuration. The binary, service, and ownership record were retained for retry; data may be partially deleted."
     fi
     ui_step "Permanently removed Trellis node data"
 else
     ui_section "Recovery"
     stamp="$(date -u +%Y%m%dT%H%M%SZ)"
     recovery_root="${STATE_ROOT}/recovery"
-    recovery_dir="${recovery_root}/${stamp}"
-    # Avoid placing the recovery directory inside the source tree before moving data.
-    data_tmp="${STATE_ROOT}/.data-recovery-${stamp}"
-    if [ -d "$DATA_DIR" ]; then mv "$DATA_DIR" "$data_tmp"; fi
-    install -d -m 0700 "$recovery_dir"
-    if [ -d "$data_tmp" ]; then mv "$data_tmp" "${recovery_dir}/data"; fi
-    if [ -f "$SECRETS_KEY_FILE" ]; then cp -a "$SECRETS_KEY_FILE" "${recovery_dir}/secrets.key"; fi
-    if [ -d "$CONFIG_DIR" ]; then cp -a "$CONFIG_DIR" "${recovery_dir}/config"; rm -rf "$CONFIG_DIR"; fi
+    install -d -m 0700 "$recovery_root"
+    recovery_dir="$(mktemp -d "${recovery_root}/${stamp}.XXXXXX")"
+    # Finish the whole recoverable set before deleting any source. In particular,
+    # a failed key/config copy must not strand the only data copy in an archive.
+    if ! (
+        if [ -d "$DATA_DIR" ]; then cp -a "$DATA_DIR" "${recovery_dir}/data" || exit 1; fi
+        if [ -f "$SECRETS_KEY_FILE" ]; then cp -a "$SECRETS_KEY_FILE" "${recovery_dir}/secrets.key" || exit 1; fi
+        if [ -d "$CONFIG_DIR" ]; then cp -a "$CONFIG_DIR" "${recovery_dir}/config" || exit 1; fi
+        if [ -f "$STATE_FILE" ]; then cp -a "$STATE_FILE" "${recovery_dir}/install-state" || exit 1; fi
+    ); then
+        rm -rf "$recovery_dir"
+        ui_die "Could not archive recoverable node state. Active data, configuration, key, and ownership were retained for retry."
+    fi
+    rm -rf "$DATA_DIR" "$CONFIG_DIR"
     if [ -f "$SECRETS_KEY_FILE" ]; then rm -f "$SECRETS_KEY_FILE"; fi
-    if [ -f "$STATE_FILE" ]; then cp -a "$STATE_FILE" "${recovery_dir}/install-state"; fi
-    rm -f "$STATE_FILE"
     ui_step "Archived recoverable node state at ${recovery_dir}"
 fi
 
 ui_section "Software"
-remove_owned_dependencies
 systemctl disable trellis >/dev/null 2>&1 || true
 rm -f "$SERVICE_FILE"
 systemctl daemon-reload
 systemctl reset-failed >/dev/null 2>&1 || true
 rm -f "${INSTALL_DIR}/trellis" "${INSTALL_DIR}/trellisctl" "${INSTALL_DIR}/trellis-health-probe"
 rm -rf "$RUN_DIR"
+rm -f "$STATE_FILE"
+if [ "$purge" = true ] && [ -d "$STATE_ROOT" ]; then rmdir "$STATE_ROOT"; fi
 ui_step "Removed Trellis service and binaries"
 
 if [ "$purge" = true ]; then

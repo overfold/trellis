@@ -40,6 +40,7 @@ Status codes separate what the client may fix from what it may retry. `4xx` resp
 | `POST` | `/v1/auth/administrator/challenge` | Issue a short-lived one-time administrator signing challenge. |
 | `GET` | `/v1/auth/whoami` | Return the current credential kind, scope, access, and available provenance metadata. |
 | `GET` | `/v1/nodes` | List node capacity, discovered capabilities, status, and control-plane membership; requires cluster scope. |
+| `GET` | `/v1/cluster/leader` | Identify the serving control-plane leader; requires cluster scope. |
 | `POST` / `DELETE` | `/v1/nodes/{id}/drain` | Drain or undrain; requires `cluster/write`. |
 | `POST` | `/v1/nodes/{id}/promote` | Authorize an enrolled worker for control-plane participation; administrator signature required. |
 | `POST` | `/v1/nodes/identities` | Bind an external node certificate and role; external signing mode and administrator signature required. |
@@ -220,6 +221,12 @@ namespace's events, and only `GET /v1/events` spans namespaces. A stream with no
 backoff after overload or a leader change. Existing streams close when their
 leader loses leadership, including streams reached through a follower proxy;
 reconnect and refresh current resources to resume observation.
+
+## Leader discovery
+
+`GET /v1/cluster/leader` requires cluster-scoped read access (or the administrator credential) and returns `200` with `{"leader_id":"<node UUID>"}`. Requests to followers are routed to the serving leader, so the ID is the leader's, not the contacted node's. An unavailable or not-yet-serving leader returns `503`; clients must not interpret failure or a missing/zero identity as a follower result. The public Go client exposes `ClusterLeader`, and `trellisctl nodes leader --output json` returns the same representation.
+
+This is a point-in-time observation, not a lock or removal precondition. Leadership can change immediately afterward. Node removal still checks current leadership and quorum at its owner and refuses removing the current leader with `409`. For graceful multi-node uninstall, the operator must transfer leadership away from the target and verify the new leader before rerunning; uninstall never transfers leadership automatically.
 
 ## Cluster settings
 

@@ -5,6 +5,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 go build -o "$tmp/real-trellisctl" "$script_dir/../orchestrator/cmd/trellisctl"
+go build -o "$tmp/real-trellis" "$script_dir/../orchestrator/cmd/trellis"
 export REAL_CTL="$tmp/real-trellisctl"
 
 # Inspect mktemp's inode before the first write, and the completed inode before
@@ -208,7 +209,8 @@ detect_advertise_ipv4() { printf '192.0.2.20\\n'; }
 fetch_latest_release() { RELEASE_TAG=v-worker-test; }
 networking_tools_present() { return 0; }
 download_release() {
-    for binary in trellis trellisctl trellis-health-probe; do
+    cp "$tmp/real-trellis" "\$1/trellis"
+    for binary in trellisctl trellis-health-probe; do
         printf '#!/bin/sh\\nexit 0\\n' >"\$1/\$binary"
     done
 }

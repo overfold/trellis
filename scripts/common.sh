@@ -86,10 +86,16 @@ load_install_state() {
 
 load_node_config_paths() {
     [ -f "$CONFIG_FILE" ] || return 0
-    local configured_data configured_key
-    configured_data="$(awk -F': ' '$1 == "data_dir" {print $2; exit}' "$CONFIG_FILE")"
-    configured_key="$(awk -F': ' '$1 == "secrets_key" {print $2; exit}' "$CONFIG_FILE")"
-    [ -z "$configured_data" ] || DATA_DIR="$configured_data"
+    require_commands jq
+    local paths configured_key
+    paths="$("${1:-${INSTALL_DIR}/trellis}" config-paths --config "$CONFIG_FILE")" ||
+        ui_die "Could not decode node configuration; no local files were deleted."
+    DATA_DIR="$(printf '%s' "$paths" | jq -er '.data_dir | select(type == "string" and length > 0)')" ||
+        ui_die "Invalid data_dir; no local files were deleted."
+    CONTAINERD_SOCKET="$(printf '%s' "$paths" | jq -er '.containerd_socket | select(type == "string" and length > 0)')" ||
+        ui_die "Invalid containerd_socket; no local files were deleted."
+    configured_key="$(printf '%s' "$paths" | jq -er '.secrets_key | select(type == "string")')" ||
+        ui_die "Invalid secrets_key; no local files were deleted."
     [ -z "$configured_key" ] || SECRETS_KEY_FILE="$configured_key"
 }
 

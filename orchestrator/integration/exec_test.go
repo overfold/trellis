@@ -36,6 +36,15 @@ func TestMultiNodeExecStream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Run("leader query through follower", func(t *testing.T) {
+		observed, err := operator.ClusterLeader(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if observed.LeaderID.String() != h.nodeID(leader) {
+			t.Fatalf("leader = %s, want node %s", observed.LeaderID, h.nodeID(leader))
+		}
+	})
 	var allocationID string
 	h.eventually(30*time.Second, func() bool {
 		allocations, err := operator.ListAllocations(context.Background(), client.AllocationFilter{})
@@ -141,5 +150,9 @@ func TestMultiNodeExecStream(t *testing.T) {
 			stdout, _, code, err := run(api.ExecRequest{Command: []string{"echo", "after"}}, "")
 			return err == nil && code == 0 && stdout == "after\n"
 		}, "exec did not recover after the leadership change")
+		h.eventually(30*time.Second, func() bool {
+			observed, err := operator.ClusterLeader(t.Context())
+			return err == nil && observed.LeaderID.String() != h.nodeID(leader) && observed.LeaderID.String() == h.nodeID(h.leader())
+		}, "leader query did not reflect the transferred leadership")
 	})
 }

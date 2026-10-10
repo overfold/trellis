@@ -151,6 +151,19 @@ func (c *Client) RemoveRaftMember(ctx context.Context, id string) error {
 	return nil
 }
 
+// ClusterLeader identifies the current serving leader. It requires cluster
+// scope. A later membership mutation still checks leadership and quorum itself.
+func (c *Client) ClusterLeader(ctx context.Context) (*api.ClusterLeaderResponse, error) {
+	var response api.ClusterLeaderResponse
+	if err := c.request(ctx, http.MethodGet, c.clusterPath("/v1/cluster/leader"), nil, &response); err != nil {
+		return nil, fmt.Errorf("get cluster leader: %w", err)
+	}
+	if response.LeaderID == uuid.Nil {
+		return nil, fmt.Errorf("get cluster leader: response has no leader identity")
+	}
+	return &response, nil
+}
+
 // ClusterSettings returns the replicated cluster-wide settings.
 func (c *Client) ClusterSettings(ctx context.Context) (*api.ClusterSettings, error) {
 	var response api.ClusterSettings

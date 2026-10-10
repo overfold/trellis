@@ -100,6 +100,7 @@ var structuredOutputCommands = [][]string{
 	{"namespaces", "list"},
 	{"nodes", "list"},
 	{"nodes", "status"},
+	{"nodes", "leader"},
 	{"cluster", "settings"},
 	{"secrets", "set"},
 	{"secrets", "list"},

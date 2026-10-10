@@ -19,11 +19,64 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"github.com/overfold/trellis/orchestrator/api"
+	"github.com/overfold/trellis/orchestrator/internal/auth"
 	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/state"
 	"github.com/overfold/trellis/orchestrator/internal/storage"
 	"github.com/overfold/trellis/orchestrator/internal/tlsutil"
 )
+
+func TestClusterLeaderPreflightAndRemovalRace(t *testing.T) {
+	leader, target := uuid.New(), uuid.New()
+	joiner := newFakeMembership(fakeMember(leader, true), fakeMember(target, true))
+	store := NewStateController(memoryStore{}, "test")
+	old := echo.New()
+	NewHandler(&Server{nodeID: leader, joiner: joiner, state: store, now: time.Now}).Register(old)
+	for _, caller := range []string{"cluster-read", "cluster-write", "administrator", "node", "anonymous"} {
+		req := httptest.NewRequest(http.MethodGet, "/v1/cluster/leader", nil)
+		ctx := req.Context()
+		switch caller {
+		case "cluster-read":
+			ctx = context.WithValue(ctx, NamespaceContextKey, auth.EncodeScope(auth.AccessCluster, auth.AccessRead))
+		case "cluster-write":
+			ctx = context.WithValue(ctx, NamespaceContextKey, auth.EncodeScope(auth.AccessCluster, auth.AccessWrite))
+		case "administrator":
+			ctx = context.WithValue(ctx, AdminContextKey, true)
+		case "node":
+			ctx = context.WithValue(ctx, NodeContextKey, target)
+		}
+		rec := httptest.NewRecorder()
+		old.ServeHTTP(rec, req.WithContext(ctx))
+		if caller == "node" || caller == "anonymous" {
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("%s: status %d, want 403", caller, rec.Code)
+			}
+			continue
+		}
+		var response api.ClusterLeaderResponse
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &response) != nil || response.LeaderID != leader {
+			t.Fatalf("%s: leader query status %d body %s", caller, rec.Code, rec.Body.String())
+		}
+	}
+	// The target wins an election after the preflight. Its leader handler must
+	// still refuse removal before revoking the identity or changing membership.
+	current := echo.New()
+	NewHandler(&Server{nodeID: target, joiner: joiner, state: store, now: time.Now}).Register(current)
+	req := httptest.NewRequest(http.MethodDelete, "/v1/raft/members/"+target.String(), nil)
+	req = req.WithContext(context.WithValue(req.Context(), AdminContextKey, true))
+	rec := httptest.NewRecorder()
+	current.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("new leader removal status %d body %s, want 409", rec.Code, rec.Body.String())
+	}
+	if gone, err := store.NodeRemoved(t.Context(), target.String()); err != nil || gone {
+		t.Fatalf("new leader tombstone = %t, %v; want retained identity", gone, err)
+	}
+	members, err := joiner.Membership()
+	if err != nil || len(members) != 2 {
+		t.Fatalf("membership after refused removal = %v, %v", members, err)
+	}
+}
 
 func TestHandleRaftMemberRemove(t *testing.T) {
 	leader, removed := uuid.New(), uuid.New()

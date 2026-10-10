@@ -221,6 +221,7 @@ func (h *Handler) Register(e *echo.Echo) {
 	v1.POST("/raft/join", h.handleRaftJoin)
 	v1.DELETE("/raft/members/:id", h.handleRaftMemberRemove)
 	v1.POST("/raft/leadership-transfer", h.handleRaftLeadershipTransfer)
+	v1.GET("/cluster/leader", h.handleClusterLeader)
 	v1.GET("/cluster/settings", h.handleGetClusterSettings)
 	v1.PUT("/cluster/settings/job-limits", h.handleUpdateJobLimits)
 	v1.PUT("/cluster/settings/reconciliation", h.handleUpdateReconciliationSettings)
@@ -1088,6 +1089,15 @@ func (h *Handler) handleRaftLeadershipTransfer(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error())
 	}
 	return c.NoContent(http.StatusNoContent)
+}
+
+func (h *Handler) handleClusterLeader(c *echo.Context) error {
+	if err := requireClusterRead(c, "leader discovery requires a cluster-scoped credential"); err != nil {
+		return err
+	}
+	// Operator requests are routed to the serving leader and admitted through
+	// the term fence. This is an observation, not authority to remove that node.
+	return c.JSON(http.StatusOK, api.ClusterLeaderResponse{LeaderID: h.server.nodeID})
 }
 
 // handleMetrics serves the leader's Prometheus metrics. They name namespaces

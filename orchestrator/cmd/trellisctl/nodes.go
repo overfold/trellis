@@ -23,6 +23,7 @@ func NewNodesCmd() *cobra.Command {
 
 	cmd.AddCommand(NewNodesListCmd())
 	cmd.AddCommand(NewNodesStatusCmd())
+	cmd.AddCommand(newNodesLeaderCmd())
 	cmd.AddCommand(NewNodesDrainCmd())
 	cmd.AddCommand(NewNodesUndrainCmd())
 	cmd.AddCommand(NewNodesRemoveCmd())
@@ -81,7 +82,7 @@ func newNodesEnrollCmd() *cobra.Command {
 }
 
 func NewNodesLeadershipTransferCmd() *cobra.Command {
-	return &cobra.Command{Use: "transfer-leadership", Args: cobra.NoArgs, Hidden: true, Short: "Transfer control-plane leadership to another voter", RunE: func(cmd *cobra.Command, _ []string) error {
+	return &cobra.Command{Use: "transfer-leadership", Args: cobra.NoArgs, Short: "Transfer control-plane leadership to another voter", RunE: func(cmd *cobra.Command, _ []string) error {
 		serverClient, err := administratorServerClient()
 		if err != nil {
 			return err
@@ -90,6 +91,24 @@ func NewNodesLeadershipTransferCmd() *cobra.Command {
 			return err
 		}
 		_, err = fmt.Fprintln(cmd.OutOrStdout(), "Control-plane leadership transfer started.")
+		return err
+	}}
+}
+
+func newNodesLeaderCmd() *cobra.Command {
+	return &cobra.Command{Use: "leader", Args: cobra.NoArgs, Short: "Show the current control-plane leader", RunE: func(cmd *cobra.Command, _ []string) error {
+		serverClient, err := apiClient("")
+		if err != nil {
+			return err
+		}
+		leader, err := serverClient.ClusterLeader(cmd.Context())
+		if err != nil {
+			return err
+		}
+		if config.Output == "json" {
+			return writeJSON(cmd.OutOrStdout(), leader)
+		}
+		_, err = fmt.Fprintf(cmd.OutOrStdout(), "Leader: %s\n", leader.LeaderID)
 		return err
 	}}
 }

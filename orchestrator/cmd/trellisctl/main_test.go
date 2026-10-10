@@ -311,7 +311,7 @@ func TestStructuredOutputFlagIsCommandLocal(t *testing.T) {
 		t.Fatal("credentials command must be discoverable in CLI help")
 	}
 
-	for _, path := range [][]string{{"jobs", "status"}, {"namespaces", "list"}, {"nodes", "list"}, {"secrets", "describe"}, {"credentials", "create"}} {
+	for _, path := range [][]string{{"jobs", "status"}, {"namespaces", "list"}, {"nodes", "list"}, {"nodes", "leader"}, {"secrets", "describe"}, {"credentials", "create"}} {
 		command, _, err := root.Find(path)
 		if err != nil {
 			t.Fatalf("find %v: %v", path, err)

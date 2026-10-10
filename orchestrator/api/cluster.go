@@ -1,6 +1,16 @@
 package api
 
-import "time"
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// ClusterLeaderResponse identifies the serving control-plane leader. Leadership
+// may change after this response; it is not a membership mutation precondition.
+type ClusterLeaderResponse struct {
+	LeaderID uuid.UUID `json:"leader_id"`
+}
 
 // ClusterSettings are the replicated cluster-wide semantics every leader
 // applies. Memory values are canonical byte counts and durations are
