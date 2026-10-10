@@ -333,13 +333,13 @@ func TestPlanFailedSiblingOccupancyUntilCleanup(t *testing.T) {
 			if err != nil || len(plan.NewAllocations) != 1 || plan.NewAllocations[0].Phase != lifecycle.PhasePlaced {
 				t.Fatalf("cleanup did not release occupancy: plan=%#v err=%v", plan, err)
 			}
-			// An inventory entry from another generation cannot charge this
-			// allocation's reservations or resurrect its terminal lifecycle.
+			// Another generation cannot resurrect this terminal record. Its
+			// unknown reservations gate the node until orphan cleanup instead.
 			node.observedAllocations[0].RetainedLogs = false
 			node.observedAllocations[0].Generation++
 			plan, err = planReconciliation(input)
-			if err != nil || len(plan.NewAllocations) != 1 || plan.NewAllocations[0].Phase != lifecycle.PhasePlaced || failed.Phase != lifecycle.PhaseFailed {
-				t.Fatalf("stale generation affected occupancy: plan=%#v err=%v", plan, err)
+			if err != nil || len(plan.NewAllocations) != 1 || plan.NewAllocations[0].Phase != lifecycle.PhasePending || failed.Phase != lifecycle.PhaseFailed {
+				t.Fatalf("stale generation did not reserve its node pending cleanup: plan=%#v err=%v", plan, err)
 			}
 		})
 	}
@@ -405,5 +405,138 @@ func TestRetainedCleanupFailureGatesSameNodeStarts(t *testing.T) {
 	<-s.dispatchReconcileActions(context.Background(), actions, true)
 	if calls := agent.recordedCalls(); len(calls) != 3 || calls[2].method != http.MethodPost {
 		t.Fatalf("calls = %#v, successful cleanup must allow start", calls)
+	}
+}
+
+func TestRollingReplacementLimitSurvivesStoppingAndLoss(t *testing.T) {
+	node := planTestNode(1, NodeStatusHealthy)
+	job := rollingPlanJob(2, 1)
+	old := drainingPlanAllocation("old", node)
+	old.Phase = lifecycle.PhaseStopping
+	lost := planTestAllocation("lost-new", node, lifecycle.PhaseLost, 2)
+	input := planTestInput(map[string]*Job{jobKey("default", "web"): job}, []*Node{node}, old, lost)
+	input.Policy.RetainTerminal = 0
+	for _, phase := range []lifecycle.Phase{lifecycle.PhaseStopping, lifecycle.PhaseStopped, lifecycle.PhaseLost} {
+		old.Phase = phase
+		plan, err := planReconciliation(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(plan.NewAllocations) != 1 {
+			t.Fatalf("old=%s: placements=%d, want one unhealthy replacement", phase, len(plan.NewAllocations))
+		}
+		for _, pruned := range plan.Pruned {
+			if pruned.ID == old.ID {
+				t.Fatalf("old=%s: pruned unfinished rollout evidence", phase)
+			}
+		}
+		inFlight := plan.NewAllocations[0]
+		input.Allocations = []*Allocation{old, lost, inFlight}
+		waiting, err := planReconciliation(input)
+		if err != nil || len(waiting.NewAllocations) != 0 {
+			t.Fatalf("old=%s: admitted second unhealthy replacement: %v %v", phase, waiting, err)
+		}
+		inFlight.Phase, inFlight.Health = lifecycle.PhaseRunning, lifecycle.HealthHealthy
+		ready, err := planReconciliation(input)
+		if err != nil || len(ready.NewAllocations) != 1 {
+			t.Fatalf("old=%s: healthy replacement did not release parallel slot: %v %v", phase, ready, err)
+		}
+		if phase != lifecycle.PhaseStopping {
+			second := ready.NewAllocations[0]
+			second.Phase, second.Health = lifecycle.PhaseRunning, lifecycle.HealthHealthy
+			input.Allocations = []*Allocation{old, lost, inFlight, second}
+			complete, err := planReconciliation(input)
+			if err != nil || len(complete.Pruned) != 2 {
+				t.Fatalf("completed rollout did not release terminal evidence: %v %v", complete, err)
+			}
+		}
+		input.Allocations = []*Allocation{old, lost}
+	}
+	input.Allocations = nil
+	initial, err := planReconciliation(input)
+	if err != nil || len(initial.NewAllocations) != 2 {
+		t.Fatalf("initial deployment was replacement-throttled: %v %v", initial, err)
+	}
+}
+
+func TestOrphanInventoryBlocksOnlyItsNodeUntilCleanup(t *testing.T) {
+	for _, elapsed := range []time.Duration{leaderRecoveryGrace - time.Nanosecond, leaderRecoveryGrace} {
+		for _, logsOnly := range []bool{false, true} {
+			t.Run(fmt.Sprintf("elapsed=%s/logs=%t", elapsed, logsOnly), func(t *testing.T) {
+				a, b := planTestNode(1, NodeStatusHealthy), planTestNode(2, NodeStatusHealthy)
+				a.CPUAllocatable, b.CPUAllocatable = 1000, 1000
+				job := planTestJob("web", 2, 1, spec.UpdateRecreate)
+				job.Spec.TaskGroups[0].Tasks[0].Resources = &spec.ResourcesSpec{CPU: 1000, Memory: 64 << 20}
+				a.observedAllocations = []observedAllocation{{ID: "pruned", Generation: 7, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy, RetainedLogs: logsOnly}}
+				input := planTestInput(map[string]*Job{jobKey("default", "web"): job}, []*Node{a, b})
+				input.LeaderSince = planNow.Add(-elapsed)
+				plan, err := planReconciliation(input)
+				if err != nil {
+					t.Fatal(err)
+				}
+				placed := 0
+				for _, allocation := range plan.NewAllocations {
+					if allocation.Node == nil {
+						continue
+					}
+					placed++
+					if !logsOnly && allocation.Node.ID == a.ID {
+						t.Fatal("orphan execution treated as free CPU/memory/ports")
+					}
+				}
+				want := 1
+				if logsOnly {
+					want = 2
+				}
+				if placed != want {
+					t.Fatalf("placed=%d want=%d (independent-node control)", placed, want)
+				}
+				stops := 0
+				for _, action := range plan.Actions {
+					if action.Type == ActionStopObserved {
+						stops++
+					}
+				}
+				wantStops := 0
+				if elapsed >= leaderRecoveryGrace {
+					wantStops = 1
+				}
+				if stops != wantStops {
+					t.Fatalf("cleanup actions=%d want=%d at grace boundary", stops, wantStops)
+				}
+			})
+		}
+	}
+}
+
+func TestOrphanStopOutcomeControlsStartAdmission(t *testing.T) {
+	s, agent := newTestServerWithAgent()
+	t.Cleanup(agent.server.Close)
+	node := planTestNode(1, NodeStatusHealthy)
+	node.Host, node.Port = agent.host, agent.port
+	addTestNode(s, node, s.now())
+	s.leaderSince = s.now().Add(-leaderRecoveryGrace)
+	job := planTestJob("web", 1, 1, spec.UpdateRecreate)
+	job.Spec.TaskGroups[0].Tasks[0].Networking = &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkHost}
+	s.jobs[jobKey("default", "web")] = job
+	allocation := planTestAllocation("queued", node, lifecycle.PhasePlaced, 1)
+	s.allocations = []*Allocation{allocation}
+	node.observedAllocations = []observedAllocation{{ID: "pruned", Generation: 7, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
+	// A start planned before the orphan heartbeat must also be rejected.
+	if err := s.Execute(t.Context(), &Action{Type: ActionStart, Allocation: allocation}); err == nil || len(agent.recordedCalls()) != 0 {
+		t.Fatal("stale planned start ignored current orphan inventory")
+	}
+	agent.failStop = true
+	s.Reconcile(t.Context())
+	if calls := agent.recordedCalls(); len(calls) != 1 || calls[0].method != http.MethodDelete {
+		t.Fatalf("failed cleanup calls=%v, want stop only", calls)
+	}
+	agent.mu.Lock()
+	agent.failStop = false
+	agent.mu.Unlock()
+	s.Reconcile(t.Context())
+	s.Reconcile(t.Context())
+	if calls := agent.recordedCalls(); len(calls) != 3 || calls[1].method != http.MethodDelete || calls[2].method != http.MethodPost {
+		t.Fatalf("cleanup recovery calls=%v, want failed stop, successful stop, start", calls)
 	}
 }

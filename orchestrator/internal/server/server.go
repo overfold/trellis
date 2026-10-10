@@ -449,6 +449,9 @@ func (s *Server) Reload(ctx context.Context) error {
 	}
 	allocations := make([]*Allocation, 0, len(allocationMap))
 	for _, allocation := range allocationMap {
+		// No heartbeat inventory survives reload. A persisted health value
+		// cannot prove continuity across the unobserved leadership gap.
+		allocation.StableSince = time.Time{}
 		if allocation.Node != nil {
 			if node := nodes[allocation.Node.ID]; node != nil {
 				allocation.Node = node

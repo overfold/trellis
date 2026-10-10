@@ -181,10 +181,13 @@ func TestHeartbeatBatchFailureLeavesMemoryAndDurableStateUnchanged(t *testing.T)
 
 func TestUnchangedHeartbeatDoesNotWriteRaft(t *testing.T) {
 	node := &Node{ID: uuid.New(), Host: "node-a", Status: NodeStatusHealthy, Version: "test", CPUCapacity: 4000, CPUAllocatable: 4000}
-	allocation := &Allocation{ID: "web-1", Node: node, Tasks: []spec.TaskSpec{{Name: "app"}}, Generation: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy,
+	allocation := &Allocation{ID: "web-1", Node: node, Tasks: []spec.TaskSpec{{Name: "app"}}, Generation: 1, Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthHealthy,
 		Endpoints: []api.AllocationEndpoint{{Task: "app"}}}
 	store := &auditStore{memoryStore: memoryStore{}}
 	clock := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	if err := allocation.Transition(lifecycle.PhaseRunning, clock, "", ""); err != nil {
+		t.Fatal(err)
+	}
 	s := &Server{now: func() time.Time { return clock }, state: NewStateController(store, "test"), allocations: []*Allocation{allocation}, catalog: newNopCatalog()}
 	addTestNode(s, node, clock)
 	status := []nodeapi.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
@@ -220,7 +223,8 @@ func TestHeartbeatPersistsOnlyDurableChanges(t *testing.T) {
 	node.CPUAllocatable, node.MemoryAllocatable = 0, 0
 	status := []nodeapi.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
 
-	// Liveness returning is an observation, not a durable fact.
+	// Liveness returning is an observation, not a durable fact, but the
+	// first running report initializes the missing durable stability proof.
 	if err := heartbeatAndApply(t, s, node.ID, status, "old", nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
 	}
@@ -239,8 +243,8 @@ func TestHeartbeatPersistsOnlyDurableChanges(t *testing.T) {
 	store.mu.Lock()
 	batches := append([]int(nil), store.batchSizes...)
 	store.mu.Unlock()
-	if len(batches) != 2 || batches[0] != 1 || batches[1] != 1 {
-		t.Fatalf("heartbeat batches = %v, want one node write then one allocation write", batches)
+	if len(batches) != 3 || batches[0] != 1 || batches[1] != 1 || batches[2] != 1 {
+		t.Fatalf("heartbeat batches = %v, want stability, node version, then allocation phase writes", batches)
 	}
 	nodes, err := s.state.ListNodes(context.Background())
 	if err != nil {

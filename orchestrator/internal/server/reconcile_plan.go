@@ -178,6 +178,29 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 	volumeOwners := make(map[string]uuid.UUID, len(in.VolumeOwners))
 	maps.Copy(volumeOwners, in.VolumeOwners)
 	nodes := sortedNodes(in.Nodes)
+	// An orphan has no record from which to recover its resource and port
+	// reservations. Withhold only its node until acknowledged cleanup, even
+	// while recovery grace prevents sending that cleanup.
+	placementNodes := make([]*Node, 0, len(nodes))
+	blockedNodes := make(map[uuid.UUID]bool)
+	for _, node := range nodes {
+		for _, observed := range node.observedAllocations {
+			if observed.RetainedLogs {
+				continue
+			}
+			owned := slices.ContainsFunc(allocations, func(allocation *Allocation) bool {
+				return allocation.Node != nil && allocation.Node.ID == node.ID && allocation.ID == observed.ID && allocation.Generation == observed.Generation
+			})
+			if !owned {
+				blockedNodes[node.ID] = true
+				break
+			}
+		}
+		if !blockedNodes[node.ID] {
+			placementNodes = append(placementNodes, node)
+		}
+	}
+	rolloutEvidence := make(map[*Allocation]bool)
 	plannedUpdates := make(map[*Allocation]bool)
 	markUpdated := func(allocation *Allocation) {
 		plannedUpdates[allocation] = true
@@ -375,7 +398,9 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 			actions = append(actions, Action{Type: ActionResume, Allocation: allocation})
 		}
 		if allocation.Phase == lifecycle.PhasePlaced || allocation.Phase == lifecycle.PhaseStarting {
-			actions = append(actions, Action{Type: ActionStart, Allocation: allocation})
+			if !blockedNodes[allocation.Node.ID] {
+				actions = append(actions, Action{Type: ActionStart, Allocation: allocation})
+			}
 		}
 		valid = append(valid, allocation)
 	}
@@ -428,6 +453,25 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 					pending = append(pending, alloc)
 				} else {
 					current = append(current, alloc)
+				}
+			}
+			// Stopping and terminal originals still identify an unfinished
+			// rollout. Keep one durable witness until desired new capacity is
+			// healthy, so history pruning cannot erase the parallel limit.
+			var rolloutOriginal *Allocation
+			healthyCurrent := 0
+			for _, alloc := range current {
+				if alloc.Phase == lifecycle.PhaseRunning && alloc.Health == lifecycle.HealthHealthy {
+					healthyCurrent++
+				}
+			}
+			if group.Update.Strategy == spec.UpdateRolling && healthyCurrent < group.Count {
+				for _, alloc := range allocationsByGroup[backoffKey] {
+					if alloc.JobRevision != job.Revision || alloc.JobIncarnation != job.Incarnation || alloc.Draining {
+						rolloutOriginal = alloc
+						rolloutEvidence[alloc] = true
+						break
+					}
 				}
 			}
 			unavailable := 0
@@ -524,8 +568,8 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 				backoff.DelayedReplacements = max(deficit, 0)
 			}
 			if deficit > 0 {
-				if strategy == spec.UpdateRolling && len(draining) > 0 {
-					inFlight := 0
+				if strategy == spec.UpdateRolling && rolloutOriginal != nil {
+					inFlight := unavailable
 					for _, alloc := range current {
 						if alloc.Phase != lifecycle.PhaseRunning || alloc.Health != lifecycle.HealthHealthy {
 							inFlight++
@@ -571,7 +615,7 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 				continue
 			}
 			requiredCapabilities := spec.GroupRequiredCapabilities(&group)
-			intent := PlacementIntent{Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Count: placeable, Nodes: nodes, Allocations: occupied, DesiredAllocations: valid, Tasks: group.Tasks, Constraints: group.Constraints, RequiredCapabilities: requiredCapabilities, VolumeOwners: volumeOwners}
+			intent := PlacementIntent{Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Count: placeable, Nodes: placementNodes, Allocations: occupied, DesiredAllocations: valid, Tasks: group.Tasks, Constraints: group.Constraints, RequiredCapabilities: requiredCapabilities, VolumeOwners: volumeOwners}
 			placements, released, diagnostic := scheduleAroundRetained(intent, retained)
 			for _, original := range released {
 				retainedStops = append(retainedStops, original.stopAction())
@@ -629,6 +673,7 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 	plan.Actions = append(retainedStops, actions...)
 
 	pruneSkip := maps.Clone(plannedUpdates)
+	maps.Copy(pruneSkip, rolloutEvidence)
 	for allocation := range observedOccupancy {
 		pruneSkip[allocation] = true
 	}

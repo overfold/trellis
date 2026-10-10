@@ -233,7 +233,7 @@ func planReplacementBackoff(policy ReplacementPolicy, previous *ReplacementBacko
 			if allocation.Phase != lifecycle.PhaseRunning || allocation.Health == lifecycle.HealthUnhealthy || allocation.Draining || allocation.JobRevision != revision {
 				continue
 			}
-			if !allocation.CreatedAt.After(next.LastFailureAt) || now.Sub(allocation.TransitionedAt) < policy.StableAfter {
+			if !allocation.CreatedAt.After(next.LastFailureAt) || allocation.StableSince.IsZero() || now.Sub(allocation.StableSince) < policy.StableAfter {
 				continue
 			}
 			next.Failures = 0

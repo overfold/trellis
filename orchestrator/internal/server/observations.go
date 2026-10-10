@@ -35,6 +35,8 @@ type allocationObservation struct {
 	ObservedTasks map[string]bool
 	StartFailure  *nodeapi.StartFailure
 	RetainedLogs  bool
+	// BreakStability preserves interrupted intervals across queue coalescing.
+	BreakStability bool
 }
 
 type allocationGeneration struct {
@@ -93,9 +95,24 @@ func (q *observationQueue) submit(observation *nodeObservation) bool {
 	if q.pending == nil {
 		q.pending = make(map[uuid.UUID]*nodeObservation)
 	}
-	if previous := q.pending[observation.node]; previous != nil && observation.at.Before(previous.at) {
-		q.mu.Unlock()
-		return false
+	if previous := q.pending[observation.node]; previous != nil {
+		if observation.at.Before(previous.at) {
+			q.mu.Unlock()
+			return false
+		}
+		for key, info := range observation.allocations {
+			prior, present := previous.allocations[key]
+			broken := !present || prior.BreakStability || prior.Phase != lifecycle.PhaseRunning || prior.Health == lifecycle.HealthUnhealthy || prior.RetainedLogs
+			for task := range info.ObservedTasks {
+				if !prior.ObservedTasks[task] {
+					broken = true
+				}
+			}
+			if broken {
+				info.BreakStability = true
+				observation.allocations[key] = info
+			}
+		}
 	}
 	_, superseded := q.pending[observation.node]
 	q.pending[observation.node] = observation
@@ -282,18 +299,19 @@ func (s *Server) planObservation(observation *nodeObservation, appliedAt time.Ti
 // observeAllocation replaces those, never edits them. The caller holds
 // a.mu.
 func observationScratch(a *Allocation) *Allocation {
-	return &Allocation{ID: a.ID, Generation: a.Generation, Tasks: a.Tasks, Phase: a.Phase, Health: a.Health, Diagnostic: a.Diagnostic, Endpoints: a.Endpoints, Ports: a.Ports}
+	return &Allocation{ID: a.ID, Generation: a.Generation, Tasks: a.Tasks, Phase: a.Phase, Health: a.Health, StableSince: a.StableSince, Diagnostic: a.Diagnostic, Endpoints: a.Endpoints, Ports: a.Ports}
 }
 
 // sameObservedState reports whether the fields a report can change are equal.
 func (a *Allocation) sameObservedState(b *Allocation) bool {
-	return a.Phase == b.Phase && a.Health == b.Health && sameDiagnostic(a.Diagnostic, b.Diagnostic) && sameEndpoints(a, b)
+	return a.Phase == b.Phase && a.Health == b.Health && a.StableSince.Equal(b.StableSince) && sameDiagnostic(a.Diagnostic, b.Diagnostic) && sameEndpoints(a, b)
 }
 
 // applyObservedState copies a scratch allocation's observed fields, and the
 // events its transitions recorded, onto a.
 func (a *Allocation) applyObservedState(scratch *Allocation) {
 	a.Phase, a.Health = scratch.Phase, scratch.Health
+	a.StableSince = scratch.StableSince
 	a.Diagnostic = scratch.Diagnostic
 	a.NextRetryAt = clonePointer(scratch.NextRetryAt)
 	a.Endpoints, a.Ports = cloneEndpoints(scratch.Endpoints), slices.Clone(scratch.Ports)
@@ -322,8 +340,10 @@ func observeAllocation(a *Allocation, observation *nodeObservation, heartbeatAt 
 		info = allocationObservation{Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown}
 	}
 	if info.RetainedLogs {
-		// Log inventory is not an execution or health observation.
-		return false
+		// Log inventory cannot update execution state, but supplies no
+		// evidence that the running interval continued.
+		a.StableSince = time.Time{}
+		return true
 	}
 	for _, task := range a.Tasks {
 		if !info.ObservedTasks[task.Name] {
@@ -363,6 +383,14 @@ func observeAllocation(a *Allocation, observation *nodeObservation, heartbeatAt 
 		}
 	}
 	_ = a.SetHealth(info.Health)
+	if info.BreakStability {
+		a.StableSince = time.Time{}
+	}
+	if a.Phase != lifecycle.PhaseRunning || info.Phase != lifecycle.PhaseRunning || a.Health == lifecycle.HealthUnhealthy {
+		a.StableSince = time.Time{}
+	} else if a.StableSince.IsZero() {
+		a.StableSince = heartbeatAt
+	}
 	endpoints := cloneEndpoints(info.Endpoints)
 	sort.SliceStable(endpoints, func(i, j int) bool { return endpoints[i].Task < endpoints[j].Task })
 	a.Endpoints = endpoints
@@ -390,6 +418,16 @@ func (s *Server) commitObservations(ctx context.Context, updates []*observationU
 		if err := s.state.PutNodesAndAllocations(ctx, summaries, allocations); err != nil {
 			if s.log != nil {
 				s.log.Error("persist heartbeat observations; the next heartbeats retry them", "nodes", len(updates), "error", err)
+			}
+			// Failed persistence must not leave an old interval usable after
+			// a reported interruption. Invalidate proof, not durable health;
+			// the next successful running report persists a fresh interval.
+			for _, update := range updates {
+				for _, allocation := range update.allocations {
+					allocation.current.mu.Lock()
+					allocation.current.StableSince = time.Time{}
+					allocation.current.mu.Unlock()
+				}
 			}
 			s.discardObservations("commit_failed", len(updates))
 			return
@@ -531,3 +569,27 @@ func newNodeObservation(nodeID uuid.UUID, at time.Time, actual []nodeapi.Allocat
 }
 
 func negative(value *int64) bool { return value != nil && *value < 0 }
+
+// nodeHasUnownedExecutionLocked checks current inventory against committed
+// allocation identity. The caller holds s.mu, but no allocation lock.
+func (s *Server) nodeHasUnownedExecutionLocked(node *Node) bool {
+	for _, observed := range node.observedAllocations {
+		if observed.RetainedLogs {
+			continue
+		}
+		owned := false
+		for _, allocation := range s.allocations {
+			allocation.mu.Lock()
+			matches := allocation.Node != nil && allocation.Node.ID == node.ID && allocation.ID == observed.ID && allocation.Generation == observed.Generation
+			allocation.mu.Unlock()
+			if matches {
+				owned = true
+				break
+			}
+		}
+		if !owned {
+			return true
+		}
+	}
+	return false
+}

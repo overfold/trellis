@@ -126,6 +126,7 @@ func updateStrategy(job *Job, groupName string) spec.UpdateStrategy {
 
 func applyReconciledAllocation(allocation, update *Allocation, node *Node) {
 	allocation.Phase = update.Phase
+	allocation.StableSince = update.StableSince
 	allocation.Diagnostic = update.Diagnostic
 	allocation.Node = node
 	allocation.Draining = update.Draining
@@ -938,6 +939,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 		s.mu.RLock()
 		node := action.Node
 		nodeStatus := node.Status
+		inventory := node.observedAllocations
 		address := fmt.Sprintf("%s:%d", node.Host, node.Port)
 		s.mu.RUnlock()
 		if nodeStatus != NodeStatusHealthy && nodeStatus != NodeStatusDraining {
@@ -946,6 +948,15 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 		if err := s.client.StopAllocation(ctx, node.ID, address, &nodeapi.StopAllocationRequest{AllocationID: action.ID, Generation: action.Generation, Epoch: epoch, RetainLogs: action.RetainLogs}); err != nil {
 			return err
 		}
+		// Acknowledged cleanup releases this inventory reservation, but do
+		// not erase a newer heartbeat that arrived while the stop was in flight.
+		s.mu.Lock()
+		if len(inventory) > 0 && len(node.observedAllocations) > 0 && &node.observedAllocations[0] == &inventory[0] {
+			node.observedAllocations = slices.DeleteFunc(node.observedAllocations, func(observed observedAllocation) bool {
+				return observed.ID == action.ID && observed.Generation == action.Generation && !observed.RetainedLogs
+			})
+		}
+		s.mu.Unlock()
 		// A successful stop includes network detach. Persist that proof for a
 		// lost allocation so its reservations can be reclaimed on the next pass.
 		s.mu.RLock()
@@ -979,6 +990,15 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 	// to deadlock the whole control plane once a writer (for example a heartbeat)
 	// is queued on mu.
 	s.mu.RLock()
+	if action.Type == ActionStart {
+		alloc.mu.Lock()
+		node := alloc.Node
+		alloc.mu.Unlock()
+		if s.nodeHasUnownedExecutionLocked(node) {
+			s.mu.RUnlock()
+			return fmt.Errorf("node %s has an unowned execution pending cleanup", node.ID)
+		}
+	}
 	alloc.mu.Lock()
 
 	serverLocked := true
@@ -1018,6 +1038,9 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 
 	switch action.Type {
 	case ActionStart:
+		if !slices.Contains(s.allocations, alloc) || (alloc.Phase != lifecycle.PhasePlaced && alloc.Phase != lifecycle.PhaseStarting && alloc.Phase != lifecycle.PhaseRunning) {
+			return nil
+		}
 		job := s.jobs[jobKey(alloc.Namespace, alloc.JobName)]
 		if job == nil || job.Incarnation != alloc.JobIncarnation {
 			return fmt.Errorf("job %s was deleted or recreated before allocation start", alloc.JobName)
@@ -1122,7 +1145,21 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 		hash := sha256.Sum256(raw)
 		request.ExecutionHash = hex.EncodeToString(hash[:])
 		if err := s.persistAllocationUpdate(ctx, alloc, func(next *Allocation) error {
-			if next.Phase == lifecycle.PhasePlaced || next.Phase == lifecycle.PhaseStopped || next.Phase == lifecycle.PhaseFailed || next.Phase == lifecycle.PhaseLost {
+			// Revalidate the committed record after request preparation, which
+			// may have waited on I/O. Running permits idempotent start retries;
+			// terminal and stopping records never authorize resurrection.
+			if next.Generation != generation || next.DrainSequence != drainSequence || (next.Phase != lifecycle.PhasePlaced && next.Phase != lifecycle.PhaseStarting && next.Phase != lifecycle.PhaseRunning) {
+				return context.Canceled
+			}
+			s.mu.RLock()
+			currentJob := s.jobs[jobKey(next.Namespace, next.JobName)]
+			currentNode := s.nodes[requestNodeID]
+			eligible := currentJob != nil && currentJob.Incarnation == next.JobIncarnation && currentJob.Revision == next.JobRevision && jobHasGroup(currentJob, next.TaskGroupName) && currentNode != nil && !s.nodeHasUnownedExecutionLocked(currentNode)
+			s.mu.RUnlock()
+			if !eligible {
+				return context.Canceled
+			}
+			if next.Phase == lifecycle.PhasePlaced {
 				return next.Transition(lifecycle.PhaseStarting, now, "", "")
 			}
 			return nil

@@ -189,6 +189,9 @@ type Allocation struct {
 	Phase          lifecycle.Phase  `json:"phase"`
 	Health         lifecycle.Health `json:"health"`
 	lifecycle.Diagnostic
+	// StableSince proves a continuous running, non-unhealthy interval.
+	// Zero means no proof; reload requires a fresh observation to begin it.
+	StableSince time.Time `json:"stable_since,omitzero"`
 	// Node is the canonical in-memory node the allocation is placed on. The
 	// persisted record stores only its ID (see MarshalJSON); Reload rebinds
 	// the pointer, so allocation records never carry node observations.
@@ -219,6 +222,11 @@ func (a *Allocation) Transition(to lifecycle.Phase, now time.Time, reason, messa
 		a.Events.Append(lifecycle.Event{Phase: to, Reason: reason, Message: message, At: now})
 		a.Phase = to
 		a.TransitionedAt = now
+		if to == lifecycle.PhaseRunning && a.Health != lifecycle.HealthUnhealthy {
+			a.StableSince = now
+		} else {
+			a.StableSince = time.Time{}
+		}
 	}
 	a.Reason, a.Message = reason, message
 	return nil
@@ -230,6 +238,9 @@ func (a *Allocation) SetHealth(health lifecycle.Health) error {
 		return fmt.Errorf("invalid allocation health %q", health)
 	}
 	a.Health = health
+	if health == lifecycle.HealthUnhealthy {
+		a.StableSince = time.Time{}
+	}
 	return nil
 }
 
@@ -287,6 +298,7 @@ func applyAllocationSnapshot(allocation, snapshot *Allocation) {
 	allocation.Tasks = snapshot.Tasks
 	allocation.Phase = snapshot.Phase
 	allocation.Health = snapshot.Health
+	allocation.StableSince = snapshot.StableSince
 	allocation.Diagnostic = snapshot.Diagnostic
 	allocation.Endpoints = snapshot.Endpoints
 	allocation.Ports = snapshot.Ports

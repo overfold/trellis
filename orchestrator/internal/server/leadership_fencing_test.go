@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -96,6 +97,71 @@ func TestOldTermOutcomeCannotRewriteReloadedAllocation(t *testing.T) {
 	// Identity fencing also rejects a detached object within the same term.
 	if err := s.persistAllocationUpdate(t.Context(), old, func(*Allocation) error { t.Fatal("detached callback ran"); return nil }); !errors.Is(err, context.Canceled) {
 		t.Fatalf("detached callback error = %v", err)
+	}
+}
+
+func TestQueuedStartCannotReviveLostAllocation(t *testing.T) {
+	for _, lost := range []bool{true, false} {
+		t.Run(fmt.Sprint("lost=", lost), func(t *testing.T) {
+			s, agent := newTestServerWithAgent()
+			t.Cleanup(agent.server.Close)
+			node := planTestNode(1, NodeStatusHealthy)
+			node.Host, node.Port = agent.host, agent.port
+			addTestNode(s, node, s.now())
+			job := planTestJob("web", 1, 1, spec.UpdateRecreate)
+			job.Spec.TaskGroups[0].Tasks[0].Networking = &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkHost}
+			s.jobs[jobKey("default", "web")] = job
+			original := planTestAllocation("original", node, lifecycle.PhasePlaced, 1)
+			s.allocations = []*Allocation{original}
+			_, busy := s.claimActionNode(node.ID)
+			if busy != nil {
+				t.Fatal("unexpected busy node")
+			}
+			done := s.dispatchReconcileActions(t.Context(), []Action{{Type: ActionStart, Allocation: original, controlPlanned: true}}, true)
+			phase := lifecycle.PhaseRunning
+			if lost {
+				phase = lifecycle.PhaseLost
+				workerAgent := newTestAgent()
+				t.Cleanup(workerAgent.server.Close)
+				worker := planTestNode(2, NodeStatusHealthy)
+				worker.Host, worker.Port = workerAgent.host, workerAgent.port
+				addTestNode(s, worker, s.now())
+				s.leaderSince = s.now().Add(-time.Hour)
+				setTestHeartbeat(s, node.ID, s.now().Add(-2*DefaultAllocationLossTimeout))
+				waitSignal(t, s.reconcile(t.Context(), false), "durable loss and replacement")
+				if original.Phase != lifecycle.PhaseLost || len(workerAgent.recordedCalls()) != 1 {
+					t.Fatal("loss pass did not replace original on independent node")
+				}
+				if err := heartbeatAndApply(t, s, node.ID, nil, "test", nodeResourceObservation{}); err != nil {
+					t.Fatal(err)
+				}
+				s.mu.Lock()
+				node.Status = NodeStatusHealthy
+				s.mu.Unlock()
+			} else {
+				if err := s.persistAllocationUpdate(t.Context(), original, func(next *Allocation) error {
+					if err := next.Transition(lifecycle.PhaseStarting, s.now(), "", ""); err != nil {
+						return err
+					}
+					return next.Transition(phase, s.now(), "", "")
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			s.releaseActionNode(node.ID)
+			waitSignal(t, done, "queued start")
+			stored, err := s.state.ListAllocations(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantCalls := 1
+			if lost {
+				wantCalls = 0
+			}
+			if len(agent.recordedCalls()) != wantCalls || stored[original.ID].Phase != phase {
+				t.Fatalf("calls=%d phase=%s; want calls=%d phase=%s", len(agent.recordedCalls()), stored[original.ID].Phase, wantCalls, phase)
+			}
+		})
 	}
 }
 

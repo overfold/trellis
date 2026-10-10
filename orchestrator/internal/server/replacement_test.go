@@ -21,6 +21,7 @@ import (
 	"github.com/overfold/trellis/orchestrator/client"
 	"github.com/overfold/trellis/orchestrator/internal/auth"
 	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 	"github.com/overfold/trellis/orchestrator/internal/state"
 )
@@ -243,7 +244,10 @@ func TestPlanReplacementBackoffResetsAfterStableReplacement(t *testing.T) {
 	}
 	runningSince := failedAt.Add(2 * time.Minute)
 	replacement := func(mutate func(*Allocation)) *Allocation {
-		allocation := &Allocation{ID: "c", Namespace: "default", JobName: "web", TaskGroupName: "api", Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy, Diagnostic: lifecycle.Diagnostic{CreatedAt: runningSince.Add(-time.Second), TransitionedAt: runningSince}}
+		allocation := &Allocation{ID: "c", Namespace: "default", JobName: "web", TaskGroupName: "api", Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthHealthy, Diagnostic: lifecycle.Diagnostic{CreatedAt: runningSince.Add(-time.Second)}}
+		if err := allocation.Transition(lifecycle.PhaseRunning, runningSince, "", ""); err != nil {
+			t.Fatal(err)
+		}
 		if mutate != nil {
 			mutate(allocation)
 		}
@@ -283,6 +287,149 @@ func TestPlanReplacementBackoffResetsAfterStableReplacement(t *testing.T) {
 	next := planReplacementBackoff(policy, reset, "default", "web", "api", 1, []*Allocation{failedAllocation("d", 1, failedAgain)}, failedAgain)
 	if next.Failures != 1 || !next.NextReplacementAt.Equal(failedAgain.Add(policy.BackoffBase)) {
 		t.Fatalf("failure after reset = %#v, want first-step delay", next)
+	}
+}
+
+func TestReplacementStabilityRestartsAfterHealthFlap(t *testing.T) {
+	for _, recoveredHealth := range []lifecycle.Health{lifecycle.HealthHealthy, lifecycle.HealthUnknown} {
+		for _, coalesced := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/coalesced=%t", recoveredHealth, coalesced), func(t *testing.T) {
+				store := newReplacementRaftStore(t, t.TempDir(), "", true)
+				s, node, clock := newBackoffReconcileServer(t, store)
+				failure := failedAllocation("failure", 1, clock.now)
+				previous := planReplacementBackoff(DefaultReplacementPolicy(), nil, "default", "web", "api", 1, []*Allocation{failure}, clock.now)
+				clock.advance(node, time.Minute)
+				allocation := &Allocation{ID: "replacement", Namespace: "default", JobName: "web", TaskGroupName: "api", Generation: 1, JobRevision: 1, Node: node, Tasks: s.jobs[jobKey("default", "web")].Spec.TaskGroups[0].Tasks, Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown, Diagnostic: lifecycle.Diagnostic{CreatedAt: clock.now}}
+				s.allocations = []*Allocation{allocation}
+				s.rebuildAllocationNodeIndexLocked()
+				report := func(health lifecycle.Health) {
+					t.Helper()
+					if err := s.Heartbeat(t.Context(), node.ID, []nodeapi.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "server", Phase: lifecycle.PhaseRunning, Health: health}}, "test", nil, nil, nodeResourceObservation{}); err != nil {
+						t.Fatal(err)
+					}
+					if !coalesced || health != lifecycle.HealthUnhealthy {
+						applyTestObservations(s)
+					}
+				}
+				report(lifecycle.HealthHealthy)
+				started := clock.now
+				clock.advance(node, 9*time.Minute)
+				report(lifecycle.HealthUnhealthy)
+				clock.advance(node, 17*time.Second)
+				report(recoveredHealth)
+				recovered := clock.now
+				for _, at := range []time.Time{started.Add(10 * time.Minute), recovered.Add(10*time.Minute - time.Nanosecond), recovered.Add(10 * time.Minute)} {
+					next := planReplacementBackoff(DefaultReplacementPolicy(), previous, "default", "web", "api", 1, []*Allocation{allocation}, at)
+					wantReset := !at.Before(recovered.Add(10 * time.Minute))
+					if (next.Failures == 0) != wantReset {
+						t.Fatalf("at=%s failures=%d want reset=%t", at.Sub(started), next.Failures, wantReset)
+					}
+				}
+				// A successor has no proof for the gap between leaders. Its first
+				// running report must begin a new interval, not reuse disk age.
+				if err := s.state.PutNode(t.Context(), node.ID.String(), nodeSummary(node)); err != nil {
+					t.Fatal(err)
+				}
+				successor := NewServer(slog.Default(), nil, NewStateController(store, "test"), store, "test", "")
+				if err := successor.Reload(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+				clock.now = recovered.Add(11 * time.Minute)
+				successor.now = func() time.Time { return clock.now }
+				if err := heartbeatAndApply(t, successor, node.ID, []nodeapi.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "server", Phase: lifecycle.PhaseRunning, Health: recoveredHealth}}, "test", nodeResourceObservation{}); err != nil {
+					t.Fatal(err)
+				}
+				next := planReplacementBackoff(DefaultReplacementPolicy(), previous, "default", "web", "api", 1, successor.allocations, clock.now)
+				if next.Failures == 0 {
+					t.Fatal("reload inferred stability across an unobserved leadership gap")
+				}
+				clock.now = clock.now.Add(10*time.Minute - time.Nanosecond)
+				next = planReplacementBackoff(DefaultReplacementPolicy(), previous, "default", "web", "api", 1, successor.allocations, clock.now)
+				if next.Failures == 0 {
+					t.Fatal("successor reset before its own stability boundary")
+				}
+				clock.now = clock.now.Add(time.Nanosecond)
+				next = planReplacementBackoff(DefaultReplacementPolicy(), previous, "default", "web", "api", 1, successor.allocations, clock.now)
+				if next.Failures != 0 {
+					t.Fatal("successor did not reset at its proven stability boundary")
+				}
+			})
+		}
+	}
+}
+
+func TestReplacementStabilityRequiresCommittedObservation(t *testing.T) {
+	store := &auditStore{memoryStore: memoryStore{}}
+	s, node, clock := newBackoffReconcileServer(t, store)
+	failure := failedAllocation("failure", 1, clock.now)
+	previous := planReplacementBackoff(DefaultReplacementPolicy(), nil, "default", "web", "api", 1, []*Allocation{failure}, clock.now)
+	clock.advance(node, time.Minute)
+	allocation := &Allocation{ID: "replacement", Namespace: "default", JobName: "web", TaskGroupName: "api", Generation: 1, JobRevision: 1, Node: node, Tasks: s.jobs[jobKey("default", "web")].Spec.TaskGroups[0].Tasks, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy, Diagnostic: lifecycle.Diagnostic{CreatedAt: clock.now, TransitionedAt: clock.now}}
+	s.allocations = []*Allocation{allocation}
+	// Existing records without interval proof must not inherit running age.
+	next := planReplacementBackoff(DefaultReplacementPolicy(), previous, "default", "web", "api", 1, s.allocations, clock.now.Add(time.Hour))
+	if next.Failures == 0 {
+		t.Fatal("record without proof inferred continuous stability")
+	}
+	report := func(health lifecycle.Health) {
+		t.Helper()
+		if err := heartbeatAndApply(t, s, node.ID, []nodeapi.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "server", Phase: lifecycle.PhaseRunning, Health: health}}, "test", nodeResourceObservation{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	report(lifecycle.HealthHealthy)
+	clock.advance(node, 9*time.Minute)
+	store.failBatch = true
+	report(lifecycle.HealthUnhealthy)
+	store.failBatch = false
+	clock.advance(node, 17*time.Second)
+	report(lifecycle.HealthHealthy)
+	next = planReplacementBackoff(DefaultReplacementPolicy(), previous, "default", "web", "api", 1, s.allocations, clock.now.Add(time.Minute))
+	if next.Failures == 0 {
+		t.Fatal("failed unhealthy commit left old stability proof usable")
+	}
+}
+
+func TestLogOnlyInventoryInterruptsReplacementStability(t *testing.T) {
+	for _, coalesced := range []bool{false, true} {
+		t.Run(fmt.Sprintf("coalesced=%t", coalesced), func(t *testing.T) {
+			s, node, clock := newBackoffReconcileServer(t, memoryStore{})
+			previous := planReplacementBackoff(DefaultReplacementPolicy(), nil, "default", "web", "api", 1, []*Allocation{failedAllocation("failure", 1, clock.now)}, clock.now)
+			clock.advance(node, time.Minute)
+			allocation := &Allocation{ID: "replacement", Namespace: "default", JobName: "web", TaskGroupName: "api", Generation: 1, JobRevision: 1, Node: node, Tasks: s.jobs[jobKey("default", "web")].Spec.TaskGroups[0].Tasks, Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown, Diagnostic: lifecycle.Diagnostic{CreatedAt: clock.now}}
+			s.allocations = []*Allocation{allocation}
+			status := nodeapi.AllocationStatus{ID: allocation.ID, Generation: 1, Task: "server", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
+			if err := heartbeatAndApply(t, s, node.ID, []nodeapi.AllocationStatus{status}, "test", nodeResourceObservation{}); err != nil {
+				t.Fatal(err)
+			}
+			before := allocation.Clone()
+			clock.advance(node, 9*time.Minute)
+			logs := status
+			logs.Phase, logs.Health, logs.RetainedLogs = lifecycle.PhaseStopped, lifecycle.HealthUnknown, true
+			if err := s.Heartbeat(t.Context(), node.ID, []nodeapi.AllocationStatus{logs}, "test", nil, nil, nodeResourceObservation{}); err != nil {
+				t.Fatal(err)
+			}
+			if !coalesced {
+				applyTestObservations(s)
+				if allocation.Phase != before.Phase || allocation.Health != before.Health || !sameDiagnostic(allocation.Diagnostic, before.Diagnostic) || !sameEndpoints(allocation, before) {
+					t.Fatal("log-only inventory changed execution lifecycle, health or endpoints")
+				}
+				stored, err := s.state.ListAllocations(t.Context())
+				if err != nil || !stored[allocation.ID].StableSince.IsZero() {
+					t.Fatalf("log-only interruption did not durably clear stability proof: %v", err)
+				}
+			}
+			clock.advance(node, 17*time.Second)
+			if err := heartbeatAndApply(t, s, node.ID, []nodeapi.AllocationStatus{status}, "test", nodeResourceObservation{}); err != nil {
+				t.Fatal(err)
+			}
+			for _, elapsed := range []time.Duration{time.Minute, 10*time.Minute - time.Nanosecond, 10 * time.Minute} {
+				next := planReplacementBackoff(DefaultReplacementPolicy(), previous, "default", "web", "api", 1, s.allocations, clock.now.Add(elapsed))
+				if (next.Failures == 0) != (elapsed == 10*time.Minute) {
+					t.Fatalf("after recovery+%s: failures=%d; log-only inventory must interrupt stability", elapsed, next.Failures)
+				}
+			}
+		})
 	}
 }
 

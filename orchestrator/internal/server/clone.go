@@ -91,6 +91,7 @@ func (a *Allocation) cloneOnto(node *Node) *Allocation {
 		Tasks:          spec.CloneTasks(a.Tasks),
 		Phase:          a.Phase,
 		Health:         a.Health,
+		StableSince:    a.StableSince,
 		Diagnostic:     diagnostic,
 		Node:           node,
 		Endpoints:      cloneEndpoints(a.Endpoints),
@@ -126,6 +127,7 @@ func (a *Allocation) sameRecord(b *Allocation) bool {
 		a.JobRevision == b.JobRevision &&
 		a.Phase == b.Phase &&
 		a.Health == b.Health &&
+		a.StableSince.Equal(b.StableSince) &&
 		sameDiagnostic(a.Diagnostic, b.Diagnostic) &&
 		a.Draining == b.Draining &&
 		a.DrainSequence == b.DrainSequence &&
