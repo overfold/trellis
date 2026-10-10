@@ -219,6 +219,9 @@ func TestAdministratorVerificationBudgets(t *testing.T) {
 			t.Fatal(err)
 		}
 		req := httptest.NewRequest(method, target, bytes.NewReader(body))
+		if len(body) == 0 {
+			req.Body = http.NoBody
+		}
 		req.Header.Set(adminsign.ChallengeHeader, value)
 		proof := make([]byte, ed25519.SignatureSize)
 		if valid {
@@ -319,27 +322,19 @@ func TestAdministratorVerificationBudgets(t *testing.T) {
 			}
 		}
 	})
-	t.Run("concurrent upload and downstream admission", func(t *testing.T) {
+	t.Run("concurrent upload admission", func(t *testing.T) {
 		entered := make(chan struct{}, 4)
 		release := make(chan struct{})
 		results := make(chan int, 4)
-		e.POST("/v1/held", func(c *echo.Context) error {
-			entered <- struct{}{}
-			<-release
-			return c.NoContent(http.StatusNoContent)
-		})
 		t.Cleanup(func() {
 			close(release)
 			for range 4 {
 				<-results
 			}
 		})
-		for i := range 4 {
-			req := request("POST", "/v1/credentials", nil, false)
+		for range 4 {
+			req := request("POST", "/v1/namespaces/default/jobs", nil, false)
 			req.Body = io.NopCloser(heldRequestBody{entered, release})
-			if i >= 2 {
-				req = request("POST", "/v1/held", nil, true)
-			}
 			go func() {
 				rec := httptest.NewRecorder()
 				e.ServeHTTP(rec, req)
@@ -354,13 +349,110 @@ func TestAdministratorVerificationBudgets(t *testing.T) {
 			}
 		}
 		body := &countedReader{}
-		req := request("POST", "/v1/credentials", nil, false)
+		req := request("POST", "/v1/namespaces/default/jobs", nil, false)
 		req.Body = io.NopCloser(body)
 		rec := httptest.NewRecorder()
 		e.ServeHTTP(rec, req)
 		t.Logf("fifth concurrent request status=%d reads=%d retry=%s", rec.Code, body.reads, rec.Header().Get("Retry-After"))
 		if rec.Code != http.StatusServiceUnavailable || body.reads != 0 || rec.Header().Get("Retry-After") != "1" {
 			t.Error("aggregate admission did not reject fifth request before reading")
+		}
+		for _, payload := range [][]byte{nil, []byte("small")} {
+			rec := httptest.NewRecorder()
+			e.ServeHTTP(rec, request("POST", "/v1/credentials", payload, true))
+			if rec.Code != http.StatusNoContent {
+				t.Errorf("lightweight operation blocked by large uploads: %d", rec.Code)
+			}
+		}
+	})
+	t.Run("downstream requests do not occupy upload slots", func(t *testing.T) {
+		entered, release := make(chan struct{}, 8), make(chan struct{})
+		results := make(chan int, 8)
+		e.POST("/v1/held", func(c *echo.Context) error {
+			entered <- struct{}{}
+			<-release
+			return c.NoContent(http.StatusNoContent)
+		})
+		launched := 0
+		t.Cleanup(func() {
+			close(release)
+			for range launched {
+				<-results
+			}
+		})
+		for i := range 8 {
+			payload := []byte("body")
+			if i >= 4 {
+				payload = nil
+			}
+			req := request("POST", "/v1/held", payload, true)
+			launched++
+			go func() { rec := httptest.NewRecorder(); e.ServeHTTP(rec, req); results <- rec.Code }()
+			select {
+			case <-entered:
+			case <-time.After(time.Second):
+				t.Fatal("downstream request occupied upload admission")
+			}
+		}
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, request("POST", "/v1/credentials", []byte("small"), true))
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("lightweight operation status=%d", rec.Code)
+		}
+	})
+	t.Run("retained buffer budget and recovery", func(t *testing.T) {
+		entered, release := make(chan struct{}, 15), make(chan struct{})
+		results := make(chan int, 15)
+		e.POST("/v1/retained", func(c *echo.Context) error {
+			entered <- struct{}{}
+			<-release
+			return c.NoContent(http.StatusNoContent)
+		})
+		launched := 0
+		closed := false
+		t.Cleanup(func() {
+			if !closed {
+				close(release)
+			}
+			for range launched {
+				<-results
+			}
+		})
+		// Fifteen 64 KiB + 1 buffers fit in the reserved 1 MiB lane.
+		for range 15 {
+			req := request("POST", "/v1/retained", []byte("body"), true)
+			launched++
+			go func() { rec := httptest.NewRecorder(); e.ServeHTTP(rec, req); results <- rec.Code }()
+			select {
+			case <-entered:
+			case <-time.After(time.Second):
+				t.Fatal("buffer budget exhausted too early")
+			}
+		}
+		req := request("POST", "/v1/credentials", []byte("body"), true)
+		incoming := &countedReader{reader: strings.NewReader("body")}
+		req.Body = io.NopCloser(incoming)
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		if rec.Code != http.StatusServiceUnavailable || incoming.reads != 0 || !strings.Contains(rec.Body.String(), "memory limit") {
+			t.Fatalf("retained memory budget status=%d reads=%d: %s", rec.Code, incoming.reads, rec.Body.String())
+		}
+		empty := httptest.NewRecorder()
+		e.ServeHTTP(empty, request("POST", "/v1/credentials", nil, true))
+		if empty.Code != http.StatusNoContent {
+			t.Fatal("empty operation used buffer budget")
+		}
+		close(release)
+		closed = true
+		for range launched {
+			<-results
+		}
+		launched = 0
+		req.Body = io.NopCloser(strings.NewReader("body"))
+		rec = httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("memory recovery burned proof or retained buffers: %d", rec.Code)
 		}
 	})
 	t.Run("recovered slot and canceled proof not consumed", func(t *testing.T) {
