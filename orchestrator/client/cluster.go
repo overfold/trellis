@@ -22,7 +22,7 @@ func (c *Client) CredentialInfo(ctx context.Context) (*api.CredentialInfoRespons
 	return &response, nil
 }
 
-// CreateCredential mints a scoped API credential. It requires the
+// CreateCredential mints an API credential. It requires the
 // administrator key. The response carries the token exactly once.
 func (c *Client) CreateCredential(ctx context.Context, request *api.CredentialCreateRequest) (*api.CredentialCreateResponse, error) {
 	var response api.CredentialCreateResponse
@@ -88,7 +88,7 @@ func (c *Client) ListNamespaces(ctx context.Context) (api.NamespaceListResponse,
 	return response, nil
 }
 
-// ListNodes returns every registered node. It requires cluster scope.
+// ListNodes returns every registered node. It requires read or write access.
 func (c *Client) ListNodes(ctx context.Context) (api.NodeListResponse, error) {
 	var response api.NodeListResponse
 	if err := c.request(ctx, http.MethodGet, c.clusterPath("/v1/nodes"), nil, &response); err != nil {

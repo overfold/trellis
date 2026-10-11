@@ -26,7 +26,7 @@ func (c *Client) Events(ctx context.Context) (*EventStream, error) {
 }
 
 // ClusterEvents streams cluster events for every namespace. It requires
-// cluster scope.
+// read or write access.
 func (c *Client) ClusterEvents(ctx context.Context) (*EventStream, error) {
 	return c.events(ctx, c.clusterPath("/v1/events"))
 }

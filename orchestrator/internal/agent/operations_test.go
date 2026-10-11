@@ -389,8 +389,8 @@ func testRestartPolicy() *spec.RestartPolicySpec {
 func operationTestRequest() *nodeapi.AllocationRequest {
 	return &nodeapi.AllocationRequest{
 		AllocationID: "allocation", Generation: 2, JobRevision: 7, Epoch: 1, ExecutionHash: "execution-hash",
-		Namespace: "default", JobName: "job", GroupName: "group", Runtime: string(spec.DefaultRuntime),
-		Tasks:   []spec.TaskSpec{{Name: "first", Image: "image"}, {Name: "second", Image: "image"}},
+		Namespace: "default", JobName: "job", GroupName: "group",
+		Tasks:   []spec.TaskSpec{{Name: "first", Image: "image", Runtime: spec.DefaultRuntime}, {Name: "second", Image: "image", Runtime: spec.DefaultRuntime}},
 		Restart: testRestartPolicy(),
 	}
 }

@@ -45,7 +45,7 @@ func (c *Client) ListAllocations(ctx context.Context, filter AllocationFilter) (
 }
 
 // ListClusterAllocations returns the allocations in every namespace. It
-// requires cluster scope.
+// requires read or write access.
 func (c *Client) ListClusterAllocations(ctx context.Context, filter AllocationFilter) (api.AllocationListResponse, error) {
 	return c.listAllocations(ctx, c.clusterPath("/v1/allocations%s", filter.query()))
 }

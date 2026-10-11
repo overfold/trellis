@@ -325,7 +325,7 @@ func TestRegistryResolutionAndHTTPApply(t *testing.T) {
 		t.Fatal(err)
 	}
 	planResponse := httptest.NewRecorder()
-	handler.ServeHTTP(planResponse, scopedRequest(t, http.MethodPost, "/v1/namespaces/default/jobs/plan", string(requestBody), auth.AccessCluster, auth.AccessWrite))
+	handler.ServeHTTP(planResponse, authorizedRequest(t, http.MethodPost, "/v1/namespaces/default/jobs/plan", string(requestBody), auth.AccessWrite))
 	var planned api.JobPlanResponse
 	if planResponse.Code != http.StatusOK || json.Unmarshal(planResponse.Body.Bytes(), &planned) != nil || planned.ResolvedImages[image] != pinned {
 		t.Fatalf("HTTP plan = %d %s", planResponse.Code, planResponse.Body.String())
@@ -337,7 +337,7 @@ func TestRegistryResolutionAndHTTPApply(t *testing.T) {
 		t.Fatal(err)
 	}
 	applyResponse := httptest.NewRecorder()
-	handler.ServeHTTP(applyResponse, scopedRequest(t, http.MethodPost, "/v1/namespaces/default/jobs", string(requestBody), auth.AccessCluster, auth.AccessWrite))
+	handler.ServeHTTP(applyResponse, authorizedRequest(t, http.MethodPost, "/v1/namespaces/default/jobs", string(requestBody), auth.AccessWrite))
 	if applyResponse.Code != http.StatusAccepted {
 		t.Fatalf("planned apply contacted unavailable registry: %d %s", applyResponse.Code, applyResponse.Body.String())
 	}

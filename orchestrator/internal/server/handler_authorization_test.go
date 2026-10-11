@@ -12,38 +12,37 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/auth"
 )
 
-func scopedRequest(t *testing.T, method, target, body string, scope auth.AccessScope, access auth.AccessLevel) *http.Request {
+func authorizedRequest(t *testing.T, method, target, body string, access auth.AccessLevel) *http.Request {
 	t.Helper()
 	req := httptest.NewRequest(method, target, bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
-	ctx := context.WithValue(req.Context(), NamespaceContextKey, auth.EncodeScope(scope, access))
+	ctx := context.WithValue(req.Context(), AuthorizationContextKey, auth.EncodeAccess(access))
 	return req.WithContext(ctx)
 }
 
-func TestCredentialCreationRejectsNamespaceScope(t *testing.T) {
+func TestCredentialCreationRejectsScope(t *testing.T) {
 	e := echo.New()
 	NewHandler(&Server{}).Register(e)
-	req := httptest.NewRequest(http.MethodPost, "/v1/credentials", strings.NewReader(`{"scope":"namespace","access":"read"}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/credentials", strings.NewReader(`{"scope":"cluster","access":"read"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req = req.WithContext(context.WithValue(req.Context(), AdminContextKey, true))
 	rec := httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "scope must be cluster") {
-		t.Fatalf("status = %d, body: %s; want 400 rejecting namespace scope", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `unknown field \"scope\"`) {
+		t.Fatalf("status = %d, body: %s; want 400 rejecting removed scope", rec.Code, rec.Body.String())
 	}
 }
 
 func TestPlanRejectsAPIAccessAboveCallerAuthority(t *testing.T) {
-	clusterWrite := `{"spec":{"name":"demo","namespace":"team","task_groups":[{"name":"web","count":1,"api_access":{"scope":"cluster","access":"write"},"tasks":[{"name":"app","image":"example.invalid/app:1","networking":{"mode":"host"}}]}]}}`
+	clusterWrite := `{"spec":{"name":"demo","namespace":"team","task_groups":[{"name":"web","count":1,"tasks":[{"name":"app","image":"example.invalid/app:1","api_access":{"access":"write"},"networking":{"mode":"host"}}]}]}}`
 	tests := []struct {
 		name   string
-		scope  auth.AccessScope
 		access auth.AccessLevel
 		body   string
 		want   int
 	}{
-		{name: "cluster read cannot delegate cluster write", scope: auth.AccessCluster, access: auth.AccessRead, body: clusterWrite, want: http.StatusForbidden},
-		{name: "cluster write may delegate cluster write", scope: auth.AccessCluster, access: auth.AccessWrite, body: clusterWrite, want: http.StatusOK},
+		{name: "read cannot delegate write", access: auth.AccessRead, body: clusterWrite, want: http.StatusForbidden},
+		{name: "write may delegate write", access: auth.AccessWrite, body: clusterWrite, want: http.StatusOK},
 	}
 
 	for _, tt := range tests {
@@ -52,7 +51,7 @@ func TestPlanRejectsAPIAccessAboveCallerAuthority(t *testing.T) {
 			e := echo.New()
 			NewHandler(control).Register(e)
 
-			req := scopedRequest(t, http.MethodPost, "/v1/namespaces/team/jobs/plan", tt.body, tt.scope, tt.access)
+			req := authorizedRequest(t, http.MethodPost, "/v1/namespaces/team/jobs/plan", tt.body, tt.access)
 			rec := httptest.NewRecorder()
 			e.ServeHTTP(rec, req)
 
@@ -65,12 +64,11 @@ func TestPlanRejectsAPIAccessAboveCallerAuthority(t *testing.T) {
 
 func TestNamespacedRoutesAuthorizeThePathNamespace(t *testing.T) {
 	type principal struct {
-		scope  auth.AccessScope
 		access auth.AccessLevel
 	}
 	var (
-		clusterRead  = principal{auth.AccessCluster, auth.AccessRead}
-		clusterWrite = principal{auth.AccessCluster, auth.AccessWrite}
+		clusterRead  = principal{auth.AccessRead}
+		clusterWrite = principal{auth.AccessWrite}
 		anonymous    = principal{}
 	)
 	const secret = `{"value_base64":"dGVzdA=="}`
@@ -123,7 +121,7 @@ func TestNamespacedRoutesAuthorizeThePathNamespace(t *testing.T) {
 			req := httptest.NewRequest(tt.method, tt.path, bytes.NewBufferString(tt.body))
 			req.Header.Set("Content-Type", "application/json")
 			if tt.caller != anonymous {
-				req = scopedRequest(t, tt.method, tt.path, tt.body, tt.caller.scope, tt.caller.access)
+				req = authorizedRequest(t, tt.method, tt.path, tt.body, tt.caller.access)
 			}
 			rec := httptest.NewRecorder()
 			e.ServeHTTP(rec, req)
@@ -141,7 +139,7 @@ func TestJobSubmissionRejectsNamespaceMismatch(t *testing.T) {
 			e := echo.New()
 			NewHandler(&Server{jobs: make(map[string]*Job)}).Register(e)
 			rec := httptest.NewRecorder()
-			e.ServeHTTP(rec, scopedRequest(t, http.MethodPost, path, body, auth.AccessCluster, auth.AccessWrite))
+			e.ServeHTTP(rec, authorizedRequest(t, http.MethodPost, path, body, auth.AccessWrite))
 			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `spec.namespace \"other\" does not match request namespace \"team\"`) {
 				t.Fatalf("status = %d, want 400 naming both namespaces; body: %s", rec.Code, rec.Body.String())
 			}

@@ -12,8 +12,8 @@ import (
 func NewCredentialsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "credentials",
-		Short: "Manage scoped operator API credentials",
-		Long:  "Mint, list, and revoke scoped operator API credentials. These commands require the administrator signing key; ordinary cluster/write operator credentials cannot manage credentials.",
+		Short: "Manage operator API credentials",
+		Long:  "Mint, list, and revoke operator API credentials. These commands require the administrator signing key; ordinary write operator credentials cannot manage credentials.",
 	}
 	cmd.AddCommand(newCredentialsCreateCmd())
 	cmd.AddCommand(newCredentialsListCmd())
@@ -22,16 +22,13 @@ func NewCredentialsCmd() *cobra.Command {
 }
 
 func newCredentialsCreateCmd() *cobra.Command {
-	var scope, access string
+	var access string
 	var ttl time.Duration
 	cmd := &cobra.Command{
 		Use:   "create",
-		Short: "Create a scoped operator API credential",
-		Long:  "Create an operator credential with explicit cluster scope and read or write access, optionally expiring after --ttl. The token is printed once; the cluster stores only its hash. The caller must authenticate with the administrator signing key.",
+		Short: "Create an operator API credential",
+		Long:  "Create an operator credential with read or write access, optionally expiring after --ttl. The token is printed once; the cluster stores only its hash. The caller must authenticate with the administrator signing key.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if scope != "cluster" {
-				return fmt.Errorf("--scope must be cluster")
-			}
 			if access != "read" && access != "write" {
 				return fmt.Errorf("--access must be read or write")
 			}
@@ -44,7 +41,7 @@ func newCredentialsCreateCmd() *cobra.Command {
 				return err
 			}
 			response, err := serverClient.CreateCredential(cmd.Context(), &api.CredentialCreateRequest{
-				Scope: scope, Access: access, TTLSeconds: ttlSeconds,
+				Access: access, TTLSeconds: ttlSeconds,
 			})
 			if err != nil {
 				return err
@@ -56,7 +53,6 @@ func newCredentialsCreateCmd() *cobra.Command {
 			return err
 		},
 	}
-	cmd.Flags().StringVar(&scope, "scope", "", "Credential scope (cluster)")
 	cmd.Flags().StringVar(&access, "access", "", "Credential access (read or write)")
 	cmd.Flags().DurationVar(&ttl, "ttl", 0, "Expire the credential after this duration, such as 720h (default: no expiry)")
 	return cmd
@@ -86,11 +82,11 @@ func newCredentialsListCmd() *cobra.Command {
 			}
 			now := time.Now()
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
-			if _, err := fmt.Fprintln(w, "ID\tScope\tAccess\tCreated\tExpires"); err != nil {
+			if _, err := fmt.Fprintln(w, "ID\tAccess\tCreated\tExpires"); err != nil {
 				return err
 			}
 			for _, credential := range credentials {
-				if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", credential.ID, credential.Scope, credential.Access, credential.CreatedAt.Format(time.RFC3339), formatExpiry(credential.ExpiresAt, now)); err != nil {
+				if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", credential.ID, credential.Access, credential.CreatedAt.Format(time.RFC3339), formatExpiry(credential.ExpiresAt, now)); err != nil {
 					return err
 				}
 			}

@@ -163,23 +163,22 @@ Treat discovery as runtime endpoint information, not application consensus. Appl
 
 ## 9. In-cluster API access
 
-API access requires explicit **scope** `cluster` and **access** `read` or `write`. Prefer read access and omit API access entirely when it is not required.
+API access is requested per task with explicit **access** `read` or `write`, always cluster-wide. There is no scope field. Prefer read access and omit API access entirely when it is not required.
 
 A typical observer uses:
 
 ```yaml
 api_access:
-  scope: cluster
   access: read
 ```
 
-Trellis gives every task in the group a cluster-wide bearer credential, plus the API address, job namespace, and cluster CA when configured. The injected job namespace is a routing convenience, not authorization; the token can address every namespace.
+Place this object on the observer task. Trellis gives only that task a cluster-wide bearer credential, plus the API address, job namespace, and cluster CA when configured. The injected job namespace is a routing convenience, not authorization; the token can address every namespace.
 
-Use `cluster/read` only for a trusted cluster-wide observer. Use `cluster/write` only for an operator workload that needs ordinary cluster mutations.
+Use `read` only for a trusted cluster-wide observer. Use `write` only for an operator workload that needs ordinary cluster-wide mutations.
 
-The administrator signing key is separate and more privileged. It is used for backup/restore, Raft administration, and minting scoped credentials, and Trellis never injects it into workloads. Node registration and heartbeats instead use certificate-bound node identity; managed enrollment uses short-lived join tokens that the administrator mints.
+The administrator signing key is separate and more privileged. It is used for backup/restore, Raft administration, and minting cluster-wide credentials, and Trellis never injects it into workloads. Node registration and heartbeats instead use certificate-bound node identity; managed enrollment uses short-lived join tokens that the administrator mints.
 
-Every task in an API-enabled group can read the injected token, so do not add untrusted sidecars. The [`api-access`](../../examples/api-access/) example intentionally uses `cluster/read` and explains the resulting cluster-wide visibility, TLS verification, authenticated requests, last-known-good behavior, and token hygiene.
+Sibling tasks do not receive the enabled task's token, but colocation is not a security sandbox: do not add untrusted sidecars. The [`api-access`](../../examples/api-access/) example intentionally uses read access and explains the resulting cluster-wide visibility, TLS verification, authenticated requests, last-known-good behavior, and token hygiene.
 
 ## 10. Release patterns
 

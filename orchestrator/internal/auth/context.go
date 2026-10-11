@@ -4,25 +4,16 @@ import "strings"
 
 const authorizationPrefix = "@trellis-auth:"
 
-// EncodeScope returns the compact authorization value stored in request context.
-func EncodeScope(scope AccessScope, access AccessLevel) string {
-	return authorizationPrefix + string(scope) + ":" + string(access)
+// EncodeAccess returns the compact authorization value stored in request context.
+func EncodeAccess(access AccessLevel) string {
+	return authorizationPrefix + string(access)
 }
 
-// DecodeScope decodes an authorization request-context value.
-func DecodeScope(value string) (scope AccessScope, access AccessLevel, ok bool) {
+// DecodeAccess decodes an authorization request-context value.
+func DecodeAccess(value string) (AccessLevel, bool) {
 	if !strings.HasPrefix(value, authorizationPrefix) {
-		return "", "", false
+		return "", false
 	}
-	parts := strings.Split(value[len(authorizationPrefix):], ":")
-	switch {
-	case len(parts) == 2 && parts[0] == string(AccessCluster):
-		access = AccessLevel(parts[1])
-		if access != AccessRead && access != AccessWrite {
-			return "", "", false
-		}
-		return AccessCluster, access, true
-	default:
-		return "", "", false
-	}
+	access := AccessLevel(strings.TrimPrefix(value, authorizationPrefix))
+	return access, access == AccessRead || access == AccessWrite
 }

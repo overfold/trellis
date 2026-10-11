@@ -17,14 +17,14 @@ All JSON request objects require unique keys recursively, including nested speci
 Trellis distinguishes three credential kinds:
 
 - `administrator` — the root request context granted after verification of an operator-held Ed25519 key;
-- `operator` — an explicitly minted API credential with `cluster` scope and `read` or `write` access;
-- `workload` — a scoped credential injected through task-group `api_access`.
+- `operator` — an explicitly minted API credential with cluster-wide `read` or `write` access;
+- `workload` — a cluster-wide credential injected through task-level `api_access`.
 
 Credential prefixes (`trls_op_`, `trls_wl_`) are descriptive only. The server authenticates the complete bearer value and uses its authoritative stored principal metadata for generated credentials. An operator credential may carry an expiry chosen at creation; from that instant it no longer authenticates. Node join tokens (`trls_join_<id>.<secret>`) are not API credentials: they are accepted only by managed enrollment.
 
-A task group requests workload access with an object such as `{"scope":"cluster","access":"read"}`. Workload credentials, like operator credentials, allow only explicit `cluster` scope and `read` or `write` access. Cluster scope grants only the ordinary API authority represented by the credential; it never turns into the administrator credential. Trellis sets `TRELLIS_NAMESPACE` to the job namespace so clients can conveniently build `/v1/namespaces/{namespace}/...` request paths, but this value is not an authorization boundary.
+A task requests workload access with an object such as `{"access":"read"}`. Workload and operator credentials have cluster-wide `read` or `write` authority; there is no scope selector. This grants only ordinary API authority, never administrator authority. Trellis sets `TRELLIS_NAMESPACE` to the job namespace so clients can conveniently build `/v1/namespaces/{namespace}/...` request paths, but this value is not an authorization boundary.
 
-Each workload credential belongs to one allocation generation and carries a subject naming its namespace, job, and task group, which `GET /v1/auth/whoami` reports as `subject`. It remains stable across start retries and leadership changes; a new generation replaces it and revokes the previous token. API-enabled allocations require the secrets encryption key. Trellis revokes a credential when its allocation record is pruned, its job or task group is deleted, the job is recreated under the same name, or `api_access` is removed or narrowed below its grant. Widening access leaves existing credentials in place; replacement allocations receive the wider grant. Token persistence and delivery are described in [node internals](../developer/node-internals.md#secrets-and-api-access).
+Each enabled task receives a separate workload credential for one allocation generation, with a subject naming its namespace, job, task group, and task, which `GET /v1/auth/whoami` reports as `subject`. It remains stable across start retries and leadership changes; a new generation replaces it and revokes the previous token. API-enabled tasks require the secrets encryption key. Trellis revokes a credential when its allocation record is pruned, its job, task group, or task is deleted, the job is recreated under the same name, or the task's `api_access` is removed or narrowed below its grant. Widening access leaves existing credentials in place; replacement allocations receive the wider grant. Token persistence and delivery are described in [node internals](../developer/node-internals.md#secrets-and-api-access).
 
 Retained `stopped`, `failed`, and `lost` allocations do not retain API authority; node-removal tombstones also revoke their workloads. Each authentication checks live allocation generation and grant, node presence, tombstones, and the leader's silence deadline independently of token-deletion commits. Invalidated credentials receive `401`. Temporary partitions and leadership recovery use the explicitly bounded [workload credential lifecycle](job-specification.md#api-access); this does not immediately stop offline containers or erase previously delivered secrets.
 
@@ -36,17 +36,17 @@ Status codes separate what the client may fix from what it may retry. `4xx` resp
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/metrics` | Prometheus metrics of the leader; requires cluster scope. |
+| `GET` | `/metrics` | Prometheus metrics of the leader; requires read access. |
 | `POST` | `/v1/auth/administrator/challenge` | Issue a short-lived one-time administrator signing challenge. |
-| `GET` | `/v1/auth/whoami` | Return the current credential kind, scope, access, and available provenance metadata. |
-| `GET` | `/v1/nodes` | List node capacity, discovered capabilities, status, and control-plane membership; requires cluster scope. |
-| `GET` | `/v1/cluster/leader` | Identify the serving control-plane leader; requires cluster scope. |
-| `POST` / `DELETE` | `/v1/nodes/{id}/drain` | Drain or undrain; requires `cluster/write`. |
+| `GET` | `/v1/auth/whoami` | Return the current credential kind, access, and available provenance metadata. |
+| `GET` | `/v1/nodes` | List node capacity, discovered capabilities, status, and control-plane membership; requires read access. |
+| `GET` | `/v1/cluster/leader` | Identify the serving control-plane leader; requires read access. |
+| `POST` / `DELETE` | `/v1/nodes/{id}/drain` | Drain or undrain; requires cluster-wide `write` access. |
 | `POST` | `/v1/nodes/{id}/promote` | Authorize an enrolled worker for control-plane participation; administrator signature required. |
 | `POST` | `/v1/nodes/identities` | Bind an external node certificate and role; external signing mode and administrator signature required. |
 | `GET` | `/v1/namespaces` | Discover namespace names visible to the caller. |
-| `GET` | `/v1/allocations?label=key:value` | List/filter allocations across all namespaces; requires cluster scope. |
-| `GET` | `/v1/events` | Server-sent event stream across all namespaces; requires cluster scope. |
+| `GET` | `/v1/allocations?label=key:value` | List/filter allocations across all namespaces; requires read access. |
+| `GET` | `/v1/events` | Server-sent event stream across all namespaces; requires read access. |
 | `GET`, `POST` | `/v1/namespaces/{ns}/jobs` | List jobs or submit `{"spec": JobSpec, "expected_version": N, "expected_incarnation": ID}`; submitting requires write access. |
 | `POST` | `/v1/namespaces/{ns}/jobs/plan` | Validate and calculate the authoritative semantic plan for a `JobSpec`. |
 | `GET`, `DELETE` | `/v1/namespaces/{ns}/jobs/{name}` | Read job state/API representation or delete the job; deleting requires write access. |
@@ -64,7 +64,7 @@ Status codes separate what the client may fix from what it may retry. `4xx` resp
 | `GET` | `/v1/namespaces/{ns}/secrets[/{name}]` | List/get secret metadata only. |
 | `DELETE` | `/v1/namespaces/{ns}/secrets/{name}` | Delete a secret; requires write access. |
 
-Authorization of `/v1/namespaces/{ns}/...` routes checks cluster scope and access (`read` or `write`) separately, as noted per route. Operator and workload API credentials may address every namespace; the path selects the resource namespace rather than narrowing credential authority. A `{ns}` that is not a valid identifier returns `400`.
+Authorization of `/v1/namespaces/{ns}/...` routes checks access (`read` or `write`), as noted per route. Operator and workload API credentials may address every namespace; the path selects the resource namespace rather than narrowing credential authority. A `{ns}` that is not a valid identifier returns `400`.
 
 Allocation listings accept a `label` filter: `key` requires that the label exists, while `key:value` requires both presence and an exact value match. `key:` matches only a present label whose value is empty, never an absent label. The first colon separates key and value; subsequent colons are part of the value.
 
@@ -73,15 +73,14 @@ Allocation listings accept a `label` filter: `key` requires that the label exist
 ```json
 {
   "kind": "operator",
-  "scope": "cluster",
   "access": "write",
   "created_at": "2026-09-02T20:00:00Z"
 }
 ```
 
-A workload credential additionally reports `"subject": {"namespace": "payments", "job": "router", "task_group": "sync"}`.
+A workload credential additionally reports `"subject": {"namespace": "payments", "job": "router", "task_group": "sync", "task": "controller"}`.
 
-An administrator credential reports `kind: "administrator"`, `scope: "cluster"`, and `access: "write"`, but callers must still treat `administrator` as more privileged than ordinary `cluster/write`: root-only endpoint checks use the credential kind/context, not merely those two effective fields.
+An administrator credential reports `kind: "administrator"` and `access: "write"`, but callers must still treat `administrator` as more privileged than ordinary cluster-wide write access: root-only endpoint checks use the credential kind/context, not merely access. No credential response includes a `scope` field.
 
 `GET /v1/namespaces` is discovery, not namespace lifecycle management. It returns the sorted union of namespace names that currently have a desired job or a stored secret. Credentials do not create discoverable namespaces. There is no namespace-creation call: storing a secret in or applying a job to a previously unseen namespace makes it discoverable.
 
@@ -264,7 +263,7 @@ Memory values are byte counts. `PUT /v1/cluster/settings/job-limits` requires an
 
 `POST /v1/credentials`, `GET /v1/credentials`, `DELETE /v1/credentials/{id}`, `POST /v1/nodes/join-tokens`, `GET /v1/nodes/join-tokens`, `DELETE /v1/nodes/join-tokens/{id}`, `PUT /v1/cluster/settings/job-limits`, `PUT /v1/cluster/settings/reconciliation`, `GET /v1/backup`, `POST /v1/backup/restore`, `DELETE /v1/raft/members/{id}`, and `POST /v1/raft/leadership-transfer` require an administrator-signed request. The operator keeps the Ed25519 private key; replicated cluster state contains only its PKIX public key.
 
-`POST /v1/credentials` takes `scope` (which must be `cluster`), `access` (`read` or `write`), and optional `ttl_seconds`; a positive value makes the credential expire that many seconds after creation, and zero or absence means no expiry. It returns `201` with the `token`, shown only in this response, and the credential's metadata: `id`, `scope`, `access`, `created_at`, and `expires_at` when set. There is no top-level namespace in the request or response. `GET /v1/credentials` lists metadata for every operator credential, expired ones included, ordered by creation time; it never returns a token. Use the returned `id` with `DELETE /v1/credentials/{id}` to revoke a credential (`204`, or `404` when no operator credential has that ID). Workload credentials are neither listed nor revocable through these endpoints. `GET /v1/auth/whoami` also reports `expires_at` for an expiring credential; a workload subject includes its job namespace, job, and task group.
+`POST /v1/credentials` takes `access` (`read` or `write`) and optional `ttl_seconds`; a positive value makes the credential expire that many seconds after creation, and zero or absence means no expiry. It returns `201` with the `token`, shown only in this response, and the credential's metadata: `id`, `access`, `created_at`, and `expires_at` when set. Neither request nor response has a `scope` or top-level namespace field. `GET /v1/credentials` lists metadata for every operator credential, expired ones included, ordered by creation time; it never returns a token. Use the returned `id` with `DELETE /v1/credentials/{id}` to revoke a credential (`204`, or `404` when no operator credential has that ID). Workload credentials are neither listed nor revocable through these endpoints. `GET /v1/auth/whoami` also reports `expires_at` for an expiring credential; a workload subject includes its job namespace, job, task group, and task.
 
 `POST /v1/nodes/join-tokens` takes `role` (`control-plane`, the default, or `worker`), optional `ttl_seconds`, and optional `max_uses`. Control-plane tokens are single-use and have a maximum/default lifetime of one hour. Worker tokens retain the 1–604800 second lifetime and 0 (unlimited)–10000 use bounds. The `201` response contains the token once plus `id`, `role`, `created_at`, `expires_at`, `max_uses`, and `uses`; listings include the same metadata but never the token.
 

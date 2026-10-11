@@ -10,7 +10,7 @@ import (
 // written into the canonical spec before it is persisted, so the stored job
 // shows its effective behavior and no other component applies defaults.
 const (
-	// DefaultRuntime is the OCI runtime of a task group that omits runtime.
+	// DefaultRuntime is the OCI runtime of a task that omits runtime.
 	DefaultRuntime = RuntimeRunc
 	// DefaultMaxRestarts is the restart budget of a task group that omits restart.
 	DefaultMaxRestarts = 3
@@ -39,9 +39,6 @@ const (
 func applyDefaults(job *JobSpec, limits Limits) {
 	for groupIndex := range job.TaskGroups {
 		group := &job.TaskGroups[groupIndex]
-		if group.Runtime == "" {
-			group.Runtime = DefaultRuntime
-		}
 		if group.Restart == nil {
 			group.Restart = &RestartPolicySpec{MaxRestarts: DefaultMaxRestarts, Window: DefaultRestartWindow}
 		}
@@ -56,6 +53,9 @@ func applyDefaults(job *JobSpec, limits Limits) {
 		}
 		for taskIndex := range group.Tasks {
 			task := &group.Tasks[taskIndex]
+			if task.Runtime == RuntimeDefault {
+				task.Runtime = DefaultRuntime
+			}
 			if task.Resources == nil {
 				task.Resources = &ResourcesSpec{CPU: limits.DefaultTaskCPU, Memory: limits.DefaultTaskMemory}
 			}
@@ -111,9 +111,6 @@ func ValidateCanonical(job *JobSpec) error {
 	for groupIndex := range job.TaskGroups {
 		group := &job.TaskGroups[groupIndex]
 		groupPath := fmt.Sprintf("task_groups[%s]", group.Name)
-		if group.Runtime == RuntimeDefault {
-			missing(groupPath + ".runtime")
-		}
 		if group.Restart == nil {
 			missing(groupPath + ".restart")
 		}
@@ -151,6 +148,9 @@ func ValidateCanonicalTask(task *TaskSpec) error {
 	issues := ValidationErrors{}
 	missing := func(path string) {
 		issues = append(issues, ValidationIssue{Path: path, Code: "not_canonical", Message: "must be explicit in a canonical job"})
+	}
+	if task.Runtime == RuntimeDefault {
+		missing("runtime")
 	}
 	if task.Resources == nil {
 		missing("resources")

@@ -14,20 +14,19 @@ import (
 // and pulls images and creates tasks in the background; heartbeats report the
 // outcome.
 type AllocationRequest struct {
-	AllocationID  string                  `json:"allocation_id"`
-	Generation    uint64                  `json:"generation"`
-	JobRevision   int                     `json:"job_revision"`
-	Epoch         uint64                  `json:"epoch"`
-	ExecutionHash string                  `json:"execution_hash"`
-	Namespace     string                  `json:"namespace,omitempty"`
-	JobName       string                  `json:"job_name"`
-	GroupName     string                  `json:"group_name"`
-	Tasks         []spec.TaskSpec         `json:"tasks"`
-	Runtime       string                  `json:"runtime,omitempty"`
-	NetworkPlan   *network.Plan           `json:"network_plan,omitempty"`
-	EnvOverrides  map[string]string       `json:"env_overrides,omitempty"`
-	Restart       *spec.RestartPolicySpec `json:"restart,omitempty"`
-	Secrets       []DeliveredSecret       `json:"secrets,omitempty"`
+	AllocationID  string                       `json:"allocation_id"`
+	Generation    uint64                       `json:"generation"`
+	JobRevision   int                          `json:"job_revision"`
+	Epoch         uint64                       `json:"epoch"`
+	ExecutionHash string                       `json:"execution_hash"`
+	Namespace     string                       `json:"namespace,omitempty"`
+	JobName       string                       `json:"job_name"`
+	GroupName     string                       `json:"group_name"`
+	Tasks         []spec.TaskSpec              `json:"tasks"`
+	NetworkPlan   *network.Plan                `json:"network_plan,omitempty"`
+	EnvOverrides  map[string]map[string]string `json:"env_overrides,omitempty"`
+	Restart       *spec.RestartPolicySpec      `json:"restart,omitempty"`
+	Secrets       []DeliveredSecret            `json:"secrets,omitempty"`
 	// Draining and DrainSequence carry the control plane's drain state for this
 	// generation so a started task honors a drain the agent never recorded.
 	// They are excluded from the execution hash.

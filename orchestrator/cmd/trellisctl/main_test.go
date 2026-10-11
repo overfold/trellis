@@ -280,16 +280,13 @@ func TestWriteUserConfigProtectsTokenFile(t *testing.T) {
 	}
 }
 
-func TestCredentialsCreateRejectsNamespaceScope(t *testing.T) {
+func TestCredentialsCreateRejectsRemovedScope(t *testing.T) {
 	cmd := newCredentialsCreateCmd()
-	if cmd.Flags().Lookup("namespace-scope") != nil {
-		t.Fatal("namespace-scope flag must not be available")
+	if cmd.Flags().Lookup("scope") != nil || cmd.Flags().Lookup("namespace-scope") != nil {
+		t.Fatal("scope flags must not be available")
 	}
-	if err := cmd.ParseFlags([]string{"--scope", "namespace", "--access", "read"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.RunE(cmd, nil); err == nil || !strings.Contains(err.Error(), "--scope must be cluster") {
-		t.Fatalf("error = %v, want rejection of namespace scope", err)
+	if err := cmd.ParseFlags([]string{"--scope", "cluster", "--access", "read"}); err == nil || !strings.Contains(err.Error(), "unknown flag: --scope") {
+		t.Fatalf("error = %v, want rejection of removed scope", err)
 	}
 }
 

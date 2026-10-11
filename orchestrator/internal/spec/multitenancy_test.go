@@ -2,29 +2,29 @@ package spec
 
 import "testing"
 
-func TestValidateNamespaceNetworkAndGroupRuntime(t *testing.T) {
+func TestValidateNamespaceNetworkAndTaskRuntime(t *testing.T) {
 	job := &JobSpec{
 		Namespace: "acme",
 		Name:      "web",
 		TaskGroups: []TaskGroupSpec{{
-			Name: "web", Count: 2, Runtime: "runsc",
-			Tasks: []TaskSpec{{Name: "app", Image: "image", Resources: &ResourcesSpec{CPU: 500, Memory: 512}, Networking: &TaskNetworkingSpec{Mode: TaskNetworkWireGuard}}},
+			Name: "web", Count: 2,
+			Tasks: []TaskSpec{{Name: "app", Image: "image", Runtime: RuntimeRunsc, Resources: &ResourcesSpec{CPU: 500, Memory: 512}, Networking: &TaskNetworkingSpec{Mode: TaskNetworkWireGuard}}},
 		}},
 	}
 	if err := Validate(job); err != nil {
 		t.Fatalf("expected valid namespaced job with runsc: %v", err)
 	}
-	job.TaskGroups[0].Runtime = ""
+	job.TaskGroups[0].Tasks[0].Runtime = ""
 	if err := Validate(job); err != nil {
 		t.Fatalf("expected valid namespaced job with default runtime: %v", err)
 	}
-	job.TaskGroups[0].Runtime = "runc"
+	job.TaskGroups[0].Tasks[0].Runtime = "runc"
 	if err := Validate(job); err != nil {
 		t.Fatalf("expected valid namespaced job with runc: %v", err)
 	}
-	job.TaskGroups[0].Runtime = "other"
+	job.TaskGroups[0].Tasks[0].Runtime = "other"
 	if err := Validate(job); err == nil {
-		t.Fatal("expected unsupported group runtime to fail")
+		t.Fatal("expected unsupported task runtime to fail")
 	}
 }
 

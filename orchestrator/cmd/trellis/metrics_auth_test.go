@@ -16,16 +16,16 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/state"
 )
 
-func TestMetricsRequireClusterScopedCredential(t *testing.T) {
+func TestMetricsRequireAuthenticatedCredential(t *testing.T) {
 	store, err := state.NewBoltStore(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	tokens := auth.NewTokenManager(store, "test")
-	token := func(scope auth.AccessScope, access auth.AccessLevel) string {
+	token := func(access auth.AccessLevel) string {
 		t.Helper()
-		value, err := tokens.CreateToken(t.Context(), auth.Principal{Kind: auth.CredentialOperator, Scope: scope, Access: access})
+		value, err := tokens.CreateToken(t.Context(), auth.Principal{Kind: auth.CredentialOperator, Access: access})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -43,8 +43,8 @@ func TestMetricsRequireClusterScopedCredential(t *testing.T) {
 	}{
 		{name: "anonymous", status: http.StatusUnauthorized},
 		{name: "unknown token", token: "trls_unknown", status: http.StatusUnauthorized},
-		{name: "cluster read", token: token(auth.AccessCluster, auth.AccessRead), status: http.StatusOK},
-		{name: "cluster write", token: token(auth.AccessCluster, auth.AccessWrite), status: http.StatusOK},
+		{name: "read", token: token(auth.AccessRead), status: http.StatusOK},
+		{name: "write", token: token(auth.AccessWrite), status: http.StatusOK},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			request := httptest.NewRequest(http.MethodGet, "/metrics", nil)

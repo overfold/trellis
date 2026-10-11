@@ -35,7 +35,7 @@ tasks:
           host_port: 443
 ```
 
-Run a fully trusted controller with `api_access` set to `scope: cluster` and the narrowest required `access` level. It should query allocations by an explicitly configured namespace and label, include only healthy endpoints, render or update the upstream set, and preserve its last known-good routing state through temporary control-plane failures. The credential itself is cluster-wide; namespace filtering is controller behavior, not authorization. Route to the task's listening port at its namespace address (from a proxy in the same namespace) or node address (for host-networked tasks), rather than assuming the published node port is the backend port. The separate [`trellis-proxy-sync`](https://github.com/overfold/trellis-proxy-sync) project implements this polling pattern; its own documentation owns controller flags, config-file permissions, and reload setup.
+Run a fully trusted controller task with `api_access` set to the narrowest required `access` level. It should query allocations by an explicitly configured namespace and label, include only healthy endpoints, render or update the upstream set, and preserve its last known-good routing state through temporary control-plane failures. The credential itself is cluster-wide; namespace filtering is controller behavior, not authorization. Route to the task's listening port at its namespace address (from a proxy in the same namespace) or node address (for host-networked tasks), rather than assuming the published node port is the backend port. The separate [`trellis-proxy-sync`](https://github.com/overfold/trellis-proxy-sync) project implements this polling pattern; its own documentation owns controller flags, config-file permissions, and reload setup.
 
 Keep the public listener itself stable: place it deliberately or put an external load balancer in front of it. The routing controller is ordinary workload code, so make its retries, timeouts, reload behavior, and credential handling explicit. Trellis discovers endpoints; it does not make the proxy highly available for you.
 
@@ -53,7 +53,7 @@ tasks:
       mode: namespace
 ```
 
-Optionally add `runtime: runsc` at the task-group level for additional syscall-level sandboxing.
+Optionally add `runtime: runsc` to each task that needs additional syscall-level sandboxing. Runtime defaults to `runc` independently per task; any `runsc` task requires placement of the whole group on a runsc-capable node.
 
 Every node runs the WireGuard mesh behind namespace networking; across nodes, allow its UDP range between them as described in [Multi-node clusters](multi-node.md#prepare-the-network-and-configuration). Namespace peers reach each other's listening ports directly, without declaring or publishing them. Healthy allocation endpoints enter Trellis discovery, and DNS names follow the shape:
 
@@ -255,15 +255,14 @@ A scaled task group repeats the same volume identities in every replica, so shar
 
 **Outcome:** let a fully trusted workload perform ordinary cluster-wide operations.
 
-Request cluster access on the controller's task group:
+Request cluster-wide access on the controller task:
 
 ```yaml
 api_access:
-  scope: cluster
   access: read
 ```
 
-Trellis creates a cluster-scoped bearer token for each allocation. It injects:
+Trellis creates a separate cluster-wide bearer token for each enabled task in each allocation. It injects into that task only:
 
 - `TRELLIS_ADDR` — workload-reachable control-plane address;
 - `TRELLIS_TOKEN` — cluster-scoped bearer token;
@@ -272,9 +271,9 @@ Trellis creates a cluster-scoped bearer token for each allocation. It injects:
 
 Use a namespace-aware client and verify TLS with the injected CA. Treat an address without an explicit scheme as HTTPS, matching first-party Trellis client behavior. Requests send Bearer authentication and address `/v1/namespaces/$TRELLIS_NAMESPACE/...`; never send the workload credential over plaintext HTTP.
 
-Every task in the group receives the injected environment, so use only reviewed images in an API-enabled group. `TRELLIS_NAMESPACE` does not restrict the token: changing it or directly constructing another namespace path grants access there. Controllers should set request deadlines, retry transient failures with backoff, tolerate resources changing between reads, avoid leaking credentials into logs or metrics, and preserve useful last-known-good state through temporary API outages.
+Sibling tasks do not receive the injected environment, but colocation is not a security sandbox: use reviewed images. `TRELLIS_NAMESPACE` does not restrict the token: changing it or directly constructing another namespace path grants access there. Controllers should set request deadlines, retry transient failures with backoff, tolerate resources changing between reads, avoid leaking credentials into logs or metrics, and preserve useful last-known-good state through temporary API outages.
 
-Cluster mode is appropriate only for an operator workload that genuinely needs ordinary API reads or writes. It does not grant credential minting, backup/restore, node enrollment, or Raft administration; those remain administrator, join-token, or node-identity operations. Treat compromise of any task in the group as compromise of the cluster credential. Pin and review images, avoid unrelated sidecars, and keep the token out of logs, metrics, and browser code.
+API access is appropriate only for a trusted task that genuinely needs ordinary API reads or writes. It does not grant credential minting, backup/restore, node enrollment, or Raft administration; those remain administrator, join-token, or node-identity operations. Treat compromise of an enabled task as compromise of its cluster credential. Pin and review images, avoid unrelated sidecars, and keep the token out of logs, metrics, and browser code.
 
 ## Apply database schema migrations safely across deployment strategies
 

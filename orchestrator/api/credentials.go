@@ -12,11 +12,10 @@ const (
 	NodeRoleWorker NodeRole = "worker"
 )
 
-// CredentialCreateRequest asks the administrator to mint a scoped API credential.
+// CredentialCreateRequest asks the administrator to mint an API credential.
 // A positive TTLSeconds makes the credential expire that many seconds after
 // creation; zero or absent means it does not expire.
 type CredentialCreateRequest struct {
-	Scope      string `json:"scope"`
 	Access     string `json:"access"`
 	TTLSeconds int64  `json:"ttl_seconds,omitempty"`
 }
@@ -32,7 +31,6 @@ type CredentialCreateResponse struct {
 // never contains the bearer token.
 type CredentialResponse struct {
 	ID        string     `json:"id"`
-	Scope     string     `json:"scope"`
 	Access    string     `json:"access"`
 	CreatedAt time.Time  `json:"created_at"`
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
@@ -47,12 +45,12 @@ type CredentialSubjectResponse struct {
 	Namespace string `json:"namespace"`
 	Job       string `json:"job"`
 	TaskGroup string `json:"task_group"`
+	Task      string `json:"task"`
 }
 
 // CredentialInfoResponse describes the credential authenticating the current request.
 type CredentialInfoResponse struct {
 	Kind      string                     `json:"kind"`
-	Scope     string                     `json:"scope"`
 	Access    string                     `json:"access"`
 	Subject   *CredentialSubjectResponse `json:"subject,omitempty"`
 	CreatedAt *time.Time                 `json:"created_at,omitempty"`

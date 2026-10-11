@@ -400,7 +400,7 @@ func TestWorkerSecretsAndWorkloadAPIAccess(t *testing.T) {
 	}
 	work := job("worker-secret-job", "v1", 1, "rolling")
 	group := work["spec"].(map[string]any)["task_groups"].([]any)[0].(map[string]any)
-	group["api_access"] = map[string]any{"scope": "cluster", "access": "read"}
+	group["tasks"].([]any)[0].(map[string]any)["api_access"] = map[string]any{"access": "read"}
 	group["constraints"] = []any{map[string]any{"attribute": "integration-role", "value": "worker"}}
 	group["tasks"].([]any)[0].(map[string]any)["secrets"] = []any{map[string]any{"name": "worker-secret", "target": "env", "env": "WORKER_SECRET"}}
 	h.submit(work)
@@ -435,7 +435,7 @@ func TestWorkerSecretsAndWorkloadAPIAccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity, err := workload.CredentialInfo(t.Context())
-	if err != nil || identity.Subject == nil || identity.Subject.Job != "worker-secret-job" || identity.Access != "read" {
+	if err != nil || identity.Subject == nil || identity.Subject.Job != "worker-secret-job" || identity.Subject.Task != "web" || identity.Access != "read" {
 		t.Fatalf("workload identity=%+v err=%v", identity, err)
 	}
 	for _, name := range []string{"raft", "tls/ca-key", "cluster-secrets.key"} {
@@ -511,7 +511,7 @@ func newHarness(t *testing.T, count int) *harness {
 		h.waitHTTP(i)
 		if i == 0 {
 			administrator := h.administrator()
-			credential, err := administrator.CreateCredential(t.Context(), &api.CredentialCreateRequest{Scope: "cluster", Access: "write"})
+			credential, err := administrator.CreateCredential(t.Context(), &api.CredentialCreateRequest{Access: "write"})
 			if err != nil {
 				t.Fatalf("mint integration operator credential: %v", err)
 			}

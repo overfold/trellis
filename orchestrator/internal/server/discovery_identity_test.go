@@ -44,7 +44,7 @@ func TestDottedDiscoveryIdentitiesRejectedBeforePersistence(t *testing.T) {
 			}
 			for _, suffix := range []string{"", "/plan"} {
 				rec := httptest.NewRecorder()
-				e.ServeHTTP(rec, scopedRequest(t, http.MethodPost, "/v1/namespaces/"+job.Namespace+"/jobs"+suffix, string(body), auth.AccessCluster, auth.AccessWrite))
+				e.ServeHTTP(rec, authorizedRequest(t, http.MethodPost, "/v1/namespaces/"+job.Namespace+"/jobs"+suffix, string(body), auth.AccessWrite))
 				want := http.StatusUnprocessableEntity
 				if field == "namespace" {
 					want = http.StatusBadRequest
@@ -71,7 +71,7 @@ func TestJobPathsRejectDottedNames(t *testing.T) {
 		{http.MethodPost, "/v1/namespaces/default/jobs/web/groups/api.v1/replacement-backoff/reset"},
 	} {
 		rec := httptest.NewRecorder()
-		e.ServeHTTP(rec, scopedRequest(t, tc.method, tc.path, "", auth.AccessCluster, auth.AccessWrite))
+		e.ServeHTTP(rec, authorizedRequest(t, tc.method, tc.path, "", auth.AccessWrite))
 		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "dots") {
 			t.Fatalf("%s: status=%d body=%s", tc.path, rec.Code, rec.Body.String())
 		}

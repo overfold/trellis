@@ -40,8 +40,8 @@ const (
 
 type contextKey string
 
-// NamespaceContextKey stores encoded API authorization in a request context.
-const NamespaceContextKey contextKey = "trellis-namespace"
+// AuthorizationContextKey stores encoded API authorization in a request context.
+const AuthorizationContextKey contextKey = "trellis-authorization"
 
 // AdminContextKey stores cluster-administrator status in a request context.
 const AdminContextKey contextKey = "trellis-admin"
@@ -55,17 +55,16 @@ const JoinTokenContextKey contextKey = "trellis-join-token"
 
 type requestAuthorization struct {
 	root   bool
-	scope  auth.AccessScope
 	access auth.AccessLevel
 }
 
 func authorization(c *echo.Context) requestAuthorization {
 	if admin, _ := c.Request().Context().Value(AdminContextKey).(bool); admin {
-		return requestAuthorization{root: true, scope: auth.AccessCluster, access: auth.AccessWrite}
+		return requestAuthorization{root: true, access: auth.AccessWrite}
 	}
-	value, _ := c.Request().Context().Value(NamespaceContextKey).(string)
-	if scope, access, ok := auth.DecodeScope(value); ok {
-		return requestAuthorization{scope: scope, access: access}
+	value, _ := c.Request().Context().Value(AuthorizationContextKey).(string)
+	if access, ok := auth.DecodeAccess(value); ok {
+		return requestAuthorization{access: access}
 	}
 	return requestAuthorization{}
 }
@@ -95,7 +94,7 @@ func requireExactNode(c *echo.Context, expected uuid.UUID, message string) error
 
 func requireClusterRead(c *echo.Context, message string) error {
 	authz := authorization(c)
-	if !authz.root && authz.scope != auth.AccessCluster {
+	if !authz.root && authz.access != auth.AccessRead && authz.access != auth.AccessWrite {
 		return echo.NewHTTPError(http.StatusForbidden, message)
 	}
 	return nil
@@ -111,7 +110,7 @@ func requireWrite(c *echo.Context, message string) error {
 
 func requireClusterWrite(c *echo.Context, message string) error {
 	authz := authorization(c)
-	if !authz.root && (authz.scope != auth.AccessCluster || authz.access != auth.AccessWrite) {
+	if !authz.root && authz.access != auth.AccessWrite {
 		return echo.NewHTTPError(http.StatusForbidden, message)
 	}
 	return nil
@@ -122,16 +121,15 @@ func requireAPIAccessDelegation(c *echo.Context, job *spec.JobSpec) error {
 	if authz.root {
 		return nil
 	}
-	if authz.scope != auth.AccessCluster {
-		return echo.NewHTTPError(http.StatusForbidden, "API access delegation requires an authenticated scoped credential")
+	if authz.access != auth.AccessRead && authz.access != auth.AccessWrite {
+		return echo.NewHTTPError(http.StatusForbidden, "API access delegation requires an authenticated credential")
 	}
 	for i := range job.TaskGroups {
-		requested := job.TaskGroups[i].APIAccess
-		if requested == nil {
-			continue
-		}
-		if authz.access == auth.AccessRead && auth.AccessLevel(requested.Access) == auth.AccessWrite {
-			return echo.NewHTTPError(http.StatusForbidden, "job api_access exceeds caller access")
+		for j := range job.TaskGroups[i].Tasks {
+			requested := job.TaskGroups[i].Tasks[j].APIAccess
+			if requested != nil && authz.access == auth.AccessRead && auth.AccessLevel(requested.Access) == auth.AccessWrite {
+				return echo.NewHTTPError(http.StatusForbidden, "job api_access exceeds caller access")
+			}
 		}
 	}
 	return nil
@@ -237,18 +235,14 @@ func (h *Handler) handleCreateCredential(c *echo.Context) error {
 	if err := decodeJSON(c, &request, maxSmallRequestBytes); err != nil {
 		return err
 	}
-	scope := auth.AccessScope(request.Scope)
 	access := auth.AccessLevel(request.Access)
-	if scope != auth.AccessCluster {
-		return echo.NewHTTPError(http.StatusBadRequest, "scope must be cluster")
-	}
 	if access != auth.AccessRead && access != auth.AccessWrite {
 		return echo.NewHTTPError(http.StatusBadRequest, "access must be read or write")
 	}
 	if request.TTLSeconds < 0 || request.TTLSeconds > maxTTLSeconds {
 		return echo.NewHTTPError(http.StatusBadRequest, "ttl_seconds must be between 0 and "+strconv.FormatInt(maxTTLSeconds, 10))
 	}
-	token, credential, err := h.server.CreateCredential(c.Request().Context(), scope, access, time.Duration(request.TTLSeconds)*time.Second)
+	token, credential, err := h.server.CreateCredential(c.Request().Context(), access, time.Duration(request.TTLSeconds)*time.Second)
 	if errors.Is(err, ErrInvalidCredentialRequest) {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
@@ -265,7 +259,6 @@ const maxTTLSeconds = int64(100 * 365 * 24 * 60 * 60)
 func credentialResponse(credential auth.OperatorCredential) api.CredentialResponse {
 	response := api.CredentialResponse{
 		ID:        credential.ID,
-		Scope:     string(credential.Principal.Scope),
 		Access:    string(credential.Principal.Access),
 		CreatedAt: credential.Principal.CreatedAt,
 	}
@@ -929,9 +922,9 @@ func (h *Handler) handleListAllocations(c *echo.Context) error {
 }
 
 // handleListClusterAllocations lists allocations across every namespace and
-// therefore requires cluster scope.
+// therefore requires authenticated read or write access.
 func (h *Handler) handleListClusterAllocations(c *echo.Context) error {
-	if err := requireClusterRead(c, "listing allocations across namespaces requires cluster scope"); err != nil {
+	if err := requireClusterRead(c, "listing allocations requires read or write access"); err != nil {
 		return err
 	}
 	return h.listAllocations(c, "")
@@ -1092,7 +1085,7 @@ func (h *Handler) handleRaftLeadershipTransfer(c *echo.Context) error {
 }
 
 func (h *Handler) handleClusterLeader(c *echo.Context) error {
-	if err := requireClusterRead(c, "leader discovery requires a cluster-scoped credential"); err != nil {
+	if err := requireClusterRead(c, "leader discovery requires read or write access"); err != nil {
 		return err
 	}
 	// Operator requests are routed to the serving leader and admitted through
@@ -1101,10 +1094,10 @@ func (h *Handler) handleClusterLeader(c *echo.Context) error {
 }
 
 // handleMetrics serves the leader's Prometheus metrics. They name namespaces
-// and jobs across the cluster, so scraping requires a cluster-scoped
+// and jobs across the cluster, so scraping requires an authenticated
 // credential.
 func (h *Handler) handleMetrics(c *echo.Context) error {
-	if err := requireClusterRead(c, "metrics require a cluster-scoped credential"); err != nil {
+	if err := requireClusterRead(c, "metrics require read or write access"); err != nil {
 		return err
 	}
 	promhttp.Handler().ServeHTTP(c.Response(), c.Request())
@@ -1288,9 +1281,9 @@ func (h *Handler) handleEvents(c *echo.Context) error {
 }
 
 // handleClusterEvents streams events from every namespace and therefore
-// requires cluster scope.
+// requires authenticated read or write access.
 func (h *Handler) handleClusterEvents(c *echo.Context) error {
-	if err := requireClusterRead(c, "streaming events across namespaces requires cluster scope"); err != nil {
+	if err := requireClusterRead(c, "streaming events requires read or write access"); err != nil {
 		return err
 	}
 	return h.streamEvents(c, "")

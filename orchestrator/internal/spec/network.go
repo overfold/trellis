@@ -30,9 +30,10 @@ func GroupRequiredCapabilities(group *TaskGroupSpec) []NodeCapability {
 	if group == nil {
 		return nil
 	}
-	var capabilities []NodeCapability
-	if group.Runtime == RuntimeRunsc {
-		capabilities = append(capabilities, CapabilityRunsc)
+	for _, task := range group.Tasks {
+		if task.Runtime == RuntimeRunsc {
+			return []NodeCapability{CapabilityRunsc}
+		}
 	}
-	return capabilities
+	return nil
 }

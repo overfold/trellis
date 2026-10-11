@@ -98,6 +98,34 @@ func TestDiffPreservesInt64ThroughWireRoundTrip(t *testing.T) {
 	}
 }
 
+func TestTaskRuntimeAndAPIAccessAgreeWithHash(t *testing.T) {
+	before := &spec.JobSpec{Name: "web", Namespace: "default", TaskGroups: []spec.TaskGroupSpec{group("web", task("app"), task("sidecar"))}}
+	if err := spec.Canonicalize(before, spec.DefaultLimits()); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"runtime", "api_access"} {
+		t.Run(field, func(t *testing.T) {
+			raw, _ := json.Marshal(before)
+			var after spec.JobSpec
+			if err := json.Unmarshal(raw, &after); err != nil {
+				t.Fatal(err)
+			}
+			if field == "runtime" {
+				after.TaskGroups[0].Tasks[1].Runtime = spec.RuntimeRunsc
+			} else {
+				after.TaskGroups[0].Tasks[1].APIAccess = &spec.APIAccessSpec{Access: spec.APIAccessRead}
+			}
+			changes := Diff(before, &after)
+			if len(changes) != 1 || changes[0].Path != "task_groups[web].tasks[1]."+field {
+				t.Fatalf("unexpected task-local changes: %+v", changes)
+			}
+			if spec.TaskGroupContentHash(&before.TaskGroups[0]) == spec.TaskGroupContentHash(&after.TaskGroups[0]) {
+				t.Fatal("task-local execution change did not affect hash")
+			}
+		})
+	}
+}
+
 func TestEmptyConstraintsAgreeWithHash(t *testing.T) {
 	before := &spec.JobSpec{Name: "web", Namespace: "default", TaskGroups: []spec.TaskGroupSpec{group("web", task("app"))}}
 	after := &spec.JobSpec{Name: "web", Namespace: "default", TaskGroups: []spec.TaskGroupSpec{group("web", task("app"))}}

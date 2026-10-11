@@ -23,7 +23,6 @@ func HandleWhoAmI(c *echo.Context) error {
 	}
 	response := api.CredentialInfoResponse{
 		Kind:   string(principal.Kind),
-		Scope:  string(principal.Scope),
 		Access: string(principal.Access),
 	}
 	if !principal.CreatedAt.IsZero() {
@@ -39,6 +38,7 @@ func HandleWhoAmI(c *echo.Context) error {
 			Namespace: principal.Subject.Namespace,
 			Job:       principal.Subject.Job,
 			TaskGroup: principal.Subject.TaskGroup,
+			Task:      principal.Subject.Task,
 		}
 	}
 	c.Response().Header().Set("Cache-Control", "no-store")

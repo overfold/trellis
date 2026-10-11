@@ -18,10 +18,6 @@ namespace: default
 task_groups:
   - name: frontend
     count: 2
-    runtime: runc
-    api_access:
-      scope: cluster
-      access: read
     labels:
       route: web
     constraints:
@@ -36,6 +32,9 @@ task_groups:
     tasks:
       - name: app
         image: ghcr.io/overfold/trellis-tutorial:v2
+        runtime: runc
+        api_access:
+          access: read
         networking:
           ports:
             - port: 8080
@@ -88,7 +87,7 @@ Before a job is planned or stored, Trellis resolves omitted defaults to their ef
 
 | Omitted field | Resolved value |
 | --- | --- |
-| task group `runtime` | `runc` |
+| task `runtime` | `runc` (resolved independently per task) |
 | task group `restart` | `max_restarts: 3`, `window: 10m` |
 | task group `update` | `strategy: recreate`, `max_parallel: 1` (zero also means one) |
 | task `networking` or `networking.mode` | `mode: namespace` |
@@ -115,9 +114,7 @@ There is no job-level networking block. Network attachment belongs to each task 
 | `name` | Yes | Group identifier, unique within the job. |
 | `count` | Yes | Desired allocation count; must be at least one. |
 | `tasks` | Yes | One or more containers placed in every allocation. |
-| `runtime` | No | `runc` (the default) or `runsc`. |
 | `labels` | No | Discovery and routing metadata. |
-| `api_access` | No | Least-privilege API credential request. Omit it for no injected API credentials. |
 | `constraints` | No | Exact matches against `os`, `arch`, or node labels. |
 | `restart` | No | Retry policy for failed tasks. |
 | `update` | No | Replacement strategy when execution-affecting desired state changes. |
@@ -128,27 +125,26 @@ Label keys and constraint attributes must begin with a letter, may contain lette
 
 ### API access
 
-`api_access` has two independent dimensions:
+Each task may request `api_access` with an explicit access level:
 
 ```yaml
 api_access:
-  scope: cluster
   access: read
 ```
 
-`scope` must be explicitly `cluster`. `access` is `read` or `write`; write includes read capability.
+`access` is `read` or `write`; write includes read capability. Both have cluster-wide authority; there is no `scope` field.
 
-- `cluster/read` can inspect cluster-scoped state.
-- `cluster/write` is the normal high-privilege operator/controller credential for cluster-wide mutations.
+- `read` can inspect state across the cluster, including every namespace.
+- `write` is the normal high-privilege operator/controller credential for cluster-wide mutations.
 - omitted means no API credential is injected.
 
 A job may never delegate more authority than the credential submitting it: read-only callers cannot request write credentials. Planning enforces the same ceiling as apply so a preview cannot advertise a deployment the caller is not authorized to create.
 
-The administrator signing key is intentionally separate. Trellis never injects it into workloads. Operations such as Raft administration, backup/restore, and minting ordinary operator credentials remain administrator operations rather than abilities granted by `cluster/write`. Node registration and heartbeats use certificate-bound node identity, while managed enrollment uses short-lived administrator-minted join tokens.
+The administrator signing key is intentionally separate. Trellis never injects it into workloads. Operations such as Raft administration, backup/restore, and minting ordinary operator credentials remain administrator operations rather than abilities granted by `write`. Node registration and heartbeats use certificate-bound node identity, while managed enrollment uses short-lived administrator-minted join tokens.
 
-Generated credentials carry an authoritative server-side kind (`operator` or `workload`) in addition to scope/access. `GET /v1/auth/whoami` reports the kind and effective authorization of the credential making the request; the administrator credential reports itself explicitly as `administrator`.
+Generated credentials carry an authoritative server-side kind (`operator` or `workload`) in addition to access. `GET /v1/auth/whoami` reports the kind and effective authorization of the credential making the request; the administrator credential reports itself explicitly as `administrator`.
 
-API-enabled allocations require the servers to be configured with the secrets encryption key (`secrets_key`, which the installer creates). Each allocation receives its own credential, bound to its job and task group and stable across start retries of the same allocation generation; a new generation receives a new credential and the previous one is revoked. Trellis revokes the credential when the allocation record is pruned, when the job or task group is deleted, or when the task group's `api_access` is removed or narrowed from `write` to `read`. Narrowing takes effect immediately, including for allocations of the previous revision that are still running during a rollout. Widening access leaves existing credentials in place; replacement allocations receive the wider grant.
+API-enabled tasks require the servers to be configured with the secrets encryption key (`secrets_key`, which the installer creates). Each enabled task in an allocation receives its own credential, bound to its namespace, job, task group, and task and stable across start retries of the same allocation generation; a new generation receives new credentials and the previous ones are revoked. Trellis revokes the credential when the allocation record is pruned, when the job, task group, or task is deleted, or when the task's `api_access` is removed or narrowed from `write` to `read`. Narrowing takes effect immediately, including for allocations of the previous revision that are still running during a rollout. Widening access leaves existing credentials in place; replacement allocations receive the wider grant.
 
 Retained history is not credential authority: `stopped`, `failed`, and `lost` allocations cannot authenticate, even while their records/logs are retained or their containers still run on a returning node. Node-removal tombstones also revoke their allocations' authority immediately when observed by the serving leader, including incomplete Raft membership removal. Durable token deletion is retried by reconciliation; authentication independently checks generation, lifecycle, job grant, node presence, and tombstones, failing closed on trust-state read errors.
 
@@ -156,11 +152,11 @@ A temporary partition preserves authority only until the leader's `allocation_lo
 
 Enabled API access injects `TRELLIS_ADDR`, `TRELLIS_TOKEN`, and `TRELLIS_NAMESPACE`; when TLS is configured, `TRELLIS_CA_CERT` contains the cluster CA PEM. `TRELLIS_NAMESPACE` is initialized to the job namespace solely as a routing convenience. It does not limit the cluster-scoped credential's authority.
 
-All four names are reserved in every task of a group with `api_access`: authored `env` entries and `secrets` targeting those environment names are rejected during validation and canonicalization, even when CA injection is unavailable. There is no authored override or token-secret exception. Without `api_access`, these names remain ordinary environment/secret targets, so workloads may explicitly supply their own token. The managed token is still delivered through a protected secret file and loaded into the process environment at startup, not stored in ordinary container environment metadata.
+All four names are reserved in each task with `api_access`: authored `env` entries and `secrets` targeting those environment names are rejected during validation and canonicalization, even when CA injection is unavailable. There is no authored override or token-secret exception. Without `api_access`, these names remain ordinary environment/secret targets, so workloads may explicitly supply their own token. The managed token is still delivered through a protected secret file and loaded into the process environment at startup, not stored in ordinary container environment metadata.
 
 `TRELLIS_ADDR` is a workload-reachable Trellis endpoint that remains usable when leadership changes. Use it with the injected CA rather than hard-coding a node address or using plaintext HTTP. API-enabled tasks must use `namespace` (the default) or `host` networking. `mode: none` is rejected because it intentionally has no route to the control plane. The [HTTP API guide](api.md) covers requests and clients; endpoint mapping is described in [node internals](../developer/node-internals.md#secrets-and-api-access).
 
-`api_access` is a task-group privilege boundary: every task in the group can read a cluster-wide credential. Do not colocate untrusted sidecars with an API-enabled controller, and omit API access unless that authority is required. Request read rather than write when possible.
+`api_access` grants authority to the requesting task only; sibling tasks do not receive its credential or injected environment. Colocation is not a security sandbox: use trusted images and omit API access unless that authority is required. Request read rather than write when possible.
 
 When `restart` is omitted, Trellis stores a policy of three restarts per ten-minute window. An explicit `restart.max_restarts` is zero or greater and `restart.window` is a positive Go-style duration such as `5m`. The agent restarts a stopped task in place while the budget allows. Restarts are counted in fixed windows of `restart.window`, and the count resets when a window elapses. The count belongs to the allocation: control-plane start retries and agent restarts keep it and never grant a fresh budget, while a replacement allocation starts with its own. Once a task stops after the allowed restarts in the current window are used up, the allocation becomes `failed` with reason `restart_budget_exhausted` and is not restarted again, even after the window elapses. The failed allocation record and its event history remain for operator diagnosis; to keep the group at `count`, the control plane schedules a new allocation in its place.
 
@@ -184,12 +180,16 @@ Task groups are the unit of placement, scaling, updates, restart behavior, and d
 | --- | --- | --- |
 | `name` | Yes | Task identifier, unique within the group. |
 | `image` | Yes | Pullable OCI image reference. Tags are resolved on plan/apply; use a digest to fix the artifact across applies. |
+| `runtime` | No | `runc` (the default per task) or `runsc`. Any `runsc` task requires the whole group to be placed on a capable node. |
+| `api_access` | No | Cluster-wide `access: read` or `access: write` for this task only. Omit for no injected credential. |
 | `env` | No | Literal environment-variable map. Do not place credentials here. |
 | `networking` | No | Network mode and the ports the task listens on. |
 | `resources` | No | CPU in millicores and memory as a byte count or readable size. |
 | `volumes` | No | Namespace-scoped named volume mounts with explicit host and container paths. |
 | `secrets` | No | References to namespace secrets delivered as environment variables or files. |
 | `health_check` | No | HTTP, TCP, or script readiness/health observation. |
+
+Runtime defaults are resolved independently for each task and stored in the canonical spec. Tasks in the same group may mix `runc` and `runsc`; if any task selects `runsc`, placement requires the node's `runtime.runsc` capability. Restart policy remains on the task group, not on individual tasks.
 
 ### Image updates
 

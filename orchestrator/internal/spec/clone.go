@@ -9,6 +9,10 @@ import (
 // maps, slices, or pointers with t, and preserves nil and empty values.
 func (t TaskSpec) Clone() TaskSpec {
 	clone := t
+	if t.APIAccess != nil {
+		apiAccess := *t.APIAccess
+		clone.APIAccess = &apiAccess
+	}
 	clone.Env = maps.Clone(t.Env)
 	if t.Networking != nil {
 		networking := *t.Networking

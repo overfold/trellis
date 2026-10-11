@@ -1062,7 +1062,7 @@ func authenticatedHandler(s *Server, access auth.AccessLevel) http.Handler {
 	e := echo.New()
 	NewHandler(s).Register(e)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := context.WithValue(r.Context(), NamespaceContextKey, auth.EncodeScope(auth.AccessCluster, access))
+		ctx := context.WithValue(r.Context(), AuthorizationContextKey, auth.EncodeAccess(access))
 		e.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

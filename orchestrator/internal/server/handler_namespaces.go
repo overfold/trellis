@@ -4,13 +4,11 @@ import (
 	"net/http"
 
 	"github.com/labstack/echo/v5"
-	"github.com/overfold/trellis/orchestrator/internal/auth"
 )
 
 func (h *Handler) handleListNamespaces(c *echo.Context) error {
-	authz := authorization(c)
-	if !authz.root && authz.scope != auth.AccessCluster {
-		return echo.NewHTTPError(http.StatusForbidden, "namespace discovery requires an authenticated scoped credential")
+	if err := requireClusterRead(c, "namespace discovery requires an authenticated credential"); err != nil {
+		return err
 	}
 	namespaces, err := h.server.ListNamespaces(c.Request().Context())
 	if err != nil {

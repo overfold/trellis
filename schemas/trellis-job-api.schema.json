@@ -9,16 +9,9 @@
             "write"
           ],
           "type": "string"
-        },
-        "scope": {
-          "enum": [
-            "cluster"
-          ],
-          "type": "string"
         }
       },
       "required": [
-        "scope",
         "access"
       ],
       "type": "object"
@@ -275,9 +268,6 @@
     "TaskGroupSpec": {
       "additionalProperties": false,
       "properties": {
-        "api_access": {
-          "$ref": "#/$defs/APIAccessSpec"
-        },
         "constraints": {
           "items": {
             "$ref": "#/$defs/ConstraintSpec"
@@ -304,14 +294,6 @@
         },
         "restart": {
           "$ref": "#/$defs/RestartPolicySpec"
-        },
-        "runtime": {
-          "enum": [
-            "",
-            "runc",
-            "runsc"
-          ],
-          "type": "string"
         },
         "tasks": {
           "items": {
@@ -401,6 +383,9 @@
     "TaskSpec": {
       "additionalProperties": false,
       "properties": {
+        "api_access": {
+          "$ref": "#/$defs/APIAccessSpec"
+        },
         "env": {
           "additionalProperties": {
             "type": "string"
@@ -423,6 +408,14 @@
         },
         "resources": {
           "$ref": "#/$defs/ResourcesSpec"
+        },
+        "runtime": {
+          "enum": [
+            "",
+            "runc",
+            "runsc"
+          ],
+          "type": "string"
         },
         "secrets": {
           "items": {

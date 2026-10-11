@@ -211,10 +211,15 @@ func TestRemoveSecretDirCleansReadOnlyEnvironmentSecrets(t *testing.T) {
 type captureCreateRuntime struct {
 	*reconcilerRuntime
 	options runtime.CreateOptions
+	created map[string]runtime.CreateOptions
 }
 
 func (r *captureCreateRuntime) Create(_ context.Context, options runtime.CreateOptions) (string, error) {
 	r.options = options
+	if r.created == nil {
+		r.created = make(map[string]runtime.CreateOptions)
+	}
+	r.created[options.ID] = options
 	return options.ID, nil
 }
 
@@ -222,11 +227,25 @@ func TestRunAllocationKeepsManagedEnvironmentSecretsOutOfRuntimeEnvironment(t *t
 	rt := &captureCreateRuntime{reconcilerRuntime: &reconcilerRuntime{}}
 	agent := newOperationTestAgent(t, rt)
 	request := operationTestRequest()
-	request.Tasks = []spec.TaskSpec{{Name: "first", Image: "image"}}
-	request.EnvOverrides = map[string]string{"TRELLIS_TOKEN": "api-token-sentinel", "TRELLIS_NAMESPACE": "default", "TRELLIS_ADDR": "https://node:8128", "TRELLIS_CA_CERT": "ca-pem"}
+	request.Tasks = []spec.TaskSpec{{Name: "helper", Image: "image", Runtime: spec.RuntimeRunc}, {Name: "first", Image: "image", Runtime: spec.RuntimeRunsc}}
+	request.EnvOverrides = map[string]map[string]string{"first": {"TRELLIS_TOKEN": "api-token-sentinel", "TRELLIS_NAMESPACE": "default", "TRELLIS_ADDR": "https://node:8128", "TRELLIS_CA_CERT": "ca-pem"}}
 	request.Secrets = []nodeapi.DeliveredSecret{{Task: "first", Name: "password", Target: spec.SecretTargetEnv, Env: "PASSWORD", Value: []byte("secret-sentinel")}}
 	if err := runGroup(context.Background(), agent, request); err != nil {
 		t.Fatal(err)
+	}
+	helper := rt.created[taskRecordID(request.AllocationID, request.Generation, "helper")]
+	if helper.Runtime != "runc" || rt.options.Runtime != "runsc" {
+		t.Fatalf("task runtimes = %q, %q", helper.Runtime, rt.options.Runtime)
+	}
+	for _, key := range []string{"TRELLIS_TOKEN", "TRELLIS_ADDR", "TRELLIS_CA_CERT", "TRELLIS_NAMESPACE"} {
+		if _, ok := helper.Env[key]; ok {
+			t.Fatalf("helper received API environment %s", key)
+		}
+	}
+	for _, mount := range helper.Mounts {
+		if mount.SecretEnv {
+			t.Fatal("helper received credential mount")
+		}
 	}
 	if _, ok := rt.options.Env["PASSWORD"]; ok {
 		t.Fatal("managed secret entered runtime environment")

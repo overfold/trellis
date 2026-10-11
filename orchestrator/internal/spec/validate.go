@@ -111,17 +111,6 @@ func Validate(job *JobSpec) error {
 				groups[group.Name] = struct{}{}
 			}
 		}
-		if !group.Runtime.Valid() {
-			add(groupPath+".runtime", "unsupported", fmt.Sprintf("unsupported runtime %q", group.Runtime))
-		}
-		if group.APIAccess != nil {
-			if !group.APIAccess.Scope.Valid() {
-				add(groupPath+".api_access.scope", "unsupported", "must be cluster")
-			}
-			if !group.APIAccess.Access.Valid() {
-				add(groupPath+".api_access.access", "unsupported", "must be read or write")
-			}
-		}
 		if group.Restart != nil {
 			if group.Restart.MaxRestarts < 0 {
 				add(groupPath+".restart.max_restarts", "out_of_range", "must be at least 0")
@@ -178,6 +167,12 @@ func Validate(job *JobSpec) error {
 			if task.Name != "" {
 				taskPath = fmt.Sprintf("%s.tasks[%s]", groupPath, task.Name)
 			}
+			if !task.Runtime.Valid() {
+				add(taskPath+".runtime", "unsupported", fmt.Sprintf("unsupported runtime %q", task.Runtime))
+			}
+			if task.APIAccess != nil && !task.APIAccess.Access.Valid() {
+				add(taskPath+".api_access.access", "unsupported", "must be read or write")
+			}
 			if strings.TrimSpace(task.Name) == "" {
 				add(taskPath+".name", "required", "name is required")
 			} else {
@@ -223,7 +218,7 @@ func Validate(job *JobSpec) error {
 						add(path, "invalid_target", "env secret requires only a valid env name")
 					}
 					if secret.Env != "" {
-						if group.APIAccess != nil && managedAPIEnv(secret.Env) {
+						if task.APIAccess != nil && managedAPIEnv(secret.Env) {
 							add(path+".env", "reserved", "environment name is managed by api_access")
 						}
 						if _, ok := secretEnvs[secret.Env]; ok {
@@ -256,7 +251,7 @@ func Validate(job *JobSpec) error {
 			}
 
 			for key := range task.Env {
-				if group.APIAccess != nil && managedAPIEnv(key) {
+				if task.APIAccess != nil && managedAPIEnv(key) {
 					add(taskPath+".env."+key, "reserved", "environment name is managed by api_access")
 				}
 				if !envPattern.MatchString(key) {
@@ -342,7 +337,7 @@ func Validate(job *JobSpec) error {
 					}
 				}
 			}
-			if group.APIAccess != nil {
+			if task.APIAccess != nil {
 				mode := TaskNetworkDefault
 				if task.Networking != nil {
 					mode = task.Networking.Mode

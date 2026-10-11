@@ -51,7 +51,7 @@ func TestAdministratorClientRetriesWithFreshChallengeAfterLeadershipChange(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	response, err := serverClient.CreateCredential(t.Context(), &api.CredentialCreateRequest{Scope: "cluster", Access: "write"})
+	response, err := serverClient.CreateCredential(t.Context(), &api.CredentialCreateRequest{Access: "write"})
 	if err != nil {
 		t.Fatal(err)
 	}

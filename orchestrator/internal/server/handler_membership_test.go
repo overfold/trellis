@@ -37,9 +37,9 @@ func TestClusterLeaderPreflightAndRemovalRace(t *testing.T) {
 		ctx := req.Context()
 		switch caller {
 		case "cluster-read":
-			ctx = context.WithValue(ctx, NamespaceContextKey, auth.EncodeScope(auth.AccessCluster, auth.AccessRead))
+			ctx = context.WithValue(ctx, AuthorizationContextKey, auth.EncodeAccess(auth.AccessRead))
 		case "cluster-write":
-			ctx = context.WithValue(ctx, NamespaceContextKey, auth.EncodeScope(auth.AccessCluster, auth.AccessWrite))
+			ctx = context.WithValue(ctx, AuthorizationContextKey, auth.EncodeAccess(auth.AccessWrite))
 		case "administrator":
 			ctx = context.WithValue(ctx, AdminContextKey, true)
 		case "node":

@@ -52,21 +52,22 @@ func TestListNamespacesIncludesSecretNamespaces(t *testing.T) {
 	}
 }
 
-func TestNamespaceDiscoveryRequiresClusterScope(t *testing.T) {
+func TestNamespaceDiscoveryRequiresAccess(t *testing.T) {
 	e := echo.New()
 	NewHandler(namespaceTestServer()).Register(e)
 
 	tests := []struct {
-		name  string
-		scope auth.AccessScope
-		want  api.NamespaceListResponse
+		name   string
+		access auth.AccessLevel
+		want   api.NamespaceListResponse
 	}{
-		{name: "cluster", scope: auth.AccessCluster, want: api.NamespaceListResponse{"alpha", "zeta"}},
+		{name: "read", access: auth.AccessRead, want: api.NamespaceListResponse{"alpha", "zeta"}},
+		{name: "write", access: auth.AccessWrite, want: api.NamespaceListResponse{"alpha", "zeta"}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := scopedRequest(t, http.MethodGet, "/v1/namespaces", "", tt.scope, auth.AccessRead)
+			req := authorizedRequest(t, http.MethodGet, "/v1/namespaces", "", tt.access)
 			rec := httptest.NewRecorder()
 			e.ServeHTTP(rec, req)
 			if rec.Code != http.StatusOK {

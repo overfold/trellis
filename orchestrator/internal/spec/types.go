@@ -20,7 +20,7 @@ const (
 // Valid reports whether s is a supported update strategy.
 func (s UpdateStrategy) Valid() bool { return s == "" || s == UpdateRecreate || s == UpdateRolling }
 
-// Runtime identifies the OCI runtime used for a task group.
+// Runtime identifies the OCI runtime used for a task.
 type Runtime string
 
 const (
@@ -36,33 +36,21 @@ const (
 // Valid reports whether r is a supported runtime.
 func (r Runtime) Valid() bool { return r == RuntimeDefault || r == RuntimeRunc || r == RuntimeRunsc }
 
-// APIAccessScope controls where an injected control-plane credential may operate.
-type APIAccessScope string
-
-const (
-	// APIAccessCluster allows the credential to operate across the cluster.
-	APIAccessCluster APIAccessScope = "cluster"
-)
-
-// Valid reports whether s is a supported API access scope.
-func (s APIAccessScope) Valid() bool { return s == APIAccessCluster }
-
 // APIAccessLevel controls whether an injected control-plane credential may mutate state.
 type APIAccessLevel string
 
 const (
 	// APIAccessRead grants observation-only API access.
 	APIAccessRead APIAccessLevel = "read"
-	// APIAccessWrite grants ordinary mutation API access within the credential scope.
+	// APIAccessWrite grants ordinary mutation API access across the cluster.
 	APIAccessWrite APIAccessLevel = "write"
 )
 
 // Valid reports whether a is a supported API access level.
 func (a APIAccessLevel) Valid() bool { return a == APIAccessRead || a == APIAccessWrite }
 
-// APIAccessSpec configures the scoped credential injected into a task group.
+// APIAccessSpec configures the cluster credential injected into a task.
 type APIAccessSpec struct {
-	Scope  APIAccessScope `yaml:"scope" json:"scope"`
 	Access APIAccessLevel `yaml:"access" json:"access"`
 }
 
@@ -122,10 +110,8 @@ type UpdateSpec struct {
 type TaskGroupSpec struct {
 	Name        string             `yaml:"name" json:"name"`
 	Count       int                `yaml:"count" json:"count"`
-	Runtime     Runtime            `yaml:"runtime,omitempty" json:"runtime,omitempty"`
 	Tasks       []TaskSpec         `yaml:"tasks" json:"tasks"`
 	Labels      map[string]string  `yaml:"labels,omitempty" json:"labels,omitempty"`
-	APIAccess   *APIAccessSpec     `yaml:"api_access,omitempty" json:"api_access,omitempty"`
 	Restart     *RestartPolicySpec `yaml:"restart,omitempty" json:"restart,omitempty"`
 	Constraints []ConstraintSpec   `yaml:"constraints,omitempty" json:"constraints,omitempty"`
 	Update      *UpdateSpec        `yaml:"update,omitempty" json:"update,omitempty"`
@@ -153,6 +139,8 @@ type TaskNetworkingSpec struct {
 type TaskSpec struct {
 	Name        string              `yaml:"name" json:"name"`
 	Image       string              `yaml:"image" json:"image"`
+	Runtime     Runtime             `yaml:"runtime,omitempty" json:"runtime,omitempty"`
+	APIAccess   *APIAccessSpec      `yaml:"api_access,omitempty" json:"api_access,omitempty"`
 	Env         map[string]string   `yaml:"env" json:"env,omitempty"`
 	Networking  *TaskNetworkingSpec `yaml:"networking,omitempty" json:"networking,omitempty"`
 	Volumes     []VolumeSpec        `yaml:"volumes" json:"volumes,omitempty"`
@@ -228,12 +216,10 @@ type VolumeSpec struct {
 func TaskGroupContentHash(g *TaskGroupSpec) string {
 	hashable := struct {
 		Name        string             `json:"Name"`
-		Runtime     Runtime            `json:"Runtime"`
 		Tasks       []TaskSpec         `json:"Tasks"`
-		APIAccess   *APIAccessSpec     `json:"APIAccess"`
 		Restart     *RestartPolicySpec `json:"Restart"`
 		Constraints []ConstraintSpec   `json:"Constraints,omitempty"`
-	}{Name: g.Name, Runtime: g.Runtime, Tasks: g.Tasks, APIAccess: g.APIAccess, Restart: g.Restart, Constraints: g.Constraints}
+	}{Name: g.Name, Tasks: g.Tasks, Restart: g.Restart, Constraints: g.Constraints}
 	raw, _ := json.Marshal(hashable)
 	h := sha256.Sum256(raw)
 	return hex.EncodeToString(h[:])

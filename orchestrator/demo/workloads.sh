@@ -12,7 +12,7 @@ TRELLIS_ADDR="localhost:8128"
 echo "Waiting for cluster leader..."
 TRELLIS_TOKEN=""
 for _ in $(seq 1 30); do
-    TRELLIS_TOKEN="$(trellisctl --server-addr "${TRELLIS_ADDR}" --administrator-key "${ADMIN_KEY_FILE}" credentials create --scope cluster --access write 2>/dev/null || true)"
+    TRELLIS_TOKEN="$(trellisctl --server-addr "${TRELLIS_ADDR}" --administrator-key "${ADMIN_KEY_FILE}" credentials create --access write 2>/dev/null || true)"
     [ -n "${TRELLIS_TOKEN}" ] && break
     sleep 3
 done

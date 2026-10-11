@@ -7,11 +7,12 @@ import (
 )
 
 func TestGroupRequiredCapabilities(t *testing.T) {
-	group := &TaskGroupSpec{Runtime: RuntimeRunsc, Tasks: []TaskSpec{{Networking: &TaskNetworkingSpec{Mode: TaskNetworkWireGuard}}}}
+	group := &TaskGroupSpec{Tasks: []TaskSpec{{Runtime: RuntimeRunc}, {Runtime: RuntimeRunsc, Networking: &TaskNetworkingSpec{Mode: TaskNetworkWireGuard}}, {Runtime: RuntimeRunsc}}}
 	if got, want := GroupRequiredCapabilities(group), []NodeCapability{CapabilityRunsc}; !slices.Equal(got, want) {
 		t.Fatalf("capabilities = %v, want %v", got, want)
 	}
-	group.Runtime = RuntimeRunc
+	group.Tasks[1].Runtime = RuntimeRunc
+	group.Tasks[2].Runtime = RuntimeRunc
 	if got := GroupRequiredCapabilities(group); len(got) != 0 {
 		t.Fatalf("namespace networking requires capabilities %v; every node provides it", got)
 	}

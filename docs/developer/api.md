@@ -36,6 +36,8 @@ The client verifies that the agent certificate identifies the scheduled node. Th
 
 The agent acknowledges a fenced start before pulling images and creating tasks in the background. The request's `attempt` is excluded from the execution hash and is returned in background-start failure observations. Exhausted restart budgets reject same-generation starts with HTTP `409` and operation code `restart_budget_exhausted`.
 
+`AllocationRequest` has no allocation-level `Runtime`: each `TaskSpec` carries its resolved runtime and optional API access grant. `EnvOverrides` is `map[string]map[string]string` (task name → environment name → value), not one allocation-wide environment map. Deliver overrides only to their named task; sibling tasks must not inherit API endpoint, token, namespace, or CA injection. Restart policy remains allocation/task-group level. These changes require coordinated leader/agent upgrades; see [upgrade conversion](../public/operations.md#coordinated-incompatible-spec-upgrade).
+
 Each node admits at most eight active background starts, including cancellation
 and rollback until they actually return. Excess distinct starts receive HTTP
 `503` with the existing `operation_failed` code; no work or start-failure

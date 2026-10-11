@@ -13,8 +13,8 @@ func TestAPIAccessReservedEnvironment(t *testing.T) {
 			t.Run(name+"/"+fmt.Sprint(secret), func(t *testing.T) {
 				job := validJob()
 				group := &job.TaskGroups[0]
-				group.APIAccess = &APIAccessSpec{Scope: APIAccessCluster, Access: APIAccessRead}
 				task := &group.Tasks[0]
+				task.APIAccess = &APIAccessSpec{Access: APIAccessRead}
 				if secret {
 					task.Secrets = []SecretRefSpec{{Name: "credential", Target: SecretTargetEnv, Env: name}}
 				} else {
@@ -34,7 +34,7 @@ func TestAPIAccessReservedEnvironment(t *testing.T) {
 						t.Fatalf("missing reserved-name issue: %v", err)
 					}
 				}
-				group.APIAccess = nil
+				task.APIAccess = nil
 				if err := Canonicalize(job, DefaultLimits()); err != nil {
 					t.Fatalf("without api_access: %v", err)
 				}
@@ -43,15 +43,54 @@ func TestAPIAccessReservedEnvironment(t *testing.T) {
 	}
 }
 
+func TestAPIAccessValidationIsTaskLocal(t *testing.T) {
+	for _, name := range []string{"TRELLIS_TOKEN", "TRELLIS_ADDR", "TRELLIS_NAMESPACE", "TRELLIS_CA_CERT"} {
+		job := validJob()
+		job.TaskGroups[0].Tasks[0].APIAccess = &APIAccessSpec{Access: APIAccessWrite}
+		job.TaskGroups[0].Tasks = append(job.TaskGroups[0].Tasks, TaskSpec{
+			Name: "isolated", Image: "example/isolated:1",
+			Networking: &TaskNetworkingSpec{Mode: TaskNetworkNone},
+			Env:        map[string]string{name: "authored-value"},
+			Secrets:    []SecretRefSpec{{Name: "credential", Target: SecretTargetEnv, Env: "TRELLIS_OTHER"}},
+		})
+		if err := Canonicalize(job, DefaultLimits()); err != nil {
+			t.Fatalf("disabled sibling with %s rejected: %v", name, err)
+		}
+		job.TaskGroups[0].Tasks[1].Env = nil
+		job.TaskGroups[0].Tasks[1].Secrets[0].Env = name
+		if err := ValidateCanonical(job); err != nil {
+			t.Fatalf("disabled sibling secret %s rejected: %v", name, err)
+		}
+	}
+}
+
+func TestParseRejectsOldTaskGroupFieldsAndAPIAccessScope(t *testing.T) {
+	for _, field := range []string{
+		"    runtime: runsc\n",
+		"    api_access:\n      access: read\n",
+	} {
+		raw := "namespace: default\nname: web\ntask_groups:\n  - name: api\n    count: 1\n" + field + "    tasks:\n      - name: server\n        image: example/server:1\n"
+		if _, err := ParseYAML([]byte(raw)); err == nil {
+			t.Fatalf("obsolete group field accepted: %s", field)
+		}
+	}
+	for _, scope := range []string{"cluster", "namespace"} {
+		raw := "namespace: default\nname: web\ntask_groups:\n  - name: api\n    count: 1\n    tasks:\n      - name: server\n        image: example/server:1\n        api_access:\n          access: read\n          scope: " + scope + "\n"
+		if _, err := ParseYAML([]byte(raw)); err == nil {
+			t.Fatalf("obsolete scope %s accepted", scope)
+		}
+	}
+}
+
 func TestParseAPIAccess(t *testing.T) {
-	raw := []byte("namespace: default\nname: api-client\ntask_groups:\n  - name: client\n    count: 1\n    api_access:\n      scope: cluster\n      access: read\n    tasks:\n      - name: client\n        image: example/client:1\n        networking:\n          mode: host\n")
+	raw := []byte("namespace: default\nname: api-client\ntask_groups:\n  - name: client\n    count: 1\n    tasks:\n      - name: client\n        image: example/client:1\n        api_access:\n          access: read\n        networking:\n          mode: host\n")
 	job, err := ParseYAML(raw)
 	if err != nil {
 		t.Fatalf("parse manifest: %v", err)
 	}
-	got := job.TaskGroups[0].APIAccess
-	if got == nil || got.Scope != APIAccessCluster || got.Access != APIAccessRead {
-		t.Fatalf("api_access = %#v, want cluster/read", got)
+	got := job.TaskGroups[0].Tasks[0].APIAccess
+	if got == nil || got.Access != APIAccessRead {
+		t.Fatalf("api_access = %#v, want read", got)
 	}
 	if err := Validate(job); err != nil {
 		t.Fatalf("validate manifest: %v", err)
@@ -59,32 +98,20 @@ func TestParseAPIAccess(t *testing.T) {
 }
 
 func TestValidateRejectsInvalidAPIAccess(t *testing.T) {
-	job := &JobSpec{Namespace: "default", Name: "api-client", TaskGroups: []TaskGroupSpec{{
-		Name: "client", Count: 1,
-		APIAccess: &APIAccessSpec{Scope: "other", Access: APIAccessRead},
-		Tasks:     []TaskSpec{{Name: "client", Image: "example/client:1", Networking: &TaskNetworkingSpec{Mode: TaskNetworkHost}}},
-	}}}
-	if err := Validate(job); err == nil {
-		t.Fatal("expected invalid api_access scope to be rejected")
-	}
-}
-
-func TestValidateRejectsNamespaceAPIAccess(t *testing.T) {
-	job := &JobSpec{Namespace: "default", Name: "api-client", TaskGroups: []TaskGroupSpec{{
-		Name: "client", Count: 1,
-		APIAccess: &APIAccessSpec{Scope: "namespace", Access: APIAccessRead},
-		Tasks:     []TaskSpec{{Name: "client", Image: "example/client:1", Networking: &TaskNetworkingSpec{Mode: TaskNetworkHost}}},
-	}}}
-	if err := Validate(job); err == nil {
-		t.Fatal("expected namespace api_access scope to be rejected")
+	for _, access := range []APIAccessLevel{"", "admin"} {
+		job := validJob()
+		job.TaskGroups[0].Tasks[0].APIAccess = &APIAccessSpec{Access: access}
+		var issues ValidationErrors
+		if err := Validate(job); !errors.As(err, &issues) || len(issues) != 1 || issues[0].Path != "task_groups[api].tasks[server].api_access.access" {
+			t.Fatalf("access %q: expected task access validation issue, got %v", access, err)
+		}
 	}
 }
 
 func TestValidateRejectsAPIAccessWithoutRoutableNetworking(t *testing.T) {
 	job := &JobSpec{Namespace: "default", Name: "api-client", TaskGroups: []TaskGroupSpec{{
 		Name: "client", Count: 1,
-		APIAccess: &APIAccessSpec{Scope: APIAccessCluster, Access: APIAccessRead},
-		Tasks:     []TaskSpec{{Name: "client", Image: "example/client:1", Networking: &TaskNetworkingSpec{Mode: TaskNetworkNone}}},
+		Tasks: []TaskSpec{{Name: "client", Image: "example/client:1", APIAccess: &APIAccessSpec{Access: APIAccessRead}, Networking: &TaskNetworkingSpec{Mode: TaskNetworkNone}}},
 	}}}
 	if err := Validate(job); err == nil {
 		t.Fatal("expected api_access without host or namespace networking to be rejected")

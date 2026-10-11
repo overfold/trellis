@@ -1,7 +1,7 @@
 // Package client is the Go client for the Trellis control-plane operator API.
 //
 // A Client sends requests to any control-plane node; followers forward them
-// to the current leader. It authenticates with a scoped API credential (a
+// to the current leader. It authenticates with a read/write API credential (a
 // bearer token minted by "trellisctl credentials create" or delivered to a
 // workload through api_access) or with the cluster administrator key, which
 // signs each request with a fresh leader-issued challenge.

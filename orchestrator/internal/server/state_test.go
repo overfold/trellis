@@ -368,13 +368,13 @@ func TestRestoreRefusesOtherBackupFormatsWithActionableError(t *testing.T) {
 	store := &backupStore{data: memoryStore{}, snapshot: &state.DesiredSnapshot{}}
 	s := newBackupTestServer(t, store, DefaultClusterSettings())
 	backup := mustBackup(t, s)
-	backup.FormatVersion = api.BackupFormatVersion - 1
+	backup.FormatVersion = 6
 	backup.TrellisVersion = "v0.4.2"
 	err := s.Restore(context.Background(), backup)
 	if err == nil {
 		t.Fatal("restored a backup with a different format version")
 	}
-	for _, want := range []string{fmt.Sprintf("backup format version %d", api.BackupFormatVersion-1), "Trellis v0.4.2", fmt.Sprintf("reads backup format version %d only", api.BackupFormatVersion), "release"} {
+	for _, want := range []string{"backup format version 6", "Trellis v0.4.2", fmt.Sprintf("reads backup format version %d only", api.BackupFormatVersion), "release"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error %q does not mention %q", err, want)
 		}

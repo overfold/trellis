@@ -275,10 +275,10 @@ func namespaceParam(c *echo.Context) (string, error) {
 		return "", echo.NewHTTPError(http.StatusBadRequest, "invalid namespace: must be a single identifier without dots")
 	}
 	authz := authorization(c)
-	if authz.root || authz.scope == auth.AccessCluster {
+	if authz.root || authz.access == auth.AccessRead || authz.access == auth.AccessWrite {
 		return namespace, nil
 	}
-	return "", echo.NewHTTPError(http.StatusForbidden, "namespaced resources require an authenticated scoped credential")
+	return "", echo.NewHTTPError(http.StatusForbidden, "namespaced resources require an authenticated credential")
 }
 
 // namespaceWrite authorizes a mutation of the {namespace} path parameter.

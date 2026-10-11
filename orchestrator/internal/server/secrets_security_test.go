@@ -38,7 +38,7 @@ func TestSecretIdentifierMethodParity(t *testing.T) {
 	e, _ := secretHandler(t)
 	for _, method := range []string{http.MethodPut, http.MethodGet, http.MethodDelete} {
 		for _, name := range []string{"bad%20name", "bad%2Bname", "%3F", "-bad"} {
-			req := scopedRequest(t, method, "/v1/namespaces/default/secrets/"+name, `{"value_base64":"eA=="}`, auth.AccessCluster, auth.AccessWrite)
+			req := authorizedRequest(t, method, "/v1/namespaces/default/secrets/"+name, `{"value_base64":"eA=="}`, auth.AccessWrite)
 			rec := httptest.NewRecorder()
 			e.ServeHTTP(rec, req)
 			if rec.Code != http.StatusBadRequest || strings.TrimSpace(rec.Body.String()) != `{"message":"invalid secret name"}` {
@@ -47,7 +47,7 @@ func TestSecretIdentifierMethodParity(t *testing.T) {
 		}
 	}
 	for _, method := range []string{http.MethodGet, http.MethodDelete} {
-		req := scopedRequest(t, method, "/v1/namespaces/default/secrets/valid-missing", "", auth.AccessCluster, auth.AccessWrite)
+		req := authorizedRequest(t, method, "/v1/namespaces/default/secrets/valid-missing", "", auth.AccessWrite)
 		rec := httptest.NewRecorder()
 		e.ServeHTTP(rec, req)
 		if rec.Code != http.StatusNotFound || strings.TrimSpace(rec.Body.String()) != `{"message":"secret not found"}` {
@@ -63,7 +63,7 @@ func TestSecretMetadataEndpointsNeverReturnPlaintext(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, path := range []string{"/v1/namespaces/default/secrets", "/v1/namespaces/default/secrets/token"} {
-		req := scopedRequest(t, http.MethodGet, path, "", auth.AccessCluster, auth.AccessRead)
+		req := authorizedRequest(t, http.MethodGet, path, "", auth.AccessRead)
 		rec := httptest.NewRecorder()
 		e.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
@@ -81,7 +81,7 @@ func TestSecretHandlerEnforcesExactDecodedSizeBoundary(t *testing.T) {
 		t.Helper()
 		encoded := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{'x'}, size))
 		body := fmt.Sprintf(`{"value_base64":%q}`, encoded)
-		req := scopedRequest(t, http.MethodPut, "/v1/namespaces/default/secrets/"+name, body, auth.AccessCluster, auth.AccessWrite)
+		req := authorizedRequest(t, http.MethodPut, "/v1/namespaces/default/secrets/"+name, body, auth.AccessWrite)
 		rec := httptest.NewRecorder()
 		e.ServeHTTP(rec, req)
 		return rec

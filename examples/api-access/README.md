@@ -2,46 +2,45 @@
 
 **Level:** Advanced · **Prerequisites:** complete the intermediate examples and use a reviewed controller image
 
-This example shows a fully trusted workload using cluster-wide read access while routing its sample request to the job's namespace. This is not tenant isolation: enabling `api_access` gives every task in the group a cluster-scoped credential.
+This example shows a fully trusted task using cluster-wide read access while routing its sample request to the job's namespace. This is not tenant isolation: enabling `api_access` gives that task a cluster-wide credential.
 
-## Choose scope and access
+## Choose access
 
-`api_access` is an explicit task-group privilege request with two dimensions:
+`api_access` is an explicit task-level privilege request:
 
-| Scope/access | Credential | Intended use |
+| Access | Credential | Intended use |
 |---|---|---|
 | omitted | None | Ordinary application workloads |
-| `cluster/read` | Cluster-wide read-only token | Trusted cluster observers |
-| `cluster/write` | Cluster-wide read/write token | Trusted operator/control-plane workloads |
+| `read` | Cluster-wide read-only token | Trusted cluster observers |
+| `write` | Cluster-wide read/write token | Trusted operator/control-plane workloads |
 
 This example requests:
 
 ```yaml
 api_access:
-  scope: cluster
   access: read
 ```
 
-`cluster` is the only valid scope. There is intentionally no namespace selector inside `api_access`.
+Place this object on the task, not the task group. There is no scope or namespace selector inside `api_access`.
 
-Use the narrowest pair that works. Cluster scope is for workloads that genuinely need cross-namespace or cluster-level visibility, and write access is only for controllers that deliberately mutate state. The injected `TRELLIS_NAMESPACE` still defaults to the job's namespace even with cluster scope; that default does not reduce a cluster-scoped token's authority.
+Use the narrowest access level that works. API access is for tasks that genuinely need cluster-wide visibility, and write access is only for controllers that deliberately mutate state. The injected `TRELLIS_NAMESPACE` defaults to the job's namespace; that default does not reduce the token's authority.
 
 A submitting credential cannot delegate write access when it has only read access.
 
 ## What Trellis injects
 
-With API access enabled, Trellis adds these variables to every task in the group:
+With API access enabled, Trellis adds these variables only to the requesting task:
 
 | Variable | Meaning |
 |---|---|
 | `TRELLIS_ADDR` | Workload-reachable address of the Trellis control-plane API. |
-| `TRELLIS_TOKEN` | Workload bearer token with the requested effective scope/access. |
+| `TRELLIS_TOKEN` | Workload bearer token with the requested cluster-wide access. |
 | `TRELLIS_NAMESPACE` | The job's namespace; use it as a routing default for namespaced request paths, never as authorization. |
 | `TRELLIS_CA_CERT` | Cluster CA certificate (inline PEM) for TLS verification when configured. |
 
-This is a group-level privilege boundary: every task in the group can read the injected environment and act with the token. Use a reviewed, pinned image and do not mix an untrusted sidecar into the group. This is especially important for cluster/write, because compromise of any task in that group exposes broad operator authority.
+Sibling tasks do not receive the injected environment or token. Colocation is not a security sandbox: use reviewed, pinned images and do not mix an untrusted sidecar into the group. Compromise of the API-enabled task exposes its cluster-wide authority.
 
-Each allocation receives its own token, bound to the job and task group. Start retries re-deliver the same token, and Trellis revokes it when the allocation is replaced and pruned, when the job is deleted, or when `api_access` is removed or narrowed. API access requires the servers' secrets encryption key, which the installer configures.
+Each enabled task in an allocation receives its own token, bound to namespace, job, task group, and task. Start retries re-deliver the same task token, and Trellis revokes it when the allocation is replaced and pruned, when the job or task is deleted, or when the task's `api_access` is removed or narrowed. API access requires the servers' secrets encryption key, which the installer configures.
 
 The bootstrap credential remains separate and is never injected into workloads.
 

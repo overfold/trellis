@@ -29,7 +29,7 @@ type schema = map[string]any
 var requiredFields = map[reflect.Type][]string{
 	reflect.TypeFor[spec.JobSpec]():           {"name", "namespace", "task_groups"},
 	reflect.TypeFor[spec.TaskGroupSpec]():     {"name", "count", "tasks"},
-	reflect.TypeFor[spec.APIAccessSpec]():     {"scope", "access"},
+	reflect.TypeFor[spec.APIAccessSpec]():     {"access"},
 	reflect.TypeFor[spec.ConstraintSpec]():    {"attribute", "value"},
 	reflect.TypeFor[spec.RestartPolicySpec](): {"window"},
 	reflect.TypeFor[spec.TaskSpec]():          {"name", "image"},
@@ -43,7 +43,6 @@ var requiredFields = map[reflect.Type][]string{
 var enumValues = map[reflect.Type][]string{
 	reflect.TypeFor[spec.UpdateStrategy]():  {"", "recreate", "rolling"},
 	reflect.TypeFor[spec.Runtime]():         {"", "runc", "runsc"},
-	reflect.TypeFor[spec.APIAccessScope]():  {"cluster"},
 	reflect.TypeFor[spec.APIAccessLevel]():  {"read", "write"},
 	reflect.TypeFor[spec.TaskNetworkMode](): {"", "none", "namespace", "host"},
 	reflect.TypeFor[spec.HealthCheckType](): {"http", "tcp", "script"},
@@ -289,7 +288,7 @@ func deriveYAML(root schema) {
 	root["title"] = "Trellis job manifest"
 	root["description"] = "Schema for the first-party human-authored YAML representation. Trellis itself consumes canonical JSON after the consumer converts human quantities."
 
-	removeEmptyEnum(defProperty(root, "TaskGroupSpec", "runtime"))
+	removeEmptyEnum(defProperty(root, "TaskSpec", "runtime"))
 	removeEmptyEnum(defProperty(root, "UpdateSpec", "strategy"))
 	removeEmptyEnum(defProperty(root, "TaskNetworkingSpec", "mode"))
 
@@ -307,16 +306,13 @@ func describeAuthoringFields(root schema) {
 
 	describeDef(root, "TaskGroupSpec", "name", "Task-group identifier, unique within this job.")
 	describeDef(root, "TaskGroupSpec", "count", "Desired number of allocations for this task group.")
-	describeDef(root, "TaskGroupSpec", "runtime", "OCI runtime: runc or runsc. Omit for runc; Trellis stores the resolved value.")
 	describeDef(root, "TaskGroupSpec", "tasks", "Containers colocated in every allocation of this group; they share placement, scaling, update, restart, and drain lifecycle.")
 	describeDef(root, "TaskGroupSpec", "labels", "Discovery and routing metadata attached to allocations from this group.")
-	describeDef(root, "TaskGroupSpec", "api_access", "Optional least-privilege Trellis API credential request for every task in this group.")
 	describeDef(root, "TaskGroupSpec", "constraints", "Exact node attribute or label matches required for placement.")
 	describeDef(root, "TaskGroupSpec", "restart", "Retry policy for task failures inside an allocation. Omit for 3 restarts within 10m; Trellis stores the resolved policy.")
 	describeDef(root, "TaskGroupSpec", "update", "How allocations from an older job revision are replaced. Omit for recreate; Trellis stores the resolved policy.")
 
-	describeDef(root, "APIAccessSpec", "scope", "The cluster scope of the injected workload credential.")
-	describeDef(root, "APIAccessSpec", "access", "Whether the injected credential is read-only or may perform ordinary writes within its scope.")
+	describeDef(root, "APIAccessSpec", "access", "Cluster-wide read access or ordinary read/write access. Write includes read; neither grants administrator authority.")
 	describeDef(root, "ConstraintSpec", "attribute", "Node attribute or label key to match, such as arch, os, or a custom label.")
 	describeDef(root, "ConstraintSpec", "value", "Exact value the selected node must report for this attribute.")
 	describeDef(root, "RestartPolicySpec", "max_restarts", "Maximum failures allowed inside the restart window. Zero disables retries.")
@@ -326,6 +322,8 @@ func describeAuthoringFields(root schema) {
 
 	describeDef(root, "TaskSpec", "name", "Task identifier, unique within this task group.")
 	describeDef(root, "TaskSpec", "image", "Pullable OCI image reference. Pin a version or digest for reproducible deployments.")
+	describeDef(root, "TaskSpec", "runtime", "OCI runtime: runc or runsc. Omit for runc; Trellis stores the resolved value per task. Any runsc task requires placement of the whole group on a runsc-capable node.")
+	describeDef(root, "TaskSpec", "api_access", "Optional cluster-wide Trellis API credential request for this task only. Omit for no injected credential.")
 	describeDef(root, "TaskSpec", "env", "Literal environment variables. Keep credentials in Trellis secrets instead of manifest text.")
 	describeDef(root, "TaskSpec", "networking", "Network attachment mode and the ports the task listens on.")
 	describeDef(root, "TaskSpec", "volumes", "Namespace-scoped named volumes. First placement registers a volume to one node; later allocations using the same namespace/name are scheduled there.")

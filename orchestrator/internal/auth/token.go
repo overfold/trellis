@@ -2,6 +2,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -19,21 +20,13 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/state"
 )
 
-// AccessScope controls where a generated API credential may operate.
-type AccessScope string
-
-const (
-	// AccessCluster permits cluster-wide operations allowed by the access level.
-	AccessCluster AccessScope = "cluster"
-)
-
 // AccessLevel controls whether a generated API credential may mutate state.
 type AccessLevel string
 
 const (
 	// AccessRead grants observation-only API access.
 	AccessRead AccessLevel = "read"
-	// AccessWrite grants ordinary mutation API access within the credential scope.
+	// AccessWrite grants ordinary mutation API access.
 	AccessWrite AccessLevel = "write"
 )
 
@@ -45,7 +38,7 @@ const (
 	CredentialAdministrator CredentialKind = "administrator"
 	// CredentialOperator is an explicitly minted human or external-client credential.
 	CredentialOperator CredentialKind = "operator"
-	// CredentialWorkload is injected into a task group through api_access.
+	// CredentialWorkload is injected into a task through api_access.
 	CredentialWorkload CredentialKind = "workload"
 )
 
@@ -54,12 +47,12 @@ type CredentialSubject struct {
 	Namespace string `json:"namespace"`
 	Job       string `json:"job"`
 	TaskGroup string `json:"task_group"`
+	Task      string `json:"task"`
 }
 
 // Principal is the authoritative identity and authorization attached to a credential.
 type Principal struct {
 	Kind      CredentialKind     `json:"kind"`
-	Scope     AccessScope        `json:"scope"`
 	Access    AccessLevel        `json:"access"`
 	Subject   *CredentialSubject `json:"subject,omitempty"`
 	CreatedAt time.Time          `json:"created_at"`
@@ -70,16 +63,13 @@ type Principal struct {
 
 // AdministratorPrincipal returns the effective principal for the administrator credential.
 func AdministratorPrincipal() Principal {
-	return Principal{Kind: CredentialAdministrator, Scope: AccessCluster, Access: AccessWrite}
+	return Principal{Kind: CredentialAdministrator, Access: AccessWrite}
 }
 
 // Validate checks that a persisted principal is internally consistent.
 func (p Principal) Validate() error {
 	if p.Kind != CredentialOperator && p.Kind != CredentialWorkload {
 		return fmt.Errorf("invalid credential kind %q", p.Kind)
-	}
-	if p.Scope != AccessCluster {
-		return fmt.Errorf("invalid credential scope %q", p.Scope)
 	}
 	if p.Access != AccessRead && p.Access != AccessWrite {
 		return fmt.Errorf("invalid credential access %q", p.Access)
@@ -94,8 +84,8 @@ func (p Principal) Validate() error {
 		return fmt.Errorf("workload credential requires a workload subject")
 	}
 	if p.Subject != nil {
-		if p.Subject.Namespace == "" || p.Subject.Job == "" || p.Subject.TaskGroup == "" {
-			return fmt.Errorf("workload subject requires namespace, job, and task group")
+		if p.Subject.Namespace == "" || p.Subject.Job == "" || p.Subject.TaskGroup == "" || p.Subject.Task == "" {
+			return fmt.Errorf("workload subject requires namespace, job, task group, and task")
 		}
 		if p.Kind != CredentialWorkload {
 			return fmt.Errorf("only workload credentials may include a workload subject")
@@ -111,7 +101,7 @@ type tokenRecord struct {
 	AllocationID string `json:"allocation_id,omitempty"`
 }
 
-// TokenManager creates and validates persisted scoped tokens.
+// TokenManager creates and validates persisted tokens.
 type TokenManager struct {
 	store             state.Store
 	cluster           string
@@ -200,10 +190,13 @@ func (m *TokenManager) ListOperatorCredentials(ctx context.Context) ([]OperatorC
 	}
 	result := make([]OperatorCredential, 0, len(values))
 	for key, data := range values {
-		var principal Principal
-		if err := json.Unmarshal(data, &principal); err != nil {
+		var record tokenRecord
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&record); err != nil {
 			return nil, fmt.Errorf("unmarshal principal: %w", err)
 		}
+		principal := record.Principal
 		if principal.Kind != CredentialOperator {
 			continue
 		}
@@ -296,7 +289,9 @@ func (m *TokenManager) ValidateToken(ctx context.Context, rawToken string) (*Pri
 		return nil, nil
 	}
 	var record tokenRecord
-	if err := json.Unmarshal(data, &record); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&record); err != nil {
 		return nil, fmt.Errorf("unmarshal principal: %w", err)
 	}
 	principal := record.Principal
@@ -310,7 +305,7 @@ func (m *TokenManager) ValidateToken(ctx context.Context, rawToken string) (*Pri
 		if record.AllocationID == "" {
 			return nil, nil
 		}
-		credential, err := m.loadWorkloadCredential(ctx, m.workloadCredentialKey(record.AllocationID))
+		credential, err := m.loadWorkloadCredential(ctx, m.workloadCredentialKey(record.AllocationID, principal.Subject.Task))
 		if err != nil {
 			return nil, fmt.Errorf("lookup workload authority: %w", err)
 		}
@@ -347,16 +342,16 @@ func (m *TokenManager) workloadCredentialPrefix() string {
 	return fmt.Sprintf("trellis/%s/workload-credentials/", m.cluster)
 }
 
-func (m *TokenManager) workloadCredentialKey(allocationID string) string {
-	return m.workloadCredentialPrefix() + url.PathEscape(allocationID)
+func (m *TokenManager) workloadCredentialKey(allocationID, task string) string {
+	return m.workloadCredentialPrefix() + url.PathEscape(allocationID) + "/" + url.PathEscape(task)
 }
 
-func (m *TokenManager) workloadTokenAAD(allocationID string, generation uint64, tokenHash string) []byte {
-	return fmt.Appendf(nil, "trellis-workload-token\x00%s\x00%s\x00%d\x00%s", m.cluster, allocationID, generation, tokenHash)
+func (m *TokenManager) workloadTokenAAD(allocationID, task string, generation uint64, tokenHash string) []byte {
+	return fmt.Appendf(nil, "trellis-workload-token\x00%s\x00%s\x00%s\x00%d\x00%s", m.cluster, allocationID, task, generation, tokenHash)
 }
 
 func samePrincipalGrant(a, b Principal) bool {
-	if a.Kind != b.Kind || a.Scope != b.Scope || a.Access != b.Access {
+	if a.Kind != b.Kind || a.Access != b.Access {
 		return false
 	}
 	if a.Subject == nil || b.Subject == nil {
@@ -365,8 +360,8 @@ func samePrincipalGrant(a, b Principal) bool {
 	return *a.Subject == *b.Subject
 }
 
-// WorkloadToken returns the credential for one allocation generation, minting
-// it on first use. Retries of the same generation receive the same token, so
+// WorkloadToken returns the credential for one task in an allocation generation,
+// minting it on first use. Retries of the same generation receive the same token, so
 // the allocation execution hash stays stable across retries and leader
 // changes. A new generation or a changed grant replaces and revokes the
 // previous credential.
@@ -386,7 +381,7 @@ func (m *TokenManager) WorkloadToken(ctx context.Context, sealer Sealer, allocat
 	if !ok {
 		return "", fmt.Errorf("state store does not support atomic workload tokens")
 	}
-	key := m.workloadCredentialKey(allocationID)
+	key := m.workloadCredentialKey(allocationID, principal.Subject.Task)
 
 	// The active leader owns one TokenManager. Serializing its read and batch
 	// prevents concurrent allocation starts from minting competing credentials;
@@ -426,7 +421,7 @@ func (m *TokenManager) WorkloadToken(ctx context.Context, sealer Sealer, allocat
 	}
 	hash := sha256.Sum256([]byte(token))
 	hashHex := hex.EncodeToString(hash[:])
-	sealed, err := sealer.Seal([]byte(token), m.workloadTokenAAD(allocationID, generation, hashHex))
+	sealed, err := sealer.Seal([]byte(token), m.workloadTokenAAD(allocationID, principal.Subject.Task, generation, hashHex))
 	if err != nil {
 		return "", fmt.Errorf("seal workload token: %w", err)
 	}
@@ -471,7 +466,7 @@ func (m *TokenManager) openWorkloadToken(ctx context.Context, sealer Sealer, cre
 	if principal == nil {
 		return "", false, nil
 	}
-	raw, err := sealer.Open(credential.SealedToken, m.workloadTokenAAD(credential.AllocationID, credential.Generation, credential.TokenHash))
+	raw, err := sealer.Open(credential.SealedToken, m.workloadTokenAAD(credential.AllocationID, credential.Principal.Subject.Task, credential.Generation, credential.TokenHash))
 	if err != nil {
 		return "", false, nil
 	}

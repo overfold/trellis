@@ -330,7 +330,7 @@ func TestExecuteFailureCallbackCannotCrossLeadershipChange(t *testing.T) {
 	})
 	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
 	s.nodes[node.ID] = node
-	task := spec.TaskSpec{Name: "app", Image: "app"}
+	task := spec.TaskSpec{Name: "app", Image: "app", Runtime: spec.RuntimeRunc}
 	s.jobs[jobKey("default", "web")] = &Job{Revision: 1, Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Tasks: []spec.TaskSpec{task}}}})}
 	old := &Allocation{ID: "a", Namespace: "default", JobName: "web", TaskGroupName: "app", Generation: 1, JobRevision: 1, Tasks: []spec.TaskSpec{task}, Node: node, Phase: lifecycle.PhasePlaced}
 	s.allocations = []*Allocation{old}

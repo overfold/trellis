@@ -326,7 +326,7 @@ func TestPlanReconciliationPersistsPlacementDiagnosticsAndRecovers(t *testing.T)
 			name: "missing capabilities", reason: "missing_capability",
 			setup: func() fixture {
 				job := planTestJob("web", 1, 1, "")
-				job.Spec.TaskGroups[0].Runtime = spec.RuntimeRunsc
+				job.Spec.TaskGroups[0].Tasks[0].Runtime = spec.RuntimeRunsc
 				node := healthyNode(1)
 				return fixture{job: job, nodes: []*Node{node}, recover: func(f *fixture) { f.nodes[0].Capabilities = []spec.NodeCapability{spec.CapabilityRunsc} }}
 			},

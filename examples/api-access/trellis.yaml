@@ -3,12 +3,11 @@ namespace: default
 task_groups:
   - name: observer
     count: 1
-    api_access:
-      scope: cluster
-      access: read
     tasks:
       - name: web
         image: docker.io/library/nginx:1.27-alpine
+        api_access:
+          access: read
         networking:
           mode: host
         resources:

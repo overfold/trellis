@@ -80,7 +80,7 @@ func TestAgentStoppedExecutionLeavesCatalogDuringRecoveryFailure(t *testing.T) {
 			if err := a.Init(ctx); err != nil {
 				t.Fatal(err)
 			}
-			request := &nodeapi.AllocationRequest{AllocationID: allocation.ID, Generation: 1, JobRevision: 1, ExecutionHash: "hash", Epoch: 1, Namespace: "default", JobName: "web", GroupName: "web", Runtime: string(group.Runtime), Restart: group.Restart, Tasks: group.Tasks}
+			request := &nodeapi.AllocationRequest{AllocationID: allocation.ID, Generation: 1, JobRevision: 1, ExecutionHash: "hash", Epoch: 1, Namespace: "default", JobName: "web", GroupName: "web", Restart: group.Restart, Tasks: group.Tasks}
 			if err := a.StartGroup(ctx, request); err != nil {
 				t.Fatal(err)
 			}

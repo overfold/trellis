@@ -59,9 +59,9 @@ func newAPIAccessServer(t *testing.T) (*Server, apiAccessStore) {
 
 func TestAPIAccessTokenClusterRead(t *testing.T) {
 	s, _ := newAPIAccessServer(t)
-	requested := &spec.APIAccessSpec{Scope: spec.APIAccessCluster, Access: spec.APIAccessRead}
+	requested := &spec.APIAccessSpec{Access: spec.APIAccessRead}
 	request := &nodeapi.AllocationRequest{AllocationID: "alloc-1", Generation: 1, Namespace: "default", JobName: "web", GroupName: "app"}
-	token, err := s.apiAccessToken(context.Background(), requested, request)
+	token, err := s.apiAccessToken(context.Background(), requested, request, "app")
 	if err != nil {
 		t.Fatalf("cluster/read api access: %v", err)
 	}
@@ -69,19 +69,19 @@ func TestAPIAccessTokenClusterRead(t *testing.T) {
 	if err != nil || stored == nil {
 		t.Fatalf("validate generated token: %v", err)
 	}
-	if stored.Kind != auth.CredentialWorkload || stored.Scope != auth.AccessCluster || stored.Access != auth.AccessRead {
+	if stored.Kind != auth.CredentialWorkload || stored.Access != auth.AccessRead {
 		t.Fatalf("unexpected generated principal: %#v", stored)
 	}
-	if stored.Subject == nil || *stored.Subject != (auth.CredentialSubject{Namespace: "default", Job: "web", TaskGroup: "app"}) {
+	if stored.Subject == nil || *stored.Subject != (auth.CredentialSubject{Namespace: "default", Job: "web", TaskGroup: "app", Task: "app"}) {
 		t.Fatalf("generated principal subject = %#v", stored.Subject)
 	}
 }
 
 func TestAPIAccessTokenRequiresSecretsKey(t *testing.T) {
 	s := &Server{tokenManager: auth.NewTokenManager(apiAccessStore{}, "test")}
-	requested := &spec.APIAccessSpec{Scope: spec.APIAccessCluster, Access: spec.APIAccessRead}
+	requested := &spec.APIAccessSpec{Access: spec.APIAccessRead}
 	request := &nodeapi.AllocationRequest{AllocationID: "alloc-1", Generation: 1, Namespace: "default", JobName: "web", GroupName: "app"}
-	if _, err := s.apiAccessToken(context.Background(), requested, request); err == nil || !strings.Contains(err.Error(), "secrets encryption key") {
+	if _, err := s.apiAccessToken(context.Background(), requested, request, "app"); err == nil || !strings.Contains(err.Error(), "secrets encryption key") {
 		t.Fatalf("api access without secrets key error = %v", err)
 	}
 }
@@ -95,10 +95,12 @@ func TestStartRetryRedeliversWorkloadTokenWithStableExecutionHash(t *testing.T) 
 	s.storage = storage.NewLocalStorage(t.TempDir())
 	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
 	s.nodes[node.ID] = node
-	task := spec.TaskSpec{Name: "app", Image: "app"}
-	group := spec.TaskGroupSpec{Name: "app", APIAccess: &spec.APIAccessSpec{Scope: spec.APIAccessCluster, Access: spec.APIAccessWrite}, Tasks: []spec.TaskSpec{task}}
+	task := spec.TaskSpec{Name: "app", Image: "app", APIAccess: &spec.APIAccessSpec{Access: spec.APIAccessWrite}}
+	sibling := spec.TaskSpec{Name: "sibling", Image: "app", APIAccess: &spec.APIAccessSpec{Access: spec.APIAccessRead}}
+	helper := spec.TaskSpec{Name: "helper", Image: "app"}
+	group := spec.TaskGroupSpec{Name: "app", Tasks: []spec.TaskSpec{task, sibling, helper}}
 	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{group}}), Revision: 1}
-	alloc := &Allocation{ID: "allocation", Namespace: "default", JobName: "web", TaskGroupName: "app", Tasks: []spec.TaskSpec{task}, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhasePlaced}
+	alloc := &Allocation{ID: "allocation", Namespace: "default", JobName: "web", TaskGroupName: "app", Tasks: group.Tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhasePlaced}
 	s.allocations = []*Allocation{alloc}
 	start := &Action{Type: ActionStart, Allocation: alloc}
 	for range 2 {
@@ -121,21 +123,39 @@ func TestStartRetryRedeliversWorkloadTokenWithStableExecutionHash(t *testing.T) 
 		}
 	}
 	first, retry, next := requests[0], requests[1], requests[2]
-	token := first.EnvOverrides["TRELLIS_TOKEN"]
-	if token == "" || retry.EnvOverrides["TRELLIS_TOKEN"] != token {
+	for _, request := range requests {
+		if len(request.EnvOverrides) != 2 || request.EnvOverrides["helper"] != nil {
+			t.Fatal("API environment was injected into a task without api_access")
+		}
+		appToken, siblingToken := request.EnvOverrides["app"]["TRELLIS_TOKEN"], request.EnvOverrides["sibling"]["TRELLIS_TOKEN"]
+		if appToken == "" || siblingToken == "" || appToken == siblingToken {
+			t.Fatal("sibling tasks did not receive distinct workload tokens")
+		}
+	}
+	for name, access := range map[string]auth.AccessLevel{"app": auth.AccessWrite, "sibling": auth.AccessRead} {
+		principal, err := s.tokenManager.ValidateToken(context.Background(), next.EnvOverrides[name]["TRELLIS_TOKEN"])
+		if err != nil || principal == nil || principal.Subject == nil || principal.Subject.Task != name || principal.Access != access {
+			t.Fatalf("task %s credential has incorrect identity or access", name)
+		}
+		if first.EnvOverrides[name]["TRELLIS_TOKEN"] != retry.EnvOverrides[name]["TRELLIS_TOKEN"] {
+			t.Fatalf("task %s credential changed on retry", name)
+		}
+	}
+	token := first.EnvOverrides["app"]["TRELLIS_TOKEN"]
+	if token == "" || retry.EnvOverrides["app"]["TRELLIS_TOKEN"] != token {
 		t.Fatal("start retry did not re-deliver the same workload token")
 	}
 	if first.ExecutionHash == "" || first.ExecutionHash != retry.ExecutionHash {
 		t.Fatalf("execution hash changed across start retries: %q, %q", first.ExecutionHash, retry.ExecutionHash)
 	}
-	if next.EnvOverrides["TRELLIS_TOKEN"] == token {
+	if next.EnvOverrides["app"]["TRELLIS_TOKEN"] == token {
 		t.Fatal("new allocation generation reused the previous workload token")
 	}
 	if principal, _ := s.tokenManager.ValidateToken(context.Background(), token); principal != nil {
 		t.Fatal("previous generation's workload token remains valid")
 	}
 	for key, value := range store {
-		if bytes.Contains(value, []byte(next.EnvOverrides["TRELLIS_TOKEN"])) {
+		if bytes.Contains(value, []byte(next.EnvOverrides["app"]["TRELLIS_TOKEN"])) {
 			t.Fatalf("state key %q contains the plaintext workload token", key)
 		}
 	}
@@ -144,11 +164,11 @@ func TestStartRetryRedeliversWorkloadTokenWithStableExecutionHash(t *testing.T) 
 func TestRevokeStaleWorkloadCredentials(t *testing.T) {
 	s, _ := newAPIAccessServer(t)
 	ctx := context.Background()
-	access := &spec.APIAccessSpec{Scope: spec.APIAccessCluster, Access: spec.APIAccessRead}
-	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", APIAccess: access}}})}
+	access := &spec.APIAccessSpec{Access: spec.APIAccessRead}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Tasks: []spec.TaskSpec{{Name: "app", Image: "app", APIAccess: access}}}}})}
 	issue := func(id string) string {
 		t.Helper()
-		token, err := s.apiAccessToken(ctx, access, &nodeapi.AllocationRequest{AllocationID: id, Generation: 1, Namespace: "default", JobName: "web", GroupName: "app"})
+		token, err := s.apiAccessToken(ctx, access, &nodeapi.AllocationRequest{AllocationID: id, Generation: 1, Namespace: "default", JobName: "web", GroupName: "app"}, "app")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -166,30 +186,30 @@ func TestRevokeStaleWorkloadCredentials(t *testing.T) {
 		t.Fatalf("after pruning an allocation: kept valid=%t pruned valid=%t", valid(kept), valid(pruned))
 	}
 
-	s.jobs[jobKey("default", "web")].Spec.TaskGroups[0].APIAccess = &spec.APIAccessSpec{Scope: spec.APIAccessCluster, Access: spec.APIAccessWrite}
+	s.jobs[jobKey("default", "web")].Spec.TaskGroups[0].Tasks[0].APIAccess = &spec.APIAccessSpec{Access: spec.APIAccessWrite}
 	s.revokeStaleWorkloadCredentials(ctx)
 	if !valid(kept) {
 		t.Fatal("widening api_access revoked a running allocation's workload token")
 	}
 
-	writer, err := s.apiAccessToken(ctx, &spec.APIAccessSpec{Scope: spec.APIAccessCluster, Access: spec.APIAccessWrite}, &nodeapi.AllocationRequest{AllocationID: "kept", Generation: 2, Namespace: "default", JobName: "web", GroupName: "app"})
+	writer, err := s.apiAccessToken(ctx, &spec.APIAccessSpec{Access: spec.APIAccessWrite}, &nodeapi.AllocationRequest{AllocationID: "kept", Generation: 2, Namespace: "default", JobName: "web", GroupName: "app"}, "app")
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.jobs[jobKey("default", "web")].Spec.TaskGroups[0].APIAccess = &spec.APIAccessSpec{Scope: spec.APIAccessCluster, Access: spec.APIAccessRead}
+	s.jobs[jobKey("default", "web")].Spec.TaskGroups[0].Tasks[0].APIAccess = &spec.APIAccessSpec{Access: spec.APIAccessRead}
 	s.revokeStaleWorkloadCredentials(ctx)
 	if valid(writer) {
 		t.Fatal("narrowing api_access left a broader workload token valid")
 	}
 
-	s.jobs[jobKey("default", "web")].Spec.TaskGroups[0].APIAccess = nil
+	s.jobs[jobKey("default", "web")].Spec.TaskGroups[0].Tasks[0].APIAccess = nil
 	kept = issue("kept")
 	s.revokeStaleWorkloadCredentials(ctx)
 	if valid(kept) {
 		t.Fatal("removing api_access left the workload token valid")
 	}
 
-	s.jobs[jobKey("default", "web")].Spec.TaskGroups[0].APIAccess = access
+	s.jobs[jobKey("default", "web")].Spec.TaskGroups[0].Tasks[0].APIAccess = access
 	kept = issue("kept")
 	s.jobs[jobKey("default", "web")].Incarnation = "recreated"
 	s.revokeStaleWorkloadCredentials(ctx)
@@ -206,9 +226,61 @@ func TestRevokeStaleWorkloadCredentials(t *testing.T) {
 	}
 }
 
+func TestTaskAccessChangesOnlyRevokeThatTaskCredential(t *testing.T) {
+	for _, change := range []string{"narrow", "remove access", "delete task"} {
+		t.Run(change, func(t *testing.T) {
+			s, store := newAPIAccessServer(t)
+			s.state = NewStateController(store, "test")
+			now := time.Now()
+			s.now = func() time.Time { return now }
+			s.leaderSince = now
+			node := &Node{ID: uuid.New()}
+			s.nodes = map[uuid.UUID]*Node{node.ID: node}
+			access := &spec.APIAccessSpec{Access: spec.APIAccessWrite}
+			job := &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Tasks: []spec.TaskSpec{{Name: "app", Image: "app", APIAccess: access}, {Name: "sibling", Image: "app", APIAccess: access}}}}})}
+			s.jobs[jobKey("default", "web")] = job
+			s.allocations = []*Allocation{{ID: "active", Generation: 1, Namespace: "default", JobName: "web", TaskGroupName: "app", Phase: lifecycle.PhaseRunning, Node: node}}
+			request := &nodeapi.AllocationRequest{AllocationID: "active", Generation: 1, Namespace: "default", JobName: "web", GroupName: "app"}
+			tokens := map[string]string{}
+			for _, name := range []string{"app", "sibling"} {
+				var err error
+				tokens[name], err = s.apiAccessToken(t.Context(), access, request, name)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			s.tokenManager.SetWorkloadAuthorizer(s.authorizeWorkloadCredential)
+			check := func(name string, want bool) {
+				t.Helper()
+				principal, err := s.tokenManager.ValidateToken(t.Context(), tokens[name])
+				if err != nil || (principal != nil) != want {
+					t.Fatalf("task %s authenticated=%t, want %t, err=%v", name, principal != nil, want, err)
+				}
+			}
+			check("app", true)
+			check("sibling", true)
+			switch change {
+			case "narrow":
+				job.Spec.TaskGroups[0].Tasks[0].APIAccess = &spec.APIAccessSpec{Access: spec.APIAccessRead}
+			case "remove access":
+				job.Spec.TaskGroups[0].Tasks[0].APIAccess = nil
+			case "delete task":
+				job.Spec.TaskGroups[0].Tasks = job.Spec.TaskGroups[0].Tasks[1:]
+			}
+			check("app", false)
+			check("sibling", true)
+			s.revokeStaleWorkloadCredentials(t.Context())
+			// Disable use-time authorization to verify durable revocation too.
+			s.tokenManager.SetWorkloadAuthorizer(nil)
+			check("app", false)
+			check("sibling", true)
+		})
+	}
+}
+
 func TestAPIAccessTokenNone(t *testing.T) {
 	s := &Server{}
-	token, err := s.apiAccessToken(context.Background(), nil, &nodeapi.AllocationRequest{Namespace: "default"})
+	token, err := s.apiAccessToken(context.Background(), nil, &nodeapi.AllocationRequest{Namespace: "default"}, "app")
 	if err != nil {
 		t.Fatalf("disabled api access: %v", err)
 	}
@@ -224,10 +296,10 @@ func TestRetainedHistoryDoesNotRetainWorkloadAuthority(t *testing.T) {
 			s.state = NewStateController(store, "test")
 			node := &Node{ID: uuid.New()}
 			s.nodes = map[uuid.UUID]*Node{node.ID: node}
-			access := &spec.APIAccessSpec{Scope: spec.APIAccessCluster, Access: spec.APIAccessRead}
-			s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", APIAccess: access}}})}
+			access := &spec.APIAccessSpec{Access: spec.APIAccessRead}
+			s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Tasks: []spec.TaskSpec{{Name: "app", Image: "app", APIAccess: access}}}}})}
 			s.allocations = []*Allocation{{ID: "retained", Namespace: "default", JobName: "web", TaskGroupName: "app", Phase: phase, Node: node}}
-			token, err := s.apiAccessToken(context.Background(), access, &nodeapi.AllocationRequest{AllocationID: "retained", Generation: 1, Namespace: "default", JobName: "web", GroupName: "app"})
+			token, err := s.apiAccessToken(context.Background(), access, &nodeapi.AllocationRequest{AllocationID: "retained", Generation: 1, Namespace: "default", JobName: "web", GroupName: "app"}, "app")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -260,10 +332,10 @@ func TestWorkloadAuthenticationPartitionDeadlineWithoutReconciliation(t *testing
 	node := &Node{ID: uuid.New()}
 	s.nodes = map[uuid.UUID]*Node{node.ID: node}
 	s.liveness.register(node.ID, now)
-	access := &spec.APIAccessSpec{Scope: spec.APIAccessCluster, Access: spec.APIAccessRead}
-	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", APIAccess: access}}})}
+	access := &spec.APIAccessSpec{Access: spec.APIAccessRead}
+	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Tasks: []spec.TaskSpec{{Name: "app", Image: "app", APIAccess: access}}}}})}
 	s.allocations = []*Allocation{{ID: "active", Generation: 1, Namespace: "default", JobName: "web", TaskGroupName: "app", Phase: lifecycle.PhaseRunning, Node: node}}
-	token, err := s.apiAccessToken(context.Background(), access, &nodeapi.AllocationRequest{AllocationID: "active", Generation: 1, Namespace: "default", JobName: "web", GroupName: "app"})
+	token, err := s.apiAccessToken(context.Background(), access, &nodeapi.AllocationRequest{AllocationID: "active", Generation: 1, Namespace: "default", JobName: "web", GroupName: "app"}, "app")
 	if err != nil {
 		t.Fatal(err)
 	}

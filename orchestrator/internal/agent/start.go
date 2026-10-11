@@ -261,6 +261,9 @@ func cloneStartRequest(request *nodeapi.AllocationRequest) *nodeapi.AllocationRe
 	clone := *request
 	clone.Tasks = append([]spec.TaskSpec(nil), request.Tasks...)
 	clone.EnvOverrides = maps.Clone(request.EnvOverrides)
+	for name, env := range clone.EnvOverrides {
+		clone.EnvOverrides[name] = maps.Clone(env)
+	}
 	clone.Secrets = append([]nodeapi.DeliveredSecret(nil), request.Secrets...)
 	for i := range clone.Secrets {
 		clone.Secrets[i].Value = bytes.Clone(request.Secrets[i].Value)
@@ -454,9 +457,9 @@ func (a *Agent) runGroupTasks(ctx context.Context, start *groupStart, request *n
 			JobName:       request.JobName,
 			GroupName:     request.GroupName,
 			Spec:          task,
-			Runtime:       request.Runtime,
+			Runtime:       string(task.Runtime),
 			NetworkPlan:   request.NetworkPlan,
-			EnvOverrides:  request.EnvOverrides,
+			EnvOverrides:  request.EnvOverrides[task.Name],
 			Secrets:       request.Secrets,
 			Restart:       request.Restart,
 			Draining:      draining,

@@ -15,8 +15,8 @@ func TestCanonicalizeMakesEveryDefaultExplicit(t *testing.T) {
 		t.Fatalf("canonicalize: %v", err)
 	}
 	group := job.TaskGroups[0]
-	if group.Runtime != DefaultRuntime {
-		t.Fatalf("runtime = %q, want %q", group.Runtime, DefaultRuntime)
+	if task.Runtime != DefaultRuntime {
+		t.Fatalf("runtime = %q, want %q", task.Runtime, DefaultRuntime)
 	}
 	if group.Restart == nil || group.Restart.MaxRestarts != DefaultMaxRestarts || group.Restart.Window != DefaultRestartWindow {
 		t.Fatalf("restart = %#v, want defaults", group.Restart)
@@ -41,7 +41,7 @@ func TestCanonicalizeMakesEveryDefaultExplicit(t *testing.T) {
 
 func TestCanonicalizeKeepsExplicitValuesAndIsIdempotent(t *testing.T) {
 	job := validJob()
-	job.TaskGroups[0].Runtime = RuntimeRunsc
+	job.TaskGroups[0].Tasks[0].Runtime = RuntimeRunsc
 	job.TaskGroups[0].Update = &UpdateSpec{Strategy: UpdateRolling, MaxParallel: 3}
 	job.TaskGroups[0].Restart = &RestartPolicySpec{MaxRestarts: 0, Window: 1}
 	job.TaskGroups[0].Tasks[0].Networking = &TaskNetworkingSpec{Mode: TaskNetworkHost, Ports: []PortSpec{{Port: 80}}}
@@ -49,7 +49,7 @@ func TestCanonicalizeKeepsExplicitValuesAndIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	group := job.TaskGroups[0]
-	if group.Runtime != RuntimeRunsc || group.Update.Strategy != UpdateRolling || group.Update.MaxParallel != 3 || group.Restart.MaxRestarts != 0 || group.Tasks[0].Networking.Mode != TaskNetworkHost {
+	if group.Tasks[0].Runtime != RuntimeRunsc || group.Update.Strategy != UpdateRolling || group.Update.MaxParallel != 3 || group.Restart.MaxRestarts != 0 || group.Tasks[0].Networking.Mode != TaskNetworkHost {
 		t.Fatalf("explicit values changed: %#v", group)
 	}
 	first, _ := json.Marshal(job)
@@ -60,6 +60,31 @@ func TestCanonicalizeKeepsExplicitValuesAndIsIdempotent(t *testing.T) {
 	second, _ := json.Marshal(job)
 	if string(first) != string(second) || TaskGroupContentHash(&job.TaskGroups[0]) != hash {
 		t.Fatalf("canonicalization is not idempotent:\n%s\n%s", first, second)
+	}
+}
+
+func TestMixedTaskRuntimeDefaultsAndHash(t *testing.T) {
+	job := validJob()
+	job.TaskGroups[0].Tasks = append(job.TaskGroups[0].Tasks, TaskSpec{Name: "sandbox", Image: "example/sandbox:1", Runtime: RuntimeRunsc})
+	if err := Canonicalize(job, DefaultLimits()); err != nil {
+		t.Fatal(err)
+	}
+	group := &job.TaskGroups[0]
+	if group.Tasks[0].Runtime != RuntimeRunc || group.Tasks[1].Runtime != RuntimeRunsc {
+		t.Fatalf("mixed task runtimes changed: %+v", group.Tasks)
+	}
+	if err := ValidateCanonical(job); err != nil {
+		t.Fatal(err)
+	}
+	hash := TaskGroupContentHash(group)
+	group.Tasks[1].Runtime = RuntimeRunc
+	if TaskGroupContentHash(group) == hash {
+		t.Fatal("changing sidecar runtime did not change execution hash")
+	}
+	group.Tasks[1].Runtime = RuntimeDefault
+	var issues ValidationErrors
+	if err := ValidateCanonical(job); !errors.As(err, &issues) || len(issues) != 1 || issues[0].Path != "task_groups[api].tasks[sandbox].runtime" {
+		t.Fatalf("missing task runtime canonical issue: %v", err)
 	}
 }
 
@@ -87,7 +112,7 @@ func TestValidateWithLimitsRejectsNonCanonicalJob(t *testing.T) {
 		t.Fatalf("error = %v, want validation errors", err)
 	}
 	want := map[string]bool{
-		"task_groups[api].runtime":                       false,
+		"task_groups[api].tasks[server].runtime":         false,
 		"task_groups[api].restart":                       false,
 		"task_groups[api].update":                        false,
 		"task_groups[api].tasks[server].resources":       false,

@@ -172,14 +172,15 @@ func TestOperationErrorReportsRestartExhaustion(t *testing.T) {
 
 func TestHandleRunRequiresCanonicalTaskGroup(t *testing.T) {
 	canonicalTask := func() spec.TaskSpec {
-		return spec.TaskSpec{Name: "task", Image: "image", Resources: &spec.ResourcesSpec{CPU: 100, Memory: 1 << 20}, Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkNone}}
+		return spec.TaskSpec{Name: "task", Image: "image", Runtime: spec.DefaultRuntime, Resources: &spec.ResourcesSpec{CPU: 100, Memory: 1 << 20}, Networking: &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkNone}}
 	}
 	for _, test := range []struct {
 		name   string
 		mutate func(*nodeapi.AllocationRequest)
 		want   string
 	}{
-		{name: "runtime", mutate: func(r *nodeapi.AllocationRequest) { r.Runtime = "" }, want: "runtime must be explicit"},
+		{name: "runtime", mutate: func(r *nodeapi.AllocationRequest) { r.Tasks[0].Runtime = "" }, want: "runtime"},
+		{name: "invalid runtime", mutate: func(r *nodeapi.AllocationRequest) { r.Tasks[0].Runtime = "invalid" }, want: "runtime"},
 		{name: "restart", mutate: func(r *nodeapi.AllocationRequest) { r.Restart = nil }, want: "restart policy is required"},
 		{name: "networking", mutate: func(r *nodeapi.AllocationRequest) { r.Tasks[0].Networking = nil }, want: "networking.mode"},
 		{name: "resources", mutate: func(r *nodeapi.AllocationRequest) { r.Tasks[0].Resources = nil }, want: "resources"},
@@ -195,7 +196,7 @@ func TestHandleRunRequiresCanonicalTaskGroup(t *testing.T) {
 			NewHandler(&Agent{}).Register(e)
 			allocation := nodeapi.AllocationRequest{
 				AllocationID: "allocation", Generation: 1, JobRevision: 1, Epoch: 1, ExecutionHash: "hash",
-				Runtime: string(spec.DefaultRuntime), Restart: testRestartPolicy(), Tasks: []spec.TaskSpec{canonicalTask()},
+				Restart: testRestartPolicy(), Tasks: []spec.TaskSpec{canonicalTask()},
 			}
 			test.mutate(&allocation)
 			body, err := json.Marshal(allocation)

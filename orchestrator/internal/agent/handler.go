@@ -285,13 +285,13 @@ func operationError(err error) error {
 // validateCanonicalRequest refuses a start whose task group settings were not
 // resolved by job canonicalization. The agent applies no defaults of its own.
 func validateCanonicalRequest(request *nodeapi.AllocationRequest) error {
-	if !spec.Runtime(request.Runtime).Valid() || request.Runtime == string(spec.RuntimeDefault) {
-		return fmt.Errorf("runtime must be explicit")
-	}
 	if request.Restart == nil {
 		return fmt.Errorf("restart policy is required")
 	}
 	for i := range request.Tasks {
+		if !request.Tasks[i].Runtime.Valid() || request.Tasks[i].Runtime == spec.RuntimeDefault {
+			return fmt.Errorf("task %q: runtime must be explicit and valid", request.Tasks[i].Name)
+		}
 		if err := spec.ValidateCanonicalTask(&request.Tasks[i]); err != nil {
 			return fmt.Errorf("task %q: %w", request.Tasks[i].Name, err)
 		}

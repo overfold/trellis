@@ -1047,20 +1047,16 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 		if job == nil || job.Incarnation != alloc.JobIncarnation {
 			return fmt.Errorf("job %s was deleted or recreated before allocation start", alloc.JobName)
 		}
-		var groupRuntime string
-		var groupAPIAccess *spec.APIAccessSpec
 		var groupRestart *spec.RestartPolicySpec
 		var groupUsesWireGuard bool
 		for _, group := range job.Spec.TaskGroups {
 			if group.Name == alloc.TaskGroupName {
-				groupRuntime = string(group.Runtime)
-				groupAPIAccess = group.APIAccess
 				groupRestart = group.Restart
 				groupUsesWireGuard = spec.GroupUsesWireGuard(&group)
 				break
 			}
 		}
-		request := &nodeapi.AllocationRequest{AllocationID: alloc.ID, Generation: alloc.Generation, JobRevision: alloc.JobRevision, Epoch: epoch, Namespace: alloc.Namespace, JobName: alloc.JobName, GroupName: alloc.TaskGroupName, Tasks: alloc.Tasks, Runtime: groupRuntime, Restart: groupRestart, Draining: alloc.Draining, DrainSequence: alloc.DrainSequence, Attempt: attempt}
+		request := &nodeapi.AllocationRequest{AllocationID: alloc.ID, Generation: alloc.Generation, JobRevision: alloc.JobRevision, Epoch: epoch, Namespace: alloc.Namespace, JobName: alloc.JobName, GroupName: alloc.TaskGroupName, Tasks: alloc.Tasks, Restart: groupRestart, Draining: alloc.Draining, DrainSequence: alloc.DrainSequence, Attempt: attempt}
 		if groupUsesWireGuard {
 			plan, err := s.networkPlan(alloc.Namespace, alloc.Node)
 			if err != nil {
@@ -1090,8 +1086,11 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 				request.Secrets = append(request.Secrets, nodeapi.DeliveredSecret{Task: task.Name, Name: ref.Name, Version: version, Target: ref.Target, Env: ref.Env, Path: ref.Path, Mode: ref.Mode, Value: value})
 			}
 		}
-		if groupAPIAccess != nil {
-			token, err := s.apiAccessToken(ctx, groupAPIAccess, request)
+		for _, task := range request.Tasks {
+			if task.APIAccess == nil {
+				continue
+			}
+			token, err := s.apiAccessToken(ctx, task.APIAccess, request, task.Name)
 			if err != nil {
 				return err
 			}
@@ -1099,7 +1098,10 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 			if err != nil {
 				return err
 			}
-			request.EnvOverrides = map[string]string{
+			if request.EnvOverrides == nil {
+				request.EnvOverrides = make(map[string]map[string]string)
+			}
+			request.EnvOverrides[task.Name] = map[string]string{
 				"TRELLIS_TOKEN":     token,
 				"TRELLIS_ADDR":      apiAddr,
 				"TRELLIS_NAMESPACE": request.Namespace,
@@ -1116,7 +1118,7 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 				request.NetworkPlan.APIPort = apiPort
 			}
 			if caCert, _, caErr := s.ClusterCA(); caErr == nil && caCert != "" {
-				request.EnvOverrides["TRELLIS_CA_CERT"] = caCert
+				request.EnvOverrides[task.Name]["TRELLIS_CA_CERT"] = caCert
 			}
 		}
 		hashInput := *request
@@ -1133,14 +1135,16 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 			hashInput.Secrets[i].Value = nil
 		}
 		if hashInput.EnvOverrides != nil {
-			hashInput.EnvOverrides = make(map[string]string, len(request.EnvOverrides))
-			for key, value := range request.EnvOverrides {
-				if key == "TRELLIS_TOKEN" {
-					digest := sha256.Sum256([]byte(value))
-					hashInput.EnvOverrides[key] = hex.EncodeToString(digest[:])
-					continue
+			hashInput.EnvOverrides = make(map[string]map[string]string, len(request.EnvOverrides))
+			for task, env := range request.EnvOverrides {
+				hashInput.EnvOverrides[task] = make(map[string]string, len(env))
+				for key, value := range env {
+					if key == "TRELLIS_TOKEN" {
+						digest := sha256.Sum256([]byte(value))
+						value = hex.EncodeToString(digest[:])
+					}
+					hashInput.EnvOverrides[task][key] = value
 				}
-				hashInput.EnvOverrides[key] = value
 			}
 		}
 		raw, _ := json.Marshal(hashInput)

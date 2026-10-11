@@ -13,10 +13,10 @@ import (
 // cannot be honored as asked.
 var ErrInvalidCredentialRequest = errors.New("invalid credential request")
 
-// CreateCredential mints a scoped operator credential. A positive ttl makes the
+// CreateCredential mints an operator credential. A positive ttl makes the
 // credential expire that long after creation; zero means no expiry. The HTTP
 // layer restricts this operation to the administrator credential.
-func (s *Server) CreateCredential(ctx context.Context, scope auth.AccessScope, access auth.AccessLevel, ttl time.Duration) (string, auth.OperatorCredential, error) {
+func (s *Server) CreateCredential(ctx context.Context, access auth.AccessLevel, ttl time.Duration) (string, auth.OperatorCredential, error) {
 	if s.tokenManager == nil {
 		return "", auth.OperatorCredential{}, fmt.Errorf("credential management is unavailable")
 	}
@@ -25,7 +25,6 @@ func (s *Server) CreateCredential(ctx context.Context, scope auth.AccessScope, a
 	}
 	principal := auth.Principal{
 		Kind:      auth.CredentialOperator,
-		Scope:     scope,
 		Access:    access,
 		CreatedAt: s.now().UTC(),
 	}
