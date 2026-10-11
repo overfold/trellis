@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -19,6 +20,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -614,6 +617,13 @@ func (h *harness) waitExit(i int, timeout time.Duration) error {
 }
 
 func addr(p int) string { return fmt.Sprintf("127.0.0.1:%d", p) }
+
+// Keep node listeners below Linux's default ephemeral range (32768–60999):
+// startup and restarts release reservations while outbound connections are
+// being made. Never reuse a port within this test process, including across
+// parallel harnesses and stopped nodes that will restart.
+var nextPort atomic.Uint32
+
 func reservePorts(t *testing.T, count int) []net.Listener {
 	t.Helper()
 	listeners := make([]net.Listener, 0, count)
@@ -622,8 +632,15 @@ func reservePorts(t *testing.T, count int) []net.Listener {
 			_ = listener.Close()
 		}
 	})
-	for range count {
-		listener, err := net.Listen("tcp", "127.0.0.1:0")
+	for len(listeners) < count {
+		port := 10000 + int(nextPort.Add(1))
+		if port >= 32768 {
+			t.Fatal("integration listener port range exhausted")
+		}
+		listener, err := net.Listen("tcp", addr(port))
+		if errors.Is(err, syscall.EADDRINUSE) {
+			continue
+		}
 		if err != nil {
 			t.Fatal(err)
 		}
