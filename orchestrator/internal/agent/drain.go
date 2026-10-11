@@ -31,7 +31,12 @@ func (a *Agent) startDrainState(request *nodeapi.AllocationRequest) (bool, uint6
 // DrainGroup suppresses automatic restarts for one allocation generation until
 // the control plane delivers the normal stop operation.
 func (a *Agent) DrainGroup(ctx context.Context, request *nodeapi.DrainAllocationRequest) error {
-	unlock := a.lockAllocationOperation(request.AllocationID)
+	waitCtx, cancel := context.WithTimeout(ctx, allocationControlWait)
+	defer cancel()
+	unlock, err := a.waitAllocationOperation(waitCtx, request.AllocationID)
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	if err := a.AcceptEpoch(request.Epoch); err != nil {
 		return err
@@ -99,8 +104,13 @@ func (a *Agent) drainStartLocked(allocationID string, generation uint64, drainin
 }
 
 // ResumeGroup cancels a drain for a retained allocation generation.
-func (a *Agent) ResumeGroup(request *nodeapi.DrainAllocationRequest) error {
-	unlock := a.lockAllocationOperation(request.AllocationID)
+func (a *Agent) ResumeGroup(ctx context.Context, request *nodeapi.DrainAllocationRequest) error {
+	ctx, cancel := context.WithTimeout(ctx, allocationControlWait)
+	defer cancel()
+	unlock, err := a.waitAllocationOperation(ctx, request.AllocationID)
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	if err := a.AcceptEpoch(request.Epoch); err != nil {
 		return err

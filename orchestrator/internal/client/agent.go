@@ -38,11 +38,16 @@ const agentOperationTimeout = 30 * time.Second
 // AgentOperationError reports a rejected agent operation.
 type AgentOperationError struct {
 	Response nodeapi.OperationResponse
+	cause    error
 }
 
 func (e *AgentOperationError) Error() string {
 	return fmt.Sprintf("agent operation %s: %s", e.Response.Code, e.Response.Message)
 }
+
+// Unwrap preserves transport status for callers deciding whether a refusal
+// consumed an execution attempt, without changing the operation wire response.
+func (e *AgentOperationError) Unwrap() error { return e.cause }
 
 func decodeOperationError(err error) error {
 	var httpErr *transport.HTTPError
@@ -51,7 +56,7 @@ func decodeOperationError(err error) error {
 	}
 	var response nodeapi.OperationResponse
 	if json.Unmarshal(httpErr.Body, &response) == nil && response.Code != "" {
-		return &AgentOperationError{Response: response}
+		return &AgentOperationError{Response: response, cause: err}
 	}
 	var wrapped struct {
 		Message json.RawMessage `json:"message"`
@@ -59,12 +64,12 @@ func decodeOperationError(err error) error {
 	if json.Unmarshal(httpErr.Body, &wrapped) == nil && len(wrapped.Message) > 0 {
 		var inner nodeapi.OperationResponse
 		if json.Unmarshal(wrapped.Message, &inner) == nil && inner.Code != "" {
-			return &AgentOperationError{Response: inner}
+			return &AgentOperationError{Response: inner, cause: err}
 		}
 		var str string
 		if json.Unmarshal(wrapped.Message, &str) == nil {
 			if json.Unmarshal([]byte(str), &inner) == nil && inner.Code != "" {
-				return &AgentOperationError{Response: inner}
+				return &AgentOperationError{Response: inner, cause: err}
 			}
 		}
 	}

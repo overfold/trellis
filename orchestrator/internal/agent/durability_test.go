@@ -261,7 +261,7 @@ func TestAgentMutationsRequirePositiveFences(t *testing.T) {
 			return agent.DrainGroup(context.Background(), &nodeapi.DrainAllocationRequest{AllocationID: "alloc", Generation: 1})
 		}},
 		{name: "resume epoch", run: func() error {
-			return agent.ResumeGroup(&nodeapi.DrainAllocationRequest{AllocationID: "alloc", Generation: 1})
+			return agent.ResumeGroup(context.Background(), &nodeapi.DrainAllocationRequest{AllocationID: "alloc", Generation: 1})
 		}},
 		{name: "network plan epoch", run: func() error {
 			return agent.UpdateNetworkPlan(context.Background(), &nodeapi.NetworkPlanRequest{Namespace: "default"})

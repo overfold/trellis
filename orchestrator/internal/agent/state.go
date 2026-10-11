@@ -223,9 +223,15 @@ func (a *Agent) OnReconciledStatus(allocID, status string) {
 			a.mu.Unlock()
 			return
 		}
-		if status == "healthy" || status == "unhealthy" {
+		switch status {
+		case "stopped":
+			// Keep the committed lifecycle recoverable, but remove stale
+			// health and cancel probes of the execution known to have stopped.
+			alloc.Health = "unhealthy"
+			a.health.DeregisterTask(allocID)
+		case "healthy", "unhealthy":
 			alloc.Health = status
-		} else {
+		default:
 			alloc.Status = status
 			if status == "failed" {
 				alloc.Health = "unhealthy"

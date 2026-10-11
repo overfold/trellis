@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/overfold/trellis/orchestrator/internal/client"
@@ -67,6 +68,8 @@ type Agent struct {
 	// starts holds accepted allocation starts running in the background, and
 	// failed ones until the control plane retries; guarded by mu.
 	starts map[string]*groupStart
+	// activeStarts includes cancelled starts until their runtime work returns.
+	activeStarts int
 	// stoppedGenerations fences starts independently of task and log retention.
 	stoppedGenerations map[string]uint64
 	// lifetime bounds background starts; Init sets it.
@@ -98,33 +101,57 @@ type Agent struct {
 }
 
 type allocationOperation struct {
-	mu   sync.Mutex
+	slot chan struct{}
 	refs int
 }
 
 func (a *Agent) lockAllocationOperation(allocationID string) func() {
+	unlock, _ := a.waitAllocationOperation(context.Background(), allocationID)
+	return unlock
+}
+
+// waitAllocationOperation retains exclusion until the owner actually returns;
+// a cancelled waiter never gains permission to clean up the owner's resources.
+func (a *Agent) waitAllocationOperation(ctx context.Context, allocationID string) (func(), error) {
 	a.operationMu.Lock()
 	if a.operations == nil {
 		a.operations = make(map[string]*allocationOperation)
 	}
 	operation := a.operations[allocationID]
 	if operation == nil {
-		operation = &allocationOperation{}
+		operation = &allocationOperation{slot: make(chan struct{}, 1)}
 		a.operations[allocationID] = operation
 	}
 	operation.refs++
 	a.operationMu.Unlock()
-	operation.mu.Lock()
-	return func() {
+	release := func() {
 		a.operationMu.Lock()
-		operation.mu.Unlock()
 		operation.refs--
 		if operation.refs == 0 {
 			delete(a.operations, allocationID)
 		}
 		a.operationMu.Unlock()
 	}
+	if err := ctx.Err(); err != nil {
+		release()
+		return nil, err
+	}
+	select {
+	case operation.slot <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			<-operation.slot
+			release()
+			return nil, err
+		}
+		return func() { <-operation.slot; release() }, nil
+	case <-ctx.Done():
+		release()
+		return nil, ctx.Err()
+	}
 }
+
+// Allocation control admission has a finite wait even for deadline-free callers.
+const allocationControlWait = 10 * time.Second
 
 var (
 	// ErrAllocationNotFound indicates that an allocation does not exist.
@@ -152,6 +179,8 @@ var (
 	// ErrRestartBudgetExhausted indicates that an allocation generation failed
 	// terminally after exhausting its restart policy.
 	ErrRestartBudgetExhausted = errors.New("restart budget exhausted")
+	// ErrStartLimit is retriable; no background work was admitted.
+	ErrStartLimit = errors.New("background allocation start limit reached; retry")
 )
 
 // ConfigureDurability enables persistent agent state.

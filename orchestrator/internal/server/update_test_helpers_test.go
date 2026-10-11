@@ -47,7 +47,8 @@ func newTestAgent() *testAgent {
 		failResume := agent.failResume
 		agent.mu.Unlock()
 		if failRun && r.Method == http.MethodPost && r.URL.Path == "/v1/allocations" {
-			http.Error(w, "run unavailable", http.StatusServiceUnavailable)
+			// A failed execution request, not retriable admission overload.
+			http.Error(w, "run failed", http.StatusInternalServerError)
 			return
 		}
 		if failStop && r.Method == http.MethodDelete && !strings.HasSuffix(r.URL.Path, "/drain") {

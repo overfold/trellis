@@ -176,7 +176,7 @@ func TestLateRuntimeCompletionRemainsFenced(t *testing.T) {
 				if !errors.Is(<-done, context.Canceled) {
 					t.Fatal("late success escaped cancellation")
 				}
-				if len(subscriber.statuses) != 0 {
+				if restart && (len(subscriber.statuses) != 1 || subscriber.statuses[0] != "stopped") || !restart && len(subscriber.statuses) != 0 {
 					t.Fatalf("late statuses = %v", subscriber.statuses)
 				}
 				if rt.calls.Load() != 1 {

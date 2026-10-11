@@ -36,6 +36,17 @@ The client verifies that the agent certificate identifies the scheduled node. Th
 
 The agent acknowledges a fenced start before pulling images and creating tasks in the background. The request's `attempt` is excluded from the execution hash and is returned in background-start failure observations. Exhausted restart budgets reject same-generation starts with HTTP `409` and operation code `restart_budget_exhausted`.
 
+Each node admits at most eight active background starts, including cancellation
+and rollback until they actually return. Excess distinct starts receive HTTP
+`503` with the existing `operation_failed` code; no work or start-failure
+observation is created for that refusal. The leader retries through ordinary
+reconciliation without consuming an execution attempt for `503`; the internal
+client preserves HTTP status alongside decoded operation errors. Same-execution
+in-progress and committed retries do not consume
+another slot. Stop, drain, and resume do not use start slots. Allocation-control
+lock admission respects request cancellation and waits at most ten seconds;
+failure to obtain exclusion is retryable `503`, not proof that execution is gone.
+
 Drain/resume requests carry a persisted intent sequence. The leader saves intent before delivery; a failed undrain save contacts no agent, while a delivery failure after a successful save is retried by reconciliation. Starts carry `draining` and `drain_sequence` outside the execution hash. The agent uses the higher sequence of its local intent and the request (the request wins ties), including for tasks already running, so delayed drains cannot override resumes and start retries cannot restart drained tasks. See [reconciliation](control-plane.md#reconciliation) and [agent convergence](node-internals.md#agent-convergence).
 
 Network-plan requests serialize epoch admission and application through a dedicated, caller-cancellable gate. Validation snapshots active attachments under the agent lock, but external network commands run without that broad lock, so unrelated start admission can proceed. An already admitted plan finishes before another plan applies; accepting a newer epoch elsewhere does not roll back when that older plan completes, and queued stale plans are rejected before application. Network command cancellation and partial-application retries remain the network manager's responsibility.

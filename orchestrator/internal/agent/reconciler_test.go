@@ -209,7 +209,7 @@ func TestResumeGroupRestoresAutomaticRestart(t *testing.T) {
 	if err := agent.DrainGroup(context.Background(), &nodeapi.DrainAllocationRequest{AllocationID: "alloc", Generation: 2, Epoch: 1, Sequence: 1}); err != nil {
 		t.Fatal(err)
 	}
-	if err := agent.ResumeGroup(&nodeapi.DrainAllocationRequest{AllocationID: "alloc", Generation: 2, Epoch: 1, Sequence: 2}); err != nil {
+	if err := agent.ResumeGroup(context.Background(), &nodeapi.DrainAllocationRequest{AllocationID: "alloc", Generation: 2, Epoch: 1, Sequence: 2}); err != nil {
 		t.Fatal(err)
 	}
 	if agent.allocations["task"].Draining {
@@ -233,7 +233,7 @@ func TestLateDrainDoesNotSuppressRestartsAfterResume(t *testing.T) {
 	}
 	drain := &nodeapi.DrainAllocationRequest{AllocationID: "alloc", Generation: 2, Epoch: 4, Sequence: 1}
 	resume := &nodeapi.DrainAllocationRequest{AllocationID: "alloc", Generation: 2, Epoch: 4, Sequence: 2}
-	if err := agent.ResumeGroup(resume); err != nil {
+	if err := agent.ResumeGroup(context.Background(), resume); err != nil {
 		t.Fatal(err)
 	}
 	for _, sequence := range []uint64{1, 2} {
@@ -456,7 +456,7 @@ func TestAllocationReconcilerTrackRecoveredExhaustedDoesNotRestart(t *testing.T)
 	if rt.restartCount != 0 {
 		t.Fatalf("restart count = %d, want 0 for exhausted allocation", rt.restartCount)
 	}
-	if len(subscriber.statuses) != 1 || subscriber.statuses[0] != "failed" {
+	if len(subscriber.statuses) != 2 || subscriber.statuses[0] != "stopped" || subscriber.statuses[1] != "failed" {
 		t.Fatalf("statuses = %v, want exhaustion confirmed exactly once", subscriber.statuses)
 	}
 }
@@ -482,7 +482,7 @@ func TestAllocationReconcilerRecoveredExhaustedRunningFailsWhenItStops(t *testin
 	if rt.restartCount != 0 {
 		t.Fatalf("restart count = %d, want 0 for exhausted allocation", rt.restartCount)
 	}
-	if len(subscriber.statuses) != 1 || subscriber.statuses[0] != "failed" {
+	if len(subscriber.statuses) != 2 || subscriber.statuses[0] != "stopped" || subscriber.statuses[1] != "failed" {
 		t.Fatalf("statuses = %v, want one failed observation after the container stops", subscriber.statuses)
 	}
 }
@@ -503,7 +503,7 @@ func TestAllocationReconcilerRetriesUnrecordedExhaustion(t *testing.T) {
 	if rt.restartCount != 0 {
 		t.Fatalf("restart count = %d, want 0", rt.restartCount)
 	}
-	if len(subscriber.statuses) != 1 || subscriber.statuses[0] != "failed" {
+	if len(subscriber.statuses) != 3 || subscriber.statuses[0] != "stopped" || subscriber.statuses[1] != "stopped" || subscriber.statuses[2] != "failed" {
 		t.Fatalf("statuses = %v, want exhaustion recorded on retry", subscriber.statuses)
 	}
 }
@@ -522,7 +522,7 @@ func TestResumeRestartsAfterExhaustedStoppingTrackDoesNotRestart(t *testing.T) {
 	if rt.restartCount != 0 {
 		t.Fatalf("restart count = %d, want 0 after resuming an exhausted allocation", rt.restartCount)
 	}
-	if len(subscriber.statuses) != 1 || subscriber.statuses[0] != "failed" {
+	if len(subscriber.statuses) != 2 || subscriber.statuses[0] != "stopped" || subscriber.statuses[1] != "failed" {
 		t.Fatalf("statuses = %v, want one failed observation", subscriber.statuses)
 	}
 }

@@ -20,11 +20,33 @@ The server submits one allocation containing all tasks in a group. The agent val
 
 Failed starts retain a stopping allocation record when cleanup fails, so a subsequent start, stop, or agent recovery can finish cleanup. Port claims remain reserved until cleanup and record deletion succeed. When container creation has an ambiguous result, cleanup first verifies the container's execution labels or confirms that its ID is absent; absence from the cluster-filtered container listing alone is not enough. Unverified ownership preserves the allocation and its resources rather than risking cleanup of another execution. Recovery proves ownership for every recorded container, regardless of its durable verification flag: its runtime labels must match the record's cluster, allocation ID, generation, job revision, execution hash, namespace, job, group, and task before the agent health-checks, execs, restarts, stops, or removes it. A match clears any unverified flag and is saved; a container whose state stays unreadable, or whose labels differ, is marked unverified and retained as stopping with all of its resources.
 
+Background start admission is node-wide: eight starts may pull/unpack and launch
+at once, with no local queue. In-progress and committed duplicate executions
+remain idempotent at capacity; other starts receive retryable `503`. Slots remain
+held until runtime work and rollback return, including cancelled starts. Stop,
+drain, and resume use no start slots. A stop cancels a matching start before
+waiting for allocation exclusion; control admission waits respect cancellation
+and are capped at ten seconds. Each detached failed-start inspection and the
+whole rollback receive a thirty-second budget after the thirty-minute start
+budget. Timeouts preserve uncertain ownership and runtime dependencies, never
+prove absence. A runtime that ignores cancellation still owns the allocation
+lock and start slot until it returns; control waiters time out rather than race
+that work. Filesystem operations must also return for rollback to complete.
+
 Agent recovery never treats an unreadable container as absent. The runtime listing reports a recorded container whose metadata or task state cannot be read with unknown status. Its allocation is kept in memory with its last recorded phase and adopted port claims, local restarts are suppressed, and heartbeats report it with unknown health until it is observed; its durable record is left unchanged. Only a successful listing that omits a recorded container confirms it is missing. The agent retries with backoff until each such allocation is observed, then applies normal recovery. The same applies to every record after a failed initial listing; the orphaned secret and network sweep waits until a listing completes. Because the control plane rejects stops for a superseded generation, the agent retries stopping any retained stopping record with verified ownership and a newer known generation until the stop succeeds, including after a restart. A start retry inspects an unobserved allocation's container itself and is refused while its state stays unreadable. A stop issued meanwhile goes to the runtime and returns its error rather than reporting success.
 
 Orphan network cleanup reserves each task-record ID under a short agent lock, checks both accepted starts and in-memory ownership, and rechecks durable record filenames after reservation. Storage and external teardown run without the broad agent lock. Each detach has a 30-second wait budget and stops waiting on agent cancellation. If a manager ignores cancellation, its reservation remains until the call actually returns: starts reusing that task ID receive a retryable error, duplicate sweeps do not launch another detach, and unrelated agent writers, status persistence, start acceptance, stop/drain, and shutdown remain available. This does not remove the network manager's own serialization of network operations; a stuck manager may still delay other network I/O. Failed cleanup retains its journal for a later sweep or start cleanup retry.
 
 Local restart accounting is persisted before the runtime restart begins. If that write fails, the agent leaves the stopped container and its budget unchanged and retries reconciliation later; therefore a crash cannot repeat a restart against an older durable counter. Explicit stop and drain operations retain their existing restart-suppression behavior and do not wait for restart-account persistence to recover.
+
+Periodic inspection of a confirmed stopped or created execution immediately
+publishes unhealthy health and cancels its old probes, even if accounting or
+restart subsequently fails. This observation remains non-healthy in heartbeats
+and is excluded from discovery even when its persistence fails; it does not make
+the recoverable lifecycle terminal. A successful restart, or a fresh inspection
+confirming running execution after an ambiguous restart response, restores
+no-probe health or starts fresh probes with unknown health. Transient inspection
+errors do not prove a stopped execution and preserve the previous observation.
 
 Recovery of an exited committed task (a durable `running` record) keeps it on that budgeted restart path, with unhealthy health until restarted. It is not recreated by a start retry as if its initial start were incomplete. Incomplete `starting` records still wait for the control plane's start retry. A confirmed runtime `NotFound` during periodic inspection records `failed`/`unhealthy` and cancels probes; transient inspection errors do not prove absence and preserve the observation.
 

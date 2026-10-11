@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"maps"
 	"net"
+	"net/http"
 	"slices"
 	"sort"
 	"strconv"
@@ -23,6 +24,7 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/network"
 	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/transport"
 )
 
 // ActionType identifies a reconciliation operation.
@@ -1182,6 +1184,12 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 				}); persistErr != nil {
 					return fmt.Errorf("%w (persist allocation failure: %w)", err, persistErr)
 				}
+				return err
+			}
+			var httpErr *transport.HTTPError
+			if errors.As(err, &httpErr) && httpErr.Status == http.StatusServiceUnavailable {
+				// Admission/control waits did not fail an execution attempt.
+				// Leave the same attempt eligible for ordinary reconciliation.
 				return err
 			}
 			if persistErr := s.persistAllocationUpdate(context.WithoutCancel(ctx), alloc, func(next *Allocation) error {

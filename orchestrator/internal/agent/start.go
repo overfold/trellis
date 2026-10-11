@@ -60,6 +60,10 @@ func (s *groupStart) mergeDrain(draining bool, sequence uint64) {
 // is reported as a failed attempt instead of leaving the allocation starting.
 const maxStartDuration = 30 * time.Minute
 
+// Bound node-wide pull/unpack and launch work, not just HTTP dispatch. There
+// is no waiting queue: excess distinct starts remain the caller's responsibility.
+const maxBackgroundStarts = 8
+
 // errStartSuperseded ends a start whose control epoch was superseded before it
 // created any task; the new leader's retry starts it again.
 var errStartSuperseded = errors.New("allocation start superseded by a newer control epoch")
@@ -78,6 +82,11 @@ func (a *Agent) StartGroup(ctx context.Context, request *nodeapi.AllocationReque
 }
 
 func (a *Agent) acceptStart(ctx context.Context, request *nodeapi.AllocationRequest) (*groupStart, error) {
+	ctx, cancel := context.WithTimeout(ctx, allocationControlWait)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if !a.ready() {
 		return nil, fmt.Errorf("agent not ready: workload DNS listeners unavailable")
 	}
@@ -87,8 +96,11 @@ func (a *Agent) acceptStart(ctx context.Context, request *nodeapi.AllocationRequ
 		return start, err
 	}
 	for {
-		unlock := a.lockAllocationOperation(request.AllocationID)
-		start, wait, err := a.acceptStartLocked(request)
+		unlock, err := a.waitAllocationOperation(ctx, request.AllocationID)
+		if err != nil {
+			return nil, err
+		}
+		start, wait, err := a.acceptStartLocked(ctx, request)
 		unlock()
 		if wait == nil {
 			return start, err
@@ -111,7 +123,13 @@ func (a *Agent) acceptRunningStart(request *nodeapi.AllocationRequest) (*groupSt
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if request.Epoch < a.epoch {
+		return nil, ErrStaleEpoch
+	}
 	current := a.starts[request.AllocationID]
+	if current != nil && current.generation < request.Generation && !current.finished() {
+		current.cancel()
+	}
 	if current == nil || current.finished() || current.generation != request.Generation || current.jobRevision != request.JobRevision || current.executionHash != request.ExecutionHash {
 		return nil, nil
 	}
@@ -131,12 +149,39 @@ func (s *groupStart) mergeRetry(request *nodeapi.AllocationRequest) {
 // acceptStartLocked registers a start, or returns the channel of an older
 // generation's start that must finish first. The caller holds the allocation
 // operation lock.
-func (a *Agent) acceptStartLocked(request *nodeapi.AllocationRequest) (*groupStart, <-chan struct{}, error) {
+func (a *Agent) acceptStartLocked(ctx context.Context, request *nodeapi.AllocationRequest) (*groupStart, <-chan struct{}, error) {
 	if err := a.AcceptEpoch(request.Epoch); err != nil {
 		return nil, nil, err
 	}
 	if err := a.fenceStart(request); err != nil {
 		return nil, nil, err
+	}
+	// An already committed execution needs no background slot. Still apply
+	// delivered drain intent under the operation lock, as a normal retry does.
+	a.mu.RLock()
+	running := a.starts[request.AllocationID] == nil && len(request.Tasks) > 0
+	for _, task := range request.Tasks {
+		record := a.allocations[taskRecordID(request.AllocationID, request.Generation, task.Name)]
+		running = running && record != nil && record.Status == "running" && !record.unobserved
+	}
+	for _, record := range a.allocations {
+		if record.AllocationID == request.AllocationID && record.Generation < request.Generation {
+			running = false
+		}
+	}
+	a.mu.RUnlock()
+	if running {
+		if err := a.removeRetainedLogs(request.AllocationID, request.Generation-1); err != nil {
+			return nil, nil, fmt.Errorf("remove logs of superseded generations: %w", err)
+		}
+		draining, sequence := a.startDrainState(request)
+		if draining {
+			return nil, nil, a.applyDrain(ctx, request.AllocationID, request.Generation, sequence)
+		}
+		if sequence > 0 {
+			return nil, nil, a.applyResume(request.AllocationID, request.Generation, sequence, true)
+		}
+		return nil, nil, nil
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -171,6 +216,16 @@ func (a *Agent) acceptStartLocked(request *nodeapi.AllocationRequest) (*groupSta
 			return nil, nil, fmt.Errorf("orphaned network cleanup for task %s is still in progress; retry the start", id)
 		}
 	}
+	if a.activeStarts >= maxBackgroundStarts {
+		return nil, nil, ErrStartLimit
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	if err := a.lifetimeContext().Err(); err != nil {
+		return nil, nil, err
+	}
+	a.activeStarts++
 	ctx, cancel := context.WithTimeout(a.lifetimeContext(), maxStartDuration)
 	start := &groupStart{
 		namespace:     request.Namespace,
@@ -225,11 +280,12 @@ func (a *Agent) runStart(ctx context.Context, start *groupStart, request *nodeap
 	}()
 	err := a.pullImages(ctx, request)
 	if err == nil {
-		unlock := a.lockAllocationOperation(request.AllocationID)
-		if err = ctx.Err(); err == nil {
+		var unlock func()
+		unlock, err = a.waitAllocationOperation(ctx, request.AllocationID)
+		if err == nil {
 			err = a.runGroupTasks(ctx, start, request)
+			unlock()
 		}
-		unlock()
 	}
 	if err != nil {
 		a.log.Error("start allocation failed", "allocation", request.AllocationID, "generation", request.Generation, "error", err)
@@ -248,6 +304,7 @@ func (a *Agent) finishStart(ctx context.Context, allocationID string, start *gro
 	if a.starts[allocationID] == start && !start.failed {
 		delete(a.starts, allocationID)
 	}
+	a.activeStarts--
 	close(start.done)
 	a.forgetIdleNetworkPlanLocked(start.namespace)
 	a.mu.Unlock()
@@ -311,30 +368,33 @@ func (a *Agent) fenceStart(request *nodeapi.AllocationRequest) error {
 	return nil
 }
 
-// cancelStartLocked cancels a start of the generation or an older one before
+// cancelStartForStop cancels a start of the generation or an older one before
 // a stop. It returns the channel to wait on while the start is still running,
-// and rejects the stop when a newer generation is starting. The caller holds
-// the allocation operation lock.
-func (a *Agent) cancelStartLocked(allocationID string, generation uint64) (<-chan struct{}, error) {
+// and rejects the stop when a newer generation is starting. Cancellation is
+// fenced under mu and does not need the allocation operation lock.
+func (a *Agent) cancelStartForStop(request *nodeapi.StopAllocationRequest) (<-chan struct{}, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	start := a.starts[allocationID]
+	if request.Epoch < a.epoch {
+		return nil, ErrStaleEpoch
+	}
+	start := a.starts[request.AllocationID]
 	if start == nil {
 		return nil, nil
 	}
-	if start.generation > generation {
+	if start.generation > request.Generation {
 		// A failed newer start never stopped this generation; let the
 		// control plane stop it while the failure stays reported.
 		if start.finished() {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("%w: current %d, requested %d", ErrStaleGeneration, start.generation, generation)
+		return nil, fmt.Errorf("%w: current %d, requested %d", ErrStaleGeneration, start.generation, request.Generation)
 	}
 	if !start.finished() {
 		start.cancel()
 		return start.done, nil
 	}
-	delete(a.starts, allocationID)
+	delete(a.starts, request.AllocationID)
 	return nil, nil
 }
 

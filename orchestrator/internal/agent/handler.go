@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -89,7 +90,7 @@ func (h *Handler) handleResume(c *echo.Context) error {
 	if request.Epoch == 0 {
 		return echo.NewHTTPError(http.StatusBadRequest, ErrInvalidEpoch.Error())
 	}
-	if err := h.agent.ResumeGroup(&request); err != nil {
+	if err := h.agent.ResumeGroup(c.Request().Context(), &request); err != nil {
 		return operationError(err)
 	}
 	return c.JSON(http.StatusOK, nodeapi.OperationResponse{Code: nodeapi.OperationOK, Generation: request.Generation, Epoch: request.Epoch})
@@ -274,6 +275,8 @@ func operationError(err error) error {
 		status = http.StatusBadRequest
 	case errors.Is(err, ErrRestartBudgetExhausted):
 		status, code = http.StatusConflict, nodeapi.OperationRestartExhausted
+	case errors.Is(err, ErrStartLimit), errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		status = http.StatusServiceUnavailable
 	}
 	raw, _ := json.Marshal(nodeapi.OperationResponse{Code: code, Message: err.Error()})
 	return echo.NewHTTPError(status, string(raw))

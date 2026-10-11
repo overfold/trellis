@@ -16,16 +16,33 @@ func (a *Agent) StopGroup(ctx context.Context, request *nodeapi.StopAllocationRe
 	if request.Generation == 0 {
 		return ErrInvalidGeneration
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := a.AcceptEpoch(request.Epoch); err != nil {
+		return err
+	}
+	// Cancel before waiting for the allocation lock, which the start owns
+	// during launch. Cleanup still owns that lock until it actually returns.
+	if _, err := a.cancelStartForStop(request); err != nil {
+		return err
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, allocationControlWait)
+	defer cancel()
 	var unlock func()
 	for {
-		unlock = a.lockAllocationOperation(request.AllocationID)
+		var err error
+		unlock, err = a.waitAllocationOperation(waitCtx, request.AllocationID)
+		if err != nil {
+			return err
+		}
 		if err := a.AcceptEpoch(request.Epoch); err != nil {
 			unlock()
 			return err
 		}
 		// A start in the background is cancelled; its own cleanup runs
 		// before the stop handles whatever records it left.
-		wait, err := a.cancelStartLocked(request.AllocationID, request.Generation)
+		wait, err := a.cancelStartForStop(request)
 		if err != nil {
 			unlock()
 			return err
@@ -36,8 +53,8 @@ func (a *Agent) StopGroup(ctx context.Context, request *nodeapi.StopAllocationRe
 		unlock()
 		select {
 		case <-wait:
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-waitCtx.Done():
+			return waitCtx.Err()
 		}
 	}
 	defer unlock()

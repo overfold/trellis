@@ -226,6 +226,7 @@ func TestRestartPersistenceFailureLeavesRuntimeAndDurableBudgetUnchanged(t *test
 	record := recoveryTestAllocation(0)
 	record.Ports = nil
 	record.Restart = policy
+	record.Status, record.Health = "running", "healthy"
 	agent.allocations[record.ID] = record
 	if err := agent.persistAllocation(record); err != nil {
 		t.Fatal(err)
@@ -247,6 +248,10 @@ func TestRestartPersistenceFailureLeavesRuntimeAndDurableBudgetUnchanged(t *test
 	if rt.restartCount != 0 || record.RestartAttempts != 0 {
 		t.Fatalf("restart count = %d, in-memory attempts = %d; want neither changed", rt.restartCount, record.RestartAttempts)
 	}
+	statuses := statusesFor(agent, record.AllocationID)
+	if len(statuses) != 1 || statuses[0].Phase != lifecycle.PhaseRunning || statuses[0].Health != lifecycle.HealthUnhealthy {
+		t.Fatalf("stopped task heartbeat during storage failure = %+v", statuses)
+	}
 
 	if err := os.Remove(recordDir); err != nil {
 		t.Fatal(err)
@@ -266,6 +271,9 @@ func TestRestartPersistenceFailureLeavesRuntimeAndDurableBudgetUnchanged(t *test
 	}
 	if rt.restartCount != 1 || record.RestartAttempts != 1 {
 		t.Fatalf("restart count = %d, attempts = %d; want one recorded restart", rt.restartCount, record.RestartAttempts)
+	}
+	if statusesFor(agent, record.AllocationID)[0].Health != lifecycle.HealthHealthy {
+		t.Fatal("storage recovery did not restore no-probe health after successful restart")
 	}
 }
 

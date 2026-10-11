@@ -44,13 +44,16 @@ type allocationReconcileState struct {
 	cancel        context.CancelFunc // guarded by the reconciler mutex
 	stopping      bool
 	healthManaged bool
-	restarting    bool
-	exhausted     bool // the restart budget is terminally used up
-	failed        bool // exhaustion has been recorded for a stopped container
-	attempts      int
-	window        time.Time
-	maxRestarts   int
-	restartWindow time.Duration
+	// executionStopped keeps health suppressed until execution is observed or
+	// successfully restarted; guarded by mu, like the restart state.
+	executionStopped bool
+	restarting       bool
+	exhausted        bool // the restart budget is terminally used up
+	failed           bool // exhaustion has been recorded for a stopped container
+	attempts         int
+	window           time.Time
+	maxRestarts      int
+	restartWindow    time.Duration
 }
 
 // NewAllocationReconciler creates an allocation reconciliation controller.
@@ -305,12 +308,37 @@ func (r *AllocationReconciler) reconcile(ctx context.Context, allocID string, st
 		return err
 	}
 
+	if containerState.Status == runtime.StatusRunning {
+		r.mu.Lock()
+		active := r.states[allocID] == state && !state.stopping && !state.failed
+		recovered, healthManaged := active && state.executionStopped, state.healthManaged
+		if recovered {
+			state.executionStopped = false
+		}
+		r.mu.Unlock()
+		if recovered {
+			// A restart can take effect despite an error response. Fresh
+			// execution evidence restores no-probe health or fresh probes.
+			if healthManaged {
+				r.publishStatus(allocID, "running")
+			} else {
+				r.publishStatus(allocID, "healthy")
+			}
+		}
+		return nil
+	}
 	// A crash between task creation and Start leaves Created behind. Only
 	// committed allocations are tracked here, so recover it with the same
 	// durable restart budget as an exited task, never an unbudgeted Start.
 	if containerState.Status != runtime.StatusStopped && containerState.Status != runtime.StatusCreated {
 		return nil
 	}
+	// Execution is confirmed non-running. Publish that observation even if
+	// durable accounting or Restart fails; it is not a terminal lifecycle.
+	r.mu.Lock()
+	state.executionStopped = true
+	r.mu.Unlock()
+	r.publishStatus(allocID, "stopped")
 	return r.restart(ctx, allocID, state)
 }
 
@@ -388,6 +416,9 @@ func (r *AllocationReconciler) restart(ctx context.Context, allocID string, stat
 		current.restarting = false
 	}
 	active := r.states[allocID] == state && !state.stopping
+	if active && ctx.Err() == nil {
+		state.executionStopped = false
+	}
 	r.mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return err

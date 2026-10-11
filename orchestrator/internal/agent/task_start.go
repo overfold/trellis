@@ -140,7 +140,7 @@ func (a *Agent) prepareTaskRecord(ctx context.Context, task *taskStart) (int, ti
 	// retry into a terminal execution conflict. An empty status means
 	// recovery already confirmed the container missing and cleaned it up.
 	if status != "" {
-		if err := a.stopAllocation(context.WithoutCancel(ctx), task.ID, false); err != nil {
+		if err := a.stopAllocation(ctx, task.ID, false); err != nil {
 			return 0, time.Time{}, false, fmt.Errorf("clean up incomplete allocation %s before retry: %w", task.ID, err)
 		}
 	}
@@ -253,7 +253,9 @@ func (a *Agent) launchTask(ctx context.Context, launch *taskLaunch) error {
 
 	launch.startAttempted = true
 	if err := a.runtime.Start(ctx, alloc.ContainerID); err != nil {
-		observed, inspectErr := a.runtime.Inspect(context.WithoutCancel(ctx), alloc.ContainerID)
+		inspectCtx, cancel := failedStartCleanupContext(ctx)
+		observed, inspectErr := a.runtime.Inspect(inspectCtx, alloc.ContainerID)
+		cancel()
 		if inspectErr != nil || observed.Status != runtime.StatusRunning {
 			return fmt.Errorf("start container %s: %w", alloc.ContainerID, err)
 		}
@@ -351,7 +353,9 @@ func (a *Agent) createTaskContainer(ctx context.Context, launch *taskLaunch, env
 		Labels:           labels,
 	})
 	if err != nil {
-		observed, inspectErr := a.runtime.Inspect(context.WithoutCancel(ctx), alloc.ContainerID)
+		inspectCtx, cancel := failedStartCleanupContext(ctx)
+		observed, inspectErr := a.runtime.Inspect(inspectCtx, alloc.ContainerID)
+		cancel()
 		if inspectErr != nil {
 			return errors.Join(fmt.Errorf("create container %s: %w", alloc.ContainerID, err), fmt.Errorf("inspect container ownership: %w", inspectErr))
 		}
@@ -438,6 +442,8 @@ func (a *Agent) commitTaskStart(launch *taskLaunch, mounts []*runtime.Mount) err
 // together with its resources, so a later start, stop, or recovery finishes
 // the cleanup.
 func (a *Agent) abortTaskStart(ctx context.Context, launch *taskLaunch) error {
+	ctx, cancel := failedStartCleanupContext(ctx)
+	defer cancel()
 	task, alloc := launch.task, launch.alloc
 	if launch.startAttempted {
 		if launch.tracked {
@@ -463,7 +469,7 @@ func (a *Agent) abortTaskStart(ctx context.Context, launch *taskLaunch) error {
 		return errors.Join(append(errs, fmt.Errorf("container ownership for %s remains unverified", task.ID))...)
 	}
 	if launch.startAttempted {
-		if err := a.runtime.Stop(context.WithoutCancel(ctx), task.ID); err != nil {
+		if err := a.runtime.Stop(ctx, task.ID); err != nil {
 			return errors.Join(append(errs, fmt.Errorf("stop container %s during failed start: %w", task.ID, err))...)
 		}
 	}
@@ -476,14 +482,14 @@ func (a *Agent) abortTaskStart(ctx context.Context, launch *taskLaunch) error {
 			cleanupErrs = append(cleanupErrs, fmt.Errorf("untrack allocation %s: %w", task.ID, err))
 		}
 	}
-	containerRemoved := true
 	if launch.containerCreated {
-		if err := a.runtime.Remove(context.WithoutCancel(ctx), task.ID); err != nil {
-			containerRemoved = false
-			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove container %s: %w", task.ID, err))
+		if err := a.runtime.Remove(ctx, task.ID); err != nil {
+			// Removal failure is uncertain. Keep every runtime dependency,
+			// not just volume staging, until a later cleanup confirms removal.
+			return errors.Join(append(errs, append(cleanupErrs, fmt.Errorf("remove container %s: %w", task.ID, err))...)...)
 		}
 	}
-	if err := a.detachAllocationNetwork(context.WithoutCancel(ctx), alloc); err != nil {
+	if err := a.detachAllocationNetwork(ctx, alloc); err != nil {
 		cleanupErrs = append(cleanupErrs, fmt.Errorf("detach allocation network: %w", err))
 	}
 	if launch.secretDir != "" {
@@ -491,12 +497,8 @@ func (a *Agent) abortTaskStart(ctx context.Context, launch *taskLaunch) error {
 			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove secret files: %w", err))
 		}
 	}
-	// A container that still exists keeps its staging mounts as OCI mount
-	// sources; a cleanup retry releases them after removal succeeds.
-	if containerRemoved {
-		if err := a.volumes.ReleaseStaging(task.ID); err != nil {
-			cleanupErrs = append(cleanupErrs, fmt.Errorf("release volume staging: %w", err))
-		}
+	if err := a.volumes.ReleaseStaging(task.ID); err != nil {
+		cleanupErrs = append(cleanupErrs, fmt.Errorf("release volume staging: %w", err))
 	}
 	if err := errors.Join(cleanupErrs...); err != nil {
 		return errors.Join(append(errs, err)...)
@@ -514,6 +516,12 @@ func (a *Agent) abortTaskStart(ctx context.Context, launch *taskLaunch) error {
 	a.forgetIdleNetworkPlanLocked(task.Namespace)
 	a.mu.Unlock()
 	return errors.Join(errs...)
+}
+
+// Detach cancellation only to finish failure inspection/rollback, and always
+// supply a fresh finite budget. Never abandon a live call and release its lock.
+func failedStartCleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 }
 
 // releaseOrphanedStaging ensures a start never stages volumes over staging

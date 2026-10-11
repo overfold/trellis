@@ -1344,8 +1344,8 @@ func TestFailedStartCleanupRetainsAllocationForRetry(t *testing.T) {
 	id := "allocation-g2-first"
 
 	err := runGroup(context.Background(), agent, request)
-	if !errors.Is(err, removeErr) || !errors.Is(err, detachErr) {
-		t.Fatalf("run error = %v, want removal and detach errors", err)
+	if !errors.Is(err, removeErr) || manager.detachCount != 0 {
+		t.Fatalf("run error = %v, detaches = %d; want removal error without releasing runtime network", err, manager.detachCount)
 	}
 	if allocation := agent.allocations[id]; allocation == nil || allocation.Status != "stopping" {
 		t.Fatalf("retained allocation = %+v, want stopping", allocation)
@@ -1358,6 +1358,7 @@ func TestFailedStartCleanupRetainsAllocationForRetry(t *testing.T) {
 	if _, err := agent.ports.Claim(spec.PortSpec{Port: port}); err == nil {
 		t.Fatal("failed start released its port before cleanup completed")
 	}
+	rt.removeErr = nil
 	if err := agent.StopAllocation(context.Background(), id); !errors.Is(err, detachErr) {
 		t.Fatalf("failed stop retry = %v, want detach error", err)
 	}
@@ -1565,7 +1566,7 @@ func TestRecoverCreatedAllocationCanBeRetriedByControlPlane(t *testing.T) {
 		t.Fatal("recovered draining allocation is not restart-suppressed")
 	}
 	drain := &nodeapi.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: request.Epoch, Sequence: 1}
-	if err := second.ResumeGroup(drain); err != nil {
+	if err := second.ResumeGroup(context.Background(), drain); err != nil {
 		t.Fatalf("undrain recovered allocation: %v", err)
 	}
 	if second.allocations[id].Draining {
@@ -1704,14 +1705,14 @@ func TestStaleResumeAfterStartRetryKeepsDrain(t *testing.T) {
 		t.Fatalf("control-plane start retry: %v", err)
 	}
 	stale := &nodeapi.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: request.Epoch, Sequence: 3}
-	if err := agent.ResumeGroup(stale); err != nil {
+	if err := agent.ResumeGroup(context.Background(), stale); err != nil {
 		t.Fatalf("stale resume: %v", err)
 	}
 	assertDrainingAfterStartRetry(t, agent, rt, local, 5)
 
 	// The control plane resumes with the next drain sequence.
 	resume := &nodeapi.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: request.Epoch, Sequence: 6}
-	if err := agent.ResumeGroup(resume); err != nil {
+	if err := agent.ResumeGroup(context.Background(), resume); err != nil {
 		t.Fatalf("current resume: %v", err)
 	}
 	if agent.allocations[rt.managedID].Draining {
@@ -1736,7 +1737,7 @@ func TestStartHonorsControlPlaneDrainWithoutLocalRecord(t *testing.T) {
 		t.Fatalf("start draining allocation: %v", err)
 	}
 	stale := &nodeapi.DrainAllocationRequest{AllocationID: request.AllocationID, Generation: request.Generation, Epoch: request.Epoch, Sequence: 3}
-	if err := agent.ResumeGroup(stale); err != nil {
+	if err := agent.ResumeGroup(context.Background(), stale); err != nil {
 		t.Fatalf("stale resume: %v", err)
 	}
 	rt.status = runtime.StatusStopped
@@ -1959,7 +1960,7 @@ func TestRecoverIncompleteAllocationDefersRestartToServer(t *testing.T) {
 			if err := second.DrainGroup(context.Background(), request); err != nil {
 				t.Fatalf("drain recovered allocation: %v", err)
 			}
-			if err := second.ResumeGroup(request); err != nil {
+			if err := second.ResumeGroup(context.Background(), request); err != nil {
 				t.Fatalf("undrain recovered allocation: %v", err)
 			}
 			if recovered.Draining {
@@ -2309,7 +2310,7 @@ func TestRestartExhaustionReportsFailedAndSurvivesAgentRestart(t *testing.T) {
 	if err := second.DrainGroup(context.Background(), request); err != nil {
 		t.Fatalf("drain: %v", err)
 	}
-	if err := second.ResumeGroup(request); err != nil {
+	if err := second.ResumeGroup(context.Background(), request); err != nil {
 		t.Fatalf("resume with failed task: %v", err)
 	}
 	if err := second.reconciler.Reconcile(context.Background(), "task"); err != nil {
@@ -2384,7 +2385,7 @@ func TestRecoverDrainingExhaustedAllocationKeepsBudgetOnResume(t *testing.T) {
 	if err := second.recover(context.Background()); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
-	if err := second.ResumeGroup(&nodeapi.DrainAllocationRequest{AllocationID: "allocation", Generation: 1, Epoch: 1, Sequence: 2}); err != nil {
+	if err := second.ResumeGroup(context.Background(), &nodeapi.DrainAllocationRequest{AllocationID: "allocation", Generation: 1, Epoch: 1, Sequence: 2}); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
 	rt.status = runtime.StatusStopped
@@ -2442,7 +2443,7 @@ func TestFailedAllocationIgnoresLateHealthObservations(t *testing.T) {
 // a failed start, so a retry with the same request starts the generation again.
 func runGroup(ctx context.Context, a *Agent, request *nodeapi.AllocationRequest) error {
 	start, err := a.acceptStart(ctx, request)
-	if err != nil {
+	if err != nil || start == nil {
 		return err
 	}
 	select {

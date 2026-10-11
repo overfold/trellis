@@ -4,7 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/google/uuid"
@@ -161,5 +165,46 @@ func TestStartRequestFailureAfterObservedRunningIsNotCounted(t *testing.T) {
 	}
 	if allocation.Phase != lifecycle.PhaseRunning || allocation.Attempt != 0 || allocation.NextRetryAt != nil {
 		t.Fatalf("running allocation after failed request: phase=%s attempt=%d retry=%v", allocation.Phase, allocation.Attempt, allocation.NextRetryAt)
+	}
+}
+
+func TestStartAdmissionRefusalDoesNotConsumeExecutionBudget(t *testing.T) {
+	s, _, node, allocation := newStartingTestServer(t, 2)
+	var overloaded atomic.Bool
+	overloaded.Store(true)
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if overloaded.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			// The agent's Echo error envelope retains the operation code.
+			_, _ = w.Write([]byte(`{"message":"{\"code\":\"operation_failed\",\"message\":\"background allocation start limit reached; retry\"}"}`))
+		} else {
+			_, _ = w.Write([]byte(`{"code":"ok"}`))
+		}
+	}))
+	defer endpoint.Close()
+	address, err := url.Parse(endpoint.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node.Host = "http://" + address.Hostname()
+	node.Port, err = strconv.Atoi(address.Port())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 4 {
+		if err := s.Execute(context.Background(), &Action{Type: ActionStart, Allocation: allocation}); err == nil {
+			t.Fatal("refusal not returned")
+		}
+		if allocation.Phase != lifecycle.PhaseStarting || allocation.Attempt != 2 || allocation.NextRetryAt != nil {
+			t.Fatalf("refused start phase=%s attempt=%d retry=%v", allocation.Phase, allocation.Attempt, allocation.NextRetryAt)
+		}
+	}
+	overloaded.Store(false)
+	if err := s.Execute(context.Background(), &Action{Type: ActionStart, Allocation: allocation}); err != nil {
+		t.Fatalf("capacity recovery: %v", err)
+	}
+	if allocation.Attempt != 2 {
+		t.Fatal("capacity recovery changed execution attempt")
 	}
 }
