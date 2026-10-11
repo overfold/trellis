@@ -135,7 +135,7 @@ func TestBoltSnapshotStreamsDeterministicVersionedJSON(t *testing.T) {
 	}
 }
 
-func TestBoltRestoreReaderLegacy(t *testing.T) {
+func TestBoltRestoreReaderOpaqueValues(t *testing.T) {
 	store, err := NewBoltStore(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -144,15 +144,15 @@ func TestBoltRestoreReaderLegacy(t *testing.T) {
 	if err := store.Put(context.Background(), "old", []byte("discard")); err != nil {
 		t.Fatal(err)
 	}
-	// Keys resembling envelope fields remain ordinary legacy keys. Opaque
+	// Keys resembling envelope fields remain ordinary payload keys. Opaque
 	// binary and empty values must survive without record reinterpretation.
-	if err := store.RestoreReader(strings.NewReader(`{"version":"AP8=","data":"","z":"bGFzdA=="}`)); err != nil {
+	if err := store.RestoreReader(strings.NewReader(`[2,{"version":"AP8=","data":"","z":"bGFzdA=="}]`)); err != nil {
 		t.Fatal(err)
 	}
 	got, err := store.List(context.Background(), "")
 	want := map[string][]byte{"version": {0, 255}, "data": {}, "z": []byte("last")}
 	if err != nil || !reflect.DeepEqual(got, want) {
-		t.Fatalf("legacy restore = %#v, %v; want %#v", got, err, want)
+		t.Fatalf("current restore = %#v, %v; want %#v", got, err, want)
 	}
 }
 
@@ -167,11 +167,12 @@ func TestBoltRestoreReaderIsAtomicOnInvalidSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	invalid := []string{
+		`{}`, `{"legacy":"b2xkLXZhbHVl"}`, `{"version":"AP8=","data":""}`,
 		``, `null`, `[]`, `[2]`, `[2,null]`, `[2,[]]`, `["2",{}]`,
 		`[2.5,{}]`, `[null,{}]`, `[1,{}]`, `[0,{}]`, `[-1,{}]`,
 		`[3,`, `[999,{}]`, `[2,{},{}]`, `[2,{}`, `[2,{}] {}`,
 	}
-	// Exercise the same strict payload contract in both supported formats,
+	// Exercise the strict payload contract inside the current envelope,
 	// including errors discovered only after a valid entry was written.
 	for _, payload := range []string{
 		`{"new":"bmV3","bad":"!"}`, `{"new":"bmV3","bad":null}`,
@@ -180,9 +181,8 @@ func TestBoltRestoreReaderIsAtomicOnInvalidSnapshot(t *testing.T) {
 		`{"new":"bmV3","new":"YQ=="}`, `{"new":"bmV3"`,
 		`{"` + strings.Repeat("k", bolt.MaxKeySize+1) + `":""}`,
 	} {
-		invalid = append(invalid, payload, "[2,"+payload+"]")
+		invalid = append(invalid, "[2,"+payload+"]")
 	}
-	invalid = append(invalid, `{} {}`)
 	for i, input := range invalid {
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
 			if err := store.RestoreReader(strings.NewReader(input)); err == nil {

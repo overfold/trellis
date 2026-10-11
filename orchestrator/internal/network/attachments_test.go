@@ -410,7 +410,7 @@ func TestDetachAllocationRemovesLeftoverAttachmentByID(t *testing.T) {
 	if _, err := os.Stat(attachment.LeasePath); !os.IsNotExist(err) {
 		t.Fatalf("address lease survived detach by ID: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(manager.stateDir, "acme")); !os.IsNotExist(err) {
+	if _, err := os.Stat(manager.leaseDirectory("acme")); !os.IsNotExist(err) {
 		t.Fatalf("lease directory survived the last detach: %v", err)
 	}
 	assertAttachments(t, manager)
@@ -678,16 +678,22 @@ func TestDetachAllocationRemovesRealNetworkNamespace(t *testing.T) {
 	// Leave the attachment as a crash between Attach steps would.
 	run := execRunner{}
 	ctx := context.Background()
-	if err := run.Run(ctx, "ip", "netns", "add", allocation); err != nil {
+	record, err := manager.readAttachmentRecord(allocation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.createNetns(ctx, record); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = run.Run(ctx, "ip", "netns", "del", allocation) })
-	recordTestNetnsInode(t, manager, allocation)
 	if err := run.Run(ctx, "ip", "link", "add", hostVeth, "type", "veth", "peer", "name", peerVeth); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = run.Run(ctx, "ip", "link", "del", hostVeth) })
 	if err := run.Run(ctx, "ip", "link", "set", "dev", hostVeth, "alias", allocationOwner(allocation)+":"+hostVeth); err != nil {
+		t.Fatal(err)
+	}
+	if err := run.Run(ctx, "ip", "link", "set", "dev", peerVeth, "alias", allocationOwner(allocation)+":"+peerVeth); err != nil {
 		t.Fatal(err)
 	}
 	if err := run.Run(ctx, "ip", "link", "set", peerVeth, "netns", allocation); err != nil {

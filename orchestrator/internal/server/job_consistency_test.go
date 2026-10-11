@@ -19,8 +19,8 @@ import (
 )
 
 func TestPersistedContentHashesRebuiltWithoutExecutionRevision(t *testing.T) {
-	for _, legacy := range []string{"current", "missing", "binary", "incorrect"} {
-		t.Run(legacy, func(t *testing.T) {
+	for _, cache := range []string{"current", "missing", "incorrect"} {
+		t.Run(cache, func(t *testing.T) {
 			store, err := state.NewBoltStore(filepath.Join(t.TempDir(), "state.db"))
 			if err != nil {
 				t.Fatal(err)
@@ -42,12 +42,10 @@ func TestPersistedContentHashesRebuiltWithoutExecutionRevision(t *testing.T) {
 			if err := json.Unmarshal(encoded, &roundTrip); err != nil || roundTrip.ContentHashes["api"] != hash {
 				t.Fatal("JSON persistence corrupted digest")
 			}
-			switch legacy {
+			switch cache {
 			case "current":
 			case "missing":
 				roundTrip.ContentHashes = nil
-			case "binary":
-				roundTrip.ContentHashes["api"] = string([]byte{0xff, 0xfe, 0x80})
 			case "incorrect":
 				roundTrip.ContentHashes["api"] = strings.Repeat("0", 64)
 			}
@@ -61,32 +59,6 @@ func TestPersistedContentHashesRebuiltWithoutExecutionRevision(t *testing.T) {
 			}
 			if successor.jobs[jobKey("default", "web")].ContentHashes["api"] != hash {
 				t.Fatal("reload did not rebuild the pinned execution hash")
-			}
-			if legacy == "binary" {
-				// Backups retain the damaged stored cache. Restore must rebuild it
-				// from authoritative pins rather than carrying it into revisions.
-				s.backupStore = &restoreBoltStore{store}
-				_, public := encodedAdministratorPublicKey(t)
-				if err := s.Init(t.Context(), ClusterBootstrap{AdministratorPublicKey: public, Settings: DefaultClusterSettings()}); err != nil {
-					t.Fatal(err)
-				}
-				backup := mustBackup(t, s)
-				target, err := state.NewBoltStore(filepath.Join(t.TempDir(), "restored.db"))
-				if err != nil {
-					t.Fatal(err)
-				}
-				t.Cleanup(func() { _ = target.Close() })
-				successor = NewServer(slog.Default(), nil, NewStateController(target, "test"), &restoreBoltStore{target}, "test", "")
-				successor.SetImageResolver(testImageResolver)
-				if err := successor.Init(t.Context(), ClusterBootstrap{AdministratorPublicKey: public, Settings: DefaultClusterSettings()}); err != nil {
-					t.Fatal(err)
-				}
-				if err := successor.Restore(t.Context(), backup); err != nil {
-					t.Fatal(err)
-				}
-				if successor.jobs[jobKey("default", "web")].ContentHashes["api"] != hash {
-					t.Fatal("restore lost the rebuilt execution hash")
-				}
 			}
 			for i := range 3 {
 				desired := versionTestSpec("app:v1", 1)

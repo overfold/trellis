@@ -44,9 +44,7 @@ func NewVolumeManager(dataRoot ...string) *VolumeManager {
 	return vm
 }
 
-// AvailableHostVolumes returns persisted volume registrations. The existing
-// node-registration field name is retained for wire compatibility; entries are
-// namespace/name identities rather than configured host-volume capabilities.
+// AvailableHostVolumes returns persisted namespace/name volume registrations.
 func (vm *VolumeManager) AvailableHostVolumes() []string {
 	vm.mu.RLock()
 	defer vm.mu.RUnlock()

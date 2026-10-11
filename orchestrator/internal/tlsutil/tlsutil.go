@@ -75,13 +75,11 @@ func GenerateCA() (certPEM, keyPEM []byte, err error) {
 }
 
 // GenerateNodeCert generates a node certificate signed by the cluster CA.
-// extraSANs is retained for source compatibility but deliberately ignored:
-// node identities may only claim their UUID-derived DNS name.
-func GenerateNodeCert(caCertPEM, caKeyPEM []byte, nodeID uuid.UUID, extraSANs ...string) (certPEM, keyPEM []byte, err error) {
+// Node identities may only claim their UUID-derived DNS name.
+func GenerateNodeCert(caCertPEM, caKeyPEM []byte, nodeID uuid.UUID) (certPEM, keyPEM []byte, err error) {
 	if nodeID == uuid.Nil {
 		return nil, nil, fmt.Errorf("node ID is required")
 	}
-	_ = extraSANs
 	csrPEM, keyPEM, err := GenerateCSR()
 	if err != nil {
 		return nil, nil, err

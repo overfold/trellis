@@ -298,7 +298,7 @@ cat >>"$tmp/worker-installer/common.sh" <<'EOF'
 RELEASE_METADATA=approved-release
 journalctl() { :; }
 EOF
-for scenario in same mismatch unknown restart-failure changed maintenance-failure; do
+for scenario in no-state same mismatch unknown restart-failure changed maintenance-failure; do
     (
         export PATH="$tmp/worker-bin:$PATH" HOME="$tmp/worker/home" SUDO_USER=test-operator
         export INSTALL_DIR="$tmp/worker/install" STATE_ROOT="$tmp/worker/state"
@@ -306,13 +306,18 @@ for scenario in same mismatch unknown restart-failure changed maintenance-failur
         export SERVICE_FILE="$tmp/worker/trellis.service" CALL_LOG="$tmp/resume-$scenario.calls"
         export RESUME_SCENARIO="$scenario" ACTIVE_VERSION=v-worker-test
         case "$scenario" in changed|maintenance-failure) ACTIVE_VERSION=v-old ;; esac
-        sed -i 's/^complete=.*/complete=false/' "$STATE_ROOT/install-state"
+        if [ "$scenario" = no-state ]; then
+            rm "$STATE_ROOT/install-state"
+        else
+            sed -i 's/^complete=.*/complete=false/' "$STATE_ROOT/install-state"
+        fi
+        cp "$CONFIG_DIR/trellis.yaml" "$tmp/resume-$scenario.config-before"
         before="$(sha256sum "$INSTALL_DIR/trellis")"
         if bash "$tmp/worker-installer/install-core.sh" --yes --worker --join control.example:8128 \
             >"$tmp/resume-$scenario.output" 2>&1; then
-            [[ "$scenario" = same || "$scenario" = changed ]]
+            [[ "$scenario" = no-state || "$scenario" = same || "$scenario" = changed ]]
             grep -qx complete=true "$STATE_ROOT/install-state"
-            if [ "$scenario" = same ]; then
+            if [ "$scenario" = same ] || [ "$scenario" = no-state ]; then
                 grep -qx 'restart trellis' "$CALL_LOG"
             else
                 ! grep -q 'restart trellis' "$CALL_LOG" # Upgrade already restarted under maintenance.
@@ -326,6 +331,7 @@ for scenario in same mismatch unknown restart-failure changed maintenance-failur
                 ;;
             esac
         fi
+        cmp "$CONFIG_DIR/trellis.yaml" "$tmp/resume-$scenario.config-before"
         case "$scenario" in changed|maintenance-failure) grep -qx maintenance "$CALL_LOG" ;; esac
         printf 'PASS active installation resume: %s\n' "$scenario"
     )

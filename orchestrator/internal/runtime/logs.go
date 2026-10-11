@@ -15,14 +15,13 @@ import (
 
 const logPollInterval = 200 * time.Millisecond
 
-// logReader streams a task log. For a runtime log it reads the rotated file
+// logReader streams a runtime task log. It reads the rotated file
 // before the active one and, across later rotations, resumes in the rotated
 // file where it left off in the active log. A reader that falls more than one
 // rotation behind skips the output rotation discarded in between.
 type logReader struct {
-	ctx    context.Context
-	follow bool
-	// path and rotation are empty for a legacy log, which never rotates.
+	ctx      context.Context
+	follow   bool
 	path     string
 	rotation *logRotation
 
@@ -90,22 +89,6 @@ func openRuntimeLog(ctx context.Context, path string, rotation *logRotation, fol
 	return r, nil
 }
 
-// newLogReader streams a legacy log file, which Trellis does not rotate.
-func newLogReader(ctx context.Context, file *os.File, follow bool, tail int) (io.ReadCloser, error) {
-	r := &logReader{ctx: ctx, follow: follow, done: make(chan struct{}), active: file}
-	info, err := file.Stat()
-	if err != nil {
-		_ = r.Close()
-		return nil, err
-	}
-	if r.offset, err = tailOffset(file, info.Size(), tail); err != nil {
-		_ = r.Close()
-		return nil, err
-	}
-	r.end = info.Size()
-	return r, nil
-}
-
 func (r *logReader) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
@@ -135,19 +118,17 @@ func (r *logReader) Read(p []byte) (int, error) {
 				return 0, io.EOF
 			}
 			p = p[:min(int64(len(p)), r.end-r.offset)]
-			if r.rotation != nil {
-				r.rotation.mu.Lock()
-				defer r.rotation.mu.Unlock()
-				if r.rotation.generation != r.generation {
-					return 0, io.EOF
-				}
+			r.rotation.mu.Lock()
+			defer r.rotation.mu.Unlock()
+			if r.rotation.generation != r.generation {
+				return 0, io.EOF
 			}
 		}
 		n, err := r.active.ReadAt(p, r.offset)
 		if err != nil && err != io.EOF {
 			return 0, err
 		}
-		if r.follow && r.rotation != nil {
+		if r.follow {
 			rotated, err := r.followRotation()
 			if err != nil {
 				return 0, err
@@ -300,7 +281,6 @@ func tailOffset(r io.ReaderAt, size int64, tail int) (int64, error) {
 // LogUsage reports the total size of the task logs in the runtime log
 // directory and the space on its filesystem. Before the first task creates
 // the directory, it reports the filesystem of the nearest existing ancestor.
-// Logs still written to the legacy temporary directory are not counted.
 func (c *ContainerdRuntime) LogUsage() (LogUsage, error) {
 	usage, err := logDirUsage(c.logDir)
 	if err != nil {

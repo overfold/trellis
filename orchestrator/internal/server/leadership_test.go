@@ -2,9 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -73,15 +70,10 @@ func TestAcquireLeadershipUsesDurableJobsAndAuthority(t *testing.T) {
 	}
 	job := &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "durable", TaskGroups: []spec.TaskGroupSpec{{Name: "web", Count: 1, Tasks: []spec.TaskSpec{{Name: "app", Image: "example/app:1"}}}}}), Revision: 12, Version: 12}
 	identity := jobKey("default", "durable")
-	if err := controller.PutJob(t.Context(), identity, job); err != nil {
-		t.Fatal(err)
-	}
 	for version := 1; version <= 12; version++ {
-		raw, err := json.Marshal(&JobRevisionRecord{Spec: job.Spec, Revision: version, Version: version, CreatedAt: time.Unix(int64(version), 0)})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := store.Put(t.Context(), "trellis/test/job-revisions/"+url.QueryEscape(identity)+"/"+fmt.Sprint(version), raw); err != nil {
+		job.Revision, job.Version = version, version
+		record := &JobRevisionRecord{Spec: job.Spec, Revision: version, Version: version, CreatedAt: time.Unix(int64(version), 0)}
+		if err := controller.PutJobWithRevision(t.Context(), identity, job, record); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -113,7 +105,7 @@ func TestAcquireLeadershipUsesDurableJobsAndAuthority(t *testing.T) {
 	}
 }
 
-func TestAcquireLeadershipCompactionFailureLeavesEpochAndMemoryUnchanged(t *testing.T) {
+func TestAcquireLeadershipEpochUpdateFailureLeavesEpochAndMemoryUnchanged(t *testing.T) {
 	ctx := context.Background()
 	store := &failingBatchStore{memoryStore: memoryStore{}}
 	stateCtl := NewStateController(store, "test-cluster")
@@ -122,14 +114,6 @@ func TestAcquireLeadershipCompactionFailureLeavesEpochAndMemoryUnchanged(t *test
 	}
 	identity := jobKey("default", "web")
 	job := &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web"}), Revision: 12}
-	prefix := "trellis/test-cluster/job-revisions/" + url.QueryEscape(identity) + "/"
-	for version := 1; version <= 12; version++ {
-		raw, err := json.Marshal(&JobRevisionRecord{Version: version, Revision: version, Spec: job.Spec, CreatedAt: time.Unix(int64(version), 0).UTC()})
-		if err != nil {
-			t.Fatal(err)
-		}
-		store.memoryStore[prefix+fmt.Sprint(version)] = raw
-	}
 	s := &Server{
 		state:        stateCtl,
 		cluster:      &Cluster{AdministratorPublicKey: "key", ControlEpoch: 3},
@@ -149,18 +133,14 @@ func TestAcquireLeadershipCompactionFailureLeavesEpochAndMemoryUnchanged(t *test
 	if persisted.ControlEpoch != 3 || s.cluster.ControlEpoch != 3 || s.controlEpoch != 3 {
 		t.Fatalf("epoch after failed activation: durable=%d cluster=%d active=%d; want 3", persisted.ControlEpoch, s.cluster.ControlEpoch, s.controlEpoch)
 	}
-	revisions, listErr := store.List(ctx, "trellis/test-cluster/job-revisions/")
-	if listErr != nil {
-		t.Fatal(listErr)
-	}
-	if len(revisions) != 12 {
-		t.Fatalf("revision count after failed activation = %d, want 12", len(revisions))
+	if s.jobs[identity] != job {
+		t.Fatal("failed activation changed cached jobs")
 	}
 	if len(store.batches) != 1 {
-		t.Fatalf("batch count = %d, want one epoch and compaction batch", len(store.batches))
+		t.Fatalf("batch count = %d, want one epoch update batch", len(store.batches))
 	}
-	if store.batches[0][0].Key != "trellis/test-cluster/meta" || store.batches[0][1].DeletePrefix != "trellis/test-cluster/job-revisions/" {
-		t.Fatalf("leadership batch = %#v, want cluster update followed by revision compaction", store.batches[0])
+	if len(store.batches[0]) != 1 || store.batches[0][0].Key != "trellis/test-cluster/meta" {
+		t.Fatalf("leadership batch = %#v, want only cluster update", store.batches[0])
 	}
 }
 

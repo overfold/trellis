@@ -18,7 +18,7 @@ import (
 func TestDottedDiscoveryIdentitiesRejectedBeforePersistence(t *testing.T) {
 	for _, field := range []string{"namespace", "job", "group"} {
 		t.Run(field, func(t *testing.T) {
-			job := persistedTestSpec("web")
+			job := persistedTestSpec()
 			switch field {
 			case "namespace":
 				job.Namespace = "team.prod"
@@ -81,7 +81,7 @@ func TestJobPathsRejectDottedNames(t *testing.T) {
 func TestLegacyDottedJobReadsAndRestoreFailClosed(t *testing.T) {
 	for _, field := range []string{"namespace", "job", "group", "nil spec"} {
 		t.Run(field, func(t *testing.T) {
-			job := persistedTestSpec("web")
+			job := persistedTestSpec()
 			switch field {
 			case "namespace":
 				job.Namespace = "team.prod"

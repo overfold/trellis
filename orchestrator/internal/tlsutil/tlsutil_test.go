@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"io"
+	"net"
 	"net/http"
 	"testing"
 	"time"
@@ -206,12 +207,13 @@ func TestPeerTLSConfig(t *testing.T) {
 	}
 }
 
-func TestGenerateNodeCertExtraSANs(t *testing.T) {
+func TestGenerateNodeCertOnlyClaimsNodeName(t *testing.T) {
 	caCert, caKey, err := GenerateCA()
 	if err != nil {
 		t.Fatal(err)
 	}
-	certPEM, _, err := GenerateNodeCert(caCert, caKey, uuid.New(), "10.19.0.5:8128", "myhost:8127")
+	nodeID := uuid.New()
+	certPEM, _, err := GenerateNodeCert(caCert, caKey, nodeID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +228,7 @@ func TestGenerateNodeCertExtraSANs(t *testing.T) {
 	if len(cert.IPAddresses) != 0 {
 		t.Errorf("cert IPAddresses = %v, want none", cert.IPAddresses)
 	}
-	if len(cert.DNSNames) != 1 || cert.DNSNames[0] == ServerName || cert.DNSNames[0] == "myhost" {
+	if len(cert.DNSNames) != 1 || cert.DNSNames[0] != NodeServerName(nodeID) {
 		t.Errorf("cert DNSNames = %v, want only UUID node name", cert.DNSNames)
 	}
 }
@@ -241,7 +243,8 @@ func TestSigningIgnoresMaliciousCSRNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
-		DNSNames: []string{ServerName, "attacker.example"},
+		DNSNames:    []string{ServerName, "attacker.example"},
+		IPAddresses: []net.IP{net.ParseIP("10.19.0.5")},
 	}, key)
 	if err != nil {
 		t.Fatal(err)
@@ -255,6 +258,9 @@ func TestSigningIgnoresMaliciousCSRNames(t *testing.T) {
 	node := parseTestCertificate(t, nodePEM)
 	if len(node.DNSNames) != 1 || node.DNSNames[0] != NodeServerName(nodeID) {
 		t.Fatalf("node DNS names = %v", node.DNSNames)
+	}
+	if len(node.IPAddresses) != 0 {
+		t.Fatalf("node IP addresses = %v, want none", node.IPAddresses)
 	}
 	apiPEM, err := SignAPICSR(caCert, caKey, csr)
 	if err != nil {
@@ -292,7 +298,7 @@ func TestNodeCertificateCannotServeAPIName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	certPEM, _, err := GenerateNodeCert(caCert, caKey, uuid.New(), ServerName)
+	certPEM, _, err := GenerateNodeCert(caCert, caKey, uuid.New())
 	if err != nil {
 		t.Fatal(err)
 	}

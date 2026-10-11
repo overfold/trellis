@@ -59,18 +59,6 @@ func allocationTaskEndpoints(allocation *Allocation) []api.AllocationEndpoint {
 		}
 	}
 
-	// Older persisted allocations may not have task specs. Preserve the
-	// historical node-address behavior for those records only.
-	if len(allocation.Tasks) == 0 {
-		if len(allocation.Endpoints) > 0 {
-			return append([]api.AllocationEndpoint(nil), allocation.Endpoints...)
-		}
-		if allocation.Node != nil {
-			return []api.AllocationEndpoint{{Address: allocation.Node.Host, Ports: append([]api.PortMapping(nil), allocation.Ports...)}}
-		}
-		return nil
-	}
-
 	endpoints := make([]api.AllocationEndpoint, 0, len(allocation.Tasks))
 	for _, task := range allocation.Tasks {
 		mode := spec.TaskNetworkDefault

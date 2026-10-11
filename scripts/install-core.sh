@@ -109,17 +109,6 @@ load_install_state
 [ "$GVISOR_ENABLED" != true ] || with_gvisor=true
 if [ "$with_gvisor" = true ]; then require_commands bzip2 sha512sum; fi
 
-# Recognize complete installs that predate the install-state file without claiming
-# ownership of packages that Trellis cannot prove it installed.
-if [ ! -f "$STATE_FILE" ] && [ -x "${INSTALL_DIR}/trellis" ] && [ -f "$CONFIG_FILE" ] && [ -f "$SERVICE_FILE" ]; then
-    STATE_COMPLETE=true
-    STATE_VERSION="$("${INSTALL_DIR}/trellis" --version 2>/dev/null | awk '{print $NF}' || true)"
-    CONTAINERD_OWNED=false; CONTAINERD_CONFIG_OWNED=false; DOCKER_REPO_OWNED=false; DOCKER_KEY_OWNED=false
-    RUNSC_OWNED=false; GVISOR_REPO_OWNED=false; GVISOR_KEY_OWNED=false; GVISOR_CONFIG_OWNED=false; WIREGUARD_OWNED=false
-    NETWORKING_ENABLED=false; GVISOR_ENABLED=false
-    write_install_state
-fi
-
 if [ "$STATE_COMPLETE" = true ] && [ -x "${INSTALL_DIR}/trellis" ] && [ -f "$CONFIG_FILE" ]; then
     ui_title "install"
     ui_step "Trellis ${STATE_VERSION:-unknown} is already installed"

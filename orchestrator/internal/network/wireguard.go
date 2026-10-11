@@ -522,10 +522,7 @@ func (m *WireGuardManager) UpdatePlan(ctx context.Context, namespace string, pla
 	if !safeName.MatchString(namespace) {
 		return fmt.Errorf("namespace must be a safe identifier")
 	}
-	leaseDir, err := m.leaseDirectory(namespace)
-	if err != nil {
-		return err
-	}
+	leaseDir := m.leaseDirectory(namespace)
 	entries, err := os.ReadDir(leaseDir)
 	if os.IsNotExist(err) {
 		return nil
@@ -646,10 +643,7 @@ func (m *WireGuardManager) Attach(ctx context.Context, request AttachRequest) (_
 			retErr = errors.Join(retErr, fmt.Errorf("roll back network attachment: %w", err))
 		}
 	}()
-	leaseDir, err := m.leaseDirectory(networkName)
-	if err != nil {
-		return nil, err
-	}
+	leaseDir := m.leaseDirectory(networkName)
 	if err := os.MkdirAll(leaseDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create IPAM state: %w", err)
 	}

@@ -190,7 +190,7 @@ func TestHandleRaftJoinBindsMembershipToCertificateIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	nodeID := uuid.New()
-	certPEM, _, err := tlsutil.GenerateNodeCert(caCert, caKey, nodeID, "node-b")
+	certPEM, _, err := tlsutil.GenerateNodeCert(caCert, caKey, nodeID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -412,11 +412,11 @@ func TestNodeCertificateBindingRejectsDuplicateCertificateForLeaderUUID(t *testi
 		}
 		return certificate
 	}
-	firstPEM, _, err := tlsutil.GenerateNodeCert(caCert, caKey, leaderID, "leader.example")
+	firstPEM, _, err := tlsutil.GenerateNodeCert(caCert, caKey, leaderID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	duplicatePEM, _, err := tlsutil.GenerateNodeCert(caCert, caKey, leaderID, "leader.example")
+	duplicatePEM, _, err := tlsutil.GenerateNodeCert(caCert, caKey, leaderID)
 	if err != nil {
 		t.Fatal(err)
 	}

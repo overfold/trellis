@@ -10,8 +10,8 @@ Raft leadership notifications can coalesce, including consecutive acquire notifi
 
 Leadership activation captures the Raft term before waiting for mutation ordering.
 An exclusive submission hold and a barrier establish the authoritative FSM view
-for both epoch advancement and job-history compaction; neither uses the follower's
-cached jobs or cluster record. Epoch exhaustion fails closed rather than wrapping.
+for epoch advancement; it does not use the follower's cached cluster record or
+compact job history. Epoch exhaustion fails closed rather than wrapping.
 Caches are reloaded after activation. Restore retains originating-term cancellation
 even through detached request contexts and compares the exact target cluster
 record before submission and atomically at installation, preserving target
@@ -38,7 +38,7 @@ A `spec.JobSpec` is immutable input to a job revision. The server resolves autho
 
 Plans return the fully defaulted spec, pinned images, current job identity/version, and a fingerprint of replicated cluster settings. Apply checks the settings fingerprint before defaulting and again under the mutation lock, including before a no-op return. Planning snapshots settings before defaulting and rejects a change during registry resolution. The CLI submits the returned spec, not the authored input. Direct submissions without a settings precondition remain available.
 
-Task-group content hashes are hexadecimal SHA-256 strings. Nil and empty constraints are equivalent, matching semantic diff's omitted-array representation. `StateController.ListJobs` always rebuilds these derived hashes from the validated canonical spec and stored image pins on restart, leadership reload, and after restore; it never trusts persisted digests. This repairs old raw-binary strings damaged by JSON UTF-8 replacement without registry I/O, Raft writes, version/revision changes, or workload replacement. Later job writes persist the rebuilt representation. Snapshot and backup formats are unchanged because canonical specs and execution identity remain authoritative; this is derived-cache rebuilding, not a desired-state migration. Agent start-request execution hashes and allocation fencing are separate and unchanged.
+Task-group content hashes are hexadecimal SHA-256 strings. Nil and empty constraints are equivalent, matching semantic diff's omitted-array representation. `StateController.ListJobs` always rebuilds these derived hashes from the validated canonical spec and stored image pins on restart, leadership reload, and after restore; it never trusts persisted digests. Rebuilding requires no registry I/O, Raft writes, version/revision changes, or workload replacement. Later job writes persist the rebuilt representation. Canonical specs and execution identity remain authoritative; this is derived-cache rebuilding, not a desired-state migration. Agent start-request execution hashes and allocation fencing are separate and unchanged.
 
 Desired state is durable. Observations—heartbeats, runtime status, logs, much of the catalog—are renewable. Each live job retains its 10 newest versions (every accepted spec change is a version; execution changes also advance the revision); deletion removes that history with the job. Backups capture the replicated cluster settings, desired jobs, their retained version history, encrypted secrets, and placement metadata from one consistent view, and a restore installs them in one Raft entry; restoring reconstitutes desired state and lets reconciliation schedule clean allocations. Raft FSM snapshots stream a stable Bolt read transaction directly into deterministic key-ordered JSON and restore inside one Bolt write transaction, avoiding whole-state maps and partial installation.
 
@@ -48,13 +48,11 @@ Desired state is durable. Observations—heartbeats, runtime status, logs, much 
 Raft's `SnapshotMeta.Version` (which versions Raft metadata/transport) and the
 operator desired-state backup format. Current writers emit the JSON tuple
 `[2,{"key":"base64-value"}]`: exactly an integer version followed by a key/value
-object. Readers support v2 and explicitly recognize the pre-versioned bare
-object as legacy v1, including snapshots from releases using that representation.
-The tuple avoids reserving a key that could collide with legacy state. Empty
-objects and empty/binary values are valid; record bytes are not migrated.
+object. Readers require this v2 tuple and reject bare key/value objects.
+Empty objects and empty/binary values are valid; record bytes remain opaque.
 
-Restore rejects unsupported versions before starting a write transaction. Both
-formats require nonempty, storage-sized, unique keys and base64 string values;
+Restore rejects unsupported versions before starting a write transaction. The
+payload requires nonempty, storage-sized, unique keys and base64 string values;
 nulls, malformed JSON, extra tuple elements and trailing data are rejected.
 Payload validation and bucket replacement share one Bolt transaction: even a
 late decode or storage failure rolls back every write and preserves existing
@@ -62,13 +60,9 @@ state. Key order in received snapshots is immaterial; writers use Bolt key order
 Values remain opaque at this layer, not revalidated as desired-state backups or
 interpreted using server record types. Domain validation on reload still applies.
 
-This supports forward reading of legacy v1, **not old-binary reading of v2** or
-arbitrary mixed-release operation. The introduction of v2 requires the
-[coordinated control-plane upgrade](../public/operations.md#raft-snapshot-format-upgrades).
-Future incompatible payload or persisted-record changes must explicitly revise
-this version and document supported readers and upgrade boundaries; do not add
-speculative migrations or reinterpret unknown versions as legacy. Snapshot
-versioning alone does not negotiate log-command or private API compatibility.
+Only the current format is supported; there is no migration or mixed-release
+guarantee. See the [pre-v1 compatibility policy](../public/operations.md#upgrade-a-node).
+Snapshot versioning does not negotiate log-command or private API compatibility.
 
 ## Package map
 

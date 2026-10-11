@@ -87,6 +87,7 @@ for mode in valid mismatch malformed missing-sidecars incomplete unrelated; do
             install_gvisor
             [ "$GVISOR_ENABLED" = true ] && [ "$GVISOR_BUNDLE_OWNED" = true ]
             grep -qx gvisor_bundle_owned=true "$STATE_FILE"
+            ! grep -Eq '^(runsc_owned|gvisor_(repo|key|config)_owned)=' "$STATE_FILE"
             [ -f "$INSTALL_DIR/trellis-gvisor/gvisor-bin/sentry" ]
             # Resume a crash between publishing the bundle and its second link.
             rm "$INSTALL_DIR/containerd-shim-runsc-v1"
@@ -95,7 +96,8 @@ for mode in valid mismatch malformed missing-sidecars incomplete unrelated; do
             # Removal honors exact owned links, not unrelated replacement files.
             rm "$INSTALL_DIR/runsc"
             printf 'unrelated replacement\n' >"$INSTALL_DIR/runsc"
-            GVISOR_CONFIG_OWNED=true
+            # Current bundle ownership must not invoke Docker configuration hooks.
+            load_install_state
             remove_owned_dependencies
             grep -qx 'unrelated replacement' "$INSTALL_DIR/runsc"
             [ ! -e "$INSTALL_DIR/containerd-shim-runsc-v1" ] && [ ! -e "$INSTALL_DIR/trellis-gvisor" ]

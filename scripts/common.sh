@@ -73,11 +73,7 @@ load_install_state() {
     CONTAINERD_CONFIG_OWNED="$(state_get containerd_config_owned false)"
     DOCKER_REPO_OWNED="$(state_get docker_repo_owned false)"
     DOCKER_KEY_OWNED="$(state_get docker_key_owned false)"
-    RUNSC_OWNED="$(state_get runsc_owned false)"
     GVISOR_BUNDLE_OWNED="$(state_get gvisor_bundle_owned false)"
-    GVISOR_REPO_OWNED="$(state_get gvisor_repo_owned false)"
-    GVISOR_KEY_OWNED="$(state_get gvisor_key_owned false)"
-    GVISOR_CONFIG_OWNED="$(state_get gvisor_config_owned false)"
     WIREGUARD_OWNED="$(state_get wireguard_owned false)"
     NETWORKING_ENABLED="$(state_get networking_enabled false)"
     GVISOR_ENABLED="$(state_get gvisor_enabled false)"
@@ -111,11 +107,7 @@ containerd_owned=${CONTAINERD_OWNED}
 containerd_config_owned=${CONTAINERD_CONFIG_OWNED}
 docker_repo_owned=${DOCKER_REPO_OWNED}
 docker_key_owned=${DOCKER_KEY_OWNED}
-runsc_owned=${RUNSC_OWNED}
 gvisor_bundle_owned=${GVISOR_BUNDLE_OWNED}
-gvisor_repo_owned=${GVISOR_REPO_OWNED}
-gvisor_key_owned=${GVISOR_KEY_OWNED}
-gvisor_config_owned=${GVISOR_CONFIG_OWNED}
 wireguard_owned=${WIREGUARD_OWNED}
 networking_enabled=${NETWORKING_ENABLED}
 gvisor_enabled=${GVISOR_ENABLED}
@@ -459,11 +451,6 @@ remove_owned_dependencies() {
     command -v dpkg-query >/dev/null 2>&1 || return 0
     local removals=() repo_changed=false
 
-    # Older installers recorded Docker config ownership after `runsc install`.
-    # Never use that flag to delete shared Docker configuration.
-    if [ "$RUNSC_OWNED" = true ] && package_installed runsc; then
-        removals+=(runsc)
-    fi
     if [ "$WIREGUARD_OWNED" = true ] && package_installed wireguard-tools; then
         removals+=(wireguard-tools)
     fi
@@ -477,8 +464,6 @@ remove_owned_dependencies() {
 
     if [ "$DOCKER_REPO_OWNED" = true ]; then rm -f /etc/apt/sources.list.d/docker.sources; repo_changed=true; fi
     if [ "$DOCKER_KEY_OWNED" = true ]; then rm -f /etc/apt/keyrings/docker.asc; repo_changed=true; fi
-    if [ "$GVISOR_REPO_OWNED" = true ]; then rm -f /etc/apt/sources.list.d/gvisor.list; repo_changed=true; fi
-    if [ "$GVISOR_KEY_OWNED" = true ]; then rm -f /usr/share/keyrings/gvisor-archive-keyring.gpg; repo_changed=true; fi
     if $repo_changed; then
         apt-get update -qq >/dev/null
         ui_step "Removed Trellis-owned package repositories"

@@ -440,7 +440,7 @@ func TestRaftStore_Snapshot(t *testing.T) {
 	}
 }
 
-func TestRaftStoreLegacySnapshotUpgradeAndRestart(t *testing.T) {
+func TestRaftStoreCurrentSnapshotStartupAndRestart(t *testing.T) {
 	dir := t.TempDir()
 	id := uuid.New()
 	bind := fmt.Sprintf("127.0.0.1:%d", freePort(t))
@@ -456,7 +456,7 @@ func TestRaftStoreLegacySnapshotUpgradeAndRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := io.WriteString(sink, `{"legacy":"b2xkLXZhbHVl"}`); err != nil {
+	if _, err := io.WriteString(sink, `[2,{"initial":"b2xkLXZhbHVl"}]`); err != nil {
 		t.Fatal(err)
 	}
 	if err := sink.Close(); err != nil {
@@ -470,9 +470,9 @@ func TestRaftStoreLegacySnapshotUpgradeAndRestart(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	waitLeader(t, store)
 	ctx := context.Background()
-	value, err := store.Get(ctx, "legacy")
+	value, err := store.Get(ctx, "initial")
 	if err != nil || string(value) != "old-value" {
-		t.Fatalf("legacy startup = %q, %v", value, err)
+		t.Fatalf("current snapshot startup = %q, %v", value, err)
 	}
 	if err := store.Put(ctx, "current", []byte("new-value")); err != nil {
 		t.Fatal(err)
@@ -491,7 +491,7 @@ func TestRaftStoreLegacySnapshotUpgradeAndRestart(t *testing.T) {
 	payload, err := io.ReadAll(reader)
 	_ = reader.Close()
 	if err != nil || !strings.HasPrefix(string(payload), "[2,{") {
-		t.Fatalf("upgraded snapshot has no v2 envelope: %v", err)
+		t.Fatalf("snapshot has no v2 envelope: %v", err)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -502,11 +502,41 @@ func TestRaftStoreLegacySnapshotUpgradeAndRestart(t *testing.T) {
 	}
 	store = restarted
 	waitLeader(t, store)
-	for key, want := range map[string]string{"legacy": "old-value", "current": "new-value"} {
+	for key, want := range map[string]string{"initial": "old-value", "current": "new-value"} {
 		value, err := store.Get(ctx, key)
 		if err != nil || string(value) != want {
 			t.Fatalf("v2 restart %s = %q, %v", key, value, err)
 		}
+	}
+}
+
+func TestRaftStoreRejectsLegacySnapshotStartup(t *testing.T) {
+	dir := t.TempDir()
+	id := uuid.New()
+	bind := fmt.Sprintf("127.0.0.1:%d", freePort(t))
+	configuration := raft.Configuration{Servers: []raft.Server{{ID: raft.ServerID(id.String()), Address: raft.ServerAddress(bind), Suffrage: raft.Voter}}}
+	snapshots, err := raft.NewFileSnapshotStore(filepath.Join(dir, "raft"), 2, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, transport := raft.NewInmemTransport(raft.ServerAddress(bind))
+	defer func() { _ = transport.Close() }()
+	sink, err := snapshots.Create(raft.SnapshotVersionMax, 1, 1, configuration, 1, transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(sink, `{"legacy":"b2xkLXZhbHVl"}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewRaftStore(RaftConfig{DataDir: dir, BindAddr: bind, ServerID: id.String(), TLS: testTLSConfig(t, id), AuthorizePeer: allowAnyRaftPeer})
+	if store != nil {
+		_ = store.Close()
+	}
+	if err == nil {
+		t.Fatal("startup accepted a legacy snapshot")
 	}
 }
 

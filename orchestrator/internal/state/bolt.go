@@ -303,8 +303,7 @@ type boltSnapshot struct {
 	tx *bolt.Tx
 }
 
-// Bare key/value objects are legacy v1. V2 wraps the unchanged payload in
-// [version, object], unambiguously separating it from every legacy key.
+// Application snapshots use a [version, object] tuple with opaque values.
 const applicationSnapshotVersion = 2
 
 func (s *boltSnapshot) persistTo(w io.Writer) error {
@@ -355,17 +354,17 @@ func (b *BoltStore) RestoreReader(r io.Reader) error {
 	if err != nil {
 		return fmt.Errorf("read snapshot envelope: %w", err)
 	}
-	versioned := token == json.Delim('[')
-	if versioned {
-		var version int
-		if err := decoder.Decode(&version); err != nil {
-			return fmt.Errorf("invalid application snapshot version: %w", err)
-		}
-		if version != applicationSnapshotVersion {
-			return fmt.Errorf("unsupported application snapshot version %d (supported: legacy v1 object and v%d); use a compatible Trellis binary", version, applicationSnapshotVersion)
-		}
-		token, err = decoder.Token()
+	if token != json.Delim('[') {
+		return fmt.Errorf("invalid snapshot envelope: expected [version, object] tuple")
 	}
+	var version int
+	if err := decoder.Decode(&version); err != nil {
+		return fmt.Errorf("invalid application snapshot version: %w", err)
+	}
+	if version != applicationSnapshotVersion {
+		return fmt.Errorf("unsupported application snapshot version %d (supported: v%d); use a compatible Trellis binary", version, applicationSnapshotVersion)
+	}
+	token, err = decoder.Token()
 	if err != nil || token != json.Delim('{') {
 		return fmt.Errorf("invalid snapshot payload: expected key/value object")
 	}
@@ -408,10 +407,8 @@ func (b *BoltStore) RestoreReader(r io.Reader) error {
 		if _, err := decoder.Token(); err != nil {
 			return err
 		}
-		if versioned {
-			if token, err := decoder.Token(); err != nil || token != json.Delim(']') {
-				return fmt.Errorf("invalid snapshot envelope: expected end after payload")
-			}
+		if token, err := decoder.Token(); err != nil || token != json.Delim(']') {
+			return fmt.Errorf("invalid snapshot envelope: expected end after payload")
 		}
 		var trailing any
 		if err := decoder.Decode(&trailing); err != io.EOF {

@@ -997,7 +997,7 @@ func loadOrBootstrapTLS(ctx context.Context, log *slog.Logger, cfg *config, loca
 	if err != nil {
 		return nil, uuid.Nil, fmt.Errorf("generate CA: %w", err)
 	}
-	nodeCert, nodeKey, err := tlsutil.GenerateNodeCert(caCert, caKey, nodeID, cfg.ServerAdvertise, cfg.AgentAdvertise, cfg.RaftAdvertise)
+	nodeCert, nodeKey, err := tlsutil.GenerateNodeCert(caCert, caKey, nodeID)
 	if err != nil {
 		return nil, uuid.Nil, fmt.Errorf("generate node cert: %w", err)
 	}

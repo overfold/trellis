@@ -131,8 +131,8 @@ var _ state.Store = memoryStore{}
 var _ state.AtomicStore = memoryStore{}
 var _ state.PrefixIterator = memoryStore{}
 
-func persistedTestSpec(name string) *spec.JobSpec {
-	return canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: name,
+func persistedTestSpec() *spec.JobSpec {
+	return canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web",
 		TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1,
 			Tasks: []spec.TaskSpec{{Name: "app", Image: "example/app:1"}}}}})
 }
@@ -143,7 +143,7 @@ func TestJobRevisionRetentionAndDeletion(t *testing.T) {
 	controller := NewStateController(store, "test")
 	identity := jobKey("default", "web")
 	for revision := 1; revision <= jobRevisionRetention+3; revision++ {
-		job := &Job{Spec: persistedTestSpec("web"), Revision: revision, Version: revision}
+		job := &Job{Spec: persistedTestSpec(), Revision: revision, Version: revision}
 		record := &JobRevisionRecord{Version: revision, Revision: revision, Spec: job.Spec, CreatedAt: time.Unix(int64(revision), 0).UTC()}
 		if err := controller.PutJobWithRevision(ctx, identity, job, record); err != nil {
 			t.Fatal(err)
@@ -164,69 +164,10 @@ func TestJobRevisionRetentionAndDeletion(t *testing.T) {
 	}
 }
 
-func TestListJobRevisionsBoundsLegacyHistory(t *testing.T) {
-	ctx := context.Background()
-	store := memoryStore{}
-	controller := NewStateController(store, "test")
-	prefix := "trellis/test/job-revisions/" + url.QueryEscape(jobKey("default", "web")) + "/"
-	for revision := 1; revision <= 25; revision++ {
-		raw, err := json.Marshal(&JobRevisionRecord{Version: revision, Revision: revision, Spec: persistedTestSpec("web"), CreatedAt: time.Unix(int64(revision), 0).UTC()})
-		if err != nil {
-			t.Fatal(err)
-		}
-		store[prefix+fmt.Sprint(revision)] = raw
-	}
-	revisions, err := controller.ListJobRevisions(ctx, jobKey("default", "web"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(revisions) != jobRevisionRetention || revisions[0].Revision != 16 || revisions[9].Revision != 25 {
-		t.Fatalf("bounded revisions = %#v, want 16 through 25", revisions)
-	}
-}
-
-func TestCompactJobRevisionsBoundsLegacyHistoryAndRemovesOrphans(t *testing.T) {
-	ctx := context.Background()
-	store := memoryStore{}
-	controller := NewStateController(store, "test")
-	liveIdentity := jobKey("default", "web")
-	for _, identity := range []string{liveIdentity, jobKey("default", "deleted")} {
-		prefix := "trellis/test/job-revisions/" + url.QueryEscape(identity) + "/"
-		for revision := 1; revision <= 12; revision++ {
-			name := "web"
-			if identity != liveIdentity {
-				name = "deleted"
-			}
-			raw, err := json.Marshal(&JobRevisionRecord{Version: revision, Revision: revision, Spec: persistedTestSpec(name), CreatedAt: time.Unix(int64(revision), 0).UTC()})
-			if err != nil {
-				t.Fatal(err)
-			}
-			store[prefix+fmt.Sprint(revision)] = raw
-		}
-	}
-	if err := controller.CompactJobRevisions(ctx, map[string]*Job{liveIdentity: {Spec: &spec.JobSpec{Namespace: "default", Name: "web"}, Revision: 12}}); err != nil {
-		t.Fatal(err)
-	}
-	entries, err := store.List(ctx, "trellis/test/job-revisions/")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != jobRevisionRetention {
-		t.Fatalf("compacted revision count = %d, want %d", len(entries), jobRevisionRetention)
-	}
-	revisions, err := controller.ListJobRevisions(ctx, liveIdentity)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if revisions[0].Revision != 3 || revisions[9].Revision != 12 {
-		t.Fatalf("compacted revisions = %#v, want 3 through 12", revisions)
-	}
-}
-
 func TestStateControllerRoundTripsDurableLeaderState(t *testing.T) {
 	ctx := context.Background()
 	controller := NewStateController(memoryStore{}, "test")
-	job := &Job{Spec: persistedTestSpec("web"), Revision: 3}
+	job := &Job{Spec: persistedTestSpec(), Revision: 3}
 	if err := controller.PutJob(ctx, jobKey("default", "web"), job); err != nil {
 		t.Fatal(err)
 	}

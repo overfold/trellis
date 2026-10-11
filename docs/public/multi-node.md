@@ -207,7 +207,7 @@ Workload semantics are the same on one node or many, but some constraints only b
 
 `trellisctl nodes drain NODE` moves allocations to other nodes before maintenance; see [Drain and maintenance](operations.md#drain-and-maintenance) for the node commands.
 
-The [upgrade script](operations.md#upgrade-a-node) is safe to run one node at a time on a live cluster. It drains the local node and waits for its allocations to stop—Trellis only stops draining allocations after healthy replacement capacity exists elsewhere—then upgrades, verifies, and undrains the node. Upgrade nodes one after another, not in parallel, so the cluster keeps quorum and replacement capacity.
+The [upgrade script](operations.md#upgrade-a-node) drains the local node and waits for its allocations to stop—Trellis only stops draining allocations after healthy replacement capacity exists elsewhere—then replaces binaries, verifies, and undrains the node. This maintenance sequence does not guarantee mixed-release safety or migrate persisted state. Follow the pre-v1 compatibility policy at that link; recreate incompatible development clusters rather than treating drain and rollback as a rolling-upgrade guarantee.
 
 The [uninstall script](operations.md#uninstall-a-node) on a live multi-node cluster drains the node, waits for healthy replacements, transfers leadership away when necessary, and removes the local Raft member before deleting local software.
 

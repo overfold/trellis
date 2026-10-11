@@ -4,12 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io/fs"
-	"net/netip"
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 )
 
@@ -84,72 +81,8 @@ func (m *WireGuardManager) removeNetnsStage(ctx context.Context, id string) erro
 
 const leaseStorageDir = ".leases"
 
-// Migrate individual legacy lease files, not the directory: "plans" also
-// contains peer-plan JSON. Hard linking refuses conflicting destination state
-// and makes interruption between publication and removal safely retryable.
-func (m *WireGuardManager) leaseDirectory(network string) (string, error) {
-	dest := filepath.Join(m.stateDir, leaseStorageDir, network)
-	legacy := filepath.Join(m.stateDir, network)
-	entries, err := os.ReadDir(legacy)
-	if errors.Is(err, fs.ErrNotExist) {
-		return dest, nil
-	}
-	if err != nil {
-		return "", err
-	}
-	for _, entry := range entries {
-		if network == "plans" && (strings.HasSuffix(entry.Name(), ".json") || strings.HasPrefix(entry.Name(), ".network-plan-")) {
-			continue
-		}
-		prefix, err := netip.ParsePrefix(strings.ReplaceAll(entry.Name(), "_", "/"))
-		if err != nil || !prefix.Addr().Is4() || !entry.Type().IsRegular() {
-			return "", fmt.Errorf("unexpected legacy lease %s/%s", network, entry.Name())
-		}
-		source, target := filepath.Join(legacy, entry.Name()), filepath.Join(dest, entry.Name())
-		owner, err := os.ReadFile(source)
-		if err != nil {
-			return "", fmt.Errorf("read legacy lease owner %s: %w", source, err)
-		}
-		if !safeAllocation.Match(owner) {
-			return "", fmt.Errorf("invalid legacy lease owner %s", source)
-		}
-		if err := os.MkdirAll(dest, 0o700); err != nil {
-			return "", err
-		}
-		if err := os.Link(source, target); err != nil {
-			if !errors.Is(err, fs.ErrExist) {
-				return "", err
-			}
-			a, err := os.Stat(source)
-			if err != nil {
-				return "", err
-			}
-			b, err := os.Lstat(target)
-			if err != nil || !os.SameFile(a, b) {
-				return "", fmt.Errorf("conflicting migrated lease %s", target)
-			}
-		}
-		if err := syncDirectory(dest); err != nil {
-			return "", err
-		}
-		for _, dir := range []string{filepath.Dir(dest), m.stateDir} {
-			if err := syncDirectory(dir); err != nil {
-				return "", err
-			}
-		}
-		if err := os.Remove(source); err != nil {
-			return "", err
-		}
-		if err := syncDirectory(legacy); err != nil {
-			return "", err
-		}
-	}
-	if network != "plans" {
-		if err := os.Remove(legacy); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return "", err
-		}
-	}
-	return dest, nil
+func (m *WireGuardManager) leaseDirectory(network string) string {
+	return filepath.Join(m.stateDir, leaseStorageDir, network)
 }
 
 func syncDirectory(path string) error {
@@ -159,37 +92,4 @@ func syncDirectory(path string) error {
 	}
 	defer func() { _ = f.Close() }()
 	return f.Sync()
-}
-
-// v2 journals omitted the probed address. Never recompute its hash: an IPAM
-// collision may have assigned a different address. Require one owned lease.
-func (m *WireGuardManager) publishedAddress(record *attachmentRecord) (string, error) {
-	if record.Version == 3 {
-		return record.Address, nil
-	}
-	dir, err := m.leaseDirectory(record.Network)
-	if err != nil {
-		return "", err
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return "", err
-	}
-	address := ""
-	for _, entry := range entries {
-		owner, err := os.ReadFile(filepath.Join(dir, entry.Name()))
-		if err != nil {
-			return "", err
-		}
-		if string(owner) == record.AllocationID {
-			if address != "" {
-				return "", fmt.Errorf("ambiguous published address for %s", record.AllocationID)
-			}
-			address = strings.ReplaceAll(entry.Name(), "_", "/")
-		}
-	}
-	if address == "" {
-		return "", fmt.Errorf("missing published address lease for %s", record.AllocationID)
-	}
-	return address, nil
 }

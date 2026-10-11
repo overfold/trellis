@@ -141,12 +141,8 @@ func (m *WireGuardManager) reconcileFirewall(ctx context.Context, bridge, wg, ci
 				return err
 			}
 		}
-		if !record.Detaching && (record.PortsReady || record.Version == 2 && record.NetnsCreated) && len(record.Ports) > 0 {
-			address, err := m.publishedAddress(record)
-			if err != nil {
-				return err
-			}
-			if err := m.publishPorts(ctx, id, address, record.Ports); err != nil {
+		if !record.Detaching && record.PortsReady && len(record.Ports) > 0 {
+			if err := m.publishPorts(ctx, id, record.Address, record.Ports); err != nil {
 				return err
 			}
 		}

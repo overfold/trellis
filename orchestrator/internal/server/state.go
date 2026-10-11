@@ -128,8 +128,8 @@ func (s *StateController) ListJobs(ctx context.Context) (map[string]*Job, error)
 		if err := spec.ValidateCanonical(job.Spec); err != nil {
 			return nil, fmt.Errorf("invalid persisted job (repair before upgrading): %w", err)
 		}
-		// Hashes are derived, not authoritative. Rebuild even legacy raw-byte
-		// digests damaged by JSON's UTF-8 replacement, without a state mutation.
+		// Hashes are derived, not authoritative. Rebuild the cache from the
+		// execution spec without a state mutation.
 		execution := executionSpec(job.Spec, job.ResolvedImages)
 		job.ContentHashes = make(map[string]string, len(execution.TaskGroups))
 		for i := range execution.TaskGroups {
@@ -507,26 +507,7 @@ func (s *StateController) ListJobRevisions(ctx context.Context, key string) ([]*
 	return s.listJobRevisions(ctx, prefix, jobRevisionRetention)
 }
 
-// CompactJobRevisions removes deleted-job history and bounds legacy histories.
-// It is called by a newly elected leader so upgrades compact existing FSM state
-// even when jobs are never applied again.
-func (s *StateController) CompactJobRevisions(ctx context.Context, jobs map[string]*Job) error {
-	mutations, err := s.jobRevisionCompactionMutations(ctx, jobs)
-	if err != nil || len(mutations) == 0 {
-		return err
-	}
-	atomic, ok := s.store.(state.AtomicStore)
-	if !ok {
-		return fmt.Errorf("state store does not support atomic job revision compaction")
-	}
-	if err := atomic.Batch(ctx, mutations); err != nil {
-		return fmt.Errorf("compact job revisions: %w", err)
-	}
-	return nil
-}
-
-// ActivateLeadership advances the fencing epoch and compacts legacy revision
-// history in one replicated state transition.
+// ActivateLeadership advances the fencing epoch in one replicated state transition.
 func (s *StateController) ActivateLeadership(ctx context.Context) (*Cluster, error) {
 	atomic, ok := s.store.(state.UpdatingStore)
 	if !ok {
@@ -547,89 +528,16 @@ func (s *StateController) ActivateLeadership(ctx context.Context) (*Cluster, err
 			return nil, fmt.Errorf("control epoch exhausted")
 		}
 		cluster.ControlEpoch++
-		jobs, err := controller.ListJobs(ctx)
-		if err != nil {
-			return nil, err
-		}
-		compaction, err := controller.jobRevisionCompactionMutations(ctx, jobs)
-		if err != nil {
-			return nil, err
-		}
 		raw, err := json.Marshal(cluster)
 		if err != nil {
 			return nil, err
 		}
-		return append([]state.Mutation{{Key: fmt.Sprintf("%s/%s/meta", trellisNamespace, s.cluster), Value: raw}}, compaction...), nil
+		return []state.Mutation{{Key: fmt.Sprintf("%s/%s/meta", trellisNamespace, s.cluster), Value: raw}}, nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("activate leadership: %w", err)
 	}
 	return cluster, nil
-}
-
-func (s *StateController) jobRevisionCompactionMutations(ctx context.Context, jobs map[string]*Job) ([]state.Mutation, error) {
-	rootPrefix := fmt.Sprintf("%s/%s/job-revisions/", trellisNamespace, s.cluster)
-	retained := make(map[string][]*JobRevisionRecord, len(jobs))
-	total := 0
-	appendRecord := func(_ string, raw []byte) error {
-		total++
-		var record JobRevisionRecord
-		if err := json.Unmarshal(raw, &record); err != nil {
-			return fmt.Errorf("unmarshal job revision: %w", err)
-		}
-		if record.Spec == nil {
-			return fmt.Errorf("job revision is missing its spec")
-		}
-		identity := jobKey(record.Spec.Namespace, record.Spec.Name)
-		if jobs[identity] == nil {
-			return nil
-		}
-		records := append(retained[identity], &record)
-		sort.Slice(records, func(i, j int) bool { return records[i].Version < records[j].Version })
-		if len(records) > jobRevisionRetention {
-			records = records[1:]
-		}
-		retained[identity] = records
-		return nil
-	}
-	if iterator, ok := s.store.(state.PrefixIterator); ok {
-		if err := iterator.IteratePrefix(ctx, rootPrefix, appendRecord); err != nil {
-			return nil, err
-		}
-	} else {
-		values, err := s.store.List(ctx, rootPrefix)
-		if err != nil {
-			return nil, err
-		}
-		for key, raw := range values {
-			if err := appendRecord(key, raw); err != nil {
-				return nil, err
-			}
-		}
-	}
-	kept := 0
-	identities := make([]string, 0, len(retained))
-	for identity, records := range retained {
-		kept += len(records)
-		identities = append(identities, identity)
-	}
-	if kept == total {
-		return nil, nil
-	}
-	sort.Strings(identities)
-	mutations := make([]state.Mutation, 0, kept+1)
-	mutations = append(mutations, state.Mutation{DeletePrefix: rootPrefix})
-	for _, identity := range identities {
-		prefix := rootPrefix + url.QueryEscape(identity) + "/"
-		for _, record := range retained[identity] {
-			raw, err := json.Marshal(record)
-			if err != nil {
-				return nil, fmt.Errorf("marshal retained job revision: %w", err)
-			}
-			mutations = append(mutations, state.Mutation{Key: prefix + fmt.Sprint(record.Version), Value: raw})
-		}
-	}
-	return mutations, nil
 }
 
 func (s *StateController) listJobRevisions(ctx context.Context, prefix string, limit int) ([]*JobRevisionRecord, error) {

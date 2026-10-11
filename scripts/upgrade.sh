@@ -93,8 +93,8 @@ ui_section "Stage"
 download_release "$WORK_TMP"
 ui_step "Downloaded and verified ${RELEASE_TAG}"
 
-# Use the verified staged daemon so maintenance can decode YAML even when the
-# currently installed release predates this command. Never eval config values.
+# Use the verified staged daemon to validate configuration against the release
+# being installed before changing binaries. Never eval config values.
 paths="$("${WORK_TMP}/trellis" config-paths --config "$CONFIG_FILE")" || ui_die "Could not decode node configuration; no binaries were changed."
 DATA_DIR="$(printf '%s' "$paths" | jq -er '.data_dir | select(type == "string" and length > 0)')" || ui_die "Invalid data_dir; no binaries were changed."
 CONTAINERD_SOCKET="$(printf '%s' "$paths" | jq -er '.containerd_socket | select(type == "string" and length > 0)')" || ui_die "Invalid containerd_socket; no binaries were changed."

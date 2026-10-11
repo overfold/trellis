@@ -140,9 +140,8 @@ continues across a rotation. The limit is approximate:
   a warning.
 
 This is node policy, not part of a job. It applies to existing logs as well as
-new ones, including tasks that were already running when the node gained the
-limit. Logs of allocations still read from the legacy `$TMPDIR/trellis-logs`
-location are not limited. Size the limit and the number of retained terminal
+new ones in the protected runtime directory; logs are not read from temporary
+directories. Size the limit and the number of retained terminal
 allocations (`terminal_allocation_retention`) together: a node can hold up to
 the limit for every running task and every retained task log on it.
 
@@ -183,6 +182,10 @@ The `cluster` value (or `--cluster`) must be a 1–63 character safe identifier:
 Run `trellis` in the host mount namespace. The installed unit deliberately omits systemd sandboxing options that give the service a private mount namespace, such as `PrivateMounts=`, `PrivateTmp=`, `ProtectSystem=`, `ProtectHome=`, `ReadOnlyPaths=`, and `InaccessiblePaths=`. Adding them in a drop-in, or running the daemon inside a container or under `unshare -m`, is unsupported: Trellis bind-mounts managed volumes at staging paths that containerd reads whenever it creates a task, and mounts made in a private namespace are invisible to containerd and disappear when the daemon exits, breaking managed-volume allocations on their next start or restart.
 
 Installer-created nodes also keep `/var/lib/trellis/install-state`. It records only lifecycle facts the installer can prove, such as which optional features are enabled and which host packages/repositories Trellis itself introduced. It is not cluster desired state and is not used by the scheduler.
+
+When this record is missing, existing binaries and configuration do not prove
+completion or dependency ownership. The installer verifies the node through its
+resume flow before marking installation complete.
 
 The root-run containerd runtime stores task logs and generated DNS/hosts mount files in `/var/lib/trellis/runtime`, independently of `data_dir` and `TMPDIR`. It creates this directory with mode `0750`. The directory and its ancestors must be root-owned, must not be symlinks, and must not be group- or world-writable; the runtime directory must also deny access to other users. Unsafe existing paths cause allocation creation/start to fail rather than being repaired automatically. Do not remove these files while allocations still use them. Container cleanup removes generated mount files but preserves task logs while the control plane retains the terminal allocation record. Minimal node-local log lookup metadata survives agent restarts; logs remain readable through the ordinary allocation logs API after the container is gone.
 
@@ -277,21 +280,11 @@ trellisctl --administrator-key ./trellis-administrator.pem credentials revoke 3f
 
 `credentials create` accepts `--access read|write`, not `--scope` or `--namespace-scope`: all credentials have cluster-wide authority. `credentials list` shows each operator credential's ID, access, creation time, and expiry, including expired credentials, but never a token; there are no Scope or Namespace columns. `credentials revoke ID` rejects the credential on its next use. Workload credentials injected through task-level `api_access` are managed with their allocations and are neither listed nor revocable here.
 
-### Coordinated incompatible spec upgrade
-
-The move of `runtime` and `api_access` from task groups to tasks, removal of credential `scope`, and task-bound workload tokens are an incompatible spec, persisted-state, and protocol change. Upgrade all control-plane nodes and agents, CLI, and API consumers together; mixed-version operation is not supported. Trellis provides no migration or compatibility path for the previous representation.
-
-Convert authored manifests: copy each group's `runtime` and `api_access` to every task in that group, remove the group fields, and drop `scope` from each copied API access object. Resolve omitted runtime independently to `runc` per task. Keep `restart` at group level. Update credential requests and consumers to use only `access` and remove `--scope` from CLI automation; credential responses no longer contain scope. New submissions must use the current task-level shape.
-
-Existing persisted jobs and revision history are not converted, allocation runtime is not recovered from old group settings, and stored credentials containing `scope` are rejected. Current backups use format 7; format 6 backups cannot be restored by this release. A binary-only upgrade of existing state is not supported. Keep the previous binaries and their recovery copies, and recreate desired workloads and credentials in a fresh cluster using current manifests; transfer volume data and other external dependencies explicitly. Do not rewrite Bolt/Raft records to bypass validation.
-
-There is no automatic replacement rollout for old allocations or conversion of allocation-shared workload tokens. Newly created allocations receive separate task-bound tokens. Plan capacity and disruption for cluster recreation and verify workload health before retiring the previous cluster.
-
 `trellisctl` fetches the signing challenge and signs the request automatically. Join tokens and ordinary `write` bearer credentials cannot manage credentials, change Raft membership, or perform backup/restore.
 
 Administrator challenges expire after 30 seconds and are single-use, process-local, and leadership-epoch-bound. Issuance is stateless: unauthenticated challenge floods cannot exhaust storage slots or evict pending legitimate challenges. A bounded 4,096-entry replay cache records only successfully verified administrator signatures until expiry; verification fails closed at capacity rather than allowing replay. Invalid proofs do not consume challenges. Network-level connection/CPU flooding is still possible; keep the administrative API on a trusted network and rate-limit it at the network boundary.
 
-Workload-token storage includes its allocation lookup so authentication checks live authority without scanning other credentials. Tokens written before this binding was introduced fail closed; after a coordinated upgrade, replace API-enabled allocations to receive current-format credentials. There is no token migration or widening of older grants. Retained history and node removal follow the [workload credential lifecycle](job-specification.md#api-access).
+Workload-token storage includes its allocation lookup so authentication checks live authority without scanning other credentials. Retained history and node removal follow the [workload credential lifecycle](job-specification.md#api-access).
 
 ## Drain and maintenance
 
@@ -307,6 +300,14 @@ revocation and registration removal remain committed: restore quorum and retry
 `nodes remove`, rather than attempting to rejoin with the revoked identity.
 
 ## Upgrade a node
+
+Trellis is pre-v1 and supports only current specifications, protocols, and persisted
+formats. There are no migrations or mixed-release guarantees: run control-plane
+nodes, agents, and CLI from the same release, and match API consumers to that
+release's contract. Recreate incompatible development clusters with current
+manifests and credentials, transferring volume
+data explicitly. Do not edit persisted state to bypass validation. Backups restore
+only into their current format; binary rollback is not a persisted-state downgrade.
 
 The upgrade entrypoint performs the node-maintenance sequence instead of asking the operator to remember it:
 
@@ -352,89 +353,30 @@ curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/upgra
 sudo env TRELLIS_CONFIG="$HOME/.config/trellis/config.yaml" bash /tmp/trellis-upgrade.sh
 ```
 
-### Namespace network resource upgrades
+### Namespace network cleanup
 
-Namespace network resources now use longer names and kernel ownership markers;
-attachment journals use resource version 3 and still read version 2. Before
-crossing from the old 40-bit name scheme, evacuate each node **with the old binary still running**, and
-confirm its network attachment journals have been removed by successful stops.
-On a single-node cluster, stop the affected jobs and wait for allocation cleanup
-before replacing the binary; reapply them afterward. This transition requires
-workload downtime on a single node. Do not merely delete the journal files.
+Attachment journals require resource version 3; other versions are rejected.
+Address leases live only in `network/.leases/<network>/`, separately from
+peer-plan JSON in `network/plans/`, including for a namespace named `plans`.
+There is no journal or lease migration.
 
-The new binary refuses pre-version-2 journals instead of deriving new names and
-falsely reporting that the old resources were cleaned up. If upgraded prematurely, use
-the creating binary to finish cleanup first. An ownership mismatch also preserves
-the journal and resources: investigate the named link or network namespace.
-Never add ownership markers to an unrelated device to force adoption. A crash
-between resource creation and ownership recording may require operator removal
-of the confirmed orphan after its workload is stopped; Trellis fails closed
-rather than assuming that a matching device name proves ownership.
-
-Version 2 → 3 does not rename interfaces or require replacing healthy workloads.
-The new binary reads existing journals and moves legacy address leases on demand
-from `network/<network>/` to `network/.leases/<network>/`. A namespace named
-`plans` is supported: only its address-lease files move, while peer-plan JSON
-stays in `network/plans/`. Migration publishes and syncs each lease before
-removing its old name; interrupted migration retries safely. A different file
-already at the destination is a conflict, even if its contents match. Stop the
-daemon and investigate both files and their allocation owners before retrying;
-do not discard reservations or peer plans to bypass the error.
-
-New attachments journal random kernel group markers before creating links,
+Attachments journal random kernel group markers before creating links,
 then install their full ownership aliases. An empty alias is accepted only
 with the journal's exact creation-time group marker; a foreign nonempty alias
 is always refused. Named namespaces publish a symlink to a private journal-owned
 mount only after ownership is durable. Keep `network/.attachments/`, including
-its hidden staging directories, intact while workloads run. Restart/cleanup
-recovers interrupted new attachments; a version-2 creation that died before
-its alias or inode was recorded still requires investigating the confirmed
-orphan with the workload and daemon stopped. Never mark a foreign resource as
-owned or delete the journal as a substitute for cleanup.
+its hidden staging directories, intact while workloads run. Ownership mismatches
+preserve journals and resources: investigate the named link or network namespace.
+Restart/cleanup recovers interrupted attachments, but an ambiguous orphan may
+require operator removal after its workload and daemon are stopped and ownership
+is confirmed. Matching names alone are not ownership proof. Never mark a foreign
+resource as owned or delete journals, reservations, or peer plans to bypass errors.
 
 Use the current binary's `sudo trellis local-cleanup --config /etc/trellis/trellis.yaml`
 only after the daemon and all containers have stopped (the uninstall flow
 already does this). It retains journals and reservations when ownership or
-storage checks fail. Correct the reported problem and retry. Before downgrading
-to a version-2-only binary, evacuate/stop workloads and finish cleanup with the
-version-3 binary; old binaries cannot read new journals or the moved leases.
-Do not downgrade a node with live or partially cleaned version-3 attachments.
-
-### Raft snapshot format upgrades
-
-The application snapshot writer now uses format v2. It still reads the bare
-key/base64-value snapshots produced by pre-versioned releases as legacy v1,
-without changing stored record bytes. Unsupported versions and malformed
-snapshots are rejected without partially installing state. Raft's own snapshot
-metadata version is separate; see [application snapshot compatibility](../developer/architecture.md#application-snapshot-compatibility).
-Operator desired-state backup files and their restore validation are unchanged.
-
-**Crossing from a pre-versioned release to a v2 writer is a coordinated
-control-plane upgrade, not a rolling upgrade.** Old binaries cannot consume v2
-snapshots. An upgraded leader may compact logs and need to send a snapshot to an
-old follower; leadership transfer to an old node does not remove this risk.
-There is no format negotiation or dual-writing mode. Upgrade every control-plane
-member, including non-voters, before restarting any of them. Worker-only nodes
-have no Raft snapshots; this policy does not promise unrelated private-protocol
-compatibility between releases.
-
-Before crossing this boundary, save a [desired-state backup](#backups), then stop
-all control-plane daemons and take recovery copies of their stopped data
-directories, configuration and separately protected secrets keys. Plan for API
-and scheduling downtime. Stage verified, release-matched binaries on every
-control-plane node; preserve membership and data directories, and do not
-bootstrap a replacement cluster. The upgrade script preserves an already
-stopped service's stopped state: stop all members first, update each, then start
-them only when every member has the new binary. Check leadership, membership,
-node registration and workload health afterward.
-
-Do not rely on automatic binary-only rollback once a v2 binary has run: it can
-write a v2 snapshot, even if the local readiness check later fails. To return to
-the pre-versioned release, stop all control-plane nodes and restore the matching
-pre-upgrade recovery copies and binaries as a coordinated recovery; changes
-since those copies are lost. Never edit snapshot JSON or mix old recovery data
-with newer replicas. Future format boundaries must have explicit release notes;
-unknown versions require a compatible binary, not an assumed data migration.
+storage checks fail. Correct the reported problem and retry. Finish cleanup with
+the release that created the resources before discarding an incompatible cluster.
 
 ### Release download trust model
 
@@ -455,28 +397,16 @@ Optional gVisor installation similarly verifies the full upstream bundle against
 its SHA-512 digest over HTTPS before extraction, without Debian package hooks or
 Docker registration. That digest shares the upstream release trust channel and
 is not an independent signature or provenance check. Uninstall removes only the
-tracked Trellis bundle and its exact links, never Docker runtime registration;
-old `gvisor_config_owned` flags do not authorize deleting Docker configuration.
+tracked Trellis bundle and its exact links, never Docker runtime registration.
+Only current bundle ownership is tracked; old apt gVisor ownership flags are not read.
 
-### Canonical specification and content-hash upgrades
+### Canonical specifications and derived hashes
 
-Upgrade control-plane binaries together and use a matching `trellisctl`; mixed old/new leaders do not provide consistent plan/default and hash semantics. Save a desired-state backup and normal recovery copies first. New plans include a resolved `spec` and `settings_fingerprint`; consumers must submit that spec, its image pins, and `expected_settings` along with job-version preconditions to apply the reviewed plan. There is no fallback in the new CLI for older plan responses. Direct applies without the new precondition remain supported but are not pinned to a prior review.
+Plans include a resolved `spec` and `settings_fingerprint`; consumers must submit that spec, its image pins, and `expected_settings` along with job-version preconditions to apply the reviewed plan. Direct applies without the settings precondition remain supported but are not pinned to a prior review.
 
-Previously persisted task-group hashes could contain raw binary bytes corrupted by JSON encoding. No manual database edit or forced redeployment is needed: every job reload rebuilds these derived hashes from the canonical specification and stored image pins, including after backup restore. Reload itself does not write state, change job versions/revisions, or replace allocations; subsequent changed applies persist safe hexadecimal hashes. Snapshot and backup format versions are unchanged. Agent execution identities remain unchanged.
+Every job reload rebuilds derived task-group hashes from the validated canonical specification and stored image pins, including after backup restore. Reload itself does not perform registry I/O, write state, change job versions/revisions, or replace allocations; subsequent job writes persist hexadecimal hashes. This is cache rebuilding, not a persisted-state migration. Agent execution identities and fencing remain separate.
 
-Fix manifests or API producers that relied on lossy YAML numeric coercion, trailing YAML documents, case-insensitive JSON job fields, or explicit null job values before submitting them. Existing canonical stored specifications remain readable; strict author-input decoding is not retroactively applied to storage records. Omit optional JSON fields rather than sending null. Supplied resources require both CPU and memory; omitting the whole resources object still selects cluster defaults. `host_port: 0` remains the supported omission sentinel, reflected in both schemas.
-
-### Discovery identifier upgrades
-
-Older versions accepted dots in namespace, job, and task-group names even though their discovery names did not resolve. These names are now rejected; there is no automatic dot-to-hyphen conversion, escaping, or identity-boundary reinterpretation. Task, secret, and volume names are unchanged.
-
-Before upgrading, save a [desired-state backup](#backups) and a consistent recovery copy of stopped nodes' data directories, configuration, and separately protected secrets keys. Inspect manifests, live jobs, and retained job versions for dotted namespace/job/group names, and inspect namespace-bearing secret, volume, and network registrations in the backup. Merely applying a renamed group is insufficient: its old retained versions still contain the dotted identity.
-
-While still running the old version, create replacement jobs with explicitly chosen single-component names, update application DNS references, and delete the old jobs (which also removes their version history). Verify workload and attachment cleanup, including unreachable/lost allocations, before proceeding. A namespace rename is resource recreation, not a metadata edit: recreate secrets from their original secure source and plan volume-data transfer/locality explicitly. Do not rewrite encrypted secret namespaces or volume registrations in a backup; their identity and node-side paths matter.
-
-If residual dotted namespaces remain in registrations, or safe cleanup cannot be confirmed, migrate workloads and their data to a fresh cluster with valid names rather than editing Bolt/Raft state. Keep the old cluster and recovery copies until the replacement is verified. Do not restore a legacy dotted backup into the new version: restore rejects it atomically, including dotted historical jobs and namespace-bearing registrations.
-
-Loading an invalid persisted job or reading an invalid retained revision returns a repair diagnostic; control-plane startup/leadership reload refuses invalid live jobs rather than scheduling or renaming them. Legacy allocation discovery entries are excluded from the catalog and DNS cache. Already-running containers are not automatically migrated or stopped by this validation change. If an upgrade was attempted prematurely, stop the upgraded nodes and return to the prior binaries with intact state (or the saved recovery copy) to perform cleanup; do not expect the new API to delete invalid dotted paths.
+Author-input decoding rejects lossy YAML numeric coercion, trailing YAML documents, case-insensitive JSON job fields, and explicit null job values. Storage reads validate canonical specifications rather than reapplying author-input decoding. Omit optional JSON fields rather than sending null. Supplied resources require both CPU and memory; omitting the whole resources object selects cluster defaults. `host_port: 0` is the supported omission sentinel, reflected in both schemas.
 
 ## Leadership activation failures
 

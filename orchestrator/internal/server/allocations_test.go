@@ -333,7 +333,7 @@ func TestAllocationEndpointDoesNotFallBackForNamespaceNetworking(t *testing.T) {
 	}
 }
 
-func TestAllocationEndpointFallsBackToNodeForHostNetworking(t *testing.T) {
+func TestAllocationEndpointUsesNodeForHostNetworking(t *testing.T) {
 	allocation := &Allocation{
 		Namespace:     "demo",
 		JobName:       "web",
@@ -352,7 +352,32 @@ func TestAllocationEndpointFallsBackToNodeForHostNetworking(t *testing.T) {
 
 	listed := s.ListAllocations("demo", nil)
 	if len(listed) != 1 || listed[0].Address != "node-a" || len(listed[0].Endpoints) != 1 || len(listed[0].Endpoints[0].Ports) != 1 {
-		t.Fatalf("allocation endpoint = %#v, want host task node fallback and port", listed)
+		t.Fatalf("allocation endpoint = %#v, want host task node address and port", listed)
+	}
+}
+
+func TestAllocationEndpointRequiresTaskSpecs(t *testing.T) {
+	for _, observed := range []bool{false, true} {
+		allocation := &Allocation{
+			Namespace: "demo", JobName: "web", TaskGroupName: "web", ID: "demo-web-1",
+			Node:  &Node{ID: uuid.New(), Host: "node-a"},
+			Ports: []api.PortMapping{{HostPort: 8080, ContainerPort: 8080}},
+			Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy,
+		}
+		if observed {
+			allocation.Endpoints = []api.AllocationEndpoint{{Task: "app", Address: "10.86.213.2", Ports: allocation.Ports}}
+		}
+		s := &Server{allocations: []*Allocation{allocation}, catalog: catalog.New(), jobs: map[string]*Job{
+			jobKey("demo", "web"): {Spec: &spec.JobSpec{Namespace: "demo", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "web"}}}},
+		}}
+		listed := s.ListAllocations("demo", nil)
+		if len(listed) != 1 || listed[0].Address != "" || len(listed[0].Endpoints) != 0 {
+			t.Fatalf("observed=%t: allocation = %#v, want no endpoint without task specs", observed, listed)
+		}
+		s.refreshCatalog()
+		if services := s.ListServices("demo", nil); len(services) != 0 {
+			t.Fatalf("observed=%t: catalog = %#v, want no endpoint without task specs", observed, services)
+		}
 	}
 }
 
@@ -381,7 +406,7 @@ func TestAllocationEndpointKeepsDistinctTaskAddresses(t *testing.T) {
 
 	listed := s.ListAllocations("demo", nil)
 	if len(listed) != 1 || listed[0].Address != "" || len(listed[0].Endpoints) != 2 {
-		t.Fatalf("allocation endpoint = %#v, want ambiguous legacy address plus two task endpoints", listed)
+		t.Fatalf("allocation endpoint = %#v, want ambiguous allocation address plus two task endpoints", listed)
 	}
 	if listed[0].Endpoints[0].Task != "app" || listed[0].Endpoints[0].Address != "10.86.213.2" ||
 		listed[0].Endpoints[1].Task != "sidecar" || listed[0].Endpoints[1].Address != "10.86.213.17" {

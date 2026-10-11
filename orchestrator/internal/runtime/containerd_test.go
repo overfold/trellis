@@ -165,17 +165,13 @@ func TestConvertMountsAddsNosuidNodev(t *testing.T) {
 	}
 }
 
-func TestContainerdLogsFallsBackToLegacyDirectory(t *testing.T) {
+func TestContainerdLogsReadsCurrentDirectory(t *testing.T) {
 	dir := t.TempDir()
 	r := &ContainerdRuntime{
-		logDir:       filepath.Join(dir, "runtime"),
-		legacyLogDir: filepath.Join(dir, "legacy"),
+		logDir: filepath.Join(dir, "runtime"),
 	}
-	if err := os.MkdirAll(r.legacyLogDir, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(r.legacyLogDir, "allocation.log"), []byte("legacy\n"), 0o600); err != nil {
-		t.Fatal(err)
+	if _, err := r.Logs(context.Background(), "allocation", false, 0); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing log error = %v, want not exist", err)
 	}
 	readLogs := func(want string) {
 		t.Helper()
@@ -192,7 +188,6 @@ func TestContainerdLogsFallsBackToLegacyDirectory(t *testing.T) {
 			t.Fatalf("logs = %q, want %q", got, want)
 		}
 	}
-	readLogs("legacy\n")
 	if err := os.MkdirAll(r.logDir, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -202,148 +197,34 @@ func TestContainerdLogsFallsBackToLegacyDirectory(t *testing.T) {
 	readLogs("current\n")
 }
 
-func TestContainerdLogsRejectsUntrustedLegacyPaths(t *testing.T) {
-	dir := t.TempDir()
-	target := filepath.Join(dir, "private")
-	if err := os.WriteFile(target, []byte("secret"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	legacy := filepath.Join(dir, "legacy")
-	if err := os.Mkdir(legacy, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	r := &ContainerdRuntime{logDir: filepath.Join(dir, "runtime"), legacyLogDir: legacy}
-	logPath := filepath.Join(legacy, "allocation.log")
-	if err := os.Symlink(target, logPath); err != nil {
-		t.Fatal(err)
-	}
-	if logs, err := r.Logs(context.Background(), "allocation", false, 0); err == nil {
-		_ = logs.Close()
-		t.Fatal("accepted a symlinked legacy log")
-	}
-	if err := os.Remove(logPath); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(legacy, 0o777); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(logPath, []byte("untrusted"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if logs, err := r.Logs(context.Background(), "allocation", false, 0); err == nil {
-		_ = logs.Close()
-		t.Fatal("accepted a writable legacy directory")
-	}
-	if err := os.RemoveAll(legacy); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(dir, legacy); err != nil {
-		t.Fatal(err)
-	}
-	if logs, err := r.Logs(context.Background(), "allocation", false, 0); err == nil {
-		_ = logs.Close()
-		t.Fatal("accepted a symlinked legacy directory")
-	}
-}
-
-func TestRemoveAllocationFilesCleansCurrentAndLegacyFiles(t *testing.T) {
+func TestRemoveAllocationFilesCleansCurrentFiles(t *testing.T) {
 	dir := t.TempDir()
 	r := &ContainerdRuntime{
-		logDir:       filepath.Join(dir, "runtime"),
-		legacyLogDir: filepath.Join(dir, "legacy"),
+		logDir: filepath.Join(dir, "runtime"),
 	}
-	for _, folder := range []string{r.logDir, r.legacyLogDir} {
-		if err := os.MkdirAll(folder, 0o750); err != nil {
+	if err := os.MkdirAll(r.logDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{".log", "-resolv.conf", "-hosts"} {
+		path := filepath.Join(r.logDir, "allocation"+suffix)
+		if err := os.WriteFile(path, []byte("data"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		for _, suffix := range []string{".log", "-resolv.conf", "-hosts"} {
-			path := filepath.Join(folder, "allocation"+suffix)
-			if err := os.WriteFile(path, []byte("data"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}
-		if err := os.WriteFile(filepath.Join(folder, "other.log"), []byte("keep"), 0o600); err != nil {
-			t.Fatal(err)
-		}
+	}
+	if err := os.WriteFile(filepath.Join(r.logDir, "other.log"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	for range 2 {
 		if err := r.removeAllocationFiles("allocation", ".log", "-resolv.conf", "-hosts"); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, folder := range []string{r.logDir, r.legacyLogDir} {
-		entries, err := os.ReadDir(folder)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(entries) != 1 || entries[0].Name() != "other.log" {
-			t.Fatalf("remaining files in %s: %v", folder, entries)
-		}
-	}
-}
-
-func TestRemoveLegacyAllocationFilesUsesOpenedDirectory(t *testing.T) {
-	parent := t.TempDir()
-	legacy := filepath.Join(parent, "legacy")
-	target := filepath.Join(parent, "target")
-	suffixes := []string{".log", "-resolv.conf", "-hosts"}
-	for _, path := range []string{legacy, target} {
-		if err := os.Mkdir(path, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		for _, suffix := range suffixes {
-			if err := os.WriteFile(filepath.Join(path, "allocation"+suffix), []byte("keep"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	dir, err := os.Open(legacy)
+	entries, err := os.ReadDir(r.logDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = dir.Close() }()
-	// Model a directory replacement after open, without timing-dependent races.
-	moved := filepath.Join(parent, "moved")
-	if err := os.Rename(legacy, moved); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(target, legacy); err != nil {
-		t.Fatal(err)
-	}
-	removeLegacyAllocationFiles(dir, "allocation", suffixes...)
-	for _, suffix := range suffixes {
-		if _, err := os.Lstat(filepath.Join(moved, "allocation"+suffix)); !os.IsNotExist(err) {
-			t.Fatalf("original legacy file was not removed: %v", err)
-		}
-		if got, err := os.ReadFile(filepath.Join(target, "allocation"+suffix)); err != nil || string(got) != "keep" {
-			t.Fatalf("replacement target changed: %q, %v", got, err)
-		}
-	}
-}
-
-func TestRemoveAllocationFilesIgnoresUnremovableLegacyEntry(t *testing.T) {
-	dir := t.TempDir()
-	r := &ContainerdRuntime{logDir: filepath.Join(dir, "runtime"), legacyLogDir: filepath.Join(dir, "legacy")}
-	for _, path := range []string{r.logDir, r.legacyLogDir} {
-		if err := os.Mkdir(path, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.WriteFile(r.logPath("allocation"), []byte("current"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	legacyLog := filepath.Join(r.legacyLogDir, "allocation.log")
-	if err := os.Mkdir(legacyLog, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(legacyLog, "blocker"), []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := r.removeAllocationFiles("allocation", ".log", "-resolv.conf", "-hosts"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(r.logPath("allocation")); !os.IsNotExist(err) {
-		t.Fatalf("current log still exists: %v", err)
+	if len(entries) != 1 || entries[0].Name() != "other.log" {
+		t.Fatalf("remaining files in %s: %v", r.logDir, entries)
 	}
 }
 

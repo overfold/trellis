@@ -402,7 +402,7 @@ func TestWireGuardDetachRemovesNamespacePathAfterLastAllocation(t *testing.T) {
 			t.Fatalf("last detach did not tear down %q:\n%s", want, joined)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(manager.stateDir, "acme")); !os.IsNotExist(err) {
+	if _, err := os.Stat(manager.leaseDirectory("acme")); !os.IsNotExist(err) {
 		t.Fatalf("namespace lease directory still exists after last detach: %v", err)
 	}
 }

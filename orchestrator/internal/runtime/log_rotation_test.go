@@ -19,7 +19,7 @@ import (
 func newRotationTestRuntime(t *testing.T) *ContainerdRuntime {
 	t.Helper()
 	dir := t.TempDir()
-	return &ContainerdRuntime{logDir: dir, legacyLogDir: filepath.Join(dir, "absent")}
+	return &ContainerdRuntime{logDir: dir}
 }
 
 // openTaskLog opens the active log of container "task" the way the containerd shim does.
@@ -426,7 +426,7 @@ func TestEnforceLogLimitFreesSpaceWhenFilesystemIsFull(t *testing.T) {
 		t.Skipf("mount tmpfs: %v", err)
 	}
 	t.Cleanup(func() { _ = syscall.Unmount(dir, 0) })
-	r := &ContainerdRuntime{logDir: dir, legacyLogDir: filepath.Join(dir, "absent")}
+	r := &ContainerdRuntime{logDir: dir}
 	shim := openTaskLog(t, r)
 	write(t, shim, "old\n")
 	follower, err := r.Logs(t.Context(), "task", true, 0)

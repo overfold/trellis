@@ -8,7 +8,7 @@ import (
 
 func TestLogUsageCountsTaskLogsAndReportsFilesystem(t *testing.T) {
 	dir := t.TempDir()
-	r := &ContainerdRuntime{logDir: dir, legacyLogDir: filepath.Join(dir, "absent")}
+	r := &ContainerdRuntime{logDir: dir}
 	for name, size := range map[string]int{"running.log": 300, "retained.log": 40, "task-hosts": 1000, "task-resolv.conf": 1000} {
 		if err := os.WriteFile(filepath.Join(dir, name), make([]byte, size), 0o600); err != nil {
 			t.Fatal(err)

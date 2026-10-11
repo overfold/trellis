@@ -41,10 +41,9 @@ const healthProbeContainerPath = "/run/trellis/health-probe"
 
 // ContainerdRuntime implements container lifecycle operations with containerd.
 type ContainerdRuntime struct {
-	client       *containerd.Client
-	logDir       string
-	legacyLogDir string
-	rotations    logRotations
+	client    *containerd.Client
+	logDir    string
+	rotations logRotations
 }
 
 // Port maps a host port to a container port.
@@ -133,9 +132,8 @@ func NewContainerdRuntime(socketPath string) (*ContainerdRuntime, error) {
 	}
 
 	return &ContainerdRuntime{
-		client:       client,
-		logDir:       "/var/lib/trellis/runtime",
-		legacyLogDir: filepath.Join(os.TempDir(), "trellis-logs"),
+		client: client,
+		logDir: "/var/lib/trellis/runtime",
 	}, nil
 }
 
@@ -472,8 +470,7 @@ func checkOwnedDir(path string, info os.FileInfo, uid uint32, private bool) erro
 // Logs opens the log stream for a container.
 func (c *ContainerdRuntime) Logs(ctx context.Context, containerID string, follow bool, tail int) (io.ReadCloser, error) {
 	path := c.logPath(containerID)
-	// Check for the runtime log first so lookups of legacy or missing logs
-	// do not create rotation state.
+	// Check first so lookups of missing logs do not create rotation state.
 	_, err := os.Lstat(path)
 	if err == nil {
 		var reader io.ReadCloser
@@ -481,48 +478,7 @@ func (c *ContainerdRuntime) Logs(ctx context.Context, containerID string, follow
 			return reader, nil
 		}
 	}
-	if !os.IsNotExist(err) {
-		return nil, fmt.Errorf("open logs for %s: %w", containerID, err)
-	}
-	file, err := c.openLegacyLog(filepath.Base(containerID) + ".log")
-	if err != nil {
-		return nil, fmt.Errorf("open logs for %s: %w", containerID, err)
-	}
-	return newLogReader(ctx, file, follow, tail)
-}
-
-func (c *ContainerdRuntime) openLegacyLog(name string) (*os.File, error) {
-	dir, err := os.OpenFile(c.legacyLogDir, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_DIRECTORY, 0)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = dir.Close() }()
-	info, err := dir.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if err := checkOwnedDir(c.legacyLogDir, info, uint32(os.Geteuid()), true); err != nil { //nolint:gosec // Linux effective UIDs are unsigned 32-bit values.
-		return nil, err
-	}
-	fd, err := syscall.Openat(int(dir.Fd()), name, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
-	if err != nil {
-		return nil, err
-	}
-	file := os.NewFile(uintptr(fd), filepath.Join(c.legacyLogDir, name))
-	info, err = file.Stat()
-	if err != nil || !info.Mode().IsRegular() {
-		_ = file.Close()
-		if err != nil {
-			return nil, err
-		}
-		return nil, fmt.Errorf("legacy log %s is not a regular file", name)
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != uint32(os.Geteuid()) { //nolint:gosec // Linux effective UIDs are unsigned 32-bit values.
-		_ = file.Close()
-		return nil, fmt.Errorf("legacy log %s must be owned by the runtime user", name)
-	}
-	return file, nil
+	return nil, fmt.Errorf("open logs for %s: %w", containerID, err)
 }
 
 // Restart stops and starts a container.
@@ -659,25 +615,7 @@ func (c *ContainerdRuntime) removeAllocationFiles(containerID string, suffixes .
 	for _, suffix := range suffixes {
 		paths = append(paths, filepath.Join(c.logDir, name+suffix))
 	}
-	err := removeRuntimeFiles(paths...)
-	// Old log locations may be controlled by local users. Cleanup there is best effort.
-	if dir, openErr := os.OpenFile(c.legacyLogDir, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_DIRECTORY, 0); openErr == nil {
-		removeLegacyAllocationFiles(dir, name, suffixes...)
-		_ = dir.Close()
-	}
-	return err
-}
-
-func removeLegacyAllocationFiles(dir *os.File, name string, suffixes ...string) {
-	info, err := dir.Stat()
-	if err != nil || checkOwnedDir(dir.Name(), info, uint32(os.Geteuid()), true) != nil { //nolint:gosec // Linux effective UIDs are unsigned 32-bit values.
-		return
-	}
-	for _, suffix := range suffixes {
-		// Stay anchored to the checked directory even if a writable ancestor
-		// of the legacy temp directory is renamed or replaced with a symlink.
-		_ = syscall.Unlinkat(int(dir.Fd()), name+suffix)
-	}
+	return removeRuntimeFiles(paths...)
 }
 
 func removeRuntimeFiles(paths ...string) error {

@@ -10,7 +10,7 @@ import (
 
 func TestCleanupRetainsLogsUntilPruning(t *testing.T) {
 	dir := t.TempDir()
-	r := &ContainerdRuntime{logDir: dir, legacyLogDir: filepath.Join(dir, "absent")}
+	r := &ContainerdRuntime{logDir: dir}
 	for _, suffix := range []string{".log", "-hosts", "-resolv.conf"} {
 		if err := os.WriteFile(filepath.Join(dir, "task"+suffix), []byte("first\nlast\n"), 0o600); err != nil {
 			t.Fatal(err)
