@@ -72,7 +72,7 @@ func TestAgentOperationDeadlineCoversStalledResponse(t *testing.T) {
 			t.Cleanup(server.Close)
 			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 			defer cancel()
-			err := NewAgentClient("", nil).RunAllocation(ctx, uuid.New(), server.URL, &nodeapi.AllocationRequest{})
+			_, err := NewAgentClient("", nil).AllocationMetrics(ctx, uuid.New(), server.URL, "allocation")
 			close(release)
 			if !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("RunAllocation error = %v, want context deadline exceeded", err)
@@ -104,7 +104,7 @@ func TestAgentOperationAddsDeadlineWithoutBoundingLogStream(t *testing.T) {
 	})
 	agent := NewAgentClient("", nil)
 	agent.clients[nodeID] = &transport.Client{HTTP: &http.Client{Transport: operationTransport}}
-	if err := agent.RunAllocation(context.Background(), nodeID, "agent.invalid", &nodeapi.AllocationRequest{}); err != nil {
+	if err := agent.operationRequest(context.Background(), nodeID, http.MethodGet, "http://agent.invalid/v1/allocations/a/metrics", nil, &nodeapi.OperationResponse{}); err != nil {
 		t.Fatalf("RunAllocation: %v", err)
 	}
 	if !operationSawDeadline {

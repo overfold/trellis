@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
-	"strings"
 	"sync"
 
 	"github.com/overfold/trellis/orchestrator/internal/catalog"
@@ -20,14 +19,11 @@ func newNopStateController() *StateController {
 }
 
 type testAgent struct {
-	server     *httptest.Server
-	host       string
-	port       int
-	mu         sync.Mutex
-	calls      []agentCall
-	failRun    bool
-	failStop   bool
-	failResume bool
+	server *httptest.Server
+	host   string
+	port   int
+	mu     sync.Mutex
+	calls  []agentCall
 }
 
 type agentCall struct {
@@ -42,23 +38,7 @@ func newTestAgent() *testAgent {
 		body, _ := io.ReadAll(r.Body)
 		agent.mu.Lock()
 		agent.calls = append(agent.calls, agentCall{method: r.Method, path: r.URL.Path, body: body})
-		failRun := agent.failRun
-		failStop := agent.failStop
-		failResume := agent.failResume
 		agent.mu.Unlock()
-		if failRun && r.Method == http.MethodPost && r.URL.Path == "/v1/allocations" {
-			// A failed execution request, not retriable admission overload.
-			http.Error(w, "run failed", http.StatusInternalServerError)
-			return
-		}
-		if failStop && r.Method == http.MethodDelete && !strings.HasSuffix(r.URL.Path, "/drain") {
-			http.Error(w, "stop unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		if failResume && r.Method == http.MethodDelete {
-			http.Error(w, "resume unavailable", http.StatusServiceUnavailable)
-			return
-		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(nodeapi.OperationResponse{Code: "ok"})
 	}))

@@ -2,13 +2,7 @@ package server
 
 import (
 	"context"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
-	"net/url"
-	"strconv"
 	"strings"
-	"sync/atomic"
 	"testing"
 
 	"github.com/google/uuid"
@@ -17,7 +11,7 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
-func newStartingTestServer(t *testing.T, attempt int) (*Server, *testAgent, *Node, *Allocation) {
+func newStartingTestServer(t *testing.T, attempt int) (*Server, *Node, *Allocation) {
 	t.Helper()
 	s, agent := newTestServerWithAgent()
 	t.Cleanup(agent.server.Close)
@@ -32,51 +26,34 @@ func newStartingTestServer(t *testing.T, attempt int) (*Server, *testAgent, *Nod
 	}
 	allocation.Attempt = attempt
 	s.allocations = []*Allocation{allocation}
-	return s, agent, node, allocation
+	return s, node, allocation
 }
 
 func startFailure(allocation *Allocation, attempt int) []nodeapi.AllocationStatus {
 	return []nodeapi.AllocationStatus{{ID: allocation.ID, Generation: allocation.Generation, Task: "app", Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown, StartFailure: &nodeapi.StartFailure{Attempt: attempt, Message: "pull image app: registry unavailable"}}}
 }
 
-func TestExecuteAcceptedStartWaitsForObservedState(t *testing.T) {
-	s, agent, _, allocation := newStartingTestServer(t, 2)
-	if err := s.Execute(context.Background(), &Action{Type: ActionStart, Allocation: allocation}); err != nil {
+func TestPublishedStartWaitsForObservedState(t *testing.T) {
+	s, node, allocation := newStartingTestServer(t, 2)
+	if err := s.Execute(t.Context(), &Action{Type: ActionStart, Allocation: allocation}); err != nil {
 		t.Fatal(err)
 	}
-	if allocation.Phase != lifecycle.PhaseStarting || allocation.Attempt != 2 {
-		t.Fatalf("after accepted start: phase=%s attempt=%d, want starting at attempt 2", allocation.Phase, allocation.Attempt)
+	first := committedAllocationIntent(t, s, node.ID, allocation.ID, allocation.Generation)
+	if first.Mode != nodeapi.ExecutionRun || first.Request.Attempt != 2 || allocation.Phase != lifecycle.PhaseStarting {
+		t.Fatalf("published start=%+v", first)
 	}
-	var starts []nodeapi.AllocationRequest
-	for _, call := range agent.recordedCalls() {
-		if call.method == http.MethodPost && call.path == "/v1/allocations" {
-			var request nodeapi.AllocationRequest
-			if err := json.Unmarshal(call.body, &request); err != nil {
-				t.Fatal(err)
-			}
-			starts = append(starts, request)
-		}
-	}
-	if len(starts) != 1 || starts[0].Attempt != 2 {
-		t.Fatalf("start requests = %+v, want one at attempt 2", starts)
-	}
-	// The attempt is not part of the execution.
 	allocation.Attempt = 3
-	if err := s.Execute(context.Background(), &Action{Type: ActionStart, Allocation: allocation}); err != nil {
+	if err := s.Execute(t.Context(), &Action{Type: ActionStart, Allocation: allocation}); err != nil {
 		t.Fatal(err)
 	}
-	var retried nodeapi.AllocationRequest
-	calls := agent.recordedCalls()
-	if err := json.Unmarshal(calls[len(calls)-1].body, &retried); err != nil {
-		t.Fatal(err)
-	}
-	if retried.Attempt != 3 || retried.ExecutionHash != starts[0].ExecutionHash {
-		t.Fatalf("retry attempt=%d hash=%s, want attempt 3 with hash %s", retried.Attempt, retried.ExecutionHash, starts[0].ExecutionHash)
+	retry := committedAllocationIntent(t, s, node.ID, allocation.ID, allocation.Generation)
+	if retry.Request.Attempt != 3 || retry.Request.ExecutionHash != first.Request.ExecutionHash {
+		t.Fatal("retry changed frozen execution identity")
 	}
 }
 
 func TestHeartbeatCountsStartFailureOnce(t *testing.T) {
-	s, _, node, allocation := newStartingTestServer(t, 0)
+	s, node, allocation := newStartingTestServer(t, 0)
 	ctx := context.Background()
 	for range 2 {
 		if err := heartbeatAndApply(t, s, node.ID, startFailure(allocation, 0), "test", nodeResourceObservation{}); err != nil {
@@ -111,19 +88,19 @@ func TestHeartbeatCountsStartFailureOnce(t *testing.T) {
 	}
 }
 
-func TestHeartbeatRunningResetsStartAttempts(t *testing.T) {
-	s, _, node, allocation := newStartingTestServer(t, 3)
+func TestHeartbeatRunningPreservesDurableStartAttempt(t *testing.T) {
+	s, node, allocation := newStartingTestServer(t, 3)
 	running := []nodeapi.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
 	if err := heartbeatAndApply(t, s, node.ID, running, "test", nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
 	}
-	if allocation.Phase != lifecycle.PhaseRunning || allocation.Attempt != 0 || allocation.NextRetryAt != nil {
+	if allocation.Phase != lifecycle.PhaseRunning || allocation.Attempt != 3 || allocation.NextRetryAt != nil {
 		t.Fatalf("after running: phase=%s attempt=%d retry=%v", allocation.Phase, allocation.Attempt, allocation.NextRetryAt)
 	}
 }
 
 func TestHeartbeatRejectsInvalidStartFailure(t *testing.T) {
-	s, _, node, allocation := newStartingTestServer(t, 0)
+	s, node, allocation := newStartingTestServer(t, 0)
 	for name, status := range map[string]nodeapi.AllocationStatus{
 		"running phase": {ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy, StartFailure: &nodeapi.StartFailure{}},
 		"long message":  {ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown, StartFailure: &nodeapi.StartFailure{Message: strings.Repeat("x", nodeapi.MaxStartFailureMessageBytes+1)}},
@@ -135,7 +112,7 @@ func TestHeartbeatRejectsInvalidStartFailure(t *testing.T) {
 }
 
 func TestHeartbeatTerminalStartFailureFailsAllocation(t *testing.T) {
-	s, _, node, allocation := newStartingTestServer(t, 1)
+	s, node, allocation := newStartingTestServer(t, 1)
 	statuses := startFailure(allocation, 1)
 	statuses[0].StartFailure.Code = nodeapi.OperationRestartExhausted
 	if err := heartbeatAndApply(t, s, node.ID, statuses, "test", nodeResourceObservation{}); err != nil {
@@ -150,61 +127,18 @@ func TestHeartbeatTerminalStartFailureFailsAllocation(t *testing.T) {
 	}
 }
 
-func TestStartRequestFailureAfterObservedRunningIsNotCounted(t *testing.T) {
-	s, agent, _, allocation := newStartingTestServer(t, 0)
-	agent.mu.Lock()
-	agent.failRun = true
-	agent.mu.Unlock()
-	// The heartbeat observing the start complete lands while the start
-	// request is in flight.
-	allocation.mu.Lock()
-	allocation.Phase = lifecycle.PhaseRunning
-	allocation.mu.Unlock()
-	if err := s.Execute(context.Background(), &Action{Type: ActionStart, Allocation: allocation}); err == nil {
-		t.Fatal("start request failure not returned")
-	}
-	if allocation.Phase != lifecycle.PhaseRunning || allocation.Attempt != 0 || allocation.NextRetryAt != nil {
-		t.Fatalf("running allocation after failed request: phase=%s attempt=%d retry=%v", allocation.Phase, allocation.Attempt, allocation.NextRetryAt)
-	}
-}
-
-func TestStartAdmissionRefusalDoesNotConsumeExecutionBudget(t *testing.T) {
-	s, _, node, allocation := newStartingTestServer(t, 2)
-	var overloaded atomic.Bool
-	overloaded.Store(true)
-	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if overloaded.Load() {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			// The agent's Echo error envelope retains the operation code.
-			_, _ = w.Write([]byte(`{"message":"{\"code\":\"operation_failed\",\"message\":\"background allocation start limit reached; retry\"}"}`))
-		} else {
-			_, _ = w.Write([]byte(`{"code":"ok"}`))
-		}
-	}))
-	defer endpoint.Close()
-	address, err := url.Parse(endpoint.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	node.Host = "http://" + address.Hostname()
-	node.Port, err = strconv.Atoi(address.Port())
-	if err != nil {
-		t.Fatal(err)
-	}
+func TestDisconnectedAgentDoesNotConsumeExecutionBudget(t *testing.T) {
+	s, node, allocation := newStartingTestServer(t, 2)
+	node.Host, node.Port = "192.0.2.1", 1
 	for range 4 {
-		if err := s.Execute(context.Background(), &Action{Type: ActionStart, Allocation: allocation}); err == nil {
-			t.Fatal("refusal not returned")
+		if err := s.Execute(t.Context(), &Action{Type: ActionStart, Allocation: allocation}); err != nil {
+			t.Fatal(err)
 		}
-		if allocation.Phase != lifecycle.PhaseStarting || allocation.Attempt != 2 || allocation.NextRetryAt != nil {
-			t.Fatalf("refused start phase=%s attempt=%d retry=%v", allocation.Phase, allocation.Attempt, allocation.NextRetryAt)
+		if allocation.Attempt != 2 || allocation.NextRetryAt != nil || allocation.Phase != lifecycle.PhaseStarting {
+			t.Fatal("publication consumed execution budget")
 		}
 	}
-	overloaded.Store(false)
-	if err := s.Execute(context.Background(), &Action{Type: ActionStart, Allocation: allocation}); err != nil {
-		t.Fatalf("capacity recovery: %v", err)
-	}
-	if allocation.Attempt != 2 {
-		t.Fatal("capacity recovery changed execution attempt")
+	if committedAllocationIntent(t, s, node.ID, allocation.ID, allocation.Generation).Mode != nodeapi.ExecutionRun {
+		t.Fatal("disconnection revoked explicit run authority")
 	}
 }

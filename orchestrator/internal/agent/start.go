@@ -17,8 +17,7 @@ import (
 // groupStart is an accepted allocation start. The agent pulls its images and
 // creates its tasks in the background. Heartbeats report its tasks that have
 // no record yet as starting, and report its failure until the control plane
-// retries with another attempt. It is not persisted: after an agent restart,
-// the control plane's next start request for the generation starts it again.
+// retries with another attempt. Admission is durable before runtime work.
 type groupStart struct {
 	namespace     string
 	generation    uint64
@@ -38,6 +37,7 @@ type groupStart struct {
 	drainSequence uint64
 	err           error
 	failed        bool
+	failureCode   nodeapi.OperationCode
 }
 
 // finished reports whether the background start returned.
@@ -133,7 +133,9 @@ func (a *Agent) acceptRunningStart(request *nodeapi.AllocationRequest) (*groupSt
 	if current == nil || current.finished() || current.generation != request.Generation || current.jobRevision != request.JobRevision || current.executionHash != request.ExecutionHash {
 		return nil, nil
 	}
-	current.mergeRetry(request)
+	if err := a.mergeStartRetry(request.AllocationID, current, request); err != nil {
+		return nil, err
+	}
 	return current, nil
 }
 
@@ -146,10 +148,25 @@ func (s *groupStart) mergeRetry(request *nodeapi.AllocationRequest) {
 	s.mergeDrain(request.Draining, request.DrainSequence)
 }
 
+func (a *Agent) mergeStartRetry(id string, s *groupStart, r *nodeapi.AllocationRequest) error {
+	cloned := *s
+	cloned.mergeRetry(r)
+	if err := a.persistStartAdmission(id, &cloned); err != nil {
+		return err
+	}
+	s.mergeRetry(r)
+	return nil
+}
+
 // acceptStartLocked registers a start, or returns the channel of an older
 // generation's start that must finish first. The caller holds the allocation
 // operation lock.
 func (a *Agent) acceptStartLocked(ctx context.Context, request *nodeapi.AllocationRequest) (*groupStart, <-chan struct{}, error) {
+	release, err := a.fenceExecution(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer release()
 	if err := a.AcceptEpoch(request.Epoch); err != nil {
 		return nil, nil, err
 	}
@@ -171,6 +188,7 @@ func (a *Agent) acceptStartLocked(ctx context.Context, request *nodeapi.Allocati
 	}
 	a.mu.RUnlock()
 	if running {
+		release()
 		if err := a.removeRetainedLogs(request.AllocationID, request.Generation-1); err != nil {
 			return nil, nil, fmt.Errorf("remove logs of superseded generations: %w", err)
 		}
@@ -179,7 +197,7 @@ func (a *Agent) acceptStartLocked(ctx context.Context, request *nodeapi.Allocati
 			return nil, nil, a.applyDrain(ctx, request.AllocationID, request.Generation, sequence)
 		}
 		if sequence > 0 {
-			return nil, nil, a.applyResume(request.AllocationID, request.Generation, sequence, true)
+			return nil, nil, a.applyResume(ctx, request.AllocationID, request.Generation, sequence, true)
 		}
 		return nil, nil, nil
 	}
@@ -194,13 +212,24 @@ func (a *Agent) acceptStartLocked(ctx context.Context, request *nodeapi.Allocati
 				current.cancel()
 				return nil, current.done, nil
 			}
+			remaining := a.recoveryListPending
+			for _, record := range a.allocations {
+				remaining = remaining || (record.AllocationID == request.AllocationID && record.Generation == current.generation)
+			}
+			if !remaining {
+				if err := a.recordCleanupLocked(request.AllocationID, current.generation); err != nil {
+					return nil, nil, err
+				}
+			}
 			delete(a.starts, request.AllocationID)
 		case current.jobRevision != request.JobRevision || current.executionHash != request.ExecutionHash:
 			return nil, nil, fmt.Errorf("%w: allocation %s generation %d", ErrExecutionConflict, request.AllocationID, request.Generation)
 		case !current.finished():
-			current.mergeRetry(request)
+			if err := a.mergeStartRetry(request.AllocationID, current, request); err != nil {
+				return nil, nil, err
+			}
 			return current, nil, nil
-		case current.attempt == request.Attempt:
+		case current.attempt >= request.Attempt:
 			// The control plane has not counted this failure yet; keep
 			// reporting it rather than hiding it behind a new attempt.
 			return current, nil, nil
@@ -242,6 +271,11 @@ func (a *Agent) acceptStartLocked(ctx context.Context, request *nodeapi.Allocati
 	}
 	if a.starts == nil {
 		a.starts = make(map[string]*groupStart)
+	}
+	if err := a.persistStartAdmission(request.AllocationID, start); err != nil {
+		a.activeStarts--
+		cancel()
+		return nil, nil, err
 	}
 	a.starts[request.AllocationID] = start
 	go a.runStart(ctx, start, cloneStartRequest(request))
@@ -299,11 +333,15 @@ func (a *Agent) runStart(ctx context.Context, start *groupStart, request *nodeap
 // finishStart publishes a start's result. A failure, including exceeding
 // maxStartDuration, is kept for heartbeats unless a stop, a newer generation,
 // a newer control epoch, or agent shutdown ended the start.
-func (a *Agent) finishStart(ctx context.Context, allocationID string, start *groupStart, err error) {
-	cancelled := errors.Is(ctx.Err(), context.Canceled) || errors.Is(err, errStartSuperseded)
+func (a *Agent) finishStart(_ context.Context, allocationID string, start *groupStart, err error) {
 	a.mu.Lock()
 	start.err = err
-	start.failed = err != nil && !cancelled
+	start.failed = err != nil
+	if start.failed && a.local != nil {
+		if persistErr := a.persistStartAdmission(allocationID, start); persistErr != nil {
+			a.log.Error("persist start outcome", "error", persistErr)
+		}
+	}
 	if a.starts[allocationID] == start && !start.failed {
 		delete(a.starts, allocationID)
 	}
@@ -440,7 +478,7 @@ func (a *Agent) runGroupTasks(ctx context.Context, start *groupStart, request *n
 	if draining {
 		err = a.applyDrain(ctx, request.AllocationID, request.Generation, drainSequence)
 	} else if drainSequence > 0 {
-		err = a.applyResume(request.AllocationID, request.Generation, drainSequence, true)
+		err = a.applyResume(ctx, request.AllocationID, request.Generation, drainSequence, true)
 	}
 	if err != nil {
 		return err
@@ -480,6 +518,9 @@ func (a *Agent) startingStatusesLocked() []nodeapi.AllocationStatus {
 		var failure *nodeapi.StartFailure
 		if start.failed {
 			failure = &nodeapi.StartFailure{Attempt: start.attempt, Code: terminalStartCode(start.err), Message: truncateStartFailure(start.err.Error())}
+			if start.failureCode != "" {
+				failure.Code = start.failureCode
+			}
 		}
 		for _, task := range start.tasks {
 			if a.allocations[taskRecordID(allocationID, start.generation, task)] != nil {

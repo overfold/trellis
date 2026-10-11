@@ -206,7 +206,7 @@ Secret write body: `{"value_base64":"...","expected_version":1}`; omit `expected
 
 Secret names use the same identifier validation for PUT, GET, and DELETE. Invalid names return `400` with `{"message":"invalid secret name"}` after authorization; GET and DELETE of a valid but missing name still return `404` with `{"message":"secret not found"}`.
 
-Secrets follow the same path-routing rule as jobs: a cluster credential with `write` access may set and delete secrets in any namespace, and one with read access may list and describe secret metadata. Secrets are write-only for every caller, including the administrator: no endpoint returns a stored value. Values reach a task only through leader-to-agent delivery for an allocation whose job references the secret, so a read-back API would add plaintext exposure without adding capability.
+Secrets follow the same path-routing rule as jobs: a cluster credential with `write` access may set and delete secrets in any namespace, and one with read access may list and describe secret metadata. Secrets are write-only for every operator caller, including the administrator: no public endpoint returns a stored value. Values reach a task through a separate node-authenticated credential pull authorized for a committed RUN generation and attempt whose job references the secret. They are absent from cached execution intent; a public read-back API would add plaintext exposure without adding capability.
 
 ### Event streams
 

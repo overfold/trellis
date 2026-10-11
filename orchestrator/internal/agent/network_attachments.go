@@ -153,12 +153,16 @@ func allocationNetworkAddress(allocation *Allocation) string {
 	return address
 }
 
-func (a *Agent) lockNetworkPlan(ctx context.Context) (func(), error) {
+func (a *Agent) lockNetworkPlan(ctx context.Context, namespace string) (func(), error) {
 	a.operationMu.Lock()
 	if a.planOperation == nil {
-		a.planOperation = make(chan struct{}, 1)
+		a.planOperation = map[string]chan struct{}{}
 	}
-	operation := a.planOperation
+	operation := a.planOperation[namespace]
+	if operation == nil {
+		operation = make(chan struct{}, 1)
+		a.planOperation[namespace] = operation
+	}
 	a.operationMu.Unlock()
 	select {
 	case operation <- struct{}{}:
@@ -170,7 +174,7 @@ func (a *Agent) lockNetworkPlan(ctx context.Context) (func(), error) {
 
 // UpdateNetworkPlan refreshes the network shared by running allocations.
 func (a *Agent) UpdateNetworkPlan(ctx context.Context, request *nodeapi.NetworkPlanRequest) error {
-	unlock, err := a.lockNetworkPlan(ctx)
+	unlock, err := a.lockNetworkPlan(ctx, request.Namespace)
 	if err != nil {
 		return err
 	}
@@ -222,12 +226,18 @@ func (a *Agent) UpdateNetworkPlan(ctx context.Context, request *nodeapi.NetworkP
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	release, err := a.fenceExecution(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	a.mu.Lock()
 	if a.networkPlans == nil {
 		a.networkPlans = make(map[string]network.Plan)
 	}
 	a.networkPlans[request.Namespace] = request.Plan
 	a.mu.Unlock()
+	release()
 	// Retain the accepted desired topology even after a partial apply failure;
 	// a delayed start must not roll it back while reconciliation retries.
 	if active {

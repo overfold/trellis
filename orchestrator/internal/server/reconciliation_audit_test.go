@@ -1,14 +1,13 @@
 package server
 
 import (
-	"context"
 	"fmt"
 	"math"
-	"net/http"
 	"testing"
 	"time"
 
 	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
@@ -78,6 +77,7 @@ func TestRecreateWaitsForOldExecutionCleanup(t *testing.T) {
 				t.Fatal("replacement admitted or input generation changed")
 			}
 			old.Phase, old.NextRetryAt = lifecycle.PhaseStopped, nil
+			old.CleanupComplete = true
 			a.observedAllocations, a.observedAt = nil, planNow
 			input.Allocations = []*Allocation{old}
 			converged, err := planReconciliation(input)
@@ -208,6 +208,7 @@ func TestPlanReturnedOriginalUnblocksRollingUpdate(t *testing.T) {
 		t.Fatal("returned original and draining execution deadlocked the full surge budget")
 	}
 	lost.Phase = lifecycle.PhaseStopped
+	lost.CleanupComplete = true
 	a.observedAllocations = nil
 	plan, err = planReconciliation(input)
 	if err != nil || len(plan.NewAllocations) != 1 || plan.NewAllocations[0].Phase != lifecycle.PhasePlaced {
@@ -329,6 +330,7 @@ func TestPlanFailedSiblingOccupancyUntilCleanup(t *testing.T) {
 				}
 			}
 			node.observedAllocations[0].RetainedLogs = true
+			failed.CleanupComplete = true
 			plan, err = planReconciliation(input)
 			if err != nil || len(plan.NewAllocations) != 1 || plan.NewAllocations[0].Phase != lifecycle.PhasePlaced {
 				t.Fatalf("cleanup did not release occupancy: plan=%#v err=%v", plan, err)
@@ -382,32 +384,6 @@ func TestPlanMaxParallelDoesNotOverflow(t *testing.T) {
 	}
 }
 
-func TestRetainedCleanupFailureGatesSameNodeStarts(t *testing.T) {
-	s, agent := newTestServerWithAgent()
-	t.Cleanup(agent.server.Close)
-	node := planTestNode(1, NodeStatusHealthy)
-	node.Host, node.Port = agent.host, agent.port
-	addTestNode(s, node, s.now())
-	alloc := planTestAllocation("replacement", node, lifecycle.PhasePlaced, 2)
-	job := rollingPlanJob(1, 1)
-	job.Spec.TaskGroups[0].Tasks[0].Networking = &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkHost}
-	s.jobs[jobKey("default", "web")] = job
-	s.allocations = []*Allocation{alloc}
-	agent.failStop = true
-	actions := []Action{{Type: ActionStopObserved, Node: node, ID: "original", Generation: 7}, {Type: ActionStart, Allocation: alloc}}
-	<-s.dispatchReconcileActions(context.Background(), actions, true)
-	if calls := agent.recordedCalls(); len(calls) != 1 || calls[0].method != http.MethodDelete {
-		t.Fatalf("calls = %#v, cleanup failure must gate the dependent start", calls)
-	}
-	agent.mu.Lock()
-	agent.failStop = false
-	agent.mu.Unlock()
-	<-s.dispatchReconcileActions(context.Background(), actions, true)
-	if calls := agent.recordedCalls(); len(calls) != 3 || calls[2].method != http.MethodPost {
-		t.Fatalf("calls = %#v, successful cleanup must allow start", calls)
-	}
-}
-
 func TestRollingReplacementLimitSurvivesStoppingAndLoss(t *testing.T) {
 	node := planTestNode(1, NodeStatusHealthy)
 	job := rollingPlanJob(2, 1)
@@ -418,6 +394,7 @@ func TestRollingReplacementLimitSurvivesStoppingAndLoss(t *testing.T) {
 	input.Policy.RetainTerminal = 0
 	for _, phase := range []lifecycle.Phase{lifecycle.PhaseStopping, lifecycle.PhaseStopped, lifecycle.PhaseLost} {
 		old.Phase = phase
+		old.CleanupComplete, lost.CleanupComplete = false, false
 		plan, err := planReconciliation(input)
 		if err != nil {
 			t.Fatal(err)
@@ -437,6 +414,10 @@ func TestRollingReplacementLimitSurvivesStoppingAndLoss(t *testing.T) {
 			t.Fatalf("old=%s: admitted second unhealthy replacement: %v %v", phase, waiting, err)
 		}
 		inFlight.Phase, inFlight.Health = lifecycle.PhaseRunning, lifecycle.HealthHealthy
+		old.CleanupComplete = true
+		if old.Phase == lifecycle.PhaseStopping {
+			old.Phase = lifecycle.PhaseStopped
+		}
 		ready, err := planReconciliation(input)
 		if err != nil || len(ready.NewAllocations) != 1 {
 			t.Fatalf("old=%s: healthy replacement did not release parallel slot: %v %v", phase, ready, err)
@@ -444,6 +425,7 @@ func TestRollingReplacementLimitSurvivesStoppingAndLoss(t *testing.T) {
 		if phase != lifecycle.PhaseStopping {
 			second := ready.NewAllocations[0]
 			second.Phase, second.Health = lifecycle.PhaseRunning, lifecycle.HealthHealthy
+			lost.CleanupComplete = true
 			input.Allocations = []*Allocation{old, lost, inFlight, second}
 			complete, err := planReconciliation(input)
 			if err != nil || len(complete.Pruned) != 2 {
@@ -509,34 +491,30 @@ func TestOrphanInventoryBlocksOnlyItsNodeUntilCleanup(t *testing.T) {
 	}
 }
 
-func TestOrphanStopOutcomeControlsStartAdmission(t *testing.T) {
-	s, agent := newTestServerWithAgent()
-	t.Cleanup(agent.server.Close)
-	node := planTestNode(1, NodeStatusHealthy)
-	node.Host, node.Port = agent.host, agent.port
-	addTestNode(s, node, s.now())
+func TestOrphanCleanupProofControlsStartAdmission(t *testing.T) {
+	s, node, allocation := executionFixture(t)
+	node.observedAllocations = []observedAllocation{{ID: "pruned", Generation: 7, Phase: lifecycle.PhaseRunning}}
 	s.leaderSince = s.now().Add(-leaderRecoveryGrace)
-	job := planTestJob("web", 1, 1, spec.UpdateRecreate)
-	job.Spec.TaskGroups[0].Tasks[0].Networking = &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkHost}
-	s.jobs[jobKey("default", "web")] = job
-	allocation := planTestAllocation("queued", node, lifecycle.PhasePlaced, 1)
-	s.allocations = []*Allocation{allocation}
-	node.observedAllocations = []observedAllocation{{ID: "pruned", Generation: 7, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}
-	// A start planned before the orphan heartbeat must also be rejected.
-	if err := s.Execute(t.Context(), &Action{Type: ActionStart, Allocation: allocation}); err == nil || len(agent.recordedCalls()) != 0 {
-		t.Fatal("stale planned start ignored current orphan inventory")
+	if err := s.Execute(t.Context(), &Action{Type: ActionStart, Allocation: allocation}); err != nil {
+		t.Fatal(err)
 	}
-	agent.failStop = true
-	s.Reconcile(t.Context())
-	if calls := agent.recordedCalls(); len(calls) != 1 || calls[0].method != http.MethodDelete {
-		t.Fatalf("failed cleanup calls=%v, want stop only", calls)
+	if committedAllocationIntent(t, s, node.ID, allocation.ID, allocation.Generation).Mode != nodeapi.ExecutionRetain {
+		t.Fatal("stale start ignored orphan inventory")
 	}
-	agent.mu.Lock()
-	agent.failStop = false
-	agent.mu.Unlock()
 	s.Reconcile(t.Context())
+	orphan := committedAllocationIntent(t, s, node.ID, "pruned", 7)
+	if orphan.Mode != nodeapi.ExecutionCleanup {
+		t.Fatal("orphan cleanup not published")
+	}
 	s.Reconcile(t.Context())
-	if calls := agent.recordedCalls(); len(calls) != 3 || calls[1].method != http.MethodDelete || calls[2].method != http.MethodPost {
-		t.Fatalf("cleanup recovery calls=%v, want failed stop, successful stop, start", calls)
+	if committedAllocationIntent(t, s, node.ID, allocation.ID, allocation.Generation).Mode != nodeapi.ExecutionRetain {
+		t.Fatal("publication released orphan reservations")
+	}
+	if err := heartbeatAndApply(t, s, node.ID, []nodeapi.AllocationStatus{{ID: "pruned", Generation: 7, Phase: lifecycle.PhaseStopped, Health: lifecycle.HealthUnknown, CleanupComplete: true}}, "test", nodeResourceObservation{}); err != nil {
+		t.Fatal(err)
+	}
+	s.Reconcile(t.Context())
+	if committedAllocationIntent(t, s, node.ID, allocation.ID, allocation.Generation).Mode != nodeapi.ExecutionRun {
+		t.Fatal("proved orphan cleanup did not release start admission")
 	}
 }

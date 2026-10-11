@@ -112,7 +112,7 @@ func TestReplacementBackoffDelaySchedule(t *testing.T) {
 func failedAllocation(id string, revision int, at time.Time) *Allocation {
 	return &Allocation{
 		ID: id, Namespace: "default", JobName: "web", TaskGroupName: "api",
-		Generation: 1, JobRevision: revision, Phase: lifecycle.PhaseFailed, Health: lifecycle.HealthUnhealthy,
+		CleanupComplete: true, Generation: 1, JobRevision: revision, Phase: lifecycle.PhaseFailed, Health: lifecycle.HealthUnhealthy,
 		Diagnostic: lifecycle.Diagnostic{CreatedAt: at.Add(-time.Minute), TransitionedAt: at, Reason: "restart_budget_exhausted", Message: "task exited"},
 	}
 }
@@ -534,6 +534,7 @@ func failActive(t *testing.T, s *Server, now time.Time) *Allocation {
 		t.Fatal(err)
 	}
 	allocation.mu.Unlock()
+	acknowledgeTestCleanup(t, s, allocation)
 	return allocation
 }
 
@@ -705,6 +706,7 @@ func TestReconcilePrunesTerminalAllocationRecords(t *testing.T) {
 	for i := range 8 {
 		allocation := failedAllocation(fmt.Sprintf("f%d", i), 1, clock.now.Add(time.Duration(i-10)*time.Second))
 		allocation.Phase = lifecycle.PhaseStopped
+		allocation.CleanupComplete = i != 0 // f0 still owns its runtime resources.
 		allocation.Node = node
 		s.allocations = append(s.allocations, allocation)
 		if err := s.state.PutAllocation(ctx, allocation); err != nil {
@@ -743,7 +745,11 @@ func TestReconcilePrunesTerminalAllocationRecords(t *testing.T) {
 			t.Fatalf("allocation %s retained in memory=%t store=%t, want %t (remaining %v)", id, inMemory, stored, want, remaining)
 		}
 	}
-	node.observedAllocations = nil
+	for _, allocation := range s.allocations {
+		if allocation.ID == "f0" {
+			acknowledgeTestCleanup(t, s, allocation)
+		}
+	}
 	node.observedAt = clock.now.Add(time.Second)
 	clock.advance(node, 2*time.Second)
 	s.Reconcile(ctx)
@@ -1190,6 +1196,7 @@ func TestReconcilePrunesRecordsOfRemovedAndUnavailableNodes(t *testing.T) {
 	for i, n := range []*Node{removed, down} {
 		allocation := failedAllocation(fmt.Sprintf("t%d", i), 1, clock.now.Add(-time.Minute))
 		allocation.Phase = lifecycle.PhaseStopped
+		allocation.CleanupComplete = true
 		allocation.Node = n
 		s.allocations = append(s.allocations, allocation)
 		if err := s.state.PutAllocation(ctx, allocation); err != nil {

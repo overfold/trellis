@@ -268,7 +268,7 @@ func planTerminalPruning(retain int, allocations []*Allocation, skip map[*Alloca
 		}
 		// Keep the evidence that an unreachable workload may still own its
 		// namespace subnet until an acknowledged stop proves cleanup.
-		if allocation.Phase == lifecycle.PhaseLost && tasksUseWireGuard(allocation.Tasks) {
+		if allocation.Node != nil && !allocation.CleanupComplete {
 			continue
 		}
 		key := groupKey{allocation.Namespace, allocation.JobName, allocation.TaskGroupName}

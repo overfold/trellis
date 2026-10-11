@@ -14,6 +14,7 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
 	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/state"
 )
 
 // maxObservationCommitRecords bounds the node and allocation records one
@@ -25,16 +26,17 @@ const maxObservationCommitRecords = 1024
 // allocationObservation aggregates one allocation generation's task reports
 // from a heartbeat.
 type allocationObservation struct {
-	ID            string
-	Generation    uint64
-	Phase         lifecycle.Phase
-	Health        lifecycle.Health
-	Reason        nodeapi.OperationCode
-	Endpoints     []api.AllocationEndpoint
-	Ports         []api.PortMapping
-	ObservedTasks map[string]bool
-	StartFailure  *nodeapi.StartFailure
-	RetainedLogs  bool
+	ID              string
+	Generation      uint64
+	Phase           lifecycle.Phase
+	Health          lifecycle.Health
+	Reason          nodeapi.OperationCode
+	Endpoints       []api.AllocationEndpoint
+	Ports           []api.PortMapping
+	ObservedTasks   map[string]bool
+	StartFailure    *nodeapi.StartFailure
+	RetainedLogs    bool
+	CleanupComplete bool
 	// BreakStability preserves interrupted intervals across queue coalescing.
 	BreakStability bool
 }
@@ -164,7 +166,11 @@ func (s *Server) runObservationApplier(ctx context.Context) {
 	wake := s.observations.wakeChannel()
 	for {
 		// Reports may have arrived before the term's applier started.
+		pending := s.observations.len() > 0
 		s.applyObservations(ctx)
+		if pending && ctx.Err() == nil {
+			s.Reconcile(ctx)
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -299,17 +305,18 @@ func (s *Server) planObservation(observation *nodeObservation, appliedAt time.Ti
 // observeAllocation replaces those, never edits them. The caller holds
 // a.mu.
 func observationScratch(a *Allocation) *Allocation {
-	return &Allocation{ID: a.ID, Generation: a.Generation, Tasks: a.Tasks, Phase: a.Phase, Health: a.Health, StableSince: a.StableSince, Diagnostic: a.Diagnostic, Endpoints: a.Endpoints, Ports: a.Ports}
+	return &Allocation{ID: a.ID, Generation: a.Generation, CleanupComplete: a.CleanupComplete, Tasks: a.Tasks, Phase: a.Phase, Health: a.Health, StableSince: a.StableSince, Diagnostic: a.Diagnostic, Endpoints: a.Endpoints, Ports: a.Ports}
 }
 
 // sameObservedState reports whether the fields a report can change are equal.
 func (a *Allocation) sameObservedState(b *Allocation) bool {
-	return a.Phase == b.Phase && a.Health == b.Health && a.StableSince.Equal(b.StableSince) && sameDiagnostic(a.Diagnostic, b.Diagnostic) && sameEndpoints(a, b)
+	return a.CleanupComplete == b.CleanupComplete && a.Phase == b.Phase && a.Health == b.Health && a.StableSince.Equal(b.StableSince) && sameDiagnostic(a.Diagnostic, b.Diagnostic) && sameEndpoints(a, b)
 }
 
 // applyObservedState copies a scratch allocation's observed fields, and the
 // events its transitions recorded, onto a.
 func (a *Allocation) applyObservedState(scratch *Allocation) {
+	a.CleanupComplete = scratch.CleanupComplete
 	a.Phase, a.Health = scratch.Phase, scratch.Health
 	a.StableSince = scratch.StableSince
 	a.Diagnostic = scratch.Diagnostic
@@ -339,6 +346,21 @@ func observeAllocation(a *Allocation, observation *nodeObservation, heartbeatAt 
 		}
 		info = allocationObservation{Phase: lifecycle.PhaseStarting, Health: lifecycle.HealthUnknown}
 	}
+	if info.CleanupComplete {
+		a.CleanupComplete = true
+		if activeAllocationPhase(a.Phase) && a.Phase != lifecycle.PhaseStopping {
+			_ = a.Transition(lifecycle.PhaseStopping, heartbeatAt, "", "")
+		}
+		if a.Phase == lifecycle.PhaseLost || a.Phase == lifecycle.PhaseStopping {
+			_ = a.Transition(lifecycle.PhaseStopped, heartbeatAt, "", "")
+		}
+		a.StableSince = time.Time{}
+		return true
+	}
+	if info.Phase == lifecycle.PhaseStopped {
+		// Exited tasks and absence are not proof of allocation resource cleanup.
+		info.Phase = lifecycle.PhaseStopping
+	}
 	if info.RetainedLogs {
 		// Log inventory cannot update execution state, but supplies no
 		// evidence that the running interval continued.
@@ -364,8 +386,9 @@ func observeAllocation(a *Allocation, observation *nodeObservation, heartbeatAt 
 			reason = string(info.Reason)
 		}
 		if info.Phase == lifecycle.PhaseRunning && a.Phase != lifecycle.PhaseRunning {
-			// The start completed; later starts get a fresh attempt budget.
-			a.Attempt, a.NextRetryAt = 0, nil
+			// Attempt is a durable generation-scoped admission identity. Never
+			// move it backwards when an accepted start finishes.
+			a.NextRetryAt = nil
 		}
 		_ = a.Transition(info.Phase, heartbeatAt, reason, "")
 	}
@@ -406,7 +429,21 @@ func observeAllocation(a *Allocation, observation *nodeObservation, heartbeatAt 
 func (s *Server) commitObservations(ctx context.Context, updates []*observationUpdate) {
 	var summaries []*NodeSummary
 	var allocations []*Allocation
+	var proofs []state.Mutation
 	for _, update := range updates {
+		for _, observed := range update.observation.observed {
+			if !observed.CleanupComplete {
+				continue
+			}
+			complete, err := s.state.executionCleaned(ctx, update.observation.node, observed.ID, observed.Generation)
+			if err == nil && !complete {
+				proofs = append(proofs, state.Mutation{Key: s.state.executionCleanupKey(update.observation.node, observed.ID, observed.Generation), Value: []byte("true")})
+			}
+			if err != nil {
+				s.discardObservations("commit_failed", len(updates))
+				return
+			}
+		}
 		if update.summary != nil {
 			summaries = append(summaries, update.summary)
 		}
@@ -414,8 +451,8 @@ func (s *Server) commitObservations(ctx context.Context, updates []*observationU
 			allocations = append(allocations, allocation.next)
 		}
 	}
-	if len(summaries) > 0 || len(allocations) > 0 {
-		if err := s.state.PutNodesAndAllocations(ctx, summaries, allocations); err != nil {
+	if len(summaries) > 0 || len(allocations) > 0 || len(proofs) > 0 {
+		if err := s.state.PutNodesAndAllocations(ctx, summaries, allocations, proofs...); err != nil {
 			if s.log != nil {
 				s.log.Error("persist heartbeat observations; the next heartbeats retry them", "nodes", len(updates), "error", err)
 			}
@@ -494,6 +531,9 @@ func newNodeObservation(nodeID uuid.UUID, at time.Time, actual []nodeapi.Allocat
 		if !a.Phase.Valid() || !a.Health.Valid() {
 			return nil, fmt.Errorf("invalid allocation state for %s: phase=%q health=%q", a.ID, a.Phase, a.Health)
 		}
+		if a.CleanupComplete && (a.ID == "" || a.Generation == 0 || a.Phase != lifecycle.PhaseStopped || a.Health != lifecycle.HealthUnknown || a.Reason != "" || a.StartFailure != nil || a.Address != "" || len(a.Ports) != 0) {
+			return nil, fmt.Errorf("invalid allocation cleanup proof")
+		}
 		if a.RetainedLogs && (a.Phase != lifecycle.PhaseStopped || a.Health != lifecycle.HealthUnknown || a.Reason != "" || a.StartFailure != nil || a.Address != "" || len(a.Ports) != 0 || a.Generation == 0 || a.Task == "") {
 			return nil, fmt.Errorf("invalid retained log observation for %s", a.ID)
 		}
@@ -506,6 +546,7 @@ func newNodeObservation(nodeID uuid.UUID, at time.Time, actual []nodeapi.Allocat
 		phase, health := a.Phase, a.Health
 		key := allocationGeneration{id: a.ID, generation: a.Generation}
 		info := statuses[key]
+		info.CleanupComplete = info.CleanupComplete || a.CleanupComplete
 		if len(info.ObservedTasks) == 0 {
 			info.ID, info.Generation, info.Phase, info.Health = a.ID, a.Generation, phase, health
 			info.RetainedLogs = a.RetainedLogs
@@ -548,7 +589,7 @@ func newNodeObservation(nodeID uuid.UUID, at time.Time, actual []nodeapi.Allocat
 	}
 	observed := make([]observedAllocation, 0, len(statuses))
 	for _, info := range statuses {
-		observed = append(observed, observedAllocation{ID: info.ID, Generation: info.Generation, RetainedLogs: info.RetainedLogs, Phase: info.Phase, Health: info.Health, Tasks: info.ObservedTasks})
+		observed = append(observed, observedAllocation{ID: info.ID, Generation: info.Generation, RetainedLogs: info.RetainedLogs, CleanupComplete: info.CleanupComplete, Phase: info.Phase, Health: info.Health, Tasks: info.ObservedTasks})
 	}
 	sort.Slice(observed, func(i, j int) bool {
 		if observed[i].ID == observed[j].ID {
@@ -574,7 +615,7 @@ func negative(value *int64) bool { return value != nil && *value < 0 }
 // allocation identity. The caller holds s.mu, but no allocation lock.
 func (s *Server) nodeHasUnownedExecutionLocked(node *Node) bool {
 	for _, observed := range node.observedAllocations {
-		if observed.RetainedLogs {
+		if observed.RetainedLogs || observed.CleanupComplete {
 			continue
 		}
 		owned := false

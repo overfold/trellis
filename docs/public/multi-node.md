@@ -37,7 +37,7 @@ Voters are replaced automatically when that is safe:
 
 Odd voter counts are steady-state targets, not a guarantee for every intermediate configuration. Membership changes happen one at a time: growth passes through 1→2→3 or 3→4→5 voters, and replacement promotes before removing or demoting the old voter. These temporary even sets require their own majority (for example, three of four voters); a replacement becoming unavailable during promotion can interrupt progress even while the old quorum remains reachable. After a voter is removed and no healthy non-voter can take its place yet, the cluster can also briefly run with an even number of voters; the next eligible node is promoted toward the odd target.
 
-When quorum is lost, allocations already running on reachable nodes keep running, but nothing can change: jobs cannot be applied or deleted, failed or lost allocations are not replaced, nodes cannot be drained, and no voter can be replaced. The cluster resumes once a majority of voters is reachable again.
+When quorum is lost, established allocations keep running and nodes can continue their configured local task restarts. New cluster authority cannot be committed: jobs cannot be applied or deleted, failed or lost allocations are not replaced, nodes cannot be newly drained, and no voter can be replaced. Nodes may still converge already accepted cleanup/drain intent. New starts need a fresh authenticated execution view and separately authorized credentials; cached intent after agent restart does not authorize fresh starts. The cluster resumes once a majority of voters is reachable again.
 
 ## Prepare the network and configuration
 
@@ -45,12 +45,14 @@ Before joining nodes, make sure they can reach each other:
 
 | Port | Protocol | Used for |
 |---|---|---|
-| `8127` | TCP | Leader-to-agent operations |
-| `8128` | TCP | Control-plane API and cluster join |
+| `8127` | TCP | Leader-initiated agent exec, logs, and allocation metrics |
+| `8128` | TCP | Control-plane API, cluster join, and node execution/credential pulls |
 | `8129` | TCP | Raft replication |
 | `51820-52075` (default) | UDP | Namespace networking between nodes |
 
 Node and Raft transports use mutually authenticated TLS. Each node's `agent_advertise`, `server_advertise`, and `raft_advertise` addresses must be routable from the other nodes; wildcard bind addresses are not valid advertised addresses. The installer auto-detects a private address and accepts `--advertise HOST` when peers cannot reach the detected one.
+
+Execution changes use durable, versioned node intent pulled from the leader, not leader-pushed starts and stops. Pull clients authenticate the exact elected leader's node identity, not just the shared API name. This does **not** make workers outbound-only: the leader still connects to their port 8127 for exec, logs, and metrics. During leader recovery, missing execution entries are not deletion authority until the recovery grace expires; explicit committed cleanup still applies. See [execution internals](../developer/api.md#durable-node-execution-intent).
 
 Daemon listeners default to all interfaces; advertised addresses do not restrict their exposure. The installer does not configure an external host firewall. Restrict the API to trusted operator/cluster networks and agent, Raft, and WireGuard ports to cluster peers. Published workload ports need separate network-edge access controls; see [Networking and TLS](operations.md#networking-and-tls).
 

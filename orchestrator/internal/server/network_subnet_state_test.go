@@ -28,7 +28,7 @@ func TestPlanNetworkSubnetsAssignsLowestFreeIndexesDeterministically(t *testing.
 	namespaces := []string{"globex", "acme"}
 	nodes := []uuid.UUID{subnetNodeB, subnetNodeA}
 
-	plan, err := planNetworkSubnetRegistrations(pool, current, namespaces, nodes)
+	plan, err := planNetworkSubnetRegistrations(pool, current, namespaces, nodes, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestPlanNetworkSubnetsAssignsLowestFreeIndexesDeterministically(t *testing.
 		t.Fatal("planning modified its inputs")
 	}
 
-	again, err := planNetworkSubnetRegistrations(pool, current, []string{"acme", "globex"}, []uuid.UUID{subnetNodeA, subnetNodeB})
+	again, err := planNetworkSubnetRegistrations(pool, current, []string{"acme", "globex"}, []uuid.UUID{subnetNodeA, subnetNodeB}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestPlanNetworkSubnetsKeepsExistingAndReusesReleasedIndexes(t *testing.T) {
 	before := maps.Clone(current)
 
 	// "retired" has no network-using jobs and node C was removed.
-	plan, err := planNetworkSubnetRegistrations(pool, current, []string{"acme", "initech"}, []uuid.UUID{subnetNodeA, subnetNodeB})
+	plan, err := planNetworkSubnetRegistrations(pool, current, []string{"acme", "initech"}, []uuid.UUID{subnetNodeA, subnetNodeB}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestPlanNetworkSubnetsReportsExhaustionWithoutPartialAssignment(t *testing.
 	pool := netip.MustParsePrefix("10.64.0.0/22")
 	current := map[networkSubnetKey]int{{namespace: "acme", node: subnetNodeA}: 0}
 
-	plan, err := planNetworkSubnetRegistrations(pool, current, []string{"acme", "globex", "initech"}, []uuid.UUID{subnetNodeA, subnetNodeB})
+	plan, err := planNetworkSubnetRegistrations(pool, current, []string{"acme", "globex", "initech"}, []uuid.UUID{subnetNodeA, subnetNodeB}, nil)
 	if !errors.Is(err, errNetworkSubnetExhausted) {
 		t.Fatalf("error = %v, want exhaustion", err)
 	}
@@ -129,7 +129,7 @@ func TestPlanNetworkSubnetsReportsExhaustionWithoutPartialAssignment(t *testing.
 
 	// Adding a node to a full pool leaves existing addressing intact.
 	full := plan.Subnets
-	plan, err = planNetworkSubnetRegistrations(pool, full, []string{"acme", "globex"}, []uuid.UUID{subnetNodeA, subnetNodeB, subnetNodeC})
+	plan, err = planNetworkSubnetRegistrations(pool, full, []string{"acme", "globex"}, []uuid.UUID{subnetNodeA, subnetNodeB, subnetNodeC}, nil)
 	if !errors.Is(err, errNetworkSubnetExhausted) {
 		t.Fatalf("error = %v, want exhaustion", err)
 	}
@@ -143,8 +143,28 @@ func TestPlanNetworkSubnetsRejectsDuplicateIndexes(t *testing.T) {
 		{namespace: "acme", node: subnetNodeA}:   3,
 		{namespace: "globex", node: subnetNodeA}: 3,
 	}
-	if _, err := planNetworkSubnetRegistrations(netip.MustParsePrefix("10.64.0.0/10"), current, []string{"acme", "globex"}, []uuid.UUID{subnetNodeA}); err == nil || errors.Is(err, errNetworkSubnetExhausted) {
+	if _, err := planNetworkSubnetRegistrations(netip.MustParsePrefix("10.64.0.0/10"), current, []string{"acme", "globex"}, []uuid.UUID{subnetNodeA}, nil); err == nil || errors.Is(err, errNetworkSubnetExhausted) {
 		t.Fatalf("error = %v, want duplicate-index error", err)
+	}
+}
+
+func TestPlanNetworkSubnetsPreservesUncleanedRemovedNodeReservation(t *testing.T) {
+	pool := netip.MustParsePrefix("10.64.0.0/22")
+	old := networkSubnetKey{namespace: "acme", node: subnetNodeA}
+	current := map[networkSubnetKey]int{old: 0}
+	plan, err := planNetworkSubnetRegistrations(pool, current, []string{"acme"}, []uuid.UUID{subnetNodeB}, map[networkSubnetKey]bool{old: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Subnets[old] != 0 || plan.Subnets[networkSubnetKey{namespace: "acme", node: subnetNodeB}] != 1 || len(plan.Deletions) != 0 {
+		t.Fatalf("removed node's potentially live subnet reused: %+v", plan)
+	}
+	cleaned, err := planNetworkSubnetRegistrations(pool, plan.Subnets, []string{"acme", "globex"}, []uuid.UUID{subnetNodeB}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, retained := cleaned.Subnets[old]; retained || cleaned.Subnets[networkSubnetKey{namespace: "globex", node: subnetNodeB}] != 0 {
+		t.Fatalf("proven cleanup did not release the reservation: %+v", cleaned)
 	}
 }
 
@@ -230,6 +250,7 @@ func TestReconcileWithholdsPlacementWhenSubnetPoolIsExhausted(t *testing.T) {
 	for _, allocation := range s.allocations {
 		if allocation.Namespace == "acme" {
 			allocation.Phase = lifecycle.PhaseStopped
+			allocation.CleanupComplete = true
 		}
 	}
 	s.Reconcile(ctx)
@@ -277,6 +298,7 @@ func TestNetworkSubnetsRetainedUntilPartitionedAllocationCleanup(t *testing.T) {
 			for _, allocation := range s.allocations {
 				if allocation != f.original {
 					allocation.Phase = lifecycle.PhaseStopped
+					allocation.CleanupComplete = true
 				}
 			}
 			s.jobs[jobKey("globex", "web")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{
@@ -303,9 +325,6 @@ func TestNetworkSubnetsRetainedUntilPartitionedAllocationCleanup(t *testing.T) {
 				t.Fatal("potentially live network allocation was pruned")
 			}
 			// A returning orphan still owns its subnet while detach/stop fails.
-			f.agent.mu.Lock()
-			f.agent.failStop = true
-			f.agent.mu.Unlock()
 			if err := heartbeatAndApply(t, s, f.nodeA.ID, []nodeapi.AllocationStatus{{ID: "original", Generation: 1, Task: "app", Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}}, "test", nodeResourceObservation{}); err != nil {
 				t.Fatal(err)
 			}
@@ -314,10 +333,7 @@ func TestNetworkSubnetsRetainedUntilPartitionedAllocationCleanup(t *testing.T) {
 			if f.original.Phase == lifecycle.PhaseStopped {
 				t.Fatal("failed stop was treated as cleanup proof")
 			}
-			f.agent.mu.Lock()
-			f.agent.failStop = false
-			f.agent.mu.Unlock()
-			f.original.NextRetryAt = nil
+			acknowledgeTestCleanup(t, s, f.original)
 			s.Reconcile(ctx)
 			if f.original.Phase != lifecycle.PhaseStopped {
 				t.Fatalf("acknowledged stop phase = %s", f.original.Phase)
@@ -372,7 +388,8 @@ func TestLostNetworkAllocationConfirmsCleanupFromRetainedLogs(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.s.Reconcile(context.Background())
-	if f.original.Phase != lifecycle.PhaseStopped || originalStops(recordedOperations(t, f.agent)) != 1 {
-		t.Fatalf("retained-log cleanup proof: phase=%s", f.original.Phase)
+	if f.original.Phase != lifecycle.PhaseLost || committedAllocationIntent(t, f.s, f.nodeA.ID, "original", 1).Mode != nodeapi.ExecutionCleanup {
+		t.Fatalf("retained logs incorrectly proved cleanup: phase=%s", f.original.Phase)
 	}
+	acknowledgeTestCleanup(t, f.s, f.original)
 }

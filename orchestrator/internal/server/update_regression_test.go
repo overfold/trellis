@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -48,21 +47,7 @@ func (s nodeWriteFailingStore) Batch(ctx context.Context, mutations []state.Muta
 	return s.memoryStore.Batch(ctx, mutations)
 }
 
-func resumeCalls(agent *testAgent, id string) []nodeapi.DrainAllocationRequest {
-	var requests []nodeapi.DrainAllocationRequest
-	for _, call := range agent.recordedCalls() {
-		if call.method != http.MethodDelete || call.path != "/v1/allocations/"+id+"/drain" {
-			continue
-		}
-		var request nodeapi.DrainAllocationRequest
-		if err := json.Unmarshal(call.body, &request); err == nil {
-			requests = append(requests, request)
-		}
-	}
-	return requests
-}
-
-func TestHandleUndrainNodeReportsResumeFailure(t *testing.T) {
+func TestHandleUndrainNodeReportsStateFailure(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()
 	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusDraining}
@@ -88,18 +73,15 @@ func TestHandleUndrainNodeReportsResumeFailure(t *testing.T) {
 	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "put nodes and allocations") {
 		t.Fatalf("persistence failure: status %d, body %s", rec.Code, rec.Body.String())
 	}
-	// Once the undrain is durable, an agent delivery failure is retried by
-	// reconciliation rather than reported as a failed undrain.
+	// Once the undrain is durable, publication does not depend on connectivity.
 	s.state = stateStore
-	agent.mu.Lock()
-	agent.failResume = true
-	agent.mu.Unlock()
+	node.Host, node.Port = "192.0.2.1", 1
 	req = httptest.NewRequest(http.MethodDelete, "/v1/nodes/"+node.ID.String()+"/drain", nil)
 	req = req.WithContext(context.WithValue(req.Context(), AdminContextKey, true))
 	rec = httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNoContent || s.allocations[0].Draining {
-		t.Fatalf("delivery failure: status %d, body %s", rec.Code, rec.Body.String())
+		t.Fatalf("durable undrain: status %d, body %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -242,13 +224,10 @@ func TestReconcileChargesAllocationsQueuedForStop(t *testing.T) {
 			addTestNode(s, node, s.now())
 			obsolete := tt.setup(t, s, node, tt.tasks)
 			s.allocations = []*Allocation{obsolete}
-			agent.mu.Lock()
-			agent.failStop = true
-			agent.mu.Unlock()
 
 			s.Reconcile(context.Background())
 
-			if obsolete.Phase != lifecycle.PhaseStopping || obsolete.NextRetryAt == nil {
+			if obsolete.Phase != lifecycle.PhaseStopping || obsolete.CleanupComplete {
 				t.Fatalf("obsolete allocation after failed stop: phase=%s retry=%v", obsolete.Phase, obsolete.NextRetryAt)
 			}
 			if tt.name == "recreate-obsolete static host port" {
@@ -258,32 +237,20 @@ func TestReconcileChargesAllocationsQueuedForStop(t *testing.T) {
 			} else if len(s.allocations) != 2 || s.allocations[1].Phase != lifecycle.PhasePending || s.allocations[1].Reason == "" {
 				t.Fatalf("allocations = %#v, want the obsolete allocation and one pending placement diagnostic", s.allocations)
 			}
-			var starts, stops int
-			for _, call := range agent.recordedCalls() {
-				if call.method == http.MethodPost && call.path == "/v1/allocations" {
-					starts++
+			entry := committedAllocationIntent(t, s, node.ID, obsolete.ID, obsolete.Generation)
+			if entry.Mode != nodeapi.ExecutionCleanup {
+				t.Fatal("obsolete cleanup not published")
+			}
+			for _, allocation := range s.allocations {
+				if allocation != obsolete && allocation.Node != nil && committedAllocationIntent(t, s, allocation.Node.ID, allocation.ID, allocation.Generation).Mode == nodeapi.ExecutionRun {
+					t.Fatal("start admitted before old resource cleanup")
 				}
-				if call.method == http.MethodDelete && call.path == "/v1/allocations/obsolete" {
-					stops++
-				}
 			}
-			if starts != 0 || stops != 1 {
-				t.Fatalf("agent calls: starts=%d stops=%d, want no start and one failed stop", starts, stops)
+			s.Reconcile(t.Context())
+			if obsolete.CleanupComplete {
+				t.Fatal("repeated publication released occupancy")
 			}
-
-			agent.mu.Lock()
-			agent.failStop = false
-			agent.mu.Unlock()
-			obsolete.NextRetryAt = nil
-			s.Reconcile(context.Background())
-			wantCount := 2
-			if tt.name == "recreate-obsolete static host port" {
-				wantCount = 1
-			}
-			if obsolete.Phase != lifecycle.PhaseStopped || len(s.allocations) != wantCount || wantCount == 2 && s.allocations[1].Phase != lifecycle.PhasePending {
-				t.Fatalf("successful stop pass: phase=%s allocations=%d, want stopped without same-pass replacement", obsolete.Phase, len(s.allocations))
-			}
-
+			acknowledgeTestCleanup(t, s, obsolete)
 			s.Reconcile(context.Background())
 			observeStarted(t, s, node.ID)
 			var replacement *Allocation
@@ -353,8 +320,8 @@ func TestDrainNodeStopsAllocationAfterReplacementHealthy(t *testing.T) {
 	}
 	observeStarted(t, s, replacementNode.ID)
 	s.Reconcile(context.Background())
-	if original.Phase != lifecycle.PhaseStopped {
-		t.Fatalf("original phase after replacement healthy = %s, want stopped", original.Phase)
+	if original.Phase != lifecycle.PhaseStopping || committedAllocationIntent(t, s, drainingNode.ID, original.ID, 1).Mode != nodeapi.ExecutionCleanup {
+		t.Fatalf("original cleanup after replacement healthy = %s", original.Phase)
 	}
 }
 
@@ -380,28 +347,11 @@ func TestUndrainNodeRetainsCurrentAllocation(t *testing.T) {
 	if allocation.Draining || allocation.Phase != lifecycle.PhaseRunning || len(s.allocations) != 2 || s.allocations[1].Phase != lifecycle.PhaseStopped {
 		t.Fatalf("allocation after undrain: draining=%t phase=%s count=%d", allocation.Draining, allocation.Phase, len(s.allocations))
 	}
-	resumed := false
-	for _, call := range agent.recordedCalls() {
-		if call.path == "/v1/allocations/original/drain" {
-			var request nodeapi.DrainAllocationRequest
-			if err := json.Unmarshal(call.body, &request); err != nil {
-				t.Fatal(err)
-			}
-			want := uint64(1)
-			if call.method == http.MethodDelete {
-				want = 2
-			}
-			if request.Sequence != want {
-				t.Fatalf("%s sequence = %d, want %d", call.method, request.Sequence, want)
-			}
-		}
-		if call.method == "DELETE" && call.path == "/v1/allocations/original/drain" {
-			resumed = true
-		}
+	entry := committedAllocationIntent(t, s, node.ID, allocation.ID, 1)
+	if entry.Mode != nodeapi.ExecutionRun || entry.Request.Draining || entry.Request.DrainSequence != 2 {
+		t.Fatal("undrain did not publish saved control sequence")
 	}
-	if !resumed {
-		t.Fatal("agent did not receive allocation resume")
-	}
+
 }
 
 func TestUndrainNodeRetriesRecoveredStartingAllocation(t *testing.T) {
@@ -420,18 +370,11 @@ func TestUndrainNodeRetriesRecoveredStartingAllocation(t *testing.T) {
 	if node.Status != NodeStatusHealthy || allocation.Draining || allocation.Phase != lifecycle.PhaseStarting {
 		t.Fatalf("after undrain: node=%s draining=%t phase=%s", node.Status, allocation.Draining, allocation.Phase)
 	}
-	var resumed, started bool
-	for _, call := range agent.recordedCalls() {
-		if call.method == "DELETE" && call.path == "/v1/allocations/original/drain" {
-			resumed = true
-		}
-		if call.method == "POST" && call.path == "/v1/allocations" {
-			started = true
-		}
+	entry := committedAllocationIntent(t, s, node.ID, allocation.ID, 1)
+	if entry.Mode != nodeapi.ExecutionRun || entry.Request.Draining || entry.Request.DrainSequence != allocation.DrainSequence {
+		t.Fatal("recovered start not authorized with saved undrain state")
 	}
-	if !resumed || !started {
-		t.Fatalf("agent calls after undrain: resumed=%t started=%t", resumed, started)
-	}
+
 }
 
 func TestUndrainNodePreservesRestartIntent(t *testing.T) {
@@ -462,18 +405,11 @@ func TestUndrainNodePreservesRestartIntent(t *testing.T) {
 	if !allocation.Draining || allocation.DrainReason != "restart" || len(s.allocations) != 2 {
 		t.Fatalf("restart intent after undrain: draining=%t reason=%q allocations=%d", allocation.Draining, allocation.DrainReason, len(s.allocations))
 	}
-	for _, call := range agent.recordedCalls() {
-		if call.method == "DELETE" && call.path == "/v1/allocations/original/drain" {
-			t.Fatal("undrain resumed an allocation marked for restart")
-		}
+	entry := committedAllocationIntent(t, s, node.ID, allocation.ID, 1)
+	if !entry.Request.Draining || entry.Request.DrainSequence != allocation.DrainSequence {
+		t.Fatal("undrain overwrote restart control state")
 	}
-	persisted, err := s.state.ListAllocations(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !persisted[allocation.ID].Draining || persisted[allocation.ID].DrainReason != "restart" {
-		t.Fatalf("persisted restart intent = %#v", persisted[allocation.ID])
-	}
+
 }
 
 func newDrainedNodeFixture(t *testing.T) (*Server, *testAgent, *Node, *Allocation) {
@@ -511,9 +447,6 @@ func TestUndrainNodeSaveFailureSendsNoResume(t *testing.T) {
 			if err := s.UndrainNode(context.Background(), node.ID); err == nil {
 				t.Fatal("undrain succeeded despite a failed save")
 			}
-			if requests := resumeCalls(agent, allocation.ID); len(requests) != 0 {
-				t.Fatalf("resume sent before its state was saved: %#v", requests)
-			}
 			if node.Status != NodeStatusDraining {
 				t.Fatalf("node status after failed save = %s, want draining", node.Status)
 			}
@@ -524,68 +457,31 @@ func TestUndrainNodeSaveFailureSendsNoResume(t *testing.T) {
 			if !allocation.Draining {
 				t.Fatal("allocation not draining after reconciliation of a draining node")
 			}
-			var drained uint64
-			for _, call := range agent.recordedCalls() {
-				if call.method == http.MethodPost && call.path == "/v1/allocations/original/drain" {
-					var request nodeapi.DrainAllocationRequest
-					if err := json.Unmarshal(call.body, &request); err != nil {
-						t.Fatal(err)
-					}
-					drained = request.Sequence
-				}
+			entry := committedAllocationIntent(t, s, node.ID, allocation.ID, 1)
+			if !entry.Request.Draining || entry.Request.DrainSequence != allocation.DrainSequence {
+				t.Fatal("failed undrain published a newer resume")
 			}
-			if drained != allocation.DrainSequence {
-				t.Fatalf("last delivered drain sequence = %d, want %d", drained, allocation.DrainSequence)
-			}
+
 		})
 	}
 }
 
-func TestUndrainNodeRedeliversResumeAfterDeliveryFailure(t *testing.T) {
+func TestUndrainAuthorityPersistsAcrossDisconnectedAgentAndLeadership(t *testing.T) {
 	s, agent, node, allocation := newDrainedNodeFixture(t)
-	defer agent.server.Close()
-	agent.mu.Lock()
-	agent.failResume = true
-	agent.mu.Unlock()
-	if err := s.UndrainNode(context.Background(), node.ID); err != nil {
-		t.Fatalf("undrain after durable save: %v", err)
-	}
-	if node.Status != NodeStatusHealthy || allocation.Draining || allocation.DrainSequence != 2 {
-		t.Fatalf("after undrain: node=%s draining=%t sequence=%d", node.Status, allocation.Draining, allocation.DrainSequence)
-	}
-	nodes, err := s.state.ListNodes(context.Background())
-	if err != nil {
+	t.Cleanup(agent.server.Close)
+	node.Host, node.Port = "192.0.2.1", 1
+	if err := s.UndrainNode(t.Context(), node.ID); err != nil {
 		t.Fatal(err)
 	}
-	allocations, err := s.state.ListAllocations(context.Background())
-	if err != nil {
-		t.Fatal(err)
+	entry := committedAllocationIntent(t, s, node.ID, allocation.ID, 1)
+	if entry.Mode != nodeapi.ExecutionRun || entry.Request.Draining || entry.Request.DrainSequence != 2 {
+		t.Fatal("disconnection blocked undrain publication")
 	}
-	if nodes[node.ID.String()].Draining || allocations[allocation.ID].Draining || allocations[allocation.ID].DrainSequence != 2 {
-		t.Fatalf("persisted undrain: node draining=%t allocation=%#v", nodes[node.ID.String()].Draining, allocations[allocation.ID])
-	}
-
-	agent.mu.Lock()
-	agent.failResume = false
-	agent.calls = nil
-	agent.mu.Unlock()
-	s.Reconcile(context.Background())
-	requests := resumeCalls(agent, allocation.ID)
-	if len(requests) != 1 || requests[0].Sequence != 2 || requests[0].Generation != 1 || requests[0].Epoch != 1 {
-		t.Fatalf("redelivered resumes = %#v, want one at sequence 2", requests)
-	}
-	s.Reconcile(context.Background())
-	if requests := resumeCalls(agent, allocation.ID); len(requests) != 1 {
-		t.Fatalf("resume redelivered after acknowledgement: %#v", requests)
-	}
-
-	// A new leadership term does not know what the previous one delivered,
-	// so it redelivers the saved resume once under its own epoch.
 	s.controlEpoch = 2
-	s.Reconcile(context.Background())
-	requests = resumeCalls(agent, allocation.ID)
-	if len(requests) != 2 || requests[1].Sequence != 2 || requests[1].Epoch != 2 {
-		t.Fatalf("resumes after leadership change = %#v, want a redelivery at epoch 2", requests)
+	s.Reconcile(t.Context())
+	entry = committedAllocationIntent(t, s, node.ID, allocation.ID, 1)
+	if entry.Request.Epoch != 2 || entry.Request.Draining || entry.Request.DrainSequence != 2 {
+		t.Fatal("failover lost saved undrain authority")
 	}
 }
 
@@ -607,8 +503,8 @@ func TestReconcileStopsRemovedGroupOnDrainingNode(t *testing.T) {
 
 	s.Reconcile(context.Background())
 
-	if removed.Phase != lifecycle.PhaseStopped {
-		t.Fatalf("removed group allocation phase = %s, want stopped", removed.Phase)
+	if removed.Phase != lifecycle.PhaseStopping || committedAllocationIntent(t, s, drainingNode.ID, removed.ID, 1).Mode != nodeapi.ExecutionCleanup {
+		t.Fatalf("removed group allocation cleanup = %s", removed.Phase)
 	}
 	if retained.Phase != lifecycle.PhaseRunning {
 		t.Fatalf("retained group allocation phase = %s, want running", retained.Phase)

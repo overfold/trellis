@@ -227,16 +227,8 @@ func (s *Server) StopAllocationByID(ctx context.Context, namespace, id string) e
 		s.mu.RUnlock()
 		return ErrAllocationNotFound
 	}
-	nodeID := found.Node.ID
 	s.mu.RUnlock()
-	slots, busy := s.claimActionNode(nodeID)
-	slots, ok := s.awaitActionNode(ctx, nodeID, slots, busy)
-	if !ok {
-		return ctx.Err()
-	}
 	err := s.Execute(ctx, &Action{Type: ActionStop, Allocation: found})
-	<-slots
-	s.releaseActionNode(nodeID)
 	if err != nil {
 		return err
 	}

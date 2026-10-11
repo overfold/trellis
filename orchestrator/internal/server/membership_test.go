@@ -558,8 +558,8 @@ func TestRemoveMemberDurableRegistrationAndRecovery(t *testing.T) {
 				}
 				s.Reconcile(t.Context())
 				subnets, err := controller.listNetworkSubnetRegistrations(t.Context())
-				if err != nil || len(subnets) != 1 || subnets[networkSubnetKey{namespace: "acme", node: leader}] != 0 {
-					t.Fatalf("removed registration consumed network capacity: %v, %v", subnets, err)
+				if err != nil || len(subnets) != 1 || subnets[networkSubnetKey{namespace: "acme", node: removed}] != 0 {
+					t.Fatalf("removal released an unproved execution's subnet: %v, %v", subnets, err)
 				}
 				allocations, err := controller.ListAllocations(t.Context())
 				if err != nil {
@@ -575,8 +575,8 @@ func TestRemoveMemberDurableRegistrationAndRecovery(t *testing.T) {
 						placed = true
 					}
 				}
-				if !placed {
-					t.Fatal("remaining node did not receive desired allocation")
+				if placed {
+					t.Fatal("placement reused the removed node's unproved-clean subnet")
 				}
 				owners, err := controller.ListVolumeRegistrations(t.Context())
 				if err != nil || owners[volumeRegistrationKey("acme", "data")] != removed {
@@ -590,6 +590,19 @@ func TestRemoveMemberDurableRegistrationAndRecovery(t *testing.T) {
 			joiner.err = nil
 			if err := s.RemoveMember(t.Context(), removed.String()); err != nil {
 				t.Fatal(err)
+			}
+			// Removal is not cleanup proof. Spare address capacity nevertheless
+			// lets the independent registered node run desired work.
+			s.networkPool = netip.MustParsePrefix("10.64.0.0/23")
+			s.Reconcile(t.Context())
+			placed := false
+			for _, allocation := range s.allocations {
+				if allocation.JobName == "web" && allocation.Node != nil && allocation.Node.ID == leader {
+					placed = true
+				}
+			}
+			if !placed {
+				t.Fatal("spare subnet capacity did not admit independent desired work")
 			}
 		})
 	}

@@ -70,7 +70,13 @@ func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spe
 	}
 	execution := executionSpec(jobSpec, images)
 	s.mutationMu.Lock()
-	defer s.mutationMu.Unlock()
+	changed := false
+	defer func() {
+		s.mutationMu.Unlock()
+		if changed {
+			s.Reconcile(ctx)
+		}
+	}()
 	if err := s.checkTerm(ctx); err != nil {
 		return nil, err
 	}
@@ -143,6 +149,7 @@ func (s *Server) RegisterJob(ctx context.Context, namespace string, jobSpec *spe
 	s.mu.Lock()
 	s.jobs[key] = job
 	s.mu.Unlock()
+	changed = true
 
 	if labelOnly {
 		s.refreshCatalog()

@@ -111,12 +111,13 @@ type networkSubnetPlan struct {
 
 // planNetworkSubnetRegistrations assigns each namespace that needs a network
 // path a subnet index on every node, keeping existing registrations and
-// releasing those whose namespace or node is gone. New indexes are the lowest
+// releasing those whose namespace or node is gone unless an uncleaned
+// execution protects the registration. New indexes are the lowest
 // free ones, assigned in namespace then node ID order, so the plan depends only
 // on its inputs. A namespace receives new registrations only when every
 // missing node can be addressed; otherwise it is left unready and the returned
 // error explains the exhaustion. The inputs are not modified.
-func planNetworkSubnetRegistrations(pool netip.Prefix, current map[networkSubnetKey]int, namespaces []string, nodes []uuid.UUID) (*networkSubnetPlan, error) {
+func planNetworkSubnetRegistrations(pool netip.Prefix, current map[networkSubnetKey]int, namespaces []string, nodes []uuid.UUID, protected map[networkSubnetKey]bool) (*networkSubnetPlan, error) {
 	wantedNamespaces := make(map[string]bool, len(namespaces))
 	for _, namespace := range namespaces {
 		if namespace == "" {
@@ -135,7 +136,7 @@ func planNetworkSubnetRegistrations(pool netip.Prefix, current map[networkSubnet
 	}
 	used := make(map[int]networkSubnetKey, len(current))
 	for key, index := range current {
-		if !wantedNamespaces[key.namespace] || !wantedNodes[key.node] {
+		if (!wantedNamespaces[key.namespace] || !wantedNodes[key.node]) && !protected[key] {
 			plan.Deletions = append(plan.Deletions, &NetworkSubnetRegistration{Namespace: key.namespace, NodeID: key.node, Index: index})
 			continue
 		}

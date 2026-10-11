@@ -595,11 +595,17 @@ func run(parent context.Context, cfg *config) error {
 		if err != nil {
 			return fmt.Errorf("leader server TLS config: %w", err)
 		}
+		var certificate atomic.Pointer[tls.Certificate]
+		certificate.Store(&leaderServerTLS.Certificates[0])
+		nodeCertificate := agentServerTLS.Certificates[0]
+		leaderServerTLS.Certificates = nil
+		leaderServerTLS.GetCertificate = func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			if hello.ServerName == id.String()+".node.trellis" {
+				return &nodeCertificate, nil
+			}
+			return certificate.Load(), nil
+		}
 		if cfg.SigningMode == "managed" {
-			var certificate atomic.Pointer[tls.Certificate]
-			certificate.Store(&leaderServerTLS.Certificates[0])
-			leaderServerTLS.Certificates = nil
-			leaderServerTLS.GetCertificate = func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return certificate.Load(), nil }
 			go renewAPICertificate(ctx, log, clientTLS, elector, &certificate)
 		}
 		leaderHTTP := echo.New()
@@ -1322,6 +1328,7 @@ func nodeControlPlaneRoute(r *http.Request) bool {
 	path := r.URL.Path
 	return (r.Method == http.MethodPost && path == "/v1/nodes") ||
 		(r.Method == http.MethodPost && strings.HasPrefix(path, "/v1/nodes/") && strings.HasSuffix(path, "/heartbeat")) ||
+		(r.Method == http.MethodGet && strings.HasPrefix(path, "/v1/nodes/") && (strings.HasSuffix(path, "/execution") || strings.Contains(path, "/execution/") && strings.HasSuffix(path, "/credentials"))) ||
 		(r.Method == http.MethodGet && path == "/v1/internal/discovery") ||
 		(r.Method == http.MethodGet && path == "/v1/internal/control-plane") ||
 		(r.Method == http.MethodGet && path == "/v1/internal/node-role") ||

@@ -5,13 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"net/http"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -130,44 +129,6 @@ func TestReconcileAbortsWhenPlannedNodeRemoved(t *testing.T) {
 	}
 }
 
-func TestStopAllocationByIDWaitsForNodeActionsAndReplaces(t *testing.T) {
-	s, agent := newTestServerWithAgent()
-	defer agent.server.Close()
-	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
-	addTestNode(s, node, s.now())
-	jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Count: 1, Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}
-	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(jobSpec), Revision: 1}
-	original := &Allocation{ID: "original", Namespace: "default", JobName: "web", TaskGroupName: "api", Tasks: jobSpec.TaskGroups[0].Tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
-	s.allocations = []*Allocation{original}
-
-	if _, busy := s.claimActionNode(node.ID); busy != nil {
-		t.Fatal("setup: node already busy")
-	}
-	done := make(chan error, 1)
-	go func() { done <- s.StopAllocationByID(context.Background(), "default", "original") }()
-	select {
-	case err := <-done:
-		s.releaseActionNode(node.ID)
-		t.Fatalf("stop completed while a pass's actions held the node: %v", err)
-	case <-time.After(50 * time.Millisecond):
-	}
-	if calls := agent.recordedCalls(); len(calls) != 0 {
-		s.releaseActionNode(node.ID)
-		t.Fatalf("agent called while a pass's actions held the node: %#v", calls)
-	}
-	s.releaseActionNode(node.ID)
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-
-	if original.Phase != lifecycle.PhaseStopped {
-		t.Fatalf("original phase = %s, want stopped", original.Phase)
-	}
-	if len(s.allocations) != 2 || s.allocations[1].Phase != lifecycle.PhaseStarting {
-		t.Fatalf("allocations = %d, want the stop followed by a replacement", len(s.allocations))
-	}
-}
-
 func TestRestartJobReconcilesImmediately(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()
@@ -177,7 +138,6 @@ func TestRestartJobReconcilesImmediately(t *testing.T) {
 	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(jobSpec), Revision: 1}
 	original := &Allocation{ID: "original", Namespace: "default", JobName: "web", TaskGroupName: "api", Tasks: jobSpec.TaskGroups[0].Tasks, Node: node, Generation: 7, JobRevision: 1, Phase: lifecycle.PhaseRunning, Health: lifecycle.HealthHealthy}
 	s.allocations = []*Allocation{original}
-	agent.failStop = true
 
 	if err := s.RestartJob(context.Background(), "default", "web"); err != nil {
 		t.Fatal(err)
@@ -186,25 +146,18 @@ func TestRestartJobReconcilesImmediately(t *testing.T) {
 	if !original.Draining || original.DrainReason != "restart" || original.DrainSequence != 1 {
 		t.Fatalf("restart intent = draining %t reason %q sequence %d", original.Draining, original.DrainReason, original.DrainSequence)
 	}
-	if original.Phase != lifecycle.PhaseStopping || original.NextRetryAt == nil || original.Generation != 7 || len(s.allocations) != 1 {
-		t.Fatal("failed recreate restart stop did not preserve fenced old execution and block replacement")
+	if original.Phase != lifecycle.PhaseStopping || original.CleanupComplete || original.Generation != 7 || len(s.allocations) != 1 {
+		t.Fatal("unproved recreate restart cleanup did not preserve fenced old execution and block replacement")
 	}
-	agent.mu.Lock()
-	agent.failStop = false
-	agent.mu.Unlock()
-	original.mu.Lock()
-	original.NextRetryAt = nil
-	original.mu.Unlock()
-	s.Reconcile(context.Background())
-	stopped := false
-	for _, call := range agent.recordedCalls() {
-		if call.method == http.MethodDelete && call.path == "/v1/allocations/original" {
-			stopped = true
-		}
+	entry := committedAllocationIntent(t, s, node.ID, original.ID, 7)
+	if entry.Mode != nodeapi.ExecutionCleanup {
+		t.Fatal("restart cleanup not published")
 	}
-	if !stopped || original.Phase != lifecycle.PhaseStopped || len(s.allocations) != 1 {
-		t.Fatalf("restart did not stop before placement: stopped=%t phase=%s allocations=%d", stopped, original.Phase, len(s.allocations))
+	s.Reconcile(t.Context())
+	if len(s.allocations) != 1 || original.CleanupComplete {
+		t.Fatal("unproved cleanup admitted restart")
 	}
+	acknowledgeTestCleanup(t, s, original)
 	s.Reconcile(context.Background())
 	if len(s.allocations) != 2 || s.allocations[1].Phase != lifecycle.PhaseStarting || original.Generation != 7 {
 		t.Fatal("restart did not place after successful stop")

@@ -17,7 +17,7 @@ import (
 
 // reconcilePlanInput is the cluster view a reconciliation pass plans against.
 // planReconciliation reads it and never mutates it: jobs, nodes, backoffs,
-// volume owners, network ports, and resume deliveries are borrowed
+// volume owners and network ports are borrowed
 // read-only, and Allocations are detached snapshots the planner copies before
 // changing. The caller must keep the borrowed values stable for the duration
 // of the call.
@@ -41,15 +41,12 @@ type reconcilePlanInput struct {
 	// NetworkReady holds namespaces with a WireGuard port slot and a subnet
 	// on every node; only they accept new namespace-networked placements.
 	NetworkReady map[string]bool
-	// DeliveredResumes holds the drain sequence of the latest resume each
-	// allocation generation acknowledged in the current control epoch.
-	DeliveredResumes map[resumeDeliveryKey]uint64
 	// NewAllocationSuffix returns the unique suffix of a new allocation ID.
 	NewAllocationSuffix func() string
 }
 
 // reconcilePlan is the outcome of one reconciliation pass: the durable commit,
-// the allocation records it changes, and the agent actions to dispatch once
+// the allocation records it changes, and execution decisions to publish once
 // the commit succeeds.
 type reconcilePlan struct {
 	Commit ReconciliationCommit
@@ -64,7 +61,7 @@ type reconcilePlan struct {
 	// NewAllocations are created by this pass. Their Node fields reference the
 	// canonical input Nodes; Commit.Allocations carries detached copies.
 	NewAllocations []*Allocation
-	// Actions are ordered for dispatch. Retained-original stops come first.
+	// Actions identify execution decisions. Retained-original cleanup comes first.
 	// Allocation fields reference working copies or new allocations.
 	Actions []Action
 	// Events are cluster events to publish after the commit.
@@ -185,7 +182,7 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 	blockedNodes := make(map[uuid.UUID]bool)
 	for _, node := range nodes {
 		for _, observed := range node.observedAllocations {
-			if observed.RetainedLogs {
+			if observed.RetainedLogs || observed.CleanupComplete {
 				continue
 			}
 			owned := slices.ContainsFunc(allocations, func(allocation *Allocation) bool {
@@ -218,22 +215,13 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 	observedOccupancy := make(map[*Allocation]bool)
 	retainedSet := make(map[*Allocation]bool)
 	for _, allocation := range allocations {
-		if allocation.Node == nil || activeAllocationPhase(allocation.Phase) {
+		if allocation.Node == nil || activeAllocationPhase(allocation.Phase) || allocation.CleanupComplete {
 			continue
 		}
 		if node := in.Nodes[allocation.Node.ID]; node != nil && !lossTimedOut(node) {
-			// A completed stop is stronger proof than an older heartbeat.
-			if allocation.Phase == lifecycle.PhaseStopped && !node.observedAt.After(allocation.TransitionedAt) {
-				continue
-			}
-			if allocation.Phase == lifecycle.PhaseFailed && node.observedAt.Before(allocation.TransitionedAt) {
-				observedOccupancy[allocation] = true
-			}
-			for _, observed := range node.observedAllocations {
-				if observed.ID == allocation.ID && observed.Generation == allocation.Generation && !observed.RetainedLogs {
-					observedOccupancy[allocation] = true
-				}
-			}
+			// Missing tasks, terminal phases, and retained logs do not release
+			// node resources. Only the generation's persisted cleanup proof does.
+			observedOccupancy[allocation] = true
 		}
 	}
 	if !in.LeaderSince.IsZero() && recoveryElapsed {
@@ -259,7 +247,25 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 			if node.Status != NodeStatusHealthy && node.Status != NodeStatusDraining {
 				continue
 			}
+			if !node.observedAt.IsZero() && !node.observedAt.Before(in.LeaderSince) {
+				for _, allocation := range allocations {
+					if allocation.Node == nil || allocation.Node.ID != node.ID || activeAllocationPhase(allocation.Phase) || allocation.CleanupComplete {
+						continue
+					}
+					present := slices.ContainsFunc(node.observedAllocations, func(observed observedAllocation) bool {
+						return observed.ID == allocation.ID && observed.Generation == allocation.Generation
+					})
+					if !present {
+						// Absence permits a cleanup decision after recovery, but
+						// cannot itself prove that ports and attachments are gone.
+						actions = append(actions, Action{Type: ActionStopObserved, Node: node, ID: allocation.ID, Generation: allocation.Generation, RetainLogs: true})
+					}
+				}
+			}
 			for _, observed := range node.observedAllocations {
+				if observed.CleanupComplete {
+					continue
+				}
 				key := observationKey{nodeID: node.ID, allocation: observed.ID, generation: observed.Generation}
 				// A lost record may have missed persisting a successful stop.
 				// Redeliver it even for retained logs to durably confirm cleanup.
@@ -390,12 +396,6 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 		}
 		if allocation.Node == nil || allocation.Node.Status != NodeStatusHealthy {
 			continue
-		}
-		// A start request carries the drain state itself, so only a running
-		// allocation needs a separate resume redelivery.
-		if allocation.Phase == lifecycle.PhaseRunning && !allocation.Draining && allocation.DrainSequence > 0 &&
-			in.DeliveredResumes[resumeDeliveryKey{allocation: allocation.ID, generation: allocation.Generation}] != allocation.DrainSequence {
-			actions = append(actions, Action{Type: ActionResume, Allocation: allocation})
 		}
 		if allocation.Phase == lifecycle.PhasePlaced || allocation.Phase == lifecycle.PhaseStarting {
 			if !blockedNodes[allocation.Node.ID] {

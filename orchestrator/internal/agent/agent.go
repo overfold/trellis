@@ -16,6 +16,7 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/client"
 	"github.com/overfold/trellis/orchestrator/internal/health"
 	"github.com/overfold/trellis/orchestrator/internal/network"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/nodecapacity"
 	"github.com/overfold/trellis/orchestrator/internal/runtime"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
@@ -67,7 +68,15 @@ type Agent struct {
 	orphanDetaches map[string]bool
 	// starts holds accepted allocation starts running in the background, and
 	// failed ones until the control plane retries; guarded by mu.
-	starts map[string]*groupStart
+	starts          map[string]*groupStart
+	intent          *nodeapi.ExecutionIntent
+	intentMu        sync.Mutex
+	intentContext   context.Context
+	intentCancel    context.CancelFunc
+	intentFresh     bool
+	intentWake      chan struct{}
+	intentWorkers   map[string]bool
+	cleanupComplete map[string]cleanupCompletion
 	// activeStarts includes cancelled starts until their runtime work returns.
 	activeStarts int
 	// stoppedGenerations fences starts independently of task and log retention.
@@ -77,7 +86,7 @@ type Agent struct {
 
 	// planOperation serializes plan application without holding mu across I/O.
 	// It is initialized under operationMu.
-	planOperation chan struct{}
+	planOperation map[string]chan struct{}
 	// Topology updates are authoritative; guarded by mu. Delayed starts only
 	// bootstrap a path, and successful cleanup forgets an idle namespace.
 	networkPlans map[string]network.Plan
@@ -354,8 +363,15 @@ func (a *Agent) Init(ctx context.Context) error {
 		a.removeOrphanedResources(ctx)
 	}
 
+	if err := a.recoverStartAdmissions(); err != nil {
+		return err
+	}
+	if err := a.recoverExecutionIntent(); err != nil {
+		return fmt.Errorf("recover execution intent: %w", err)
+	}
 	go a.runRecoveryRetry(ctx)
 	go a.runHeartbeatLoop(ctx)
+	go a.runExecutionLoop(ctx)
 	go a.runLogLimitLoop(ctx)
 	go a.reconciler.Run(ctx)
 	return nil

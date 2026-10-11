@@ -298,8 +298,8 @@ func (s *StateController) PutNodeAndAllocations(ctx context.Context, node *NodeS
 
 // PutNodesAndAllocations commits node summaries and allocation updates as one
 // durable state transition, in the order given.
-func (s *StateController) PutNodesAndAllocations(ctx context.Context, nodes []*NodeSummary, allocations []*Allocation) error {
-	if len(nodes) == 0 && len(allocations) == 0 {
+func (s *StateController) PutNodesAndAllocations(ctx context.Context, nodes []*NodeSummary, allocations []*Allocation, proofs ...state.Mutation) error {
+	if len(nodes) == 0 && len(allocations) == 0 && len(proofs) == 0 {
 		return nil
 	}
 	atomic, ok := s.store.(state.AtomicStore)
@@ -321,6 +321,7 @@ func (s *StateController) PutNodesAndAllocations(ctx context.Context, nodes []*N
 		}
 		mutations = append(mutations, state.Mutation{Key: s.allocationKey(allocation.ID), Value: raw})
 	}
+	mutations = append(mutations, proofs...)
 	if err := atomic.Batch(ctx, mutations); err != nil {
 		return fmt.Errorf("put nodes and allocations: %w", err)
 	}
@@ -329,6 +330,7 @@ func (s *StateController) PutNodesAndAllocations(ctx context.Context, nodes []*N
 
 // ReconciliationCommit is the durable outcome of one reconciliation pass.
 type ReconciliationCommit struct {
+	ExecutionCleanup            []executionCleanupDecision
 	Allocations                 []*Allocation
 	DeleteAllocations           []string
 	VolumeRegistrations         []*VolumeRegistration
@@ -348,7 +350,7 @@ type ReconciliationCommit struct {
 // value, including leader-chosen timestamps, so replaying the Raft entry is
 // deterministic.
 func (s *StateController) CommitReconciliation(ctx context.Context, commit *ReconciliationCommit) error {
-	if commit == nil || len(commit.Allocations)+len(commit.DeleteAllocations)+len(commit.VolumeRegistrations)+len(commit.NetworkPortRegistrations)+len(commit.DeleteNetworkPortNamespaces)+len(commit.NetworkSubnetRegistrations)+len(commit.DeleteNetworkSubnetRegistrations)+len(commit.Backoffs)+len(commit.DeleteBackoffs) == 0 {
+	if commit == nil || len(commit.ExecutionCleanup)+len(commit.Allocations)+len(commit.DeleteAllocations)+len(commit.VolumeRegistrations)+len(commit.NetworkPortRegistrations)+len(commit.DeleteNetworkPortNamespaces)+len(commit.NetworkSubnetRegistrations)+len(commit.DeleteNetworkSubnetRegistrations)+len(commit.Backoffs)+len(commit.DeleteBackoffs) == 0 {
 		return nil
 	}
 	atomic, ok := s.store.(state.AtomicStore)
@@ -414,6 +416,13 @@ func (s *StateController) CommitReconciliation(ctx context.Context, commit *Reco
 	}
 	for _, backoff := range commit.DeleteBackoffs {
 		mutations = append(mutations, state.Mutation{Key: s.replacementBackoffKey(backoff)})
+	}
+	for _, decision := range commit.ExecutionCleanup {
+		raw, err := json.Marshal(decision)
+		if err != nil {
+			return err
+		}
+		mutations = append(mutations, state.Mutation{Key: s.executionDecisionKey(decision.Node, decision.ID, decision.Generation), Value: raw})
 	}
 	if err := atomic.Batch(ctx, mutations); err != nil {
 		return fmt.Errorf("commit reconciliation: %w", err)

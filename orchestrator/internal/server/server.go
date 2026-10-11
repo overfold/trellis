@@ -70,7 +70,7 @@ type Server struct {
 	//	reconcileMu -> mutationMu -> termMu -> mu -> allocation.mu -> leaf locks
 	//
 	//   - reconcileMu serializes reconciliation planning and its durable
-	//     commit; a pass's agent actions run after it is released.
+	//     commit and intent publication; no agent transport is involved.
 	//   - mutationMu serializes durable state mutations: reconciliation
 	//     commits, API mutations, agent action outcomes, and the observation
 	//     applier. Each reads the committed state, commits through Raft, and
@@ -82,50 +82,33 @@ type Server struct {
 	//     leadership snapshots. It must never be held during network or storage
 	//     I/O.
 	//   - allocation.mu protects lifecycle fields on that allocation.
-	//   - Leaf locks guard self-contained state and acquire nothing while
-	//     held: liveness.mu, observations.mu, resumeMu, networkPlanMu, and
-	//     actionMu. actionMu guards actionNodes and actionSlots, which
-	//     serialize agent actions per node and bound them globally across
-	//     passes.
-	//   - refreshMu serializes the network-plan and catalog refresh after a
-	//     pass's actions, so overlapping passes cannot apply an older
-	//     snapshot. It is acquired without reconcileMu or mutationMu, before
-	//     mu.
+	//   - Leaf locks guard liveness and observation queues.
 	//   - membershipMu serializes Raft membership changes and is never
 	//     acquired while mu is held.
 	//
 	// Heartbeats take termMu for short admission checks and then the
 	// liveness and observations leaf locks, never mutationMu or Raft.
-	mu                 sync.RWMutex
-	reconcileMu        sync.Mutex
-	refreshMu          sync.Mutex
-	actionMu           sync.Mutex
-	actionNodes        map[uuid.UUID]chan struct{}
-	actionSlots        chan struct{}
-	mutationMu         sync.Mutex
-	networkPlanMu      sync.Mutex
-	networkPlans       map[networkPlanKey]*networkPlanState
-	networkPlanWorkers map[uuid.UUID]uint64
-	networkPlanWake    chan struct{}
-	controlEpoch       uint64
-	leaderSince        time.Time
-	now                func() time.Time
-	metrics            *Metrics
-	secrets            *secretstore.Store
-	events             *EventBus
-	logStreams         *transport.StreamLimiter
+	mu sync.RWMutex
+	// executionMu serializes committed intent reads, publication and watcher
+	// subscription. Publication takes mutationMu first and releases mu before
+	// taking executionMu; blocking pulls never hold it while waiting.
+	executionMu    sync.Mutex
+	executionWatch map[uuid.UUID]chan struct{}
+	reconcileMu    sync.Mutex
+	mutationMu     sync.Mutex
+	controlEpoch   uint64
+	leaderSince    time.Time
+	now            func() time.Time
+	metrics        *Metrics
+	secrets        *secretstore.Store
+	events         *EventBus
+	logStreams     *transport.StreamLimiter
 
-	// termWork joins admitted requests and dispatched work before reload.
+	// termWork joins admitted requests and publication before reload.
 	termMu   sync.RWMutex
 	term     context.Context
 	termWork *sync.WaitGroup
 	raftTerm uint64
-
-	// resumeMu guards the per-term record of acknowledged allocation
-	// resumes. It is a leaf lock: nothing else is acquired while it is held.
-	resumeMu    sync.Mutex
-	resumes     map[resumeDeliveryKey]uint64
-	resumeEpoch uint64
 
 	// reconciliation holds the replicated reconciliation settings; the zero
 	// value selects DefaultReconciliationSettings. Protected by mu.
@@ -167,9 +150,6 @@ func NewServer(log *slog.Logger, storage *storage.LocalStorage, state *StateCont
 		networkPorts:       make(map[string]int),
 		networkSubnets:     make(map[networkSubnetKey]int),
 		wireGuardPortCount: settings.WireGuardPortCount,
-		networkPlans:       make(map[networkPlanKey]*networkPlanState),
-		networkPlanWorkers: make(map[uuid.UUID]uint64),
-		networkPlanWake:    make(chan struct{}, 1),
 		membershipWake:     make(chan struct{}, 1),
 		tokenManager:       auth.NewTokenManager(store, cluster),
 		catalog:            catalog.New(),
@@ -231,16 +211,6 @@ func (s *Server) AcquireLeadership(ctx context.Context) error {
 	s.liveness.startTerm()
 	s.observations.reset()
 
-	// Desired network plans are derived from the leader's in-memory topology.
-	// Never carry them across leadership terms: doing so could wrap stale
-	// contents in the new fencing epoch before the first fresh reconcile.
-	s.networkPlanMu.Lock()
-	s.networkPlans = make(map[networkPlanKey]*networkPlanState)
-	if s.networkPlanWorkers == nil {
-		s.networkPlanWorkers = make(map[uuid.UUID]uint64)
-	}
-	s.networkPlanMu.Unlock()
-	s.wakeNetworkPlans()
 	return nil
 }
 
@@ -321,7 +291,7 @@ func (s *Server) Run(ctx context.Context) <-chan struct{} {
 	s.exec.startTerm(ctx)
 	ctx, release := s.bindTerm(ctx)
 	var group sync.WaitGroup
-	for _, run := range []func(context.Context){s.runReconcileLoop, s.runNetworkPlanLoop, s.runMembershipLoop, s.runObservationApplier} {
+	for _, run := range []func(context.Context){s.runReconcileLoop, s.runMembershipLoop, s.runObservationApplier} {
 		group.Go(func() { run(ctx) })
 	}
 	done := make(chan struct{})
@@ -504,11 +474,9 @@ func (s *Server) runReconcileLoop(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
-	// A newly elected leader must derive current network-plan state before
-	// waiting for the ordinary periodic reconciliation interval. Periodic
-	// passes do not wait for their agent actions: a node still busy with an
-	// earlier pass is skipped while the other nodes proceed.
-	s.reconcile(ctx, false)
+	// A newly elected leader must publish current fenced execution and network
+	// authority before waiting for the ordinary reconciliation interval.
+	s.reconcile(ctx)
 
 	ticker := time.NewTicker(reconcileInterval)
 	defer ticker.Stop()
@@ -518,7 +486,7 @@ func (s *Server) runReconcileLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.reconcile(ctx, false)
+			s.reconcile(ctx)
 		}
 	}
 }

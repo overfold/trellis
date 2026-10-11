@@ -68,17 +68,11 @@ func TestReconcileStopsHeartbeatObservedOrphanAfterRecoveryGrace(t *testing.T) {
 	}
 
 	s.Reconcile(context.Background())
-	calls := agent.recordedCalls()
-	if len(calls) != 1 || calls[0].method != http.MethodDelete || calls[0].path != "/v1/allocations/orphan" {
-		t.Fatalf("agent calls = %#v, want one orphan stop", calls)
+	entry := committedAllocationIntent(t, s, node.ID, "orphan", 3)
+	if entry.Mode != nodeapi.ExecutionCleanup {
+		t.Fatal("orphan generation 3 cleanup not published")
 	}
-	var request nodeapi.StopAllocationRequest
-	if err := json.Unmarshal(calls[0].body, &request); err != nil {
-		t.Fatal(err)
-	}
-	if request.AllocationID != "orphan" || request.Generation != 3 {
-		t.Fatalf("stop request = %#v, want orphan generation 3", request)
-	}
+
 }
 
 func TestReconcileStopsTerminalAllocationReportedByReturningNode(t *testing.T) {
@@ -115,17 +109,14 @@ func TestReconcileStopsTerminalAllocationReportedByReturningNode(t *testing.T) {
 			}
 
 			s.Reconcile(context.Background())
-			calls := agent.recordedCalls()
-			if len(calls) != 1 || calls[0].method != http.MethodDelete || calls[0].path != "/v1/allocations/old" {
-				t.Fatalf("agent calls = %#v, want one stop of the %s allocation's container", calls, phase)
+			entry := committedAllocationIntent(t, s, node.ID, "old", 1)
+			if entry.Mode != nodeapi.ExecutionCleanup {
+				t.Fatal("returning terminal generation cleanup not published")
 			}
-			var request nodeapi.StopAllocationRequest
-			if err := json.Unmarshal(calls[0].body, &request); err != nil {
-				t.Fatal(err)
+			if old.CleanupComplete {
+				t.Fatal("publication fabricated cleanup proof")
 			}
-			if request.AllocationID != "old" || request.Generation != 1 {
-				t.Fatalf("stop request = %#v, want old generation 1", request)
-			}
+			acknowledgeTestCleanup(t, s, old)
 			if old.Phase != lifecycle.PhaseStopped || replacement.Phase != lifecycle.PhaseRunning {
 				t.Fatalf("phases after reconcile: old=%s replacement=%s, want stopped/running", old.Phase, replacement.Phase)
 			}
@@ -146,9 +137,11 @@ func TestReconcileProtectsRecoveredObservationDuringLeaderGrace(t *testing.T) {
 	}
 
 	s.Reconcile(context.Background())
-	if calls := agent.recordedCalls(); len(calls) != 0 {
-		t.Fatalf("agent calls during leader recovery grace = %#v, want none", calls)
+	doc, err := s.ExecutionIntent(t.Context(), node.ID, 0)
+	if err != nil || doc == nil || doc.CleanupAbsent || len(doc.Allocations) != 0 {
+		t.Fatalf("recovery grace authority: %+v %v", doc, err)
 	}
+
 }
 
 func TestReconcileStopsStaleObservedGeneration(t *testing.T) {
@@ -174,15 +167,10 @@ func TestReconcileStopsStaleObservedGeneration(t *testing.T) {
 	}
 
 	s.Reconcile(context.Background())
-	calls := agent.recordedCalls()
-	if len(calls) != 1 || calls[0].method != http.MethodDelete {
-		t.Fatalf("agent calls = %#v, want one stale-generation stop", calls)
+	old := committedAllocationIntent(t, s, node.ID, "alloc", 1)
+	current := committedAllocationIntent(t, s, node.ID, "alloc", 2)
+	if old.Mode != nodeapi.ExecutionCleanup || current.Mode != nodeapi.ExecutionRun {
+		t.Fatal("cleanup was not fenced to stale generation")
 	}
-	var request nodeapi.StopAllocationRequest
-	if err := json.Unmarshal(calls[0].body, &request); err != nil {
-		t.Fatal(err)
-	}
-	if request.AllocationID != "alloc" || request.Generation != 1 {
-		t.Fatalf("stop request = %#v, want alloc generation 1", request)
-	}
+
 }

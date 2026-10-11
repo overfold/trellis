@@ -61,7 +61,7 @@ func TestTerminalLogsSurviveCleanupAndRecovery(t *testing.T) {
 		t.Fatalf("execution cleanup: allocations=%v removes=%d", agent.allocations, rt.removeCount)
 	}
 	statuses := agent.allocationStatuses()
-	if len(statuses) != 1 || !statuses[0].RetainedLogs {
+	if len(statuses) != 2 || !statuses[0].RetainedLogs || !statuses[1].CleanupComplete {
 		t.Fatalf("retained observation: %+v", statuses)
 	}
 
@@ -106,7 +106,8 @@ func TestTerminalLogsSurviveCleanupAndRecovery(t *testing.T) {
 	if _, err := restarted.TaskLogs(ctx, "allocation", "task", false, 100); !errors.Is(err, ErrAllocationNotFound) {
 		t.Fatalf("pruned logs: %v", err)
 	}
-	if len(rt.logs) != 0 || len(restarted.allocationStatuses()) != 0 {
+	statuses = restarted.allocationStatuses()
+	if len(rt.logs) != 0 || len(statuses) != 1 || !statuses[0].CleanupComplete {
 		t.Fatal("pruned logs still advertised or stored")
 	}
 }

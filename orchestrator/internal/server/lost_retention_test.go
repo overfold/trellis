@@ -2,8 +2,7 @@ package server
 
 import (
 	"context"
-	"encoding/json"
-	"net/http"
+	"sort"
 	"testing"
 	"time"
 
@@ -94,50 +93,62 @@ func (f *lostReturnFixture) replacements() []*Allocation {
 	return result
 }
 
-type recordedOperation struct {
-	method, id string
+type publishedOperation struct {
+	mode       nodeapi.ExecutionMode
+	id         string
 	generation uint64
 }
 
-func recordedOperations(t *testing.T, agent *testAgent) []recordedOperation {
+func publishedOperations(t *testing.T, s *Server) []publishedOperation {
 	t.Helper()
-	var operations []recordedOperation
-	for _, call := range agent.recordedCalls() {
-		switch {
-		case call.method == http.MethodDelete:
-			var request nodeapi.StopAllocationRequest
-			if err := json.Unmarshal(call.body, &request); err != nil {
-				t.Fatal(err)
+	var operations []publishedOperation
+	for id := range s.nodes {
+		doc, err := s.ExecutionIntent(t.Context(), id, 0)
+		if err != nil || doc == nil {
+			t.Fatalf("intent: %v", err)
+		}
+		for _, entry := range doc.Allocations {
+			if entry.Mode == nodeapi.ExecutionRetain {
+				continue
 			}
-			operations = append(operations, recordedOperation{method: call.method, id: request.AllocationID, generation: request.Generation})
-		case call.method == http.MethodPost && call.path == "/v1/allocations":
-			var request nodeapi.AllocationRequest
-			if err := json.Unmarshal(call.body, &request); err != nil {
-				t.Fatal(err)
+			if entry.Mode == nodeapi.ExecutionRun {
+				running := false
+				for _, allocation := range s.allocations {
+					if allocation.ID == entry.Request.AllocationID && allocation.Generation == entry.Request.Generation && allocation.Phase == lifecycle.PhaseRunning {
+						running = true
+					}
+				}
+				if running {
+					continue
+				}
 			}
-			operations = append(operations, recordedOperation{method: call.method, id: request.AllocationID, generation: request.Generation})
-		default:
-			operations = append(operations, recordedOperation{method: call.method, id: call.path})
+			operations = append(operations, publishedOperation{mode: entry.Mode, id: entry.Request.AllocationID, generation: entry.Request.Generation})
 		}
 	}
+	sort.Slice(operations, func(i, j int) bool {
+		if operations[i].mode != operations[j].mode {
+			return operations[i].mode == nodeapi.ExecutionCleanup
+		}
+		return operations[i].id < operations[j].id
+	})
 	return operations
 }
 
 // originalStops counts the stops of the lost original's container.
-func originalStops(operations []recordedOperation) int {
+func originalStops(operations []publishedOperation) int {
 	stops := 0
 	for _, operation := range operations {
-		if operation.method == http.MethodDelete && operation.id == "original" {
+		if operation.mode == nodeapi.ExecutionCleanup && operation.id == "original" {
 			stops++
 		}
 	}
 	return stops
 }
 
-func startsOf(operations []recordedOperation) []recordedOperation {
-	var starts []recordedOperation
+func startsOf(operations []publishedOperation) []publishedOperation {
+	var starts []publishedOperation
 	for _, operation := range operations {
-		if operation.method == http.MethodPost {
+		if operation.mode == nodeapi.ExecutionRun {
 			starts = append(starts, operation)
 		}
 	}
@@ -152,7 +163,7 @@ func TestReconcileKeepsLostOriginalUntilReplacementRuns(t *testing.T) {
 		f.heartbeatA(t)
 
 		f.s.Reconcile(context.Background())
-		operations := recordedOperations(t, f.agent)
+		operations := publishedOperations(t, f.s)
 		if originalStops(operations) != 0 {
 			t.Fatalf("operations = %#v, want the original kept while its replacement starts", operations)
 		}
@@ -165,7 +176,7 @@ func TestReconcileKeepsLostOriginalUntilReplacementRuns(t *testing.T) {
 		f.heartbeatA(t)
 
 		f.s.Reconcile(context.Background())
-		operations := recordedOperations(t, f.agent)
+		operations := publishedOperations(t, f.s)
 		if originalStops(operations) != 0 || len(startsOf(operations)) != 1 {
 			t.Fatalf("operations = %#v, want one replacement start and the original kept", operations)
 		}
@@ -180,7 +191,7 @@ func TestReconcileKeepsLostOriginalUntilReplacementRuns(t *testing.T) {
 		f.nodeA.CPUAllocatable = 500
 
 		f.s.Reconcile(context.Background())
-		if operations := recordedOperations(t, f.agent); len(operations) != 0 {
+		if operations := publishedOperations(t, f.s); len(operations) != 0 {
 			t.Fatalf("operations = %#v, want none: the original is kept and nothing fits", operations)
 		}
 		if replacements := f.replacements(); len(replacements) != 1 || replacements[0].Phase != lifecycle.PhasePending || replacements[0].Reason != "insufficient_capacity" {
@@ -196,7 +207,7 @@ func TestReconcileKeepsLostOriginalUntilReplacementRuns(t *testing.T) {
 		}
 
 		f.s.Reconcile(context.Background())
-		if operations := recordedOperations(t, f.agent); originalStops(operations) != 1 {
+		if operations := publishedOperations(t, f.s); originalStops(operations) != 1 {
 			t.Fatalf("operations = %#v, want the non-running original stopped", operations)
 		}
 	})
@@ -207,22 +218,23 @@ func TestReconcileStopsLostOriginalOnceReplacementRuns(t *testing.T) {
 	replacement := f.addAllocation("replacement", f.s.nodes[lostNodeBID], lifecycle.PhaseStarting)
 	f.heartbeatA(t)
 	f.s.Reconcile(context.Background())
-	if operations := recordedOperations(t, f.agent); originalStops(operations) != 0 {
+	if operations := publishedOperations(t, f.s); originalStops(operations) != 0 {
 		t.Fatalf("operations before the replacement runs = %#v, want the original kept", operations)
 	}
 
 	replacement.Phase = lifecycle.PhaseRunning
 	replacement.Health = lifecycle.HealthHealthy
 	f.s.Reconcile(context.Background())
-	operations := recordedOperations(t, f.agent)
+	operations := publishedOperations(t, f.s)
 	if originalStops(operations) != 1 {
 		t.Fatalf("operations = %#v, want the original stopped once its replacement runs", operations)
 	}
 	for _, operation := range operations {
-		if operation.method == http.MethodDelete && operation.id == "original" && operation.generation != 1 {
+		if operation.mode == nodeapi.ExecutionCleanup && operation.id == "original" && operation.generation != 1 {
 			t.Fatalf("stop = %#v, want original generation 1", operation)
 		}
 	}
+	acknowledgeTestCleanup(t, f.s, f.original)
 	if f.original.Phase != lifecycle.PhaseStopped || replacement.Phase != lifecycle.PhaseRunning {
 		t.Fatalf("phases after reconcile: original=%s replacement=%s, want stopped/running", f.original.Phase, replacement.Phase)
 	}
@@ -234,7 +246,7 @@ func TestReconcileStopsLostOriginalOfOutdatedRecreateRevision(t *testing.T) {
 	f.heartbeatA(t)
 
 	f.s.Reconcile(context.Background())
-	if operations := recordedOperations(t, f.agent); originalStops(operations) != 1 {
+	if operations := publishedOperations(t, f.s); originalStops(operations) != 1 {
 		t.Fatalf("operations = %#v, want the outdated original stopped as recreate stops outdated allocations", operations)
 	}
 }
@@ -246,7 +258,7 @@ func TestReconcileKeepsLostOriginalBesideReplacementPinnedToItsNode(t *testing.T
 	f.heartbeatA(t)
 
 	f.s.Reconcile(context.Background())
-	operations := recordedOperations(t, f.agent)
+	operations := publishedOperations(t, f.s)
 	if originalStops(operations) != 0 || len(startsOf(operations)) != 1 {
 		t.Fatalf("operations = %#v, want the replacement started beside the kept original", operations)
 	}
@@ -259,7 +271,7 @@ func TestReconcileKeepsLostOriginalBesideReplacementPinnedToItsNode(t *testing.T
 	replacement.Phase = lifecycle.PhaseRunning
 	replacement.Health = lifecycle.HealthHealthy
 	f.s.Reconcile(context.Background())
-	if operations := recordedOperations(t, f.agent); originalStops(operations) != 1 {
+	if operations := publishedOperations(t, f.s); originalStops(operations) != 1 {
 		t.Fatalf("operations = %#v, want the original stopped once the pinned replacement runs", operations)
 	}
 }
@@ -278,7 +290,7 @@ func TestReconcileLostOriginalHostPortConflict(t *testing.T) {
 		f.heartbeatA(t)
 
 		f.s.Reconcile(context.Background())
-		operations := recordedOperations(t, f.agent)
+		operations := publishedOperations(t, f.s)
 		if originalStops(operations) != 0 || len(startsOf(operations)) != 1 {
 			t.Fatalf("operations = %#v, want one replacement start and the original kept", operations)
 		}
@@ -292,12 +304,17 @@ func TestReconcileLostOriginalHostPortConflict(t *testing.T) {
 		f.heartbeatA(t)
 
 		f.s.Reconcile(context.Background())
-		operations := recordedOperations(t, f.agent)
-		if len(operations) != 2 || operations[0].method != http.MethodDelete || operations[0].id != "original" || operations[1].method != http.MethodPost {
-			t.Fatalf("operations = %#v, want the original stopped before its pinned replacement starts", operations)
+		operations := publishedOperations(t, f.s)
+		if len(operations) != 1 || operations[0].mode != nodeapi.ExecutionCleanup || operations[0].id != "original" || len(startsOf(operations)) != 0 {
+			t.Fatalf("operations = %#v, want cleanup authority and replacement withheld until proof", operations)
 		}
 		if replacements := f.replacements(); len(replacements) != 1 || replacements[0].Node == nil || replacements[0].Node.ID != f.nodeA.ID {
 			t.Fatalf("replacements = %#v, want one replacement on the volume's node", replacements)
+		}
+		acknowledgeTestCleanup(t, f.s, f.original)
+		f.s.Reconcile(t.Context())
+		if len(startsOf(publishedOperations(t, f.s))) != 1 {
+			t.Fatal("proved cleanup did not admit pinned replacement")
 		}
 	})
 	t.Run("replacement already placed on the original's node", func(t *testing.T) {
@@ -306,8 +323,8 @@ func TestReconcileLostOriginalHostPortConflict(t *testing.T) {
 		f.heartbeatA(t)
 
 		f.s.Reconcile(context.Background())
-		operations := recordedOperations(t, f.agent)
-		if len(operations) == 0 || operations[0].method != http.MethodDelete || operations[0].id != "original" {
+		operations := publishedOperations(t, f.s)
+		if len(operations) == 0 || operations[0].mode != nodeapi.ExecutionCleanup || operations[0].id != "original" {
 			t.Fatalf("operations = %#v, want the original stopped first so the placed replacement can bind its port", operations)
 		}
 	})
@@ -322,9 +339,14 @@ func TestReconcileLostOriginalHostPortConflict(t *testing.T) {
 		f.heartbeatA(t)
 
 		f.s.Reconcile(context.Background())
-		operations := recordedOperations(t, f.agent)
-		if len(operations) != 2 || operations[0].method != http.MethodDelete || operations[0].id != "original" || operations[1].method != http.MethodPost {
-			t.Fatalf("operations = %#v, want the blocking original stopped before the worker starts", operations)
+		operations := publishedOperations(t, f.s)
+		if len(operations) != 1 || operations[0].mode != nodeapi.ExecutionCleanup || operations[0].id != "original" || len(startsOf(operations)) != 0 {
+			t.Fatalf("operations = %#v, want cleanup authority before worker admission", operations)
+		}
+		acknowledgeTestCleanup(t, f.s, f.original)
+		f.s.Reconcile(t.Context())
+		if len(startsOf(publishedOperations(t, f.s))) != 1 {
+			t.Fatal("proved cleanup did not admit worker")
 		}
 	})
 }

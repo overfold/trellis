@@ -21,6 +21,7 @@ type ServerClient struct {
 	client       *transport.Client
 	mu           sync.RWMutex
 	controlPlane nodeapi.ControlPlaneResponse
+	tlsConfig    *tls.Config
 }
 
 // NodeInfo contains the identity and capacity used to register a node.
@@ -75,8 +76,9 @@ func NewServerClient(token string, addr string, tlsConfig *tls.Config) *ServerCl
 	// budget, and caller cancellation still terminates shutdown immediately.
 	httpClient.Timeout = 10 * time.Second
 	return &ServerClient{
-		baseURL: transport.NormalizeBaseURL(addr),
-		client:  &transport.Client{Token: token, HTTP: httpClient},
+		baseURL:   transport.NormalizeBaseURL(addr),
+		client:    &transport.Client{Token: token, HTTP: httpClient},
+		tlsConfig: tlsConfig,
 	}
 }
 

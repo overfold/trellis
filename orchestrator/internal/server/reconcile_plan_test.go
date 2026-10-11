@@ -193,19 +193,6 @@ func TestPlanReconciliation(t *testing.T) {
 			created: []plannedUpdate{{ID: "default-web-app-00000001", Phase: lifecycle.PhasePlaced}},
 		},
 		{
-			name: "redelivers an unacknowledged resume",
-			input: func() *reconcilePlanInput {
-				resumed := planTestAllocation("a", healthy, lifecycle.PhaseRunning, 1)
-				resumed.DrainSequence = 2
-				resumedAcknowledged := planTestAllocation("b", healthy, lifecycle.PhaseRunning, 1)
-				resumedAcknowledged.DrainSequence = 2
-				input := planTestInput(map[string]*Job{jobKey("default", "web"): planTestJob("web", 2, 1, "")}, []*Node{healthy}, resumed, resumedAcknowledged)
-				input.DeliveredResumes = map[resumeDeliveryKey]uint64{{allocation: "b", generation: 1}: 2, {allocation: "a", generation: 1}: 1}
-				return input
-			},
-			actions: []plannedAction{{ActionResume, "a"}},
-		},
-		{
 			name: "stops observed allocations that are no longer desired",
 			input: func() *reconcilePlanInput {
 				observing := planTestNode(1, NodeStatusHealthy)

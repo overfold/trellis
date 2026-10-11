@@ -55,6 +55,8 @@ func TestDeleteAndRecreateJobDoesNotAdoptPreviousIncarnation(t *testing.T) {
 	}
 	s.Reconcile(ctx)
 
+	acknowledgeTestCleanup(t, s, old)
+	s.Reconcile(ctx)
 	if old.Phase != lifecycle.PhaseStopped {
 		t.Fatalf("old allocation phase = %s, want retained as stopped", old.Phase)
 	}
@@ -139,6 +141,8 @@ func TestConcurrentDeleteAndRecreateFencesOldAllocations(t *testing.T) {
 	if job.Incarnation == oldIncarnation {
 		t.Fatal("concurrent recreation reused the deleted job incarnation")
 	}
+	acknowledgeTestCleanup(t, s, old)
+	s.Reconcile(ctx)
 	if old.Phase != lifecycle.PhaseStopped {
 		t.Fatalf("old allocation phase = %s, want stopped", old.Phase)
 	}

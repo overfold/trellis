@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"net/netip"
-	"strings"
 	"testing"
 	"time"
 
@@ -88,13 +87,14 @@ func TestReconcileContinuesAfterWireGuardPortExhaustion(t *testing.T) {
 	s.jobs[jobKey("plain", "worker")] = &Job{Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "plain", Name: "worker", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}}), Revision: 1}
 
 	s.Reconcile(context.Background())
-	if old.Phase != lifecycle.PhaseStopped {
-		t.Fatalf("deleted allocation phase = %s, want stopped", old.Phase)
+	if old.Phase != lifecycle.PhaseStopping || committedAllocationIntent(t, s, node.ID, old.ID, 1).Mode != nodeapi.ExecutionCleanup {
+		t.Fatalf("deleted allocation cleanup = %s", old.Phase)
 	}
 	if len(s.allocations) != 2 || s.allocations[1].Namespace != "plain" || s.allocations[1].Phase != lifecycle.PhaseStarting {
 		t.Fatalf("allocations after exhaustion = %+v, want stopped old and starting plain", s.allocations)
 	}
 
+	acknowledgeTestCleanup(t, s, old)
 	s.Reconcile(context.Background())
 	if len(s.allocations) != 3 || s.allocations[2].Namespace != "new" || s.allocations[2].Phase != lifecycle.PhaseStarting {
 		t.Fatalf("allocations after slot release = %+v, want new network allocation starting", s.allocations)
@@ -125,8 +125,8 @@ func TestReconcileScaleDownSelectionIsDeterministic(t *testing.T) {
 		s.Reconcile(context.Background())
 		agent.server.Close()
 
-		if byID["a"].Phase != lifecycle.PhaseRunning || byID["z"].Phase != lifecycle.PhaseStopped {
-			t.Fatalf("input order %v produced phases a=%s z=%s; want a running and z stopped", ids, byID["a"].Phase, byID["z"].Phase)
+		if byID["a"].Phase != lifecycle.PhaseRunning || byID["z"].Phase != lifecycle.PhaseStopping {
+			t.Fatalf("input order %v produced phases a=%s z=%s; want a running and z stopping", ids, byID["a"].Phase, byID["z"].Phase)
 		}
 	}
 }
@@ -166,8 +166,8 @@ func TestReconcileEnforcesNamespaceDesiredAllocationLimit(t *testing.T) {
 	}
 	for _, allocation := range s.allocations {
 		if allocation.JobName == "third" {
-			if allocation.Phase != lifecycle.PhaseStopped {
-				t.Fatalf("excluded allocation phase = %s, want stopped", allocation.Phase)
+			if allocation.Phase != lifecycle.PhaseStopping {
+				t.Fatalf("excluded allocation phase = %s, want stopping", allocation.Phase)
 			}
 		}
 	}
@@ -215,23 +215,22 @@ func TestReconcileRecreateStopsOldAllocations(t *testing.T) {
 	newHashes := map[string]string{"api": spec.TaskGroupContentHash(&newSpec.TaskGroups[0])}
 	s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(newSpec), Revision: 2, ContentHashes: newHashes}
 
-	agent.failStop = true
 	s.Reconcile(context.Background())
 	if len(s.allocations) != 2 {
 		t.Fatal("failed cross-node recreate stops admitted replacement on spare capacity")
 	}
 	for _, a := range s.allocations {
 		a.mu.Lock()
-		if a.Phase != lifecycle.PhaseStopping || a.Generation != 1 || a.NextRetryAt == nil {
+		if a.Phase != lifecycle.PhaseStopping || a.Generation != 1 || a.CleanupComplete {
 			t.Errorf("failed stop %s: phase=%s generation=%d retry=%v", a.ID, a.Phase, a.Generation, a.NextRetryAt)
 		}
 		a.NextRetryAt = nil
 		a.mu.Unlock()
 	}
-	agent.mu.Lock()
-	agent.failStop = false
-	agent.mu.Unlock()
 	s.Reconcile(context.Background())
+	for _, old := range s.allocations {
+		acknowledgeTestCleanup(t, s, old)
+	}
 	if len(s.allocations) != 2 || s.allocations[0].Phase != lifecycle.PhaseStopped || s.allocations[1].Phase != lifecycle.PhaseStopped {
 		t.Fatal("successful stop pass did not release both old executions without same-pass starts")
 	}
@@ -307,15 +306,15 @@ func TestReconcileRollingDrainsOldAllocations(t *testing.T) {
 	if newCount != 1 {
 		t.Errorf("expected 1 new allocation (max_parallel=1), got %d", newCount)
 	}
-	drainCalls := 0
-	for _, call := range agent.recordedCalls() {
-		if strings.HasSuffix(call.path, "/drain") {
-			drainCalls++
+	for _, allocation := range s.allocations {
+		if allocation.JobRevision == 1 {
+			entry := committedAllocationIntent(t, s, node.ID, allocation.ID, allocation.Generation)
+			if !entry.Request.Draining || entry.Request.DrainSequence != allocation.DrainSequence || entry.Mode != nodeapi.ExecutionRun {
+				t.Fatal("durable drain control missing from run authority")
+			}
 		}
 	}
-	if drainCalls != 2 {
-		t.Errorf("drain-control calls = %d, want 2", drainCalls)
-	}
+
 }
 
 func TestReconcileRollingStopsDrainingAsNewBecomeHealthy(t *testing.T) {
@@ -363,12 +362,12 @@ func TestReconcileRollingStopsDrainingAsNewBecomeHealthy(t *testing.T) {
 		draining.mu.Lock()
 		phase := draining.Phase
 		draining.mu.Unlock()
-		if phase == lifecycle.PhaseStopped {
+		if phase == lifecycle.PhaseStopping {
 			stopped++
 		}
 	}
 	if stopped != 1 {
-		t.Errorf("expected exactly one draining allocation to stop for one unconsumed healthy replacement, got %d", stopped)
+		t.Errorf("expected exactly one draining cleanup intent for one unconsumed healthy replacement, got %d", stopped)
 	}
 }
 

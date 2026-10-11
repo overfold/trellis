@@ -1,18 +1,14 @@
 package agent
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 	"testing/synctest"
 	"time"
 
-	"github.com/labstack/echo/v5"
 	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
 	"github.com/overfold/trellis/orchestrator/internal/network"
 	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
@@ -162,18 +158,18 @@ func TestB4BackgroundStartAdmission(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	a.lifetime = ctx
 	defer cancel()
-	e := echo.New()
-	NewHandler(a).Register(e)
 	post := func(req *nodeapi.AllocationRequest) int {
 		t.Helper()
 		req.Tasks[0].Resources = &spec.ResourcesSpec{CPU: 100, Memory: 1 << 20}
 		req.Tasks[0].Networking = &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkNone}
-		body, _ := json.Marshal(req)
-		r := httptest.NewRequest(http.MethodPost, "/v1/allocations", bytes.NewReader(body))
-		r.Header.Set("Content-Type", "application/json")
-		rec := httptest.NewRecorder()
-		e.ServeHTTP(rec, r)
-		return rec.Code
+		err := a.StartGroup(ctx, req)
+		if errors.Is(err, ErrStartLimit) {
+			return http.StatusServiceUnavailable
+		}
+		if err != nil {
+			return http.StatusConflict
+		}
+		return http.StatusOK
 	}
 	committed := singleTaskRequest()
 	committed.AllocationID = "committed"
@@ -307,7 +303,8 @@ func TestB4StopCancelsLaunchBeforeLock(t *testing.T) {
 		<-done
 		t.Fatal("stop waited for launch instead of cancelling it")
 	}
-	if !errors.Is(attempt.Err(), context.Canceled) || len(statusesFor(a, req.AllocationID)) != 0 {
+	statuses := statusesFor(a, req.AllocationID)
+	if !errors.Is(attempt.Err(), context.Canceled) || len(statuses) != 1 || !statuses[0].CleanupComplete {
 		t.Fatal("stop did not cancel launch and finish cleanup")
 	}
 }

@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -17,47 +16,23 @@ import (
 	"github.com/google/uuid"
 	"github.com/overfold/trellis/orchestrator/internal/auth"
 	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
-	"github.com/overfold/trellis/orchestrator/internal/spec"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 )
 
-func TestQueuedControlActionsCannotOverrideDurableResume(t *testing.T) {
-	for _, kind := range []ActionType{ActionDrain, ActionStop} {
-		t.Run(string(kind), func(t *testing.T) {
-			s, agent := newTestServerWithAgent()
-			t.Cleanup(agent.server.Close)
-			node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusDraining}
-			addTestNode(s, node, s.now())
-			s.jobs[jobKey("default", "web")] = &Job{Revision: 1, Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Count: 1, Tasks: []spec.TaskSpec{{Name: "app", Image: "app"}}}}})}
-			allocation := &Allocation{ID: "a", Namespace: "default", JobName: "web", TaskGroupName: "app", JobRevision: 1, Generation: 1, Node: node, Phase: lifecycle.PhaseRunning, Draining: true, DrainReason: "node", DrainSequence: 1}
-			s.allocations = []*Allocation{allocation}
-			_, busy := s.claimActionNode(node.ID)
-			if busy != nil {
-				t.Fatal("unexpected busy node")
-			}
-			done := s.dispatchReconcileActions(t.Context(), []Action{{Type: kind, Allocation: allocation, controlPlanned: true, drainSequence: 1}}, true)
-			resumes, err := s.resumeNodeAllocations(t.Context(), node.ID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			s.deliverResumes(t.Context(), node.ID, resumes)
-			s.releaseActionNode(node.ID)
-			select {
-			case <-done:
-			case <-time.After(time.Second):
-				t.Fatal("queued action did not finish")
-			}
-			calls := agent.recordedCalls()
-			if len(calls) != 1 || calls[0].path != "/v1/allocations/a/drain" || calls[0].method != http.MethodDelete {
-				t.Fatalf("agent calls = %+v; want only the acknowledged resume", calls)
-			}
-			stored, err := s.state.ListAllocations(t.Context())
-			if err != nil {
-				t.Fatal(err)
-			}
-			if stored["a"].Phase != lifecycle.PhaseRunning || stored["a"].Draining || stored["a"].DrainSequence != 2 {
-				t.Fatalf("resume overwritten: %+v", stored["a"])
-			}
-		})
+func TestStaleControlDecisionCannotOverrideDurableUndrain(t *testing.T) {
+	s, node, allocation := executionFixture(t)
+	allocation.Phase = lifecycle.PhaseRunning
+	allocation.Draining, allocation.DrainReason, allocation.DrainSequence = true, "node", 1
+	stale := Action{Type: ActionStop, Allocation: allocation, controlPlanned: true, drainSequence: 1}
+	if err := s.UndrainNode(t.Context(), node.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Execute(t.Context(), &stale); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := s.ExecutionIntent(t.Context(), node.ID, 0)
+	if err != nil || doc.Allocations[0].Mode != nodeapi.ExecutionRun || doc.Allocations[0].Request.Draining || doc.Allocations[0].Request.DrainSequence != 2 {
+		t.Fatalf("stale decision replaced undrain: %+v %v", doc, err)
 	}
 }
 
@@ -100,68 +75,15 @@ func TestOldTermOutcomeCannotRewriteReloadedAllocation(t *testing.T) {
 	}
 }
 
-func TestQueuedStartCannotReviveLostAllocation(t *testing.T) {
-	for _, lost := range []bool{true, false} {
-		t.Run(fmt.Sprint("lost=", lost), func(t *testing.T) {
-			s, agent := newTestServerWithAgent()
-			t.Cleanup(agent.server.Close)
-			node := planTestNode(1, NodeStatusHealthy)
-			node.Host, node.Port = agent.host, agent.port
-			addTestNode(s, node, s.now())
-			job := planTestJob("web", 1, 1, spec.UpdateRecreate)
-			job.Spec.TaskGroups[0].Tasks[0].Networking = &spec.TaskNetworkingSpec{Mode: spec.TaskNetworkHost}
-			s.jobs[jobKey("default", "web")] = job
-			original := planTestAllocation("original", node, lifecycle.PhasePlaced, 1)
-			s.allocations = []*Allocation{original}
-			_, busy := s.claimActionNode(node.ID)
-			if busy != nil {
-				t.Fatal("unexpected busy node")
-			}
-			done := s.dispatchReconcileActions(t.Context(), []Action{{Type: ActionStart, Allocation: original, controlPlanned: true}}, true)
-			phase := lifecycle.PhaseRunning
-			if lost {
-				phase = lifecycle.PhaseLost
-				workerAgent := newTestAgent()
-				t.Cleanup(workerAgent.server.Close)
-				worker := planTestNode(2, NodeStatusHealthy)
-				worker.Host, worker.Port = workerAgent.host, workerAgent.port
-				addTestNode(s, worker, s.now())
-				s.leaderSince = s.now().Add(-time.Hour)
-				setTestHeartbeat(s, node.ID, s.now().Add(-2*DefaultAllocationLossTimeout))
-				waitSignal(t, s.reconcile(t.Context(), false), "durable loss and replacement")
-				if original.Phase != lifecycle.PhaseLost || len(workerAgent.recordedCalls()) != 1 {
-					t.Fatal("loss pass did not replace original on independent node")
-				}
-				if err := heartbeatAndApply(t, s, node.ID, nil, "test", nodeResourceObservation{}); err != nil {
-					t.Fatal(err)
-				}
-				s.mu.Lock()
-				node.Status = NodeStatusHealthy
-				s.mu.Unlock()
-			} else {
-				if err := s.persistAllocationUpdate(t.Context(), original, func(next *Allocation) error {
-					if err := next.Transition(lifecycle.PhaseStarting, s.now(), "", ""); err != nil {
-						return err
-					}
-					return next.Transition(phase, s.now(), "", "")
-				}); err != nil {
-					t.Fatal(err)
-				}
-			}
-			s.releaseActionNode(node.ID)
-			waitSignal(t, done, "queued start")
-			stored, err := s.state.ListAllocations(t.Context())
-			if err != nil {
-				t.Fatal(err)
-			}
-			wantCalls := 1
-			if lost {
-				wantCalls = 0
-			}
-			if len(agent.recordedCalls()) != wantCalls || stored[original.ID].Phase != phase {
-				t.Fatalf("calls=%d phase=%s; want calls=%d phase=%s", len(agent.recordedCalls()), stored[original.ID].Phase, wantCalls, phase)
-			}
-		})
+func TestStaleStartCannotReviveLostAllocation(t *testing.T) {
+	s, node, allocation := executionFixture(t)
+	allocation.Phase = lifecycle.PhaseLost
+	if err := s.Execute(t.Context(), &Action{Type: ActionStart, Allocation: allocation}); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := s.ExecutionIntent(t.Context(), node.ID, 0)
+	if err != nil || doc.Allocations[0].Mode != nodeapi.ExecutionRetain || allocation.Phase != lifecycle.PhaseLost {
+		t.Fatalf("lost allocation relaunched: %+v %v", doc, err)
 	}
 }
 
@@ -316,66 +238,6 @@ func TestOldTermRaftProgressCannotCrossReset(t *testing.T) {
 	s.RecordRaftProgress(t.Context(), node.ID, 900)
 	if progress, reported := s.liveness.raftProgress(node.ID); !reported || progress.applied != 900 {
 		t.Fatalf("fresh progress = %+v, reported=%t", progress, reported)
-	}
-}
-
-func TestExecuteFailureCallbackCannotCrossLeadershipChange(t *testing.T) {
-	s, agent := newTestServerWithAgent()
-	t.Cleanup(agent.server.Close)
-	entered, respond := make(chan struct{}), make(chan struct{})
-	agent.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		close(entered)
-		<-respond
-		http.Error(w, "start failed", http.StatusServiceUnavailable)
-	})
-	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
-	s.nodes[node.ID] = node
-	task := spec.TaskSpec{Name: "app", Image: "app", Runtime: spec.RuntimeRunc}
-	s.jobs[jobKey("default", "web")] = &Job{Revision: 1, Spec: canonicalTestSpec(&spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "app", Tasks: []spec.TaskSpec{task}}}})}
-	old := &Allocation{ID: "a", Namespace: "default", JobName: "web", TaskGroupName: "app", Generation: 1, JobRevision: 1, Tasks: []spec.TaskSpec{task}, Node: node, Phase: lifecycle.PhasePlaced}
-	s.allocations = []*Allocation{old}
-	term, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	s.term, s.controlEpoch = term, 1
-	result := make(chan error, 1)
-	go func() { result <- s.Execute(t.Context(), &Action{Type: ActionStart, Allocation: old}) }()
-	select {
-	case <-entered:
-	case <-time.After(time.Second):
-		t.Fatal("start was not sent")
-	}
-	// Hold mutation ordering so the actual failure callback can only run
-	// after loss and replacement of its canonical allocation object.
-	s.mutationMu.Lock()
-	cancel()
-	close(respond)
-	s.termMu.Lock()
-	s.mu.Lock()
-	fresh := old.cloneRecord()
-	fresh.Phase, fresh.Health, fresh.DrainSequence = lifecycle.PhaseRunning, lifecycle.HealthHealthy, 2
-	s.allocations = []*Allocation{fresh}
-	s.controlEpoch, s.term = 2, t.Context()
-	s.mu.Unlock()
-	s.termMu.Unlock()
-	err := s.state.PutAllocation(t.Context(), fresh)
-	s.mutationMu.Unlock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case err := <-result:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("old Execute error = %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("old Execute did not finish")
-	}
-	stored, err := s.state.ListAllocations(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stored["a"].Phase != lifecycle.PhaseRunning || stored["a"].Health != lifecycle.HealthHealthy || stored["a"].DrainSequence != 2 || stored["a"].Attempt != 0 {
-		t.Fatalf("failure callback overwrote fresh state: %+v", stored["a"])
 	}
 }
 

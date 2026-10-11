@@ -455,15 +455,18 @@ Leadership activation failures (Raft barrier, state reload, or epoch acquisition
 
 ## Agent recovery refused
 
-When the daemon starts, its allocation agent recovers from records below `data_dir` (`agent/control-epoch`, `agent/allocations/`, and `agent/stopped-generations/`). With intact records, an unavailable containerd listing is retried while health is unknown; restore containerd rather than deleting agent state. Stop-generation watermarks prevent delayed starts from resurrecting stopped workloads and remain after retained logs are pruned.
+When the daemon starts, its allocation agent recovers from records below `data_dir`: `agent/control-epoch`, `agent/allocations/`, `agent/stopped-generations/`, `agent/execution-intent`, `agent/start-admissions/`, and `agent/cleanup-complete/`. With intact records, an unavailable containerd listing is retried while health is unknown; restore containerd rather than deleting agent state. Stop-generation watermarks prevent delayed starts from resurrecting stopped workloads and remain after retained logs are pruned. Start admissions prevent interrupted attempts from silently replaying, and exact-generation cleanup receipts prove resource teardown. Cached execution intent alone does not authorize fresh starts after restart; the node must fetch current leader authority. Established work and local task restarts can continue while disconnected.
 
 The agent refuses to start, and the daemon exits, when that state is broken:
 
 - `agent/control-epoch`, an allocation record, or a stop-generation watermark is unreadable or malformed, or a record's file name does not match its allocation ID;
+- durable start-admission or cleanup-completion records cannot be loaded;
 - the control epoch is missing while allocation records, stop-generation watermarks, or managed containers exist, or while containerd cannot be listed to confirm an empty first boot;
 - a Trellis container of this cluster has no allocation record.
 
 The container-without-record check also runs when containerd becomes available after startup. While the daemon is down its allocations stop heartbeating and can be replaced on other nodes. Do not fabricate records or delete fencing state to bypass the refusal; [agent convergence](../developer/node-internals.md#agent-convergence) explains the recovery invariants.
+
+An unreadable or invalid cached execution document fails agent initialization, using the same execution-content validation as incoming documents. Restore the damaged record from a node backup or use the complete empty-node reset below, not a partial fencing reset. A cached document does not reauthenticate an old leader or authorize fresh starts: the agent must obtain a current authenticated document before admitting new execution.
 
 The error names the file or container and ends with `see "Agent recovery refused"`. To recover:
 
@@ -494,6 +497,10 @@ The error names the file or container and ends with `see "Agent recovery refused
    sudo mv agent/allocations agent/control-epoch agent-broken/
    # If present, move stop fences only as part of this complete empty-node reset.
    if [ -d agent/stopped-generations ]; then sudo mv agent/stopped-generations agent-broken/; fi
+   # Clear cached authority and attempt/proof records only after removing all containers.
+   for path in agent/execution-intent agent/start-admissions agent/cleanup-complete; do
+     if [ -e "$path" ]; then sudo mv "$path" agent-broken/; fi
+   done
    sudo systemctl start trellis
    ```
 

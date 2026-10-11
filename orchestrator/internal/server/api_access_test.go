@@ -3,7 +3,6 @@ package server
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"log/slog"
 	"strings"
 	"testing"
@@ -89,6 +88,7 @@ func TestAPIAccessTokenRequiresSecretsKey(t *testing.T) {
 func TestStartRetryRedeliversWorkloadTokenWithStableExecutionHash(t *testing.T) {
 	s, agent := newTestServerWithAgent()
 	defer agent.server.Close()
+	s.controlEpoch = 1
 	apiServer, store := newAPIAccessServer(t)
 	s.tokenManager, s.secrets = apiServer.tokenManager, apiServer.secrets
 	s.serverAddr = "10.0.0.1:8128"
@@ -103,25 +103,37 @@ func TestStartRetryRedeliversWorkloadTokenWithStableExecutionHash(t *testing.T) 
 	alloc := &Allocation{ID: "allocation", Namespace: "default", JobName: "web", TaskGroupName: "app", Tasks: group.Tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhasePlaced}
 	s.allocations = []*Allocation{alloc}
 	start := &Action{Type: ActionStart, Allocation: alloc}
+	var requests []nodeapi.AllocationRequest
+	fetch := func() {
+		t.Helper()
+		doc, err := s.ExecutionIntent(t.Context(), node.ID, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var request nodeapi.AllocationRequest
+		for _, entry := range doc.Allocations {
+			if entry.Request.Generation == alloc.Generation {
+				request = entry.Request
+			}
+		}
+		if len(request.EnvOverrides) != 0 || len(request.Secrets) != 0 {
+			t.Fatal("durable intent contains credentials")
+		}
+		credentials := fetchExecutionCredentials(t, s, node.ID, doc.Version, request)
+		request.EnvOverrides, request.Secrets = credentials.EnvOverrides, credentials.Secrets
+		requests = append(requests, request)
+	}
 	for range 2 {
 		if err := s.Execute(context.Background(), start); err != nil {
 			t.Fatal(err)
 		}
+		fetch()
 	}
 	alloc.Generation = 2
 	if err := s.Execute(context.Background(), start); err != nil {
 		t.Fatal(err)
 	}
-	calls := agent.recordedCalls()
-	if len(calls) != 3 {
-		t.Fatalf("start calls = %d, want 3", len(calls))
-	}
-	requests := make([]nodeapi.AllocationRequest, len(calls))
-	for i := range calls {
-		if err := json.Unmarshal(calls[i].body, &requests[i]); err != nil {
-			t.Fatal(err)
-		}
-	}
+	fetch()
 	first, retry, next := requests[0], requests[1], requests[2]
 	for _, request := range requests {
 		if len(request.EnvOverrides) != 2 || request.EnvOverrides["helper"] != nil {

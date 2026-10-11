@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -102,46 +101,20 @@ func (s *auditStore) Delete(ctx context.Context, key string) error {
 	return s.memoryStore.Delete(ctx, key)
 }
 
-func TestExecutePersistenceFailuresDoNotAdvanceMemory(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		failAfter int
-		failRun   bool
-		wantPhase lifecycle.Phase
-	}{
-		{name: "initial transition", failAfter: 2, wantPhase: lifecycle.PhasePlaced},
-		{name: "agent failure transition", failAfter: 3, failRun: true, wantPhase: lifecycle.PhaseStarting},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			s, agent := newTestServerWithAgent()
-			defer agent.server.Close()
-			node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
-			s.nodes[node.ID] = node
-			jobSpec := &spec.JobSpec{Namespace: "default", Name: "web", TaskGroups: []spec.TaskGroupSpec{{Name: "api", Tasks: []spec.TaskSpec{{Name: "server", Image: "app"}}}}}
-			s.jobs[jobKey("default", "web")] = &Job{Spec: canonicalTestSpec(jobSpec), Revision: 1}
-			allocation := &Allocation{ID: "web-1", Namespace: "default", JobName: "web", TaskGroupName: "api", Tasks: jobSpec.TaskGroups[0].Tasks, Node: node, Generation: 1, JobRevision: 1, Phase: lifecycle.PhasePlaced, Health: lifecycle.HealthUnknown}
-			s.allocations = []*Allocation{allocation}
-			store := &auditStore{memoryStore: memoryStore{}, failPutAfter: tc.failAfter}
-			s.state = NewStateController(store, "test")
-			if err := s.state.PutAllocation(context.Background(), allocation); err != nil {
-				t.Fatal(err)
-			}
-			agent.mu.Lock()
-			agent.failRun = tc.failRun
-			agent.mu.Unlock()
-
-			err := s.Execute(context.Background(), &Action{Type: ActionStart, Allocation: allocation})
-			if err == nil || !strings.Contains(err.Error(), "storage unavailable") {
-				t.Fatalf("Execute error = %v, want persistence failure", err)
-			}
-			persisted, listErr := s.state.ListAllocations(context.Background())
-			if listErr != nil {
-				t.Fatal(listErr)
-			}
-			if allocation.Phase != tc.wantPhase || persisted[allocation.ID].Phase != tc.wantPhase {
-				t.Fatalf("phase after failed write: memory=%s durable=%s, want %s", allocation.Phase, persisted[allocation.ID].Phase, tc.wantPhase)
-			}
-		})
+func TestExecutionTransitionPersistenceFailureDoesNotAdvanceMemory(t *testing.T) {
+	s, node, allocation := executionFixture(t)
+	allocation.Phase = lifecycle.PhasePlaced
+	store := &auditStore{memoryStore: memoryStore{}, failBatch: true}
+	s.state = NewStateController(store, "test")
+	if err := s.Execute(t.Context(), &Action{Type: ActionStart, Allocation: allocation}); err == nil {
+		t.Fatal("failed transition commit was accepted")
+	}
+	if allocation.Phase != lifecycle.PhasePlaced {
+		t.Fatal("failed atomic transition advanced memory")
+	}
+	doc, err := s.state.GetExecutionIntent(t.Context(), node.ID)
+	if err != nil || doc != nil {
+		t.Fatal("failed transition published run authority")
 	}
 }
 
@@ -364,8 +337,8 @@ func TestUndrainBatchFailureLeavesMemoryAndDurableStateDraining(t *testing.T) {
 	if !nodes[node.ID.String()].Draining || !allocations[allocation.ID].Draining || allocations[allocation.ID].DrainSequence != 1 {
 		t.Fatalf("durable state after failed undrain: node=%#v allocation=%#v", nodes[node.ID.String()], allocations[allocation.ID])
 	}
-	if requests := resumeCalls(agent, allocation.ID); len(requests) != 0 {
-		t.Fatalf("resume delivered after failed undrain: %#v", requests)
+	if doc, err := s.state.GetExecutionIntent(t.Context(), node.ID); err != nil || doc != nil {
+		t.Fatalf("failed undrain published authority: %+v %v", doc, err)
 	}
 }
 

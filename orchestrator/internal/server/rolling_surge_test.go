@@ -1,12 +1,11 @@
 package server
 
 import (
-	"context"
-	"net/http"
 	"testing"
 	"time"
 
 	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
 
@@ -46,7 +45,7 @@ func TestPlanRollingWaitsForCrossNodeStopBeforeStartingNextReplacement(t *testin
 			stops++
 		case ActionStart:
 			starts++
-		case ActionDrain, ActionResume, ActionStopObserved:
+		case ActionDrain, ActionStopObserved:
 		}
 	}
 	if stops != 1 || starts != 0 {
@@ -57,6 +56,7 @@ func TestPlanRollingWaitsForCrossNodeStopBeforeStartingNextReplacement(t *testin
 	}
 
 	oldA.Phase = lifecycle.PhaseStopped
+	oldA.CleanupComplete = true
 	plan, err = planReconciliation(input)
 	if err != nil {
 		t.Fatal(err)
@@ -72,68 +72,29 @@ func TestPlanRollingWaitsForCrossNodeStopBeforeStartingNextReplacement(t *testin
 	}
 }
 
-func TestReconcileRollingFailedStopKeepsSurgeSlotReserved(t *testing.T) {
+func TestReconcileRollingUnprovedCleanupKeepsSurgeSlotReserved(t *testing.T) {
 	s, agent := newTestServerWithAgent()
-	defer agent.server.Close()
-	nodes := []*Node{
-		{ID: planTestNode(1, NodeStatusHealthy).ID, Host: agent.host, Port: agent.port, Status: NodeStatusHealthy},
-		{ID: planTestNode(2, NodeStatusHealthy).ID, Host: agent.host, Port: agent.port, Status: NodeStatusHealthy},
-		{ID: planTestNode(3, NodeStatusHealthy).ID, Host: agent.host, Port: agent.port, Status: NodeStatusHealthy},
-		{ID: planTestNode(4, NodeStatusHealthy).ID, Host: agent.host, Port: agent.port, Status: NodeStatusHealthy},
-	}
+	t.Cleanup(agent.server.Close)
+	nodes := []*Node{planTestNode(1, NodeStatusHealthy), planTestNode(2, NodeStatusHealthy), planTestNode(3, NodeStatusHealthy), planTestNode(4, NodeStatusHealthy)}
 	for _, node := range nodes {
 		addTestNode(s, node, s.now())
 	}
 	s.jobs[jobKey("default", "web")] = rollingPlanJob(2, 1)
-	oldA := drainingPlanAllocation("old-a", nodes[0])
-	oldB := drainingPlanAllocation("old-b", nodes[1])
-	newHealthy := planTestAllocation("new-healthy", nodes[2], lifecycle.PhaseRunning, 2)
-	s.allocations = []*Allocation{oldA, oldB, newHealthy}
-	agent.failStop = true
-
-	s.Reconcile(context.Background())
-	if oldA.Phase != lifecycle.PhaseStopping || oldA.NextRetryAt == nil {
-		t.Fatalf("failed stop state = phase %s retry %v, want stopping with backoff", oldA.Phase, oldA.NextRetryAt)
+	oldA, oldB := drainingPlanAllocation("old-a", nodes[0]), drainingPlanAllocation("old-b", nodes[1])
+	healthy := planTestAllocation("new-healthy", nodes[2], lifecycle.PhaseRunning, 2)
+	s.allocations = []*Allocation{oldA, oldB, healthy}
+	s.Reconcile(t.Context())
+	if oldA.Phase != lifecycle.PhaseStopping || len(s.allocations) != 3 || committedAllocationIntent(t, s, nodes[0].ID, oldA.ID, 1).Mode != nodeapi.ExecutionCleanup {
+		t.Fatal("rolling cleanup not published with surge slot held")
 	}
-	if len(s.allocations) != 3 {
-		t.Fatalf("allocations after failed stop = %d, want no excess replacement", len(s.allocations))
+	s.Reconcile(t.Context())
+	if oldA.CleanupComplete || len(s.allocations) != 3 {
+		t.Fatal("unproved cleanup released surge slot")
 	}
-	stopCalls := func() int {
-		stops := 0
-		for _, call := range agent.recordedCalls() {
-			if call.method == http.MethodDelete && call.path == "/v1/allocations/old-a" {
-				stops++
-			}
-		}
-		return stops
-	}
-	stopsAfterFailure := stopCalls()
-	s.Reconcile(context.Background())
-	if stops := stopCalls(); stops != stopsAfterFailure {
-		t.Fatalf("stop calls during backoff = %d, want %d", stops, stopsAfterFailure)
-	}
-	if len(s.allocations) != 3 {
-		t.Fatalf("allocations during stop backoff = %d, want 3", len(s.allocations))
-	}
-
-	agent.failStop = false
-	oldA.NextRetryAt = nil
-	s.Reconcile(context.Background())
-	if oldA.Phase != lifecycle.PhaseStopped || len(s.allocations) != 3 {
-		t.Fatalf("successful stop pass = phase %s allocations %d, want stopped without a same-pass start", oldA.Phase, len(s.allocations))
-	}
-	s.Reconcile(context.Background())
+	acknowledgeTestCleanup(t, s, oldA)
+	s.Reconcile(t.Context())
 	if len(s.allocations) != 4 {
-		t.Fatalf("allocations after released slot = %d, want one replacement", len(s.allocations))
-	}
-	starts := 0
-	for _, call := range agent.recordedCalls() {
-		if call.method == http.MethodPost && call.path == "/v1/allocations" {
-			starts++
-		}
-	}
-	if starts != 1 {
-		t.Fatalf("replacement starts = %d, want one after stop completion", starts)
+		t.Fatal("proved cleanup did not release surge slot")
 	}
 }
 
@@ -165,13 +126,14 @@ func TestPlanRollingMaxParallelReservesEveryLiveSlot(t *testing.T) {
 			stops++
 		case ActionStart:
 			starts++
-		case ActionDrain, ActionResume, ActionStopObserved:
+		case ActionDrain, ActionStopObserved:
 		}
 	}
 	if stops != 2 || starts != 0 {
 		t.Fatalf("actions at six live replicas = %#v, want two stops and no starts", summarizeActions(plan.Actions))
 	}
 	old[0].Phase, old[1].Phase = lifecycle.PhaseStopped, lifecycle.PhaseStopped
+	old[0].CleanupComplete, old[1].CleanupComplete = true, true
 	plan, err = planReconciliation(input)
 	if err != nil {
 		t.Fatal(err)

@@ -81,25 +81,26 @@ func (a *Allocation) cloneOnto(node *Node) *Allocation {
 	diagnostic := a.Diagnostic
 	diagnostic.NextRetryAt = clonePointer(a.NextRetryAt)
 	return &Allocation{
-		Namespace:      a.Namespace,
-		JobName:        a.JobName,
-		TaskGroupName:  a.TaskGroupName,
-		ID:             a.ID,
-		Generation:     a.Generation,
-		JobIncarnation: a.JobIncarnation,
-		JobRevision:    a.JobRevision,
-		Tasks:          spec.CloneTasks(a.Tasks),
-		Phase:          a.Phase,
-		Health:         a.Health,
-		StableSince:    a.StableSince,
-		Diagnostic:     diagnostic,
-		Node:           node,
-		Endpoints:      cloneEndpoints(a.Endpoints),
-		Ports:          slices.Clone(a.Ports),
-		Draining:       a.Draining,
-		DrainSequence:  a.DrainSequence,
-		DrainReason:    a.DrainReason,
-		Events:         a.Events.Clone(),
+		Namespace:       a.Namespace,
+		JobName:         a.JobName,
+		TaskGroupName:   a.TaskGroupName,
+		ID:              a.ID,
+		Generation:      a.Generation,
+		CleanupComplete: a.CleanupComplete,
+		JobIncarnation:  a.JobIncarnation,
+		JobRevision:     a.JobRevision,
+		Tasks:           spec.CloneTasks(a.Tasks),
+		Phase:           a.Phase,
+		Health:          a.Health,
+		StableSince:     a.StableSince,
+		Diagnostic:      diagnostic,
+		Node:            node,
+		Endpoints:       cloneEndpoints(a.Endpoints),
+		Ports:           slices.Clone(a.Ports),
+		Draining:        a.Draining,
+		DrainSequence:   a.DrainSequence,
+		DrainReason:     a.DrainReason,
+		Events:          a.Events.Clone(),
 	}
 }
 
@@ -123,6 +124,7 @@ func (a *Allocation) sameRecord(b *Allocation) bool {
 		a.TaskGroupName == b.TaskGroupName &&
 		a.ID == b.ID &&
 		a.Generation == b.Generation &&
+		a.CleanupComplete == b.CleanupComplete &&
 		a.JobIncarnation == b.JobIncarnation &&
 		a.JobRevision == b.JobRevision &&
 		a.Phase == b.Phase &&

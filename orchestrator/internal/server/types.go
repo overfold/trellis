@@ -106,9 +106,10 @@ type Node struct {
 }
 
 type observedAllocation struct {
-	ID           string
-	Generation   uint64
-	RetainedLogs bool
+	ID              string
+	Generation      uint64
+	RetainedLogs    bool
+	CleanupComplete bool
 	// Phase is the lifecycle phase aggregated from the node's task reports.
 	Phase  lifecycle.Phase
 	Health lifecycle.Health
@@ -177,17 +178,18 @@ type Job struct {
 
 // Allocation contains desired and observed allocation state.
 type Allocation struct {
-	mu             sync.Mutex
-	Namespace      string
-	JobName        string
-	TaskGroupName  string
-	ID             string `json:"allocation_id"`
-	Generation     uint64 `json:"generation"`
-	JobIncarnation string `json:"job_incarnation"`
-	JobRevision    int    `json:"job_revision"`
-	Tasks          []spec.TaskSpec
-	Phase          lifecycle.Phase  `json:"phase"`
-	Health         lifecycle.Health `json:"health"`
+	mu              sync.Mutex
+	Namespace       string
+	JobName         string
+	TaskGroupName   string
+	ID              string `json:"allocation_id"`
+	Generation      uint64 `json:"generation"`
+	CleanupComplete bool   `json:"cleanup_complete,omitempty"`
+	JobIncarnation  string `json:"job_incarnation"`
+	JobRevision     int    `json:"job_revision"`
+	Tasks           []spec.TaskSpec
+	Phase           lifecycle.Phase  `json:"phase"`
+	Health          lifecycle.Health `json:"health"`
 	lifecycle.Diagnostic
 	// StableSince proves a continuous running, non-unhealthy interval.
 	// Zero means no proof; reload requires a fresh observation to begin it.
@@ -293,6 +295,7 @@ func applyAllocationSnapshot(allocation, snapshot *Allocation) {
 	allocation.TaskGroupName = snapshot.TaskGroupName
 	allocation.ID = snapshot.ID
 	allocation.Generation = snapshot.Generation
+	allocation.CleanupComplete = snapshot.CleanupComplete
 	allocation.JobIncarnation = snapshot.JobIncarnation
 	allocation.JobRevision = snapshot.JobRevision
 	allocation.Tasks = snapshot.Tasks

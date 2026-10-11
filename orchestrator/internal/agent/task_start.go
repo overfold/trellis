@@ -269,7 +269,7 @@ func (a *Agent) attachTaskNetwork(ctx context.Context, launch *taskLaunch) error
 	if task.NetworkPlan == nil {
 		return fmt.Errorf("automatic WireGuard network plan is required")
 	}
-	unlock, err := a.lockNetworkPlan(ctx)
+	unlock, err := a.lockNetworkPlan(ctx, task.Namespace)
 	if err != nil {
 		return err
 	}

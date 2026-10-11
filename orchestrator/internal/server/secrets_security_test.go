@@ -16,7 +16,6 @@ import (
 	"github.com/labstack/echo/v5"
 	"github.com/overfold/trellis/orchestrator/internal/auth"
 	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
-	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	secretstore "github.com/overfold/trellis/orchestrator/internal/secrets"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 	"github.com/overfold/trellis/orchestrator/internal/state"
@@ -116,19 +115,20 @@ func TestAllocationReceivesSecretFromMatchingNamespace(t *testing.T) {
 	if err := s.Execute(context.Background(), &Action{Type: ActionStart, Allocation: allocation}); err != nil {
 		t.Fatal(err)
 	}
-	calls := agent.recordedCalls()
-	if len(calls) != 1 {
-		t.Fatalf("start calls = %d, want 1", len(calls))
-	}
-	var request nodeapi.AllocationRequest
-	if err := json.Unmarshal(calls[0].body, &request); err != nil {
+	doc, err := s.ExecutionIntent(t.Context(), node.ID, 0)
+	if err != nil || doc == nil {
 		t.Fatal(err)
 	}
-	defer clear(calls[0].body)
-	if len(request.Secrets) != 1 || string(request.Secrets[0].Value) != "matching-value" {
-		t.Fatalf("delivered secrets = %#v", request.Secrets)
+	request := committedExecutionRequest(t, s, node.ID, allocation.ID, allocation.Generation)
+	if len(request.Secrets) != 0 {
+		t.Fatal("secret plaintext persisted in execution authority")
 	}
-	clear(request.Secrets[0].Value)
+	credentials := fetchExecutionCredentials(t, s, node.ID, doc.Version, request)
+	defer clear(credentials.Secrets[0].Value)
+	if len(credentials.Secrets) != 1 || string(credentials.Secrets[0].Value) != "matching-value" {
+		t.Fatal("credential pull selected another namespace")
+	}
+
 }
 
 func TestBackupContainsCiphertextOnlySecretRecords(t *testing.T) {

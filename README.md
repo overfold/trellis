@@ -50,6 +50,8 @@ You do not need to clone or build Trellis for this quick start. Have a password 
 
 Every machine runs the same `trellis` daemon. Control-plane eligibility and workload placement are independent node settings, both enabled by default. Raft elects a control-plane leader to serve the API and schedule work; workers register and heartbeat without joining Raft or storing the secrets-encryption or CA private keys.
 
+Nodes pull durable, versioned execution intent from the leader and reconcile it locally. Established workloads and configured local restarts continue through disconnection; new starts require fresh authority. The leader still connects to agents for exec, logs, and metrics, so workers are not outbound-only. See [multi-node networking and failure behavior](docs/public/multi-node.md).
+
 Jobs live in **namespaces** and contain **task groups**: sets of containers that Trellis places and scales together. Each running copy of a task group is an **allocation**. When you apply a job, the leader plans the change, places allocations on nodes with capacity, and replaces any that fail or whose node stops responding. The [user model](docs/public/user-model.md) defines every term.
 
 ## Design principles

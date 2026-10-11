@@ -47,6 +47,11 @@ func (a *Agent) DrainGroup(ctx context.Context, request *nodeapi.DrainAllocation
 // applyDrain marks one allocation generation draining at sequence. The caller
 // must hold the allocation operation lock.
 func (a *Agent) applyDrain(ctx context.Context, allocationID string, generation, sequence uint64) error {
+	release, err := a.fenceExecution(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	a.mu.Lock()
 	if err := a.drainStartLocked(allocationID, generation, true, sequence); err != nil {
 		a.mu.Unlock()
@@ -79,6 +84,7 @@ func (a *Agent) applyDrain(ctx context.Context, allocationID string, generation,
 		ids = append(ids, allocation.ID)
 	}
 	a.mu.Unlock()
+	release()
 	for _, id := range ids {
 		persistErr = errors.Join(persistErr, a.reconciler.SuppressRestarts(ctx, id))
 	}
@@ -115,13 +121,18 @@ func (a *Agent) ResumeGroup(ctx context.Context, request *nodeapi.DrainAllocatio
 	if err := a.AcceptEpoch(request.Epoch); err != nil {
 		return err
 	}
-	return a.applyResume(request.AllocationID, request.Generation, request.Sequence, false)
+	return a.applyResume(ctx, request.AllocationID, request.Generation, request.Sequence, false)
 }
 
 // applyResume cancels a drain for one allocation generation at sequence. A
 // record that is neither running nor starting fails the resume unless
 // skipInactive is set. The caller must hold the allocation operation lock.
-func (a *Agent) applyResume(allocationID string, generation, sequence uint64, skipInactive bool) error {
+func (a *Agent) applyResume(ctx context.Context, allocationID string, generation, sequence uint64, skipInactive bool) error {
+	release, err := a.fenceExecution(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	a.mu.Lock()
 	if err := a.drainStartLocked(allocationID, generation, false, sequence); err != nil {
 		a.mu.Unlock()

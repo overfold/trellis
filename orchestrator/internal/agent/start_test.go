@@ -196,8 +196,8 @@ func TestStopCancelsStartDuringPull(t *testing.T) {
 	if _, creates := rt.counts(); creates != 0 {
 		t.Fatalf("stopped start created %d containers", creates)
 	}
-	if statuses := statusesFor(agent, request.AllocationID); len(statuses) != 0 {
-		t.Fatalf("heartbeat after stop = %+v, want nothing", statuses)
+	if statuses := statusesFor(agent, request.AllocationID); len(statuses) != 1 || !statuses[0].CleanupComplete {
+		t.Fatalf("heartbeat after stop = %+v, want cleanup completion", statuses)
 	}
 }
 
@@ -279,8 +279,8 @@ func TestNewerGenerationCancelsStartInProgress(t *testing.T) {
 		t.Fatalf("newer start generation=%d error=%v", start.generation, start.err)
 	}
 	statuses := statusesFor(agent, request.AllocationID)
-	if len(statuses) != 1 || statuses[0].Generation != newer.Generation || statuses[0].Phase != lifecycle.PhaseRunning {
-		t.Fatalf("heartbeat = %+v, want only the newer generation running", statuses)
+	if len(statuses) != 2 || statuses[0].Generation != newer.Generation || statuses[0].Phase != lifecycle.PhaseRunning || statuses[1].Generation != request.Generation || !statuses[1].CleanupComplete {
+		t.Fatalf("heartbeat = %+v, want newer generation running and exact superseded cleanup receipt", statuses)
 	}
 }
 
@@ -300,7 +300,7 @@ func TestAgentRestartDuringPullRecoversOnRetriedStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitPulling(t, rt)
-	// The agent stops mid-pull: nothing durable describes the start.
+	// The agent stops mid-pull: durable admission forbids replaying this attempt.
 	first.mu.RLock()
 	interrupted := first.starts[request.AllocationID]
 	first.mu.RUnlock()
@@ -319,9 +319,16 @@ func TestAgentRestartDuringPullRecoversOnRetriedStart(t *testing.T) {
 	if err := second.recover(context.Background()); err != nil {
 		t.Fatalf("recover after interrupted pull: %v", err)
 	}
-	if statuses := statusesFor(second, request.AllocationID); len(statuses) != 0 {
-		t.Fatalf("restarted agent reports %+v, want nothing until the start is retried", statuses)
+	if err := second.recoverStartAdmissions(); err != nil {
+		t.Fatal(err)
 	}
+	if statuses := statusesFor(second, request.AllocationID); len(statuses) != 1 || statuses[0].StartFailure == nil {
+		t.Fatalf("restarted agent reports %+v, want interrupted failure", statuses)
+	}
+	if err := runGroup(context.Background(), second, request); err == nil {
+		t.Fatal("unchanged admitted attempt was relaunched")
+	}
+	request.Attempt++
 	if err := runGroup(context.Background(), second, request); err != nil {
 		t.Fatalf("retried start after restart: %v", err)
 	}
@@ -367,10 +374,11 @@ func TestStartSupersededByNewEpochCreatesNothing(t *testing.T) {
 	if _, creates := rt.counts(); creates != 0 {
 		t.Fatalf("superseded start created %d containers", creates)
 	}
-	if statuses := statusesFor(agent, request.AllocationID); len(statuses) != 0 {
-		t.Fatalf("superseded start reported %+v, want nothing", statuses)
+	if statuses := statusesFor(agent, request.AllocationID); len(statuses) != 1 || statuses[0].StartFailure == nil {
+		t.Fatalf("superseded start reported %+v, want interrupted failure", statuses)
 	}
 	request.Epoch++
+	request.Attempt++
 	if err := agent.StartGroup(context.Background(), request); err != nil {
 		t.Fatalf("new leader's start: %v", err)
 	}
@@ -412,7 +420,7 @@ func TestFailedNewerStartDoesNotFenceOlderStop(t *testing.T) {
 	if err := agent.StopGroup(context.Background(), older); err != nil {
 		t.Fatalf("stop of older generation beside a failed start: %v", err)
 	}
-	if statuses := statusesFor(agent, request.AllocationID); len(statuses) != 1 || statuses[0].StartFailure == nil {
+	if statuses := statusesFor(agent, request.AllocationID); len(statuses) != 2 || !statuses[0].CleanupComplete || statuses[1].StartFailure == nil {
 		t.Fatalf("failure no longer reported after older stop: %+v", statuses)
 	}
 }

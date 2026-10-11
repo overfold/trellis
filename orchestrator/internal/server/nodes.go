@@ -201,22 +201,18 @@ func (s *Server) DrainNode(ctx context.Context, id uuid.UUID) error {
 // UndrainNode makes a drained node schedulable.
 func (s *Server) UndrainNode(ctx context.Context, id uuid.UUID) error {
 	s.reconcileMu.Lock()
-	resumes, err := s.resumeNodeAllocations(ctx, id)
+	err := s.undrainNodeAllocations(ctx, id)
 	s.reconcileMu.Unlock()
 	if err != nil {
 		return err
 	}
-	// Deliver outside reconcileMu: an unreachable agent costs a full request
-	// timeout per allocation and must not stall cluster-wide planning.
-	s.deliverResumes(ctx, id, resumes)
 	s.Reconcile(ctx)
 	return nil
 }
 
-// resumeNodeAllocations durably undrains the node and its node-drained
-// allocations and returns the resumes to deliver to the agent. The caller
-// holds reconcileMu.
-func (s *Server) resumeNodeAllocations(ctx context.Context, id uuid.UUID) ([]resumeDelivery, error) {
+// undrainNodeAllocations commits node and allocation control state atomically.
+// The caller holds reconcileMu.
+func (s *Server) undrainNodeAllocations(ctx context.Context, id uuid.UUID) error {
 	s.mutationMu.Lock()
 	mutationLocked := true
 	defer func() {
@@ -228,11 +224,11 @@ func (s *Server) resumeNodeAllocations(ctx context.Context, id uuid.UUID) ([]res
 	node := s.nodes[id]
 	if node == nil {
 		s.mu.RUnlock()
-		return nil, fmt.Errorf("%w: %s", ErrNodeNotFound, id)
+		return fmt.Errorf("%w: %s", ErrNodeNotFound, id)
 	}
 	nextNode := node.Clone()
 	nextNode.Status = livenessStatus(NodeStatusHealthy, s.liveness.lastHeartbeat(id), s.now())
-	var resumes []resumeDelivery
+	var originals []*Allocation
 	var updates []*Allocation
 	for _, allocation := range s.allocations {
 		allocation.mu.Lock()
@@ -257,91 +253,27 @@ func (s *Server) resumeNodeAllocations(ctx context.Context, id uuid.UUID) ([]res
 			allocation.mu.Unlock()
 			continue
 		}
-		address := fmt.Sprintf("%s:%d", node.Host, node.Port)
-		request := &nodeapi.DrainAllocationRequest{AllocationID: allocation.ID, Generation: allocation.Generation, Epoch: s.controlEpoch, Sequence: allocation.DrainSequence + 1}
 		next := allocation.cloneOnto(nextNode)
 		allocation.mu.Unlock()
 		next.Draining = false
 		next.DrainReason = ""
-		next.DrainSequence = request.Sequence
+		next.DrainSequence++
 		updates = append(updates, next)
-		resumes = append(resumes, resumeDelivery{allocation: allocation, address: address, request: request})
+		originals = append(originals, allocation)
 	}
 	s.mu.RUnlock()
 	if err := s.state.PutNodeAndAllocations(ctx, nodeSummary(nextNode), updates); err != nil {
-		return nil, stateUnavailable(err)
+		return stateUnavailable(err)
 	}
 	s.mu.Lock()
 	applyNodeSnapshot(node, nextNode)
-	for i, resume := range resumes {
-		resume.allocation.mu.Lock()
-		applyAllocationSnapshot(resume.allocation, updates[i])
-		resume.allocation.mu.Unlock()
+	for i, allocation := range originals {
+		allocation.mu.Lock()
+		applyAllocationSnapshot(allocation, updates[i])
+		allocation.mu.Unlock()
 	}
 	s.mu.Unlock()
 	s.mutationMu.Unlock()
 	mutationLocked = false
-	return resumes, nil
-}
-
-// deliverResumes sends durable resumes to the agent without holding any state
-// lock. A resume the agent does not acknowledge now is redelivered by
-// reconciliation, and the agent rejects a resume that a later drain has
-// superseded by its sequence, so a drain racing with delivery stays correct.
-func (s *Server) deliverResumes(ctx context.Context, id uuid.UUID, resumes []resumeDelivery) {
-	for _, resume := range resumes {
-		allocation := resume.allocation
-		allocation.mu.Lock()
-		superseded := allocation.Draining || allocation.DrainSequence != resume.request.Sequence
-		allocation.mu.Unlock()
-		if superseded {
-			continue
-		}
-		if err := s.client.ResumeAllocation(ctx, id, resume.address, resume.request); err != nil {
-			s.log.Warn("deliver allocation resume; reconciliation will retry", "allocation", allocation.ID, "node", id, "error", err)
-		} else {
-			s.recordResumeDelivered(resume.request)
-		}
-	}
-}
-
-type resumeDelivery struct {
-	allocation *Allocation
-	address    string
-	request    *nodeapi.DrainAllocationRequest
-}
-
-type resumeDeliveryKey struct {
-	allocation string
-	generation uint64
-}
-
-// deliveredResumes copies the resume sequence each agent acknowledged per
-// allocation generation during the given leadership term. The record is
-// renewable delivery state, not desired state: a new term starts empty and
-// redelivers each resume once.
-func (s *Server) deliveredResumes(epoch uint64) map[resumeDeliveryKey]uint64 {
-	s.resumeMu.Lock()
-	defer s.resumeMu.Unlock()
-	if s.resumeEpoch != epoch {
-		return nil
-	}
-	delivered := make(map[resumeDeliveryKey]uint64, len(s.resumes))
-	maps.Copy(delivered, s.resumes)
-	return delivered
-}
-
-func (s *Server) recordResumeDelivered(request *nodeapi.DrainAllocationRequest) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if request.Epoch != s.controlEpoch {
-		return
-	}
-	s.resumeMu.Lock()
-	defer s.resumeMu.Unlock()
-	if s.resumes == nil || s.resumeEpoch != request.Epoch {
-		s.resumes = make(map[resumeDeliveryKey]uint64)
-		s.resumeEpoch = request.Epoch
-	}
-	s.resumes[resumeDeliveryKey{allocation: request.AllocationID, generation: request.Generation}] = request.Sequence
+	return nil
 }

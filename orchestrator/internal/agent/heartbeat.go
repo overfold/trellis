@@ -95,5 +95,8 @@ func (a *Agent) allocationStatuses() []nodeapi.AllocationStatus {
 		}
 		actual = append(actual, nodeapi.AllocationStatus{ID: record.AllocationID, Generation: record.Generation, Task: record.TaskName, RetainedLogs: true, Phase: lifecycle.PhaseStopped, Health: lifecycle.HealthUnknown})
 	}
+	for _, receipt := range a.cleanupComplete {
+		actual = append(actual, nodeapi.AllocationStatus{ID: receipt.ID, Generation: receipt.Generation, CleanupComplete: true, Phase: lifecycle.PhaseStopped, Health: lifecycle.HealthUnknown})
+	}
 	return append(actual, a.startingStatusesLocked()...)
 }

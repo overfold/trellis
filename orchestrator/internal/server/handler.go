@@ -178,6 +178,8 @@ func (h *Handler) Register(e *echo.Echo) {
 	v1.POST("/nodes", h.handleRegisterNode)
 	v1.POST("/nodes/api-certificate", h.handleAPICertificate)
 	v1.POST("/nodes/:id/heartbeat", h.handleHeartbeat)
+	v1.GET("/nodes/:id/execution", h.handleExecution)
+	v1.GET("/nodes/:id/execution/:allocation/credentials", h.handleExecutionCredentials)
 	v1.GET("/internal/control-plane", h.handleControlPlane)
 	v1.GET("/internal/node-role", h.handleNodeRole)
 	v1.POST("/nodes/:id/drain", h.handleDrainNode)

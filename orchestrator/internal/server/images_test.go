@@ -168,7 +168,8 @@ func TestImageApplyPinsPlanAndRetainedHistory(t *testing.T) {
 			// Caller-owned maps must not mutate durable desired state.
 			planned.ResolvedImages[image] = third
 			s.Reconcile(ctx)
-			// Recreate releases old execution in one pass and places in the next.
+			// Recreate requires the original generation's committed cleanup proof.
+			acknowledgeTestCleanup(t, s, s.allocations[0])
 			s.Reconcile(ctx)
 			if s.allocations[len(s.allocations)-1].Tasks[0].Image != second {
 				t.Fatal("replacement did not use the reviewed image")

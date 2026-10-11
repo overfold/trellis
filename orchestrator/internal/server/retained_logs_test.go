@@ -1,8 +1,6 @@
 package server
 
 import (
-	"context"
-	"encoding/json"
 	"testing"
 	"time"
 
@@ -12,69 +10,34 @@ import (
 )
 
 func TestRetainedLogInventoryCleanupAfterPruning(t *testing.T) {
-	s, agent := newTestServerWithAgent()
-	defer agent.server.Close()
-	node := &Node{ID: uuid.New(), Host: agent.host, Port: agent.port, Status: NodeStatusHealthy}
-	addTestNode(s, node, s.now())
-	s.leaderSince = s.now().Add(-leaderRecoveryGrace - time.Second)
-	allocation := failedAllocation("failed", 1, s.now())
-	allocation.Node = node
-	s.allocations = []*Allocation{allocation}
-	ctx := context.Background()
-	if err := s.state.PutAllocation(ctx, allocation); err != nil {
+	s, node, allocation := executionFixture(t)
+	allocation.Phase, allocation.Health = lifecycle.PhaseFailed, lifecycle.HealthUnhealthy
+	s.leaderSince = s.now().Add(-leaderRecoveryGrace)
+	if err := heartbeatAndApply(t, s, node.ID, []nodeapi.AllocationStatus{{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseFailed, Health: lifecycle.HealthUnhealthy}}, "test", nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
 	}
-	status := nodeapi.AllocationStatus{ID: "failed", Generation: 1, Task: "app", Phase: lifecycle.PhaseFailed, Health: lifecycle.HealthUnhealthy}
+	s.Reconcile(t.Context())
+	first := committedAllocationIntent(t, s, node.ID, allocation.ID, 1)
+	if first.Mode != nodeapi.ExecutionCleanup || !first.RetainLogs {
+		t.Fatal("terminal cleanup discarded retained history logs")
+	}
+	// Logs alone must not release reservations or rewrite the terminal result.
+	status := nodeapi.AllocationStatus{ID: allocation.ID, Generation: 1, Task: "app", Phase: lifecycle.PhaseStopped, Health: lifecycle.HealthUnknown, RetainedLogs: true}
 	if err := heartbeatAndApply(t, s, node.ID, []nodeapi.AllocationStatus{status}, "test", nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
 	}
-	s.Reconcile(ctx)
-	calls := agent.recordedCalls()
-	if len(calls) != 1 {
-		t.Fatalf("cleanup calls=%v", calls)
+	s.Reconcile(t.Context())
+	if allocation.CleanupComplete || allocation.Phase != lifecycle.PhaseFailed || !committedAllocationIntent(t, s, node.ID, allocation.ID, 1).RetainLogs {
+		t.Fatal("log inventory changed terminal execution")
 	}
-	var stop nodeapi.StopAllocationRequest
-	if err := json.Unmarshal(calls[0].body, &stop); err != nil {
-		t.Fatal(err)
-	}
-	if !stop.RetainLogs {
-		t.Fatal("failed allocation cleanup discarded retained logs")
-	}
-
-	status.RetainedLogs, status.Phase, status.Health = true, lifecycle.PhaseStopped, lifecycle.HealthUnknown
-	if err := heartbeatAndApply(t, s, node.ID, []nodeapi.AllocationStatus{status}, "test", nodeResourceObservation{}); err != nil {
-		t.Fatal(err)
-	}
-	s.Reconcile(ctx)
-	if len(agent.recordedCalls()) != 1 {
-		t.Fatal("retained logs removed while history still exists")
-	}
-	if allocation.Phase != lifecycle.PhaseFailed || allocation.Health != lifecycle.HealthUnhealthy {
-		t.Fatal("log inventory changed terminal lifecycle/health")
-	}
-
-	// History can disappear while the node is unavailable. Its later complete
-	// heartbeat must still cause retryable cleanup without a durable tombstone.
+	acknowledgeTestCleanup(t, s, allocation)
+	// Prune while offline, then publish absence: the old keep-logs cleanup must
+	// not keep historical logs forever, even if no fresh inventory was received.
 	s.allocations = nil
-	if err := heartbeatAndApply(t, s, node.ID, []nodeapi.AllocationStatus{status}, "test", nodeResourceObservation{}); err != nil {
-		t.Fatal(err)
-	}
-	s.Reconcile(ctx)
-	calls = agent.recordedCalls()
-	if len(calls) != 2 {
-		t.Fatalf("pruned log cleanup calls=%v", calls)
-	}
-	stop = nodeapi.StopAllocationRequest{}
-	if err := json.Unmarshal(calls[1].body, &stop); err != nil {
-		t.Fatal(err)
-	}
-	if stop.RetainLogs || stop.Generation != 1 {
-		t.Fatalf("pruned cleanup=%+v", stop)
-	}
-	// No acknowledgement yet: the observed inventory drives another retry.
-	s.Reconcile(ctx)
-	if len(agent.recordedCalls()) != 3 {
-		t.Fatal("pruned cleanup was not retried")
+	s.Reconcile(t.Context())
+	doc, err := s.ExecutionIntent(t.Context(), node.ID, 0)
+	if err != nil || !doc.CleanupAbsent || len(doc.Allocations) != 0 {
+		t.Fatalf("pruned log authority=%+v %v", doc, err)
 	}
 }
 

@@ -24,7 +24,7 @@ func (a *Agent) StopGroup(ctx context.Context, request *nodeapi.StopAllocationRe
 	}
 	// Cancel before waiting for the allocation lock, which the start owns
 	// during launch. Cleanup still owns that lock until it actually returns.
-	if _, err := a.cancelStartForStop(request); err != nil {
+	if _, err := a.cancelExecutionStop(ctx, request); err != nil {
 		return err
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, allocationControlWait)
@@ -42,7 +42,7 @@ func (a *Agent) StopGroup(ctx context.Context, request *nodeapi.StopAllocationRe
 		}
 		// A start in the background is cancelled; its own cleanup runs
 		// before the stop handles whatever records it left.
-		wait, err := a.cancelStartForStop(request)
+		wait, err := a.cancelExecutionStop(ctx, request)
 		if err != nil {
 			unlock()
 			return err
@@ -64,7 +64,7 @@ func (a *Agent) StopGroup(ctx context.Context, request *nodeapi.StopAllocationRe
 		if allocation.AllocationID != request.AllocationID {
 			continue
 		}
-		if allocation.Generation > request.Generation {
+		if allocation.Generation > request.Generation && ctx.Value(executionFenceKey{}) == nil {
 			a.mu.RUnlock()
 			return fmt.Errorf("%w: current %d, requested %d", ErrStaleGeneration, allocation.Generation, request.Generation)
 		}
@@ -73,7 +73,7 @@ func (a *Agent) StopGroup(ctx context.Context, request *nodeapi.StopAllocationRe
 		}
 	}
 	for _, record := range a.retainedLogs {
-		if record.AllocationID == request.AllocationID && record.Generation > request.Generation {
+		if record.AllocationID == request.AllocationID && record.Generation > request.Generation && ctx.Value(executionFenceKey{}) == nil {
 			a.mu.RUnlock()
 			return fmt.Errorf("%w: current %d, requested %d", ErrStaleGeneration, record.Generation, request.Generation)
 		}
@@ -110,12 +110,17 @@ func (a *Agent) StopGroup(ctx context.Context, request *nodeapi.StopAllocationRe
 	}
 	// Persist the fence before deleting any task record. A crash during
 	// cleanup must not permit a delayed start to undo this stop intent.
+	release, err := a.fenceExecution(ctx)
+	if err != nil {
+		return err
+	}
 	a.mu.Lock()
 	if a.stoppedGenerations[request.AllocationID] < request.Generation {
 		if a.local != nil {
 			key := "agent/stopped-generations/" + allocationFileName(request.AllocationID)
 			if err := a.local.Put(key, request.Generation); err != nil {
 				a.mu.Unlock()
+				release()
 				return fmt.Errorf("persist stopped generation: %w", err)
 			}
 		}
@@ -125,6 +130,7 @@ func (a *Agent) StopGroup(ctx context.Context, request *nodeapi.StopAllocationRe
 		a.stoppedGenerations[request.AllocationID] = request.Generation
 	}
 	a.mu.Unlock()
+	release()
 	var errs []error
 	for _, id := range ids {
 		if err := a.stopAllocation(ctx, id, request.RetainLogs); err != nil {
@@ -141,7 +147,10 @@ func (a *Agent) StopGroup(ctx context.Context, request *nodeapi.StopAllocationRe
 			errs = append(errs, a.stopUnrecorded(ctx, request, containers, ids))
 		}
 	}
-	return errors.Join(errs...)
+	if err := errors.Join(errs...); err != nil {
+		return err
+	}
+	return a.recordCleanup(request.AllocationID, request.Generation)
 }
 
 // listUnrecorded lists containers for stopUnrecorded and rejects a stop for a
@@ -156,7 +165,7 @@ func (a *Agent) listUnrecorded(ctx context.Context, request *nodeapi.StopAllocat
 		return nil, fmt.Errorf("list containers for unrecorded allocation %s: %w", request.AllocationID, err)
 	}
 	for _, container := range containers {
-		if allocation := allocationFromRuntime(container); allocation != nil && allocation.AllocationID == request.AllocationID && allocation.Generation > request.Generation {
+		if allocation := allocationFromRuntime(container); allocation != nil && allocation.AllocationID == request.AllocationID && allocation.Generation > request.Generation && ctx.Value(executionFenceKey{}) == nil {
 			return nil, fmt.Errorf("%w: listed %d, requested %d", ErrStaleGeneration, allocation.Generation, request.Generation)
 		}
 	}
@@ -296,6 +305,12 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string, retainLogs b
 	a.mu.Lock()
 	delete(a.allocations, allocID)
 	a.forgetIdleNetworkPlanLocked(alloc.Namespace)
+	remaining := false
+	for _, record := range a.allocations {
+		if record.AllocationID == alloc.AllocationID && record.Generation == alloc.Generation {
+			remaining = true
+		}
+	}
 	a.mu.Unlock()
 	for _, p := range alloc.Ports {
 		// Recovery may retain a stale record sharing a live allocation's port.
@@ -304,5 +319,29 @@ func (a *Agent) stopAllocation(ctx context.Context, allocID string, retainLogs b
 		}
 	}
 
+	a.mu.RLock()
+	listPending := a.recoveryListPending
+	a.mu.RUnlock()
+	if !remaining && !listPending && persistStopErr == nil {
+		return a.recordCleanup(alloc.AllocationID, alloc.Generation)
+	}
 	return persistStopErr
+}
+
+func (a *Agent) cancelExecutionStop(ctx context.Context, request *nodeapi.StopAllocationRequest) (<-chan struct{}, error) {
+	release, err := a.fenceExecution(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	if ctx.Value(executionFenceKey{}) != nil {
+		a.mu.RLock()
+		start := a.starts[request.AllocationID]
+		newer := start != nil && start.generation > request.Generation
+		a.mu.RUnlock()
+		if newer {
+			return nil, nil
+		}
+	}
+	return a.cancelStartForStop(request)
 }

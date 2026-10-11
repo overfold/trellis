@@ -4,9 +4,9 @@
 
 `trellis` composes the control plane and worker agent. Each responsibility can be enabled independently: worker-only nodes run no Raft/state/CA/secrets-key components, while control-plane-only nodes may opt out of workloads. The control plane owns desired state, scheduling, service catalog, HTTP endpoints, metrics, and reconciliation. The agent owns containers, ports, volumes, logs, secrets materialization, and local health loops.
 
-The design is leader-driven. A Raft-backed state store persists jobs, secrets, allocation records, membership-related desired state, and a monotonically meaningful control epoch. Followers serve as cluster members, but only the elected leader reconciles. At most five members vote; the rest replicate as non-voters that the leader promotes to keep an odd voter set (see [control-plane membership](control-plane.md#control-plane-membership)). The server-to-agent protocol includes epoch, allocation generation, job revision, and execution hash to make repeat requests safe and reject stale control traffic.
+The design is leader-planned and node-reconciled. A Raft-backed state store persists jobs, secrets, allocation records, cleanup decisions/proofs, versioned node execution documents, membership-related desired state, and a monotonically meaningful control epoch. Only the elected leader plans and publishes execution authority; nodes pull complete documents and converge locally. Epoch, allocation generation, job revision, execution hash, and durable attempt identity fence execution. At most five members vote; the rest replicate as non-voters that the leader promotes to keep an odd voter set (see [control-plane membership](control-plane.md#control-plane-membership)).
 
-Raft leadership notifications can coalesce, including consecutive acquire notifications with no intervening loss. Every notification deactivates the leader API and cancels and joins the previous term's background loops, dispatched actions and admitted API work before any reload or epoch acquisition. Requests and actions retain their originating epoch; outcome callbacks cannot discard term cancellation or rewrite detached allocation objects. New terms apply a Raft barrier before reloading durable state.
+Raft leadership notifications can coalesce, including consecutive acquire notifications with no intervening loss. Every notification deactivates the leader API and cancels and joins the previous term's background loops and admitted API work before any reload or epoch acquisition. Requests and intent publication retain their originating term. New terms apply a Raft barrier before reloading durable state.
 
 Leadership activation captures the Raft term before waiting for mutation ordering.
 An exclusive submission hold and a barrier establish the authoritative FSM view
@@ -33,6 +33,8 @@ Each FSM command commits its changes and an internal applied-log-index checkpoin
 Operator restore also authenticates every encrypted secret through `internal/secrets.Store.ValidateRecord` before submitting desired state. It shares decryption with `Resolve`, authenticates both the wrapped DEK and secret ciphertext, and clears transient plaintext and DEK bytes. This is leader-local recovery validation, not FSM work: replicated snapshots contain only encrypted records, never encryption keys or plaintext. All potential leaders still need the original key bytes and explicit ID, if configured; no keyring or automatic rekeying is provided. Bolt's atomic freshness check and Raft's barrier-backed preflight return `state.ErrRestoreNotFresh`, preserved as HTTP `409`. Real barrier, storage, commit, and post-commit reload failures remain `503`, with potentially committed state requiring inspection before retry. See [operator recovery](../public/operations.md#backups).
 
 ## Desired and observed state
+
+Execution intent is durable authority, not heartbeat observation: each node document contains complete/version/epoch fencing, RUN/RETAIN/CLEANUP entries, sequenced drain state, and namespace network plans. During recovery grace `CleanupAbsent` is false but explicit cleanup remains effective. Exact generation cleanup receipts, not absent inventory or exited tasks, release reservations. Projection follows the plan commit in separate writes; later reconciliation repairs interrupted publication. Nodes persist accepted documents and start admissions. Disconnection prevents new admission after pull failure but does not stop established work or its local restart policy. Secrets and workload tokens use a separate attempt-authorized credential endpoint and never enter cached intent. See [internal execution protocol](api.md#durable-node-execution-intent).
 
 A `spec.JobSpec` is immutable input to a job revision. The server resolves authored image references at plan/apply and stores `ResolvedImages` with each job and historical version. Execution hashing and allocation construction use those pins, while the canonical spec retains authored tags. Registry resolution happens outside mutation locks and Raft application; planned pins are validated and reused at apply, and reconciliation never resolves tags. A task group's execution content is hashed independently of count, labels, and update policy so metadata/scale changes can be distinguished from container replacement. Server `Allocation` objects join desired identity (namespace/job/group/revision/generation) with placement and observed lifecycle/health. Agents reconstruct local allocation state from durable allocation records after restart and verify it against runtime labels.
 
@@ -94,6 +96,8 @@ operations are grouped by responsibility:
   queries and catalog projection.
 - `allocations.go` / `task_logs.go` / `exec.go`: allocation queries and operations,
   log access, and exec streams.
+- `execution.go`: durable node execution projection, versioned pulls, cleanup
+  decisions/proofs, and separately authorized credential delivery.
 - `auth.go` / `node_trust.go` / `secrets.go`: operator authentication, node identity
   and trust, and secret operations.
 
@@ -113,6 +117,8 @@ workflows are grouped by responsibility:
   persistence, queries, and health/restart observation callbacks.
 - `recovery.go`: durable-state recovery, runtime ownership verification,
   re-observation, and interrupted-cleanup retries.
+- `execution.go` / `start_admission.go`: intent validation, caching, pull and
+  local convergence / durable admission and exact-generation cleanup receipts.
 - `start.go` / `task_start.go`: background group-start admission and fencing /
   task preparation, resource acquisition, launch, commit, and rollback.
 - `stop.go` / `drain.go`: generation-fenced stops and task cleanup / sequenced

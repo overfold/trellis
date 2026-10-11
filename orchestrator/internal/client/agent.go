@@ -7,8 +7,6 @@ package client
 import (
 	"context"
 	"crypto/tls"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -48,33 +46,6 @@ func (e *AgentOperationError) Error() string {
 // Unwrap preserves transport status for callers deciding whether a refusal
 // consumed an execution attempt, without changing the operation wire response.
 func (e *AgentOperationError) Unwrap() error { return e.cause }
-
-func decodeOperationError(err error) error {
-	var httpErr *transport.HTTPError
-	if !errors.As(err, &httpErr) {
-		return err
-	}
-	var response nodeapi.OperationResponse
-	if json.Unmarshal(httpErr.Body, &response) == nil && response.Code != "" {
-		return &AgentOperationError{Response: response, cause: err}
-	}
-	var wrapped struct {
-		Message json.RawMessage `json:"message"`
-	}
-	if json.Unmarshal(httpErr.Body, &wrapped) == nil && len(wrapped.Message) > 0 {
-		var inner nodeapi.OperationResponse
-		if json.Unmarshal(wrapped.Message, &inner) == nil && inner.Code != "" {
-			return &AgentOperationError{Response: inner, cause: err}
-		}
-		var str string
-		if json.Unmarshal(wrapped.Message, &str) == nil {
-			if json.Unmarshal([]byte(str), &inner) == nil && inner.Code != "" {
-				return &AgentOperationError{Response: inner, cause: err}
-			}
-		}
-	}
-	return err
-}
 
 // Logs streams logs for an allocation from an agent.
 func (s *AgentClient) Logs(ctx context.Context, nodeID uuid.UUID, address, allocID string, follow bool, tail int) (io.ReadCloser, error) {
@@ -157,56 +128,6 @@ func (s *AgentClient) RetainNodes(nodes map[uuid.UUID]struct{}) {
 			delete(clients, nodeID)
 		}
 	}
-}
-
-// RunAllocation asks an agent to start an allocation.
-func (s *AgentClient) RunAllocation(ctx context.Context, nodeID uuid.UUID, address string, allocation *nodeapi.AllocationRequest) error {
-	var response nodeapi.OperationResponse
-	err := s.operationRequest(ctx, nodeID, http.MethodPost, transport.NormalizeBaseURL(address)+"/v1/allocations", allocation, &response)
-	if err != nil {
-		return fmt.Errorf("run allocation: %w", decodeOperationError(err))
-	}
-	return nil
-}
-
-// DrainAllocation suppresses automatic restarts until the allocation is stopped.
-func (s *AgentClient) DrainAllocation(ctx context.Context, nodeID uuid.UUID, address string, request *nodeapi.DrainAllocationRequest) error {
-	var response nodeapi.OperationResponse
-	err := s.operationRequest(ctx, nodeID, http.MethodPost, transport.NormalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(request.AllocationID)+"/drain", request, &response)
-	if err != nil {
-		return fmt.Errorf("drain allocation: %w", decodeOperationError(err))
-	}
-	return nil
-}
-
-// ResumeAllocation restores automatic restarts for a retained allocation.
-func (s *AgentClient) ResumeAllocation(ctx context.Context, nodeID uuid.UUID, address string, request *nodeapi.DrainAllocationRequest) error {
-	var response nodeapi.OperationResponse
-	err := s.operationRequest(ctx, nodeID, http.MethodDelete, transport.NormalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(request.AllocationID)+"/drain", request, &response)
-	if err != nil {
-		return fmt.Errorf("resume allocation: %w", decodeOperationError(err))
-	}
-	return nil
-}
-
-// StopAllocation asks an agent to stop an allocation.
-func (s *AgentClient) StopAllocation(ctx context.Context, nodeID uuid.UUID, address string, request *nodeapi.StopAllocationRequest) error {
-	var response nodeapi.OperationResponse
-	err := s.operationRequest(ctx, nodeID, http.MethodDelete, transport.NormalizeBaseURL(address)+"/v1/allocations/"+url.PathEscape(request.AllocationID), request, &response)
-	if err != nil {
-		return fmt.Errorf("stop allocation: %w", decodeOperationError(err))
-	}
-
-	return nil
-}
-
-// UpdateNetworkPlan reconciles an active namespace network on an agent.
-func (s *AgentClient) UpdateNetworkPlan(ctx context.Context, nodeID uuid.UUID, address string, request *nodeapi.NetworkPlanRequest) error {
-	var response nodeapi.OperationResponse
-	if err := s.clientFor(nodeID, 0).Request(ctx, http.MethodPost, transport.NormalizeBaseURL(address)+"/v1/network-plans", request, &response); err != nil {
-		return fmt.Errorf("update network plan: %w", decodeOperationError(err))
-	}
-	return nil
 }
 
 // Exec opens a leader-to-agent exec stream to a new process in an
