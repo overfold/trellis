@@ -63,9 +63,9 @@ func (s *ServerClient) executionRequest(ctx context.Context, leader uuid.UUID, p
 }
 
 // PullExecution long-polls the authenticated current leader for a complete view.
-func (s *ServerClient) PullExecution(ctx context.Context, node, leader uuid.UUID, version uint64) (*nodeapi.ExecutionIntent, error) {
+func (s *ServerClient) PullExecution(ctx context.Context, node, leader uuid.UUID, epoch, version uint64) (*nodeapi.ExecutionIntent, error) {
 	var intent nodeapi.ExecutionIntent
-	err := s.executionRequest(ctx, leader, fmt.Sprintf("/v1/nodes/%s/execution?version=%d", node, version), 35*time.Second, &intent)
+	err := s.executionRequest(ctx, leader, fmt.Sprintf("/v1/nodes/%s/execution?epoch=%d&version=%d", node, epoch, version), 35*time.Second, &intent)
 	if err != nil {
 		return nil, err
 	}

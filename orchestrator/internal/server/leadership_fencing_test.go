@@ -53,8 +53,8 @@ func TestOldTermOutcomeCannotRewriteReloadedAllocation(t *testing.T) {
 	if err := s.state.PutAllocation(t.Context(), fresh); err != nil {
 		t.Fatal(err)
 	}
-	err := s.persistAllocationUpdate(context.WithoutCancel(ctx), old, func(next *Allocation) error {
-		return next.Transition(lifecycle.PhaseFailed, s.now(), "old_start_failure", "")
+	err := s.persistAllocationUpdate(context.WithoutCancel(ctx), old, func(next *Allocation) (bool, error) {
+		return false, next.Transition(lifecycle.PhaseFailed, s.now(), "old_start_failure", "")
 	})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("old callback error = %v", err)
@@ -70,7 +70,7 @@ func TestOldTermOutcomeCannotRewriteReloadedAllocation(t *testing.T) {
 		t.Fatalf("old term changed fresh state: %+v", stored["a"])
 	}
 	// Identity fencing also rejects a detached object within the same term.
-	if err := s.persistAllocationUpdate(t.Context(), old, func(*Allocation) error { t.Fatal("detached callback ran"); return nil }); !errors.Is(err, context.Canceled) {
+	if err := s.persistAllocationUpdate(t.Context(), old, func(*Allocation) (bool, error) { t.Fatal("detached callback ran"); return false, nil }); !errors.Is(err, context.Canceled) {
 		t.Fatalf("detached callback error = %v", err)
 	}
 }

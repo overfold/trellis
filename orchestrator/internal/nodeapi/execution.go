@@ -15,8 +15,9 @@ const (
 	ExecutionCleanup ExecutionMode = "cleanup"
 )
 
-// ExecutionIntent is a complete, durable node-scoped desired execution view.
-// Version increases only for committed changes. Complete is required before
+// ExecutionIntent is a complete projection of durable node execution authority.
+// Version increases when content changes within Epoch and resets in a new epoch.
+// Agents order (Epoch, Version) lexicographically. Complete is required before
 // absence can authorize cleanup; failure to fetch is never an empty view.
 type ExecutionIntent struct {
 	NodeID        uuid.UUID               `json:"node_id"`

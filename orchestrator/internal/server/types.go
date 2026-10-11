@@ -188,8 +188,10 @@ type Allocation struct {
 	JobIncarnation  string `json:"job_incarnation"`
 	JobRevision     int    `json:"job_revision"`
 	Tasks           []spec.TaskSpec
-	Phase           lifecycle.Phase  `json:"phase"`
-	Health          lifecycle.Health `json:"health"`
+	// Restart is frozen with Tasks, independently of later job changes.
+	Restart *spec.RestartPolicySpec `json:"restart,omitempty"`
+	Phase   lifecycle.Phase         `json:"phase"`
+	Health  lifecycle.Health        `json:"health"`
 	lifecycle.Diagnostic
 	// StableSince proves a continuous running, non-unhealthy interval.
 	// Zero means no proof; reload requires a fresh observation to begin it.
@@ -299,6 +301,7 @@ func applyAllocationSnapshot(allocation, snapshot *Allocation) {
 	allocation.JobIncarnation = snapshot.JobIncarnation
 	allocation.JobRevision = snapshot.JobRevision
 	allocation.Tasks = snapshot.Tasks
+	allocation.Restart = snapshot.Restart
 	allocation.Phase = snapshot.Phase
 	allocation.Health = snapshot.Health
 	allocation.StableSince = snapshot.StableSince

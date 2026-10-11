@@ -146,8 +146,8 @@ func TestExecutionRecoveryGraceAndPrunedAuthorityConverge(t *testing.T) {
 	now := s.now()
 	s.now = func() time.Time { return now }
 	s.leaderSince = now
-	s.allocations = nil
-	if err := s.publishReconcileIntent(t.Context(), nil); err != nil {
+	allocation.Phase = lifecycle.PhaseLost
+	if err := s.publishReconcileIntent(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	doc, _ := s.ExecutionIntent(t.Context(), node.ID, 0)
@@ -155,7 +155,12 @@ func TestExecutionRecoveryGraceAndPrunedAuthorityConverge(t *testing.T) {
 		t.Fatal("recovery grace destroyed original execution")
 	}
 	now = now.Add(leaderRecoveryGrace)
-	if err := s.publishReconcileIntent(t.Context(), nil); err != nil {
+	decision := executionCleanupDecision{Node: node.ID, ID: allocation.ID, Generation: allocation.Generation, RetainLogs: false}
+	if err := s.state.CommitReconciliation(t.Context(), &ReconciliationCommit{DeleteAllocations: []string{allocation.ID}, ExecutionCleanup: []executionCleanupDecision{decision}}); err != nil {
+		t.Fatal(err)
+	}
+	s.allocations = nil
+	if err := s.publishReconcileIntent(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	doc, _ = s.ExecutionIntent(t.Context(), node.ID, 0)
@@ -165,7 +170,7 @@ func TestExecutionRecoveryGraceAndPrunedAuthorityConverge(t *testing.T) {
 	if err := heartbeatAndApply(t, s, node.ID, []nodeapi.AllocationStatus{{ID: allocation.ID, Generation: allocation.Generation, Phase: lifecycle.PhaseStopped, Health: lifecycle.HealthUnknown, CleanupComplete: true}}, "test", nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.publishReconcileIntent(t.Context(), nil); err != nil {
+	if err := s.publishReconcileIntent(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	doc, _ = s.ExecutionIntent(t.Context(), node.ID, 0)
@@ -177,15 +182,23 @@ func TestExecutionRecoveryGraceAndPrunedAuthorityConverge(t *testing.T) {
 func TestExecutionCommittedCleanupSurvivesProjectionFailureAndFailover(t *testing.T) {
 	s, node, allocation := executionFixture(t)
 	decision := executionCleanupDecision{Node: node.ID, ID: allocation.ID, Generation: allocation.Generation, RetainLogs: false}
+	keepLogs := decision
+	keepLogs.RetainLogs = true
 	// Model the leader stopping after the atomic pruning/cleanup commit but
 	// before publishing its node document. No renewable inventory is available.
-	if err := s.state.CommitReconciliation(t.Context(), &ReconciliationCommit{DeleteAllocations: []string{allocation.ID}, ExecutionCleanup: []executionCleanupDecision{decision}}); err != nil {
+	if err := s.state.CommitReconciliation(t.Context(), &ReconciliationCommit{DeleteAllocations: []string{allocation.ID}, ExecutionCleanup: []executionCleanupDecision{decision, keepLogs}}); err != nil {
+		t.Fatal(err)
+	}
+	// Neither a duplicate in the same batch nor a later cleanup request can
+	// revoke removal of logs, even without a previous response document.
+	if err := s.state.CommitReconciliation(t.Context(), &ReconciliationCommit{ExecutionCleanup: []executionCleanupDecision{keepLogs}}); err != nil {
 		t.Fatal(err)
 	}
 	s.allocations, s.executionWatch = nil, nil
 	s.controlEpoch++
 	s.leaderSince = s.now()
-	if err := s.publishReconcileIntent(t.Context(), nil); err != nil {
+	s.executionIntents = nil
+	if err := s.publishReconcileIntent(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	entry := committedAllocationIntent(t, s, node.ID, allocation.ID, allocation.Generation)
@@ -202,8 +215,10 @@ func TestExecutionCleanupProofReleasesOnlyExactGenerationAdmission(t *testing.T)
 	s.allocations = append(s.allocations, replacement)
 	s.rebuildAllocationNodeIndexLocked()
 	actions := []Action{{Type: ActionStopObserved, Node: node, ID: allocation.ID, Generation: allocation.Generation}, {Type: ActionStart, Allocation: replacement}}
-	if err := s.publishReconcileIntent(t.Context(), actions); err != nil {
-		t.Fatal(err)
+	for _, action := range actions {
+		if err := s.Execute(t.Context(), &action); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if committedAllocationIntent(t, s, node.ID, replacement.ID, 2).Mode != nodeapi.ExecutionRetain {
 		t.Fatal("cleanup publication prematurely admitted replacement")
@@ -211,14 +226,14 @@ func TestExecutionCleanupProofReleasesOnlyExactGenerationAdmission(t *testing.T)
 	if err := heartbeatAndApply(t, s, node.ID, []nodeapi.AllocationStatus{{ID: allocation.ID, Generation: 2, Phase: lifecycle.PhaseStopped, Health: lifecycle.HealthUnknown, CleanupComplete: true}}, "test", nodeResourceObservation{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.publishReconcileIntent(t.Context(), nil); err != nil {
+	if err := s.publishReconcileIntent(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if committedAllocationIntent(t, s, node.ID, replacement.ID, 2).Mode != nodeapi.ExecutionRetain {
 		t.Fatal("wrong generation released admission")
 	}
 	acknowledgeTestCleanup(t, s, allocation)
-	if err := s.publishReconcileIntent(t.Context(), nil); err != nil {
+	if err := s.publishReconcileIntent(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if committedAllocationIntent(t, s, node.ID, replacement.ID, 2).Mode != nodeapi.ExecutionRun {
@@ -250,17 +265,32 @@ func TestExecutionIntentCommittedVersionsWakeAndSurviveLeaderChange(t *testing.T
 	if second == nil || second.Version != 2 || second.Allocations[0].Mode != nodeapi.ExecutionCleanup || allocation.Phase != lifecycle.PhaseStopping {
 		t.Fatalf("cleanup intent = %+v; phase=%s", second, allocation.Phase)
 	}
-	// A new publisher reloads the replicated version rather than a term-local
-	// counter, and must preserve an already committed destruction decision.
+	// A new publisher rebuilds from canonical state with a new epoch and a
+	// fresh counter, preserving an already committed destruction decision.
 	s.controlEpoch = 2
 	s.executionWatch = nil
+	s.executionIntents = nil
 	allocation.Phase = lifecycle.PhaseLost
 	if err := s.Execute(t.Context(), &Action{Type: ActionDrain, Allocation: allocation}); err != nil {
 		t.Fatal(err)
 	}
 	third, _ := s.ExecutionIntent(t.Context(), node.ID, 0)
-	if third.Version != 3 || third.Epoch != 2 || third.Allocations[0].Mode != nodeapi.ExecutionCleanup {
+	if third.Version != 1 || third.Epoch != 2 || third.Allocations[0].Mode != nodeapi.ExecutionCleanup {
 		t.Fatalf("new leader intent = %+v", third)
+	}
+	// The old epoch must not long-poll just because its version was reused.
+	e := echo.New()
+	NewHandler(s).Register(e)
+	request := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v1/nodes/%s/execution?epoch=%d&version=%d", node.ID, first.Epoch, first.Version), nil)
+	request = request.WithContext(context.WithValue(ctx, NodeContextKey, node.ID))
+	response := httptest.NewRecorder()
+	e.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("old epoch pull blocked or failed: %d %s", response.Code, response.Body.String())
+	}
+	var pulled nodeapi.ExecutionIntent
+	if err := json.Unmarshal(response.Body.Bytes(), &pulled); err != nil || pulled.Epoch != 2 || pulled.Version != 1 {
+		t.Fatalf("old epoch pull returned %+v %v", pulled, err)
 	}
 }
 
@@ -429,16 +459,16 @@ func TestReconcilePublicationSerializesUndrain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := &auditStore{memoryStore: memoryStore(values), blockPut: make(chan struct{}), putStarted: make(chan struct{})}
+	store := &auditStore{memoryStore: memoryStore(values), blockBatch: make(chan struct{}), batchStarted: make(chan struct{})}
 	s.state = NewStateController(store, "test")
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 	pass := make(chan struct{})
 	go func() { s.Reconcile(ctx); close(pass) }()
 	select {
-	case <-store.putStarted:
+	case <-store.batchStarted:
 	case <-ctx.Done():
-		t.Fatal("pass did not reach execution publication")
+		t.Fatal("pass did not reach execution authority commit")
 	}
 	undrain := make(chan error, 1)
 	go func() { undrain <- s.UndrainNode(ctx, node.ID) }()
@@ -447,7 +477,7 @@ func TestReconcilePublicationSerializesUndrain(t *testing.T) {
 		t.Fatalf("undrain crossed unpublished cleanup decision: %v", err)
 	case <-time.After(30 * time.Millisecond):
 	}
-	close(store.blockPut)
+	close(store.blockBatch)
 	select {
 	case <-pass:
 	case <-ctx.Done():
@@ -464,5 +494,68 @@ func TestReconcilePublicationSerializesUndrain(t *testing.T) {
 	entry := committedAllocationIntent(t, s, node.ID, allocation.ID, 1)
 	if entry.Mode != nodeapi.ExecutionCleanup || !allocation.Draining || allocation.Phase != lifecycle.PhaseStopping {
 		t.Fatal("undrain revoked the committed cleanup generation")
+	}
+}
+
+func TestReconcileCommitsAuthorityWithoutNodeDocuments(t *testing.T) {
+	s, node, _ := executionFixture(t)
+	store := &auditStore{memoryStore: memoryStore{}}
+	s.state = NewStateController(store, "test")
+	s.allocations = nil
+	s.rebuildAllocationNodeIndexLocked()
+	s.executionIntents = nil
+	job := s.jobs[jobKey("default", "web")]
+	job.Spec.TaskGroups[0].Count = 3
+	job.Spec.TaskGroups[0].Restart = &spec.RestartPolicySpec{MaxRestarts: 3, Window: time.Minute}
+	if err := s.state.PutJob(t.Context(), jobKey("default", "web"), job); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.state.PutNode(t.Context(), node.ID.String(), nodeSummary(node)); err != nil {
+		t.Fatal(err)
+	}
+	store.puts = 0
+	s.Reconcile(t.Context())
+	stored, err := s.state.ListAllocations(t.Context())
+	if err != nil || len(stored) != 3 {
+		t.Fatalf("committed allocations: %v %v", stored, err)
+	}
+	for _, allocation := range stored {
+		if allocation.Phase != lifecycle.PhaseStarting || allocation.Restart == nil || allocation.Restart.MaxRestarts != 3 {
+			t.Fatalf("admission was not committed with placement: %+v", allocation)
+		}
+	}
+	if store.puts != 0 || len(store.batchSizes) != 1 {
+		t.Fatalf("three starts required extra writes: puts=%d batches=%v", store.puts, store.batchSizes)
+	}
+	doc, err := s.ExecutionIntent(t.Context(), node.ID, 0)
+	if err != nil || doc == nil || len(doc.Allocations) != 3 {
+		t.Fatalf("projected intent: %+v %v", doc, err)
+	}
+	first := doc.Allocations[0].Request
+	documents, err := store.List(t.Context(), "trellis/test/node-execution/")
+	if err != nil || len(documents) != 0 {
+		t.Fatalf("persisted response documents: %v %v", documents, err)
+	}
+	s.Reconcile(t.Context())
+	if store.puts != 0 || len(store.batchSizes) != 1 {
+		t.Fatal("unchanged reconciliation wrote derived intent")
+	}
+	// A changed/deleted source job must not redefine an existing generation.
+	job.Spec.TaskGroups[0].Restart.MaxRestarts = 20
+	job.Spec.TaskGroups[0].Tasks[0].Image = "changed"
+	if err := s.state.PutJob(t.Context(), jobKey("default", "web"), job); err != nil {
+		t.Fatal(err)
+	}
+	s.controlEpoch++
+	s.executionIntents = nil
+	if err := s.Reload(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Execute(t.Context(), &Action{Type: ActionDrain}); err != nil {
+		t.Fatal(err)
+	}
+	rebuilt := committedExecutionRequest(t, s, node.ID, first.AllocationID, first.Generation)
+	if rebuilt.ExecutionHash != first.ExecutionHash || rebuilt.Restart.MaxRestarts != 3 || rebuilt.Tasks[0].Image != first.Tasks[0].Image {
+		t.Fatalf("cache-free recovery changed execution identity: %+v", rebuilt)
 	}
 }

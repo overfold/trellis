@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -98,7 +97,7 @@ func applyReconciledAllocation(allocation, update *Allocation, node *Node) {
 	allocation.Events = update.Events
 }
 
-func (s *Server) persistAllocationUpdate(ctx context.Context, allocation *Allocation, update func(*Allocation) error) error {
+func (s *Server) persistAllocationUpdate(ctx context.Context, allocation *Allocation, update func(*Allocation) (bool, error)) error {
 	ctx, release := s.bindTerm(ctx)
 	defer release()
 	s.mutationMu.Lock()
@@ -115,17 +114,17 @@ func (s *Server) persistAllocationUpdate(ctx context.Context, allocation *Alloca
 	next := allocation.cloneRecord()
 	allocation.mu.Unlock()
 	s.mu.RUnlock()
-	if err := update(next); err != nil {
+	cleanup, err := update(next)
+	if err != nil {
 		return err
 	}
 	var decisions []state.Mutation
-	if next.Node != nil && next.Phase == lifecycle.PhaseStopping {
+	if next.Node != nil && cleanup {
 		decision := executionCleanupDecision{Node: next.Node.ID, ID: next.ID, Generation: next.Generation, RetainLogs: true}
-		raw, err := json.Marshal(decision)
+		decisions, err = s.state.executionCleanupMutations(ctx, []executionCleanupDecision{decision})
 		if err != nil {
 			return err
 		}
-		decisions = append(decisions, state.Mutation{Key: s.state.executionDecisionKey(decision.Node, decision.ID, decision.Generation), Value: raw})
 	}
 	if err := s.state.PutNodesAndAllocations(ctx, nil, []*Allocation{next}, decisions...); err != nil {
 		return err
@@ -151,7 +150,6 @@ func (s *Server) reconcile(ctx context.Context) {
 	ctx, release := s.bindTerm(ctx)
 	defer release()
 	start := time.Now()
-	var executable []Action
 	planned := false
 	s.reconcileMu.Lock()
 	s.mutationMu.Lock()
@@ -161,7 +159,7 @@ func (s *Server) reconcile(ctx context.Context) {
 			s.mutationMu.Unlock()
 		}
 		if planned {
-			if err := s.publishReconcileIntent(ctx, executable); err != nil {
+			if err := s.publishReconcileIntent(ctx); err != nil {
 				s.log.Error("publish node execution intent", "error", err)
 			}
 			s.refreshCatalog()
@@ -279,12 +277,44 @@ func (s *Server) reconcile(ctx context.Context) {
 		s.log.Error(diagnostic.Message, diagnostic.Args...)
 	}
 	for _, action := range plan.Actions {
+		// Include execution admission in the plan's atomic commit. The pure
+		// planner still describes placement; publication performs no writes.
+		a := action.Allocation
+		if action.Type == ActionStart && a != nil && tasksUseWireGuard(a.Tasks) {
+			if a.Node == nil {
+				continue
+			}
+			_, addressed := subnets.Subnets[networkSubnetKey{namespace: a.Namespace, node: a.Node.ID}]
+			_, assigned := networkPorts[a.Namespace]
+			if !addressed || !assigned {
+				continue
+			}
+		}
+		if a != nil && (action.Type == ActionStart && a.Phase == lifecycle.PhasePlaced || action.Type == ActionStop && activeAllocationPhase(a.Phase) && a.Phase != lifecycle.PhaseStopping) {
+			phase := lifecycle.PhaseStarting
+			if action.Type == ActionStop {
+				phase = lifecycle.PhaseStopping
+			}
+			if err := a.Transition(phase, now, "", ""); err != nil {
+				s.mu.Unlock()
+				s.log.Error("plan execution transition", "error", err)
+				return
+			}
+			if plan.Source[a] != nil && !slices.Contains(plan.Updated, a) {
+				plan.Updated = append(plan.Updated, a)
+			}
+		}
 		if action.Type == ActionStop && action.Allocation != nil && action.Allocation.Node != nil {
 			a := action.Allocation
 			plan.Commit.ExecutionCleanup = append(plan.Commit.ExecutionCleanup, executionCleanupDecision{Node: a.Node.ID, ID: a.ID, Generation: a.Generation, RetainLogs: true})
 		} else if action.Type == ActionStopObserved && action.Node != nil {
 			plan.Commit.ExecutionCleanup = append(plan.Commit.ExecutionCleanup, executionCleanupDecision{Node: action.Node.ID, ID: action.ID, Generation: action.Generation, RetainLogs: action.RetainLogs})
 		}
+	}
+	sort.Slice(plan.Updated, func(i, j int) bool { return plan.Updated[i].ID < plan.Updated[j].ID })
+	plan.Commit.Allocations = append([]*Allocation(nil), plan.Updated...)
+	for _, a := range plan.NewAllocations {
+		plan.Commit.Allocations = append(plan.Commit.Allocations, a.Clone())
 	}
 	for _, allocation := range plan.Pruned {
 		if allocation.Node != nil {
@@ -315,16 +345,6 @@ func (s *Server) reconcile(ctx context.Context) {
 		applyReconciledAllocation(originalOf(allocation), allocation, canonicalNodes[allocation])
 	}
 	unlockUpdates()
-	actions := plan.Actions
-	for i := range actions {
-		if allocation := actions[i].Allocation; allocation != nil {
-			actions[i].drainSequence = allocation.DrainSequence
-			actions[i].controlPlanned = true
-		}
-		if original := originalOf(actions[i].Allocation); original != nil {
-			actions[i].Allocation = original
-		}
-	}
 	s.mu.Lock()
 	s.networkPorts = networkPorts
 	s.networkSubnets = subnets.Subnets
@@ -365,23 +385,7 @@ func (s *Server) reconcile(ctx context.Context) {
 		s.events.publish(event)
 	}
 
-	executableActions := make([]Action, 0, len(actions))
-	for i := range actions {
-		if actions[i].Type == ActionStart && tasksUseWireGuard(actions[i].Allocation.Tasks) {
-			allocation := actions[i].Allocation
-			if _, assigned := networkPorts[allocation.Namespace]; !assigned {
-				continue
-			}
-			if allocation.Node == nil {
-				continue
-			}
-			if _, addressed := subnets.Subnets[networkSubnetKey{namespace: allocation.Namespace, node: allocation.Node.ID}]; !addressed {
-				continue
-			}
-		}
-		executableActions = append(executableActions, actions[i])
-	}
-	executable, planned = executableActions, true
+	planned = true
 }
 
 // lockReconcileTargetsLocked locks every stored allocation the plan rewrites
@@ -551,7 +555,40 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 	}
 	s.reconcileMu.Lock()
 	defer s.reconcileMu.Unlock()
-	return s.publishReconcileIntent(ctx, []Action{*action})
+	if action.Allocation != nil && (action.Type == ActionStart || action.Type == ActionStop) {
+		if err := s.persistAllocationUpdate(ctx, action.Allocation, func(next *Allocation) (bool, error) {
+			if action.controlPlanned && next.DrainSequence != action.drainSequence {
+				return false, nil
+			}
+			if action.Type == ActionStop {
+				if activeAllocationPhase(next.Phase) {
+					return true, next.Transition(lifecycle.PhaseStopping, s.now().UTC(), "", "")
+				}
+				return true, nil
+			}
+			if action.Type == ActionStart && next.Phase == lifecycle.PhasePlaced {
+				s.mu.RLock()
+				job := s.jobs[jobKey(next.Namespace, next.JobName)]
+				eligible := job != nil && job.Incarnation == next.JobIncarnation && job.Revision == next.JobRevision && jobHasGroup(job, next.TaskGroupName)
+				s.mu.RUnlock()
+				if !eligible {
+					return false, context.Canceled
+				}
+				return false, next.Transition(lifecycle.PhaseStarting, s.now().UTC(), "", "")
+			}
+			return false, nil
+		}); err != nil {
+			return err
+		}
+	} else if action.Type == ActionStopObserved && action.Node != nil {
+		s.mutationMu.Lock()
+		err := s.state.CommitReconciliation(ctx, &ReconciliationCommit{ExecutionCleanup: []executionCleanupDecision{{Node: action.Node.ID, ID: action.ID, Generation: action.Generation, RetainLogs: action.RetainLogs}}})
+		s.mutationMu.Unlock()
+		if err != nil {
+			return err
+		}
+	}
+	return s.publishReconcileIntent(ctx)
 }
 
 func (s *Server) networkPlan(namespace string, target *Node) (*network.Plan, error) {

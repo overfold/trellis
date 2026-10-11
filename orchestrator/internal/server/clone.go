@@ -90,6 +90,7 @@ func (a *Allocation) cloneOnto(node *Node) *Allocation {
 		JobIncarnation:  a.JobIncarnation,
 		JobRevision:     a.JobRevision,
 		Tasks:           spec.CloneTasks(a.Tasks),
+		Restart:         clonePointer(a.Restart),
 		Phase:           a.Phase,
 		Health:          a.Health,
 		StableSince:     a.StableSince,
@@ -127,6 +128,7 @@ func (a *Allocation) sameRecord(b *Allocation) bool {
 		a.CleanupComplete == b.CleanupComplete &&
 		a.JobIncarnation == b.JobIncarnation &&
 		a.JobRevision == b.JobRevision &&
+		reflect.DeepEqual(a.Restart, b.Restart) &&
 		a.Phase == b.Phase &&
 		a.Health == b.Health &&
 		a.StableSince.Equal(b.StableSince) &&

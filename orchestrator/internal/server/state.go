@@ -417,13 +417,11 @@ func (s *StateController) CommitReconciliation(ctx context.Context, commit *Reco
 	for _, backoff := range commit.DeleteBackoffs {
 		mutations = append(mutations, state.Mutation{Key: s.replacementBackoffKey(backoff)})
 	}
-	for _, decision := range commit.ExecutionCleanup {
-		raw, err := json.Marshal(decision)
-		if err != nil {
-			return err
-		}
-		mutations = append(mutations, state.Mutation{Key: s.executionDecisionKey(decision.Node, decision.ID, decision.Generation), Value: raw})
+	cleanup, err := s.executionCleanupMutations(ctx, commit.ExecutionCleanup)
+	if err != nil {
+		return err
 	}
+	mutations = append(mutations, cleanup...)
 	if err := atomic.Batch(ctx, mutations); err != nil {
 		return fmt.Errorf("commit reconciliation: %w", err)
 	}

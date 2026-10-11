@@ -104,6 +104,7 @@ func (s *auditStore) Delete(ctx context.Context, key string) error {
 func TestExecutionTransitionPersistenceFailureDoesNotAdvanceMemory(t *testing.T) {
 	s, node, allocation := executionFixture(t)
 	allocation.Phase = lifecycle.PhasePlaced
+	s.executionIntents = nil
 	store := &auditStore{memoryStore: memoryStore{}, failBatch: true}
 	s.state = NewStateController(store, "test")
 	if err := s.Execute(t.Context(), &Action{Type: ActionStart, Allocation: allocation}); err == nil {
@@ -112,7 +113,7 @@ func TestExecutionTransitionPersistenceFailureDoesNotAdvanceMemory(t *testing.T)
 	if allocation.Phase != lifecycle.PhasePlaced {
 		t.Fatal("failed atomic transition advanced memory")
 	}
-	doc, err := s.state.GetExecutionIntent(t.Context(), node.ID)
+	doc, err := s.ExecutionIntent(t.Context(), node.ID, 0)
 	if err != nil || doc != nil {
 		t.Fatal("failed transition published run authority")
 	}
@@ -337,7 +338,7 @@ func TestUndrainBatchFailureLeavesMemoryAndDurableStateDraining(t *testing.T) {
 	if !nodes[node.ID.String()].Draining || !allocations[allocation.ID].Draining || allocations[allocation.ID].DrainSequence != 1 {
 		t.Fatalf("durable state after failed undrain: node=%#v allocation=%#v", nodes[node.ID.String()], allocations[allocation.ID])
 	}
-	if doc, err := s.state.GetExecutionIntent(t.Context(), node.ID); err != nil || doc != nil {
+	if doc, err := s.ExecutionIntent(t.Context(), node.ID, 0); err != nil || doc == nil || !doc.Allocations[0].Request.Draining || doc.Allocations[0].Request.DrainSequence != 1 {
 		t.Fatalf("failed undrain published authority: %+v %v", doc, err)
 	}
 }

@@ -41,6 +41,9 @@ func TestPullExecutionAuthenticatesCurrentLeaderAndBoundsBody(t *testing.T) {
 		if r.TLS.ServerName != leader.String()+".node.trellis" {
 			t.Errorf("unexpected SNI %q", r.TLS.ServerName)
 		}
+		if mode == "normal" && (r.URL.Query().Get("epoch") != "7" || r.URL.Query().Get("version") != "19") {
+			t.Errorf("pull did not carry epoch/version: %s", r.URL.RawQuery)
+		}
 		switch mode {
 		case "changed":
 			client.SetControlPlane(nodeapi.ControlPlaneResponse{LeaderID: uuid.New(), LeaderAddress: "https://changed.invalid"})
@@ -62,14 +65,14 @@ func TestPullExecutionAuthenticatesCurrentLeaderAndBoundsBody(t *testing.T) {
 	client = NewServerClient("", server.URL, clientTLS)
 	topology := nodeapi.ControlPlaneResponse{LeaderID: leader, LeaderAddress: server.URL}
 	client.SetControlPlane(topology)
-	if _, err := client.PullExecution(context.Background(), node, leader, 0); err != nil {
+	if _, err := client.PullExecution(context.Background(), node, leader, 7, 19); err != nil {
 		t.Fatal(err)
 	}
 	for _, value := range []string{"changed", "redirect", "body"} {
 		mode = value
 		client.SetControlPlane(topology)
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-		_, err := client.PullExecution(ctx, node, leader, 0)
+		_, err := client.PullExecution(ctx, node, leader, 0, 0)
 		cancel()
 		if err == nil {
 			t.Fatalf("%s fetch accepted", mode)
@@ -77,7 +80,7 @@ func TestPullExecutionAuthenticatesCurrentLeaderAndBoundsBody(t *testing.T) {
 	}
 	mode = "normal"
 	client.SetControlPlane(nodeapi.ControlPlaneResponse{LeaderID: node, LeaderAddress: server.URL})
-	if _, err := client.PullExecution(context.Background(), node, node, 0); err == nil {
+	if _, err := client.PullExecution(context.Background(), node, node, 0, 0); err == nil {
 		t.Fatal("wrong identity certificate accepted")
 	}
 }

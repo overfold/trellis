@@ -638,7 +638,7 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 					continue
 				}
 				name := fmt.Sprintf("%s-%s-%s-%s", namespace, jobName, group.Name, newSuffix())
-				allocation := &Allocation{ID: name, Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Tasks: group.Tasks, Node: node, Generation: 1, JobIncarnation: job.Incarnation, JobRevision: job.Revision, Phase: lifecycle.PhasePlaced, Health: lifecycle.HealthUnknown, Diagnostic: lifecycle.Diagnostic{CreatedAt: now, TransitionedAt: now}}
+				allocation := &Allocation{ID: name, Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Tasks: group.Tasks, Restart: clonePointer(group.Restart), Node: node, Generation: 1, JobIncarnation: job.Incarnation, JobRevision: job.Revision, Phase: lifecycle.PhasePlaced, Health: lifecycle.HealthUnknown, Diagnostic: lifecycle.Diagnostic{CreatedAt: now, TransitionedAt: now}}
 				actions = append(actions, Action{Type: ActionStart, Allocation: allocation})
 				plan.NewAllocations = append(plan.NewAllocations, allocation)
 				valid = append(valid, allocation)
@@ -658,7 +658,7 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 				}
 				for i := len(reusable); i < unplaced; i++ {
 					name := fmt.Sprintf("%s-%s-%s-%s", namespace, jobName, group.Name, newSuffix())
-					allocation := &Allocation{ID: name, Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Tasks: group.Tasks, Generation: 1, JobIncarnation: job.Incarnation, JobRevision: job.Revision, Phase: lifecycle.PhasePending, Health: lifecycle.HealthUnknown, Diagnostic: lifecycle.Diagnostic{CreatedAt: now, TransitionedAt: now, Reason: diagnostic.Reason, Message: diagnostic.Message}}
+					allocation := &Allocation{ID: name, Namespace: namespace, JobName: jobName, TaskGroupName: group.Name, Tasks: group.Tasks, Restart: clonePointer(group.Restart), Generation: 1, JobIncarnation: job.Incarnation, JobRevision: job.Revision, Phase: lifecycle.PhasePending, Health: lifecycle.HealthUnknown, Diagnostic: lifecycle.Diagnostic{CreatedAt: now, TransitionedAt: now, Reason: diagnostic.Reason, Message: diagnostic.Message}}
 					plan.NewAllocations = append(plan.NewAllocations, allocation)
 					valid = append(valid, allocation)
 				}

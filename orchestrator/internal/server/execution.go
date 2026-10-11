@@ -20,11 +20,8 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
 	"github.com/overfold/trellis/orchestrator/internal/network"
 	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
+	"github.com/overfold/trellis/orchestrator/internal/state"
 )
-
-func (s *StateController) executionKey(id uuid.UUID) string {
-	return fmt.Sprintf("%s/%s/node-execution/%s", trellisNamespace, s.cluster, id)
-}
 
 func (s *StateController) executionCleanupKey(node uuid.UUID, allocation string, generation uint64) string {
 	return fmt.Sprintf("%s/%s/execution-cleanup/%s/%s/%d", trellisNamespace, s.cluster, node, url.PathEscape(allocation), generation)
@@ -41,6 +38,42 @@ type executionCleanupDecision struct {
 
 func (s *StateController) executionDecisionKey(node uuid.UUID, allocation string, generation uint64) string {
 	return fmt.Sprintf("%s/%s/execution-decisions/%s/%s/%d", trellisNamespace, s.cluster, node, url.PathEscape(allocation), generation)
+}
+
+// executionCleanupMutations preserves irreversible log removal in canonical
+// authority, including duplicate decisions in one commit. Callers hold mutation
+// ordering until the returned mutations commit with their allocation changes.
+func (s *StateController) executionCleanupMutations(ctx context.Context, decisions []executionCleanupDecision) ([]state.Mutation, error) {
+	byKey := make(map[string]executionCleanupDecision, len(decisions))
+	keys := make([]string, 0, len(decisions))
+	for _, decision := range decisions {
+		key := s.executionDecisionKey(decision.Node, decision.ID, decision.Generation)
+		if prior, ok := byKey[key]; ok {
+			decision.RetainLogs = decision.RetainLogs && prior.RetainLogs
+		} else {
+			keys = append(keys, key)
+		}
+		byKey[key] = decision
+	}
+	sort.Strings(keys)
+	mutations := make([]state.Mutation, 0, len(keys))
+	for _, key := range keys {
+		decision := byKey[key]
+		var prior executionCleanupDecision
+		found, err := s.get(ctx, key, &prior)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			decision.RetainLogs = decision.RetainLogs && prior.RetainLogs
+		}
+		raw, err := json.Marshal(decision)
+		if err != nil {
+			return nil, err
+		}
+		mutations = append(mutations, state.Mutation{Key: key, Value: raw})
+	}
+	return mutations, nil
 }
 
 func (s *StateController) executionDecisions(ctx context.Context, node uuid.UUID) ([]executionCleanupDecision, error) {
@@ -65,41 +98,49 @@ func (s *StateController) executionCleaned(ctx context.Context, node uuid.UUID, 
 	return complete, err
 }
 
-// GetExecutionIntent reads committed execution authority, not observations.
-func (s *StateController) GetExecutionIntent(ctx context.Context, id uuid.UUID) (*nodeapi.ExecutionIntent, error) {
-	var intent nodeapi.ExecutionIntent
-	found, err := s.get(ctx, s.executionKey(id), &intent)
-	if err != nil || !found {
-		return nil, err
+// executionIntentLocked returns only a view belonging to the current epoch.
+// Missing projections fail closed until reconciliation rebuilds them.
+func (s *Server) executionIntentLocked(id uuid.UUID) *nodeapi.ExecutionIntent {
+	intent := s.executionIntents[id]
+	if intent == nil || intent.Epoch != s.currentControlEpoch() {
+		return nil
 	}
-	return &intent, nil
+	return intent
 }
 
-// publishExecution serializes read/commit/notification. The document is never
-// visible to a waiter before the replicated write succeeds.
+// publishExecution caches a projection of already committed authority. Versions
+// are local to an epoch; acquiring a new durable epoch permits rebuilding them.
 func (s *Server) publishExecution(ctx context.Context, next *nodeapi.ExecutionIntent) error {
 	s.executionMu.Lock()
 	defer s.executionMu.Unlock()
 	if err := s.checkTerm(ctx); err != nil {
 		return err
 	}
-	prior, err := s.state.GetExecutionIntent(ctx, next.NodeID)
+	// Detach mutable slices/policies and compare canonical wire content, so
+	// omitted empty maps and slices do not spuriously advance the version.
+	raw, err := json.Marshal(next)
 	if err != nil {
 		return err
 	}
+	var cloned nodeapi.ExecutionIntent
+	if err := json.Unmarshal(raw, &cloned); err != nil {
+		return err
+	}
+	prior := s.executionIntentLocked(cloned.NodeID)
 	if prior != nil {
-		next.Version = prior.Version
-		if reflect.DeepEqual(prior, next) {
+		cloned.Version = prior.Version
+		if reflect.DeepEqual(prior, &cloned) {
 			return nil
 		}
 	}
-	if next.Version == math.MaxUint64 {
+	if cloned.Version == math.MaxUint64 {
 		return fmt.Errorf("node execution version exhausted")
 	}
-	next.Version++
-	if err := s.state.put(ctx, s.state.executionKey(next.NodeID), next); err != nil {
-		return err
+	cloned.Version++
+	if s.executionIntents == nil {
+		s.executionIntents = make(map[uuid.UUID]*nodeapi.ExecutionIntent)
 	}
+	s.executionIntents[next.NodeID] = &cloned
 	if s.executionWatch == nil {
 		s.executionWatch = make(map[uuid.UUID]chan struct{})
 	}
@@ -118,10 +159,10 @@ func (s *Server) ExecutionIntent(ctx context.Context, id uuid.UUID, version uint
 	defer timer.Stop()
 	for {
 		s.executionMu.Lock()
-		intent, err := s.state.GetExecutionIntent(ctx, id)
-		if err != nil || intent == nil || intent.Version != version {
+		intent := s.executionIntentLocked(id)
+		if intent == nil || intent.Version != version {
 			s.executionMu.Unlock()
-			return intent, err
+			return intent, nil
 		}
 		if s.executionWatch == nil {
 			s.executionWatch = make(map[uuid.UUID]chan struct{})
@@ -136,71 +177,44 @@ func (s *Server) ExecutionIntent(ctx context.Context, id uuid.UUID, version uint
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-timer.C:
-			return s.state.GetExecutionIntent(ctx, id)
+			s.executionMu.Lock()
+			intent := s.executionIntentLocked(id)
+			s.executionMu.Unlock()
+			return intent, nil
 		case <-watch:
 		}
 	}
 }
 
-// publishReconcileIntent turns planner decisions into durable authority. Lost
-// generations remain retain-only unless the planner explicitly chose cleanup;
-// an earlier cleanup choice is irreversible even across leadership changes.
-func (s *Server) publishReconcileIntent(ctx context.Context, actions []Action) error {
-	for _, action := range actions {
-		if action.Allocation == nil || (action.Type != ActionStart && action.Type != ActionStop) {
-			continue
-		}
-		if err := s.persistAllocationUpdate(ctx, action.Allocation, func(next *Allocation) error {
-			if action.controlPlanned && next.DrainSequence != action.drainSequence {
-				return nil
-			}
-			if action.Type == ActionStop && activeAllocationPhase(next.Phase) {
-				return next.Transition(lifecycle.PhaseStopping, s.now().UTC(), "", "")
-			}
-			if action.Type == ActionStart && next.Phase == lifecycle.PhasePlaced {
-				s.mu.RLock()
-				job := s.jobs[jobKey(next.Namespace, next.JobName)]
-				eligible := job != nil && job.Incarnation == next.JobIncarnation && job.Revision == next.JobRevision && jobHasGroup(job, next.TaskGroupName)
-				s.mu.RUnlock()
-				if !eligible {
-					return context.Canceled
-				}
-				return next.Transition(lifecycle.PhaseStarting, s.now().UTC(), "", "")
-			}
-			return nil
-		}); err != nil {
-			return err
-		}
-	}
+// publishReconcileIntent projects canonical authority without persisting the
+// response documents. All admission and cleanup decisions are already committed.
+func (s *Server) publishReconcileIntent(ctx context.Context) error {
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
-	// Previous cleanup entries reserve a node even when the current leader has
-	// not received its inventory yet. Missing observations never prove cleanup.
+	// Durable cleanup decisions reserve a node even before fresh inventory.
 	s.mu.RLock()
 	ids := make([]uuid.UUID, 0, len(s.nodes))
 	for id := range s.nodes {
 		ids = append(ids, id)
 	}
 	s.mu.RUnlock()
-	previous := make(map[uuid.UUID]*nodeapi.ExecutionIntent, len(ids))
 	cleanupPending := make(map[uuid.UUID]bool)
 	cleaned := make(map[uuid.UUID]map[allocationGeneration]bool)
+	decisions := make(map[uuid.UUID][]executionCleanupDecision, len(ids))
 	for _, id := range ids {
-		prior, err := s.state.GetExecutionIntent(ctx, id)
+		entries, err := s.state.executionDecisions(ctx, id)
 		if err != nil {
 			return err
 		}
-		previous[id] = prior
+		decisions[id] = entries
 		cleaned[id] = make(map[allocationGeneration]bool)
-		if prior != nil {
-			for _, entry := range prior.Allocations {
-				complete, err := s.state.executionCleaned(ctx, id, entry.Request.AllocationID, entry.Request.Generation)
-				if err != nil {
-					return err
-				}
-				cleaned[id][allocationGeneration{id: entry.Request.AllocationID, generation: entry.Request.Generation}] = complete
-				cleanupPending[id] = cleanupPending[id] || entry.Mode == nodeapi.ExecutionCleanup && !complete
+		for _, entry := range entries {
+			complete, err := s.state.executionCleaned(ctx, id, entry.ID, entry.Generation)
+			if err != nil {
+				return err
 			}
+			cleaned[id][allocationGeneration{id: entry.ID, generation: entry.Generation}] = complete
+			cleanupPending[id] = cleanupPending[id] || !complete
 		}
 	}
 	s.mu.RLock()
@@ -225,16 +239,9 @@ func (s *Server) publishReconcileIntent(ctx context.Context, actions []Action) e
 			allocation.mu.Unlock()
 			continue
 		}
-		request := nodeapi.AllocationRequest{AllocationID: allocation.ID, Generation: allocation.Generation, JobRevision: allocation.JobRevision, Epoch: epoch, Namespace: allocation.Namespace, JobName: allocation.JobName, GroupName: allocation.TaskGroupName, Tasks: allocation.Tasks, Attempt: allocation.Attempt, Draining: allocation.Draining, DrainSequence: allocation.DrainSequence}
+		request := nodeapi.AllocationRequest{AllocationID: allocation.ID, Generation: allocation.Generation, JobRevision: allocation.JobRevision, Epoch: epoch, Namespace: allocation.Namespace, JobName: allocation.JobName, GroupName: allocation.TaskGroupName, Tasks: allocation.Tasks, Restart: allocation.Restart, Attempt: allocation.Attempt, Draining: allocation.Draining, DrainSequence: allocation.DrainSequence}
 		if allocation.CleanupComplete {
 			cleaned[allocation.Node.ID][allocationGeneration{id: allocation.ID, generation: allocation.Generation}] = true
-		}
-		if job := s.jobs[jobKey(allocation.Namespace, allocation.JobName)]; job != nil {
-			for _, group := range job.Spec.TaskGroups {
-				if group.Name == allocation.TaskGroupName {
-					request.Restart = group.Restart
-				}
-			}
 		}
 		networkUnavailable := false
 		if tasksUseWireGuard(allocation.Tasks) && !allocation.CleanupComplete {
@@ -271,18 +278,6 @@ func (s *Server) publishReconcileIntent(ctx context.Context, actions []Action) e
 		if allocation.CleanupComplete || allocation.Phase == lifecycle.PhaseStopping || allocation.Phase == lifecycle.PhaseStopped {
 			mode = nodeapi.ExecutionCleanup
 		}
-		for _, action := range actions {
-			if action.Allocation == allocation {
-				if action.controlPlanned && allocation.DrainSequence != action.drainSequence {
-					continue
-				}
-				if action.Type == ActionStart && eligible && activeAllocationPhase(allocation.Phase) && allocation.Phase != lifecycle.PhaseStopping && (allocation.NextRetryAt == nil || !s.now().Before(*allocation.NextRetryAt)) {
-					mode = nodeapi.ExecutionRun
-				} else if action.Type == ActionStop {
-					mode = nodeapi.ExecutionCleanup
-				}
-			}
-		}
 		if mode == nodeapi.ExecutionRun && (networkUnavailable || blocked[allocation.Node.ID] && allocation.Phase != lifecycle.PhaseRunning) {
 			mode = nodeapi.ExecutionRetain
 		}
@@ -302,35 +297,8 @@ func (s *Server) publishReconcileIntent(ctx context.Context, actions []Action) e
 		allocation.mu.Unlock()
 	}
 	s.mu.RUnlock()
-	for _, action := range actions {
-		if action.Type != ActionStopObserved {
-			continue
-		}
-		if doc := documents[action.Node.ID]; doc != nil {
-			found := false
-			for i := range doc.Allocations {
-				entry := &doc.Allocations[i]
-				if entry.Request.AllocationID == action.ID && entry.Request.Generation == action.Generation {
-					entry.Mode, entry.RetainLogs = nodeapi.ExecutionCleanup, action.RetainLogs
-					found = true
-				}
-			}
-			if !found {
-				doc.Allocations = append(doc.Allocations, nodeapi.AllocationIntent{Mode: nodeapi.ExecutionCleanup, Request: nodeapi.AllocationRequest{AllocationID: action.ID, Generation: action.Generation, Epoch: epoch}, RetainLogs: action.RetainLogs})
-			}
-		}
-	}
 	for id, doc := range documents {
-		decisions, err := s.state.executionDecisions(ctx, id)
-		if err != nil {
-			return err
-		}
-		for _, decision := range decisions {
-			complete, err := s.state.executionCleaned(ctx, id, decision.ID, decision.Generation)
-			if err != nil {
-				return err
-			}
-			cleaned[id][allocationGeneration{id: decision.ID, generation: decision.Generation}] = complete
+		for _, decision := range decisions[id] {
 			found := false
 			for i := range doc.Allocations {
 				entry := &doc.Allocations[i]
@@ -340,54 +308,11 @@ func (s *Server) publishReconcileIntent(ctx context.Context, actions []Action) e
 				}
 			}
 			if !found {
-				complete, err := s.state.executionCleaned(ctx, id, decision.ID, decision.Generation)
-				if err != nil {
-					return err
-				}
+				complete := cleaned[id][allocationGeneration{id: decision.ID, generation: decision.Generation}]
 				if complete && cleanupAbsent {
 					continue
 				}
 				doc.Allocations = append(doc.Allocations, nodeapi.AllocationIntent{Mode: nodeapi.ExecutionCleanup, Request: nodeapi.AllocationRequest{AllocationID: decision.ID, Generation: decision.Generation, Epoch: epoch}, RetainLogs: decision.RetainLogs})
-			}
-		}
-		prior := previous[id]
-		if prior != nil {
-			for _, old := range prior.Allocations {
-				found := false
-				for i := range doc.Allocations {
-					entry := &doc.Allocations[i]
-					if entry.Request.AllocationID == old.Request.AllocationID && entry.Request.Generation == old.Request.Generation {
-						found = true
-						// Execution identity is frozen at first authorization; the
-						// current job may now be deleted or have a different policy.
-						epoch, attempt := entry.Request.Epoch, entry.Request.Attempt
-						draining, sequence := entry.Request.Draining, entry.Request.DrainSequence
-						plan := entry.Request.NetworkPlan
-						if plan == nil && !cleaned[id][allocationGeneration{id: old.Request.AllocationID, generation: old.Request.Generation}] {
-							plan = old.Request.NetworkPlan
-						}
-						entry.Request = old.Request
-						entry.Request.Epoch, entry.Request.Attempt = epoch, attempt
-						entry.Request.Draining, entry.Request.DrainSequence = draining, sequence
-						entry.Request.NetworkPlan = plan
-						if old.Mode == nodeapi.ExecutionCleanup {
-							entry.Mode = old.Mode
-							entry.RetainLogs = entry.RetainLogs && old.RetainLogs
-						}
-					}
-				}
-				if !found {
-					if cleaned[id][allocationGeneration{id: old.Request.AllocationID, generation: old.Request.Generation}] {
-						continue
-					}
-					old.Request.Epoch = epoch
-					if cleanupAbsent {
-						old.Mode, old.RetainLogs = nodeapi.ExecutionCleanup, false
-					} else if old.Mode == nodeapi.ExecutionRun {
-						old.Mode = nodeapi.ExecutionRetain
-					}
-					doc.Allocations = append(doc.Allocations, old)
-				}
 			}
 		}
 		pendingCleanup := false
@@ -433,6 +358,13 @@ func (h *Handler) handleExecution(c *echo.Context) error {
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid execution version")
 	}
+	epoch, err := strconv.ParseUint(c.QueryParam("epoch"), 10, 64)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid execution epoch")
+	}
+	if epoch != h.server.currentControlEpoch() {
+		version = 0
+	}
 	intent, err := h.server.ExecutionIntent(c.Request().Context(), id, version)
 	if err != nil || intent == nil {
 		return echo.NewHTTPError(http.StatusServiceUnavailable, "execution intent unavailable")
@@ -472,10 +404,7 @@ func (h *Handler) handleExecutionCredentials(c *echo.Context) error {
 	if err := s.checkTerm(ctx); err != nil {
 		return echo.NewHTTPError(http.StatusServiceUnavailable, "control-plane leadership changed")
 	}
-	doc, err := s.state.GetExecutionIntent(ctx, id)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusServiceUnavailable, "execution intent unavailable")
-	}
+	doc := s.executionIntentLocked(id)
 	if doc == nil || doc.Version != values["version"] || doc.Epoch != values["epoch"] || doc.Epoch != s.currentControlEpoch() {
 		return echo.NewHTTPError(http.StatusConflict, "execution authorization changed")
 	}
@@ -483,7 +412,9 @@ func (h *Handler) handleExecutionCredentials(c *echo.Context) error {
 	for i := range doc.Allocations {
 		entry := &doc.Allocations[i]
 		attempt := entry.Request.Attempt
-		if attempt < 0 { continue }
+		if attempt < 0 {
+			continue
+		}
 		if entry.Mode == nodeapi.ExecutionRun && entry.Request.AllocationID == c.Param("allocation") && entry.Request.Generation == values["generation"] && uint64(attempt) == values["attempt"] && entry.Request.Epoch == values["epoch"] {
 			request = &entry.Request
 			break
@@ -531,8 +462,8 @@ func (h *Handler) handleExecutionCredentials(c *echo.Context) error {
 	}
 	s.executionMu.Lock()
 	locked = true
-	current, err := s.state.GetExecutionIntent(ctx, id)
-	if err != nil || s.checkTerm(ctx) != nil {
+	current := s.executionIntentLocked(id)
+	if s.checkTerm(ctx) != nil {
 		return echo.NewHTTPError(http.StatusServiceUnavailable, "execution authorization unavailable")
 	}
 	if current == nil || current.Version != doc.Version || current.Epoch != doc.Epoch {

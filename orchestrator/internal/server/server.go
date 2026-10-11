@@ -14,6 +14,7 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/auth"
 	"github.com/overfold/trellis/orchestrator/internal/catalog"
 	"github.com/overfold/trellis/orchestrator/internal/client"
+	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	secretstore "github.com/overfold/trellis/orchestrator/internal/secrets"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 	"github.com/overfold/trellis/orchestrator/internal/state"
@@ -89,20 +90,21 @@ type Server struct {
 	// Heartbeats take termMu for short admission checks and then the
 	// liveness and observations leaf locks, never mutationMu or Raft.
 	mu sync.RWMutex
-	// executionMu serializes committed intent reads, publication and watcher
+	// executionMu serializes derived intent reads, publication and watcher
 	// subscription. Publication takes mutationMu first and releases mu before
 	// taking executionMu; blocking pulls never hold it while waiting.
-	executionMu    sync.Mutex
-	executionWatch map[uuid.UUID]chan struct{}
-	reconcileMu    sync.Mutex
-	mutationMu     sync.Mutex
-	controlEpoch   uint64
-	leaderSince    time.Time
-	now            func() time.Time
-	metrics        *Metrics
-	secrets        *secretstore.Store
-	events         *EventBus
-	logStreams     *transport.StreamLimiter
+	executionMu      sync.Mutex
+	executionWatch   map[uuid.UUID]chan struct{}
+	executionIntents map[uuid.UUID]*nodeapi.ExecutionIntent
+	reconcileMu      sync.Mutex
+	mutationMu       sync.Mutex
+	controlEpoch     uint64
+	leaderSince      time.Time
+	now              func() time.Time
+	metrics          *Metrics
+	secrets          *secretstore.Store
+	events           *EventBus
+	logStreams       *transport.StreamLimiter
 
 	// termWork joins admitted requests and publication before reload.
 	termMu   sync.RWMutex

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -283,9 +284,48 @@ func TestExecutionVersionFenceWithoutCancellation(t *testing.T) {
 		t.Fatal("stale cleanup produced a receipt")
 	}
 	r := old.Allocations[0].Request
-	ctx := context.WithValue(context.Background(), executionFenceKey{}, old.Version)
+	ctx := context.WithValue(context.Background(), executionFenceKey{}, [2]uint64{old.Epoch, old.Version})
 	if err := a.DrainGroup(ctx, &nodeapi.DrainAllocationRequest{AllocationID: r.AllocationID, Generation: r.Generation, Epoch: r.Epoch, Sequence: 1}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("stale drain admission returned %v", err)
+	}
+}
+
+func TestExecutionNewEpochResetsVersionAndFencesOldWorkers(t *testing.T) {
+	for _, version := range []uint64{1, 9} {
+		t.Run(fmt.Sprint(version), func(t *testing.T) {
+			a := newOperationTestAgent(t, &reconcilerRuntime{})
+			a.nodeID = uuid.New()
+			leader := uuid.New()
+			a.server = client.NewServerClient("", "", nil)
+			a.server.SetControlPlane(nodeapi.ControlPlaneResponse{LeaderID: leader})
+			old := executionTestDocument(a, leader)
+			old.Version = 9
+			old.Allocations[0].Mode = nodeapi.ExecutionCleanup
+			if err := a.AcceptExecution(old); err != nil {
+				t.Fatal(err)
+			}
+			oldWork := a.intentContext
+			next := executionTestDocument(a, leader)
+			next.Epoch++
+			next.Version = version
+			next.Allocations[0].Request.Epoch = next.Epoch
+			if err := a.AcceptExecution(next); err != nil {
+				t.Fatalf("new epoch with reset/reused version rejected: %v", err)
+			}
+			if !errors.Is(oldWork.Err(), context.Canceled) {
+				t.Fatal("new epoch did not cancel old workers")
+			}
+			if err := a.reconcileExecution(context.Background(), old); !errors.Is(err, ErrStaleEpoch) {
+				t.Fatalf("old epoch cleanup admitted: %v", err)
+			}
+			if len(a.allocationStatuses()) != 0 {
+				t.Fatal("old epoch cleanup produced a receipt")
+			}
+			old.Version = 100
+			if err := a.AcceptExecution(old); err == nil {
+				t.Fatal("older epoch with higher version accepted")
+			}
+		})
 	}
 }
 

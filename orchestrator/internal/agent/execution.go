@@ -102,10 +102,10 @@ func (a *Agent) acceptExecution(doc *nodeapi.ExecutionIntent, cached bool) error
 				return fmt.Errorf("mixed execution identity for %s", r.AllocationID)
 			}
 		}
-		if doc.Version < a.intent.Version || doc.Epoch < a.intent.Epoch {
+		if doc.Epoch < a.intent.Epoch || doc.Epoch == a.intent.Epoch && doc.Version < a.intent.Version {
 			return fmt.Errorf("stale execution intent")
 		}
-		if doc.Version == a.intent.Version && !reflect.DeepEqual(doc, a.intent) {
+		if doc.Epoch == a.intent.Epoch && doc.Version == a.intent.Version && !reflect.DeepEqual(doc, a.intent) {
 			return fmt.Errorf("conflicting execution version")
 		}
 	}
@@ -137,7 +137,7 @@ func (a *Agent) acceptExecution(doc *nodeapi.ExecutionIntent, cached bool) error
 	if err = a.AcceptEpoch(doc.Epoch); err != nil {
 		return err
 	}
-	if a.intentContext == nil || a.intent == nil || a.intent.Version != cloned.Version {
+	if a.intentContext == nil || a.intent == nil || a.intent.Epoch != cloned.Epoch || a.intent.Version != cloned.Version {
 		if a.intentCancel != nil {
 			a.intentCancel()
 		}
@@ -192,11 +192,13 @@ func (a *Agent) runExecutionLoop(ctx context.Context) {
 	for ctx.Err() == nil {
 		a.intentMu.Lock()
 		version := uint64(0)
+		epoch := uint64(0)
 		if a.intent != nil {
 			version = a.intent.Version
+			epoch = a.intent.Epoch
 		}
 		a.intentMu.Unlock()
-		doc, err := a.server.PullExecution(ctx, a.nodeID, a.server.ControlPlane().LeaderID, version)
+		doc, err := a.server.PullExecution(ctx, a.nodeID, a.server.ControlPlane().LeaderID, epoch, version)
 		if err == nil {
 			err = a.AcceptExecution(doc)
 		}
@@ -292,7 +294,7 @@ func (a *Agent) dispatchExecution(ctx context.Context, doc *nodeapi.ExecutionInt
 			defer func() {
 				a.intentMu.Lock()
 				delete(a.intentWorkers, id)
-				if a.intent != nil && a.intent.Version != doc.Version && a.intentWake != nil {
+				if a.intent != nil && (a.intent.Epoch != doc.Epoch || a.intent.Version != doc.Version) && a.intentWake != nil {
 					select {
 					case a.intentWake <- struct{}{}:
 					default:
@@ -310,7 +312,7 @@ func (a *Agent) dispatchExecution(ctx context.Context, doc *nodeapi.ExecutionInt
 				namespace := id[len("network/"):]
 				part.NetworkPlans = map[string]network.Plan{namespace: doc.NetworkPlans[namespace]}
 			}
-			if err := a.reconcileExecutionAllowed(context.WithValue(ctx, executionFenceKey{}, doc.Version), &part, fresh); err != nil {
+			if err := a.reconcileExecutionAllowed(context.WithValue(ctx, executionFenceKey{}, [2]uint64{doc.Epoch, doc.Version}), &part, fresh); err != nil {
 				a.log.Debug("reconcile allocation intent", "allocation", id, "error", err)
 			}
 		}()
@@ -322,7 +324,7 @@ type executionFenceKey struct{}
 // fenceExecution serializes admission with document persistence, not runtime I/O.
 func (a *Agent) fenceExecution(ctx context.Context) (func(), error) {
 	a.intentMu.Lock()
-	if version, ok := ctx.Value(executionFenceKey{}).(uint64); ok && (a.intent == nil || a.intent.Version != version) {
+	if revision, ok := ctx.Value(executionFenceKey{}).([2]uint64); ok && (a.intent == nil || [2]uint64{a.intent.Epoch, a.intent.Version} != revision) {
 		a.intentMu.Unlock()
 		return nil, context.Canceled
 	}
@@ -335,7 +337,7 @@ func (a *Agent) fenceExecution(ctx context.Context) (func(), error) {
 }
 
 func (a *Agent) reconcileExecution(ctx context.Context, doc *nodeapi.ExecutionIntent) error {
-	return a.reconcileExecutionAllowed(context.WithValue(ctx, executionFenceKey{}, doc.Version), doc, true)
+	return a.reconcileExecutionAllowed(context.WithValue(ctx, executionFenceKey{}, [2]uint64{doc.Epoch, doc.Version}), doc, true)
 }
 
 func (a *Agent) reconcileExecutionAllowed(ctx context.Context, doc *nodeapi.ExecutionIntent, allowStarts bool) error {
