@@ -57,6 +57,47 @@ are [cluster settings](#cluster-settings): they only initialize a new cluster,
 and afterwards every node uses the replicated values. Editing them here and
 restarting has no effect on an existing cluster.
 
+### WireGuard identity recovery
+
+Each node keeps its WireGuard pair in `<data_dir>/network/identity.key` (private,
+0600) and `identity.pub` (public, 0644). These are base64-encoded 32-byte keys,
+not the node's TLS certificate keys. Back up the private key securely with the
+node's local data; desired-state backups do not include it. Existing valid pairs
+are preserved byte-for-byte, without a format migration.
+
+Startup derives the public identity from the private key and requires any
+existing public file to match. A missing public file is atomically recreated
+without changing the private key. Private and public publication is synced
+before registration; a failed or interrupted publication can be retried with
+the same private key. Unreadable, malformed, or mismatched files, or a missing
+private key beside an existing public file, stop startup rather than silently
+rotating the node identity.
+
+For repair, stop the daemon first (`sudo systemctl stop trellis` on installed
+nodes), preserve the files for investigation, and use the configured `data_dir`:
+
+1. If the private key is missing or malformed, restore the **original** private
+   key from a trusted node-local backup, with mode 0600 and daemon ownership.
+   A public key cannot recover its private key.
+2. If only the public file is corrupt or mismatched, derive a candidate with
+   `sudo wg pubkey < identity.key` from the network directory (run the redirection
+   in a root shell if necessary). This prints only the public key. Compare it
+   with a trusted backup of that node's original `identity.pub`, or its peer
+   identity on a healthy node (`sudo wg show`, identifying the peer by endpoint).
+   If they match, move the bad
+   `identity.pub` aside and restart; Trellis republishes it. If they differ,
+   restore the original private key instead; do not blindly delete the public
+   file to accept an unintended new identity.
+3. Restart (`sudo systemctl start trellis`), confirm registration, and check
+   namespace workload connectivity to other nodes.
+
+Never delete both files as a repair shortcut. When both are absent, Trellis
+treats the directory as a first initialization and generates a new pair; local
+files alone cannot distinguish a new node from total identity loss. If the
+original private key cannot be recovered, use the documented
+[node removal and replacement](multi-node.md#maintain-a-multi-node-cluster) workflow rather
+than restarting an existing node with an accidental new key.
+
 ### Host resource reserve
 
 Scheduling uses the node's **allocatable** CPU and memory, not its whole-host

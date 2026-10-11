@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
+	"github.com/overfold/trellis/orchestrator/internal/network"
 	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 )
@@ -85,6 +86,9 @@ func (s *Server) RegisterNode(ctx context.Context, nodeRegistration *NodeRegistr
 	if nodeRegistration.WireGuardPublicKey != "" || nodeRegistration.WireGuardEndpoint != "" || nodeRegistration.WireGuardPortBase != 0 || nodeRegistration.WireGuardPortCount != 0 {
 		if nodeRegistration.WireGuardPublicKey == "" || nodeRegistration.WireGuardEndpoint == "" {
 			return fmt.Errorf("%w: WireGuard registration requires a public key and endpoint", ErrInvalidNodeRegistration)
+		}
+		if err := network.ValidateWireGuardPublicKey(nodeRegistration.WireGuardPublicKey); err != nil {
+			return fmt.Errorf("%w: %w", ErrInvalidNodeRegistration, err)
 		}
 		if nodeRegistration.WireGuardPortCount != s.wireGuardPortCount {
 			return fmt.Errorf("%w: WireGuard port count %d does not match cluster count %d", ErrInvalidNodeRegistration, nodeRegistration.WireGuardPortCount, s.wireGuardPortCount)

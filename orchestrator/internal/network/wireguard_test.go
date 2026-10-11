@@ -311,6 +311,115 @@ func TestAutomatedIdentityPersists(t *testing.T) {
 	}
 }
 
+func TestAutomatedIdentityRecovery(t *testing.T) {
+	// RFC 7748 Alice's key pair, independent of the implementation's derivation.
+	const private = "dwdtCnMYpX08FsFyUbJmRd9ML4frwJkqsXf7pR25LCo="
+	const public = "hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo="
+	for _, tc := range []struct {
+		name, private, public string
+		wantError             bool
+	}{
+		{"valid", private + "\n", public + "\n", false},
+		{"valid_unterminated", private, public, false},
+		{"missing_public", private + "\n", "", false},
+		{"missing_private", "", public + "\n", true},
+		{"malformed_private", "not-a-key\n", public + "\n", true},
+		{"malformed_private_missing_public", "not-a-key\n", "", true},
+		{"zero_private", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n", "", true},
+		{"malformed_public", private + "\n", "not-a-key\n", true},
+		{"mismatched_public", private + "\n", "3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hbeGdNrfx+FG+IK08=\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			keyPath, pubPath := filepath.Join(dir, "identity.key"), filepath.Join(dir, "identity.pub")
+			for path, value := range map[string]string{keyPath: tc.private, pubPath: tc.public} {
+				if value != "" {
+					if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			manager, err := NewAutomatedWireGuardManager(dir)
+			if tc.wantError {
+				if err == nil {
+					t.Fatal("unsafe identity accepted")
+				}
+				t.Logf("refused unsafe identity: %v", err)
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				for range 2 {
+					got, err := manager.Identity()
+					if err != nil || got != public {
+						t.Fatalf("identity = %q, %v; want RFC public", got, err)
+					}
+					manager, err = NewAutomatedWireGuardManager(dir)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				got, err := os.ReadFile(pubPath)
+				wantPublic := tc.public
+				if wantPublic == "" {
+					wantPublic = public + "\n"
+				}
+				if err != nil || string(got) != wantPublic {
+					t.Fatalf("published public differs: %v", err)
+				}
+			}
+			got, err := os.ReadFile(keyPath)
+			if tc.private == "" {
+				if !os.IsNotExist(err) {
+					t.Fatal("missing private key was replaced")
+				}
+			} else if err != nil || string(got) != tc.private {
+				t.Fatalf("private material changed: %v", err)
+			}
+		})
+	}
+}
+
+func TestAutomatedIdentityInterruptedPublication(t *testing.T) {
+	dir := t.TempDir()
+	pubPath, keyPath := filepath.Join(dir, "identity.pub"), filepath.Join(dir, "identity.key")
+	if _, err := NewAutomatedWireGuardManager(dir); err != nil {
+		t.Fatal(err)
+	}
+	private, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(pubPath); err != nil {
+		t.Fatal(err)
+	}
+	// Force publication to fail after the private key has been persisted.
+	if err := os.Mkdir(pubPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewAutomatedWireGuardManager(dir); err == nil {
+		t.Fatal("publication failure accepted")
+	}
+	if err := os.Remove(pubPath); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewAutomatedWireGuardManager(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	public, err := manager.Identity()
+	if err != nil || public == "" {
+		t.Fatalf("recovery: %v", err)
+	}
+	got, err := os.ReadFile(keyPath)
+	if err != nil || string(got) != string(private) {
+		t.Fatal("interrupted publication rotated private identity")
+	}
+	if _, err := NewAutomatedWireGuardManager(dir); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestConfigureWorkloadDNSRejectsIPv6(t *testing.T) {
 	manager := NewWireGuardManager(t.TempDir())
 	manager.run = &recordingRunner{}

@@ -119,6 +119,29 @@ func TestKernelNamespaceAudit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Recover lost public files on both endpoints before exercising real
+	// attachment reconciliation and authenticated cross-node traffic.
+	for _, identity := range []struct {
+		manager **WireGuardManager
+		public  string
+	}{{&manager, localKey}, {&remoteIdentity, remoteKey}} {
+		dir := (*identity.manager).stateDir
+		if err := os.Remove(filepath.Join(dir, "identity.pub")); err != nil {
+			t.Fatal(err)
+		}
+		recovered, err := NewAutomatedWireGuardManager(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		public, err := recovered.Identity()
+		if err != nil || public != identity.public {
+			t.Fatalf("public-file recovery changed peer identity: %v", err)
+		}
+		*identity.manager = recovered
+	}
+	if err := manager.ConfigureWorkloadDNS(t.Context(), WorkloadDNSAddress); err != nil {
+		t.Fatal(err)
+	}
 	plan.APIPort = 0
 	plan.Peers = []PeerPlan{{PublicKey: remoteKey, Endpoint: "192.0.2.2:52000", AllowedIPs: []string{"10.42.9.0/24"}}}
 	if err := manager.UpdatePlan(t.Context(), one.Namespace, plan); err != nil {
@@ -152,6 +175,20 @@ func TestKernelNamespaceAudit(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	connect("remote", allocationIP, true) // Remote namespace peers reach workloads.
+	for _, identity := range []struct{ namespace, device, public string }{
+		{"", one.WireGuardInterface, localKey}, {"remote", "wg0", remoteKey},
+	} {
+		args := []string{"show", identity.device, "public-key"}
+		command := "wg"
+		if identity.namespace != "" {
+			command, args = "ip", append([]string{"netns", "exec", identity.namespace, "wg"}, args...)
+		}
+		public, err := (execRunner{}).Output(t.Context(), command, args...)
+		if err != nil || strings.TrimSpace(public) != identity.public {
+			t.Fatalf("kernel identity differs from advertised identity: %v", err)
+		}
+	}
+	t.Log("two isolated node endpoints retained advertised identities after public-file recovery; real WireGuard traffic reached the attached namespace workload")
 	// Baseline proves WireGuard transport and the host listener work.
 	run("iptables", "-I", "INPUT", "1", "-i", one.WireGuardInterface, "-j", "ACCEPT")
 	connect("remote", plan.Gateway, true)

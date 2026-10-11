@@ -70,13 +70,39 @@ func TestRegisterNodeRejectsMismatchedWireGuardPortCount(t *testing.T) {
 		ID:                 uuid.New(),
 		Host:               "node-a",
 		Port:               8127,
-		WireGuardPublicKey: "public-key",
+		WireGuardPublicKey: "hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo=",
 		WireGuardEndpoint:  "node-a:51820",
 		WireGuardPortBase:  51820,
 		WireGuardPortCount: 64,
 	})
 	if err == nil {
 		t.Fatal("expected mismatched WireGuard port count to be rejected")
+	}
+}
+
+func TestRegisterNodeValidatesWireGuardIdentity(t *testing.T) {
+	const public = "hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo="
+	store := memoryStore{}
+	s := newSettingsTestServer(t, store)
+	s.wireGuardPortCount = 256
+	id := uuid.New()
+	registration := &NodeRegistration{ID: id, Host: "node-a", Port: 8127,
+		WireGuardPublicKey: public, WireGuardEndpoint: "node-a:51820", WireGuardPortBase: 51820, WireGuardPortCount: 256}
+	if err := s.RegisterNode(t.Context(), registration); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"not-a-key", "aGVsbG8=", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", public + "\n"} {
+		registration.WireGuardPublicKey = key
+		if err := s.RegisterNode(t.Context(), registration); !errors.Is(err, ErrInvalidNodeRegistration) {
+			t.Errorf("unsafe public key registration = %v; want invalid registration", err)
+		}
+		nodes, err := s.state.ListNodes(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(nodes) != 1 || nodes[id.String()].WireGuardPublicKey != public || s.ListNodes()[0].WireGuardPublicKey != public {
+			t.Error("rejected identity changed registered or persisted peer")
+		}
 	}
 }
 

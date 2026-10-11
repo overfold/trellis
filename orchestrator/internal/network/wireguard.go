@@ -112,7 +112,8 @@ func NewAutomatedWireGuardManager(stateDir string) (*WireGuardManager, error) {
 	return m, nil
 }
 
-// Identity returns the manager public key, generating its key pair if needed.
+// Identity validates and durably publishes the manager identity before it can
+// be registered. Existing private material is authoritative and never rotated.
 func (m *WireGuardManager) Identity() (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -120,21 +121,89 @@ func (m *WireGuardManager) Identity() (string, error) {
 		return "", err
 	}
 	privatePath, publicPath := filepath.Join(m.stateDir, "identity.key"), filepath.Join(m.stateDir, "identity.pub")
-	if raw, err := os.ReadFile(publicPath); err == nil {
-		return strings.TrimSpace(string(raw)), nil
+	privateRaw, privateErr := os.ReadFile(privatePath)
+	defer clear(privateRaw)
+	if privateErr != nil && !os.IsNotExist(privateErr) {
+		return "", fmt.Errorf("read WireGuard private identity %s: %w", privatePath, privateErr)
 	}
-	key, err := ecdh.X25519().GenerateKey(rand.Reader)
-	if err != nil {
-		return "", err
+	publicRaw, publicErr := os.ReadFile(publicPath)
+	if publicErr != nil && !os.IsNotExist(publicErr) {
+		return "", fmt.Errorf("read WireGuard public identity %s: %w", publicPath, publicErr)
 	}
-	private, public := base64.StdEncoding.EncodeToString(key.Bytes()), base64.StdEncoding.EncodeToString(key.PublicKey().Bytes())
-	if err := os.WriteFile(privatePath, []byte(private+"\n"), 0o600); err != nil {
-		return "", err
+	var key *ecdh.PrivateKey
+	if os.IsNotExist(privateErr) {
+		if publicErr == nil {
+			return "", fmt.Errorf("WireGuard private identity %s is missing but public identity exists; restore the original private key (see operations: WireGuard identity recovery)", privatePath)
+		}
+		var err error
+		key, err = ecdh.X25519().GenerateKey(rand.Reader)
+		if err != nil {
+			return "", fmt.Errorf("generate WireGuard identity: %w", err)
+		}
+		private := base64.StdEncoding.EncodeToString(key.Bytes())
+		if err := writeAtomicFile(privatePath, []byte(private+"\n")); err != nil {
+			return "", fmt.Errorf("publish WireGuard private identity: %w", err)
+		}
+	} else {
+		private := strings.TrimSpace(string(privateRaw))
+		decoded, err := base64.StdEncoding.Strict().DecodeString(private)
+		defer clear(decoded)
+		if err != nil || len(decoded) != 32 || base64.StdEncoding.EncodeToString(decoded) != private || [32]byte(decoded) == [32]byte{} {
+			return "", fmt.Errorf("invalid WireGuard private identity %s; restore the original private key (see operations: WireGuard identity recovery)", privatePath)
+		}
+		key, err = ecdh.X25519().NewPrivateKey(decoded)
+		if err != nil {
+			return "", fmt.Errorf("parse WireGuard private identity: %w", err)
+		}
 	}
-	if err := os.WriteFile(publicPath, []byte(public+"\n"), 0o644); err != nil {
-		return "", err
+	public := base64.StdEncoding.EncodeToString(key.PublicKey().Bytes())
+	if publicErr == nil && strings.TrimSpace(string(publicRaw)) != public {
+		return "", fmt.Errorf("WireGuard public identity %s does not match the private key; verify the registered identity before repair (see operations: WireGuard identity recovery)", publicPath)
+	}
+	if os.IsNotExist(publicErr) {
+		if err := writeAtomicFileWithRename(publicPath, []byte(public+"\n"), 0o644, os.Rename); err != nil {
+			return "", fmt.Errorf("publish WireGuard public identity: %w", err)
+		}
+	}
+	// Sync existing material too, including retries following an ambiguous
+	// publication error. Never return an identity before durability.
+	for _, path := range []string{privatePath, publicPath} {
+		f, err := os.Open(path)
+		if err != nil {
+			return "", fmt.Errorf("open WireGuard identity %s: %w", path, err)
+		}
+		if err := errors.Join(f.Sync(), f.Close()); err != nil {
+			return "", fmt.Errorf("sync WireGuard identity %s: %w", path, err)
+		}
+	}
+	for _, dir := range []string{m.stateDir, filepath.Dir(m.stateDir)} {
+		if err := syncDirectory(dir); err != nil {
+			return "", fmt.Errorf("sync WireGuard identity directory: %w", err)
+		}
 	}
 	return public, nil
+}
+
+// ValidateWireGuardPublicKey rejects malformed and low-order X25519 identities
+// that cannot authenticate a WireGuard peer. Wire keys use canonical base64.
+func ValidateWireGuardPublicKey(public string) error {
+	raw, err := base64.StdEncoding.Strict().DecodeString(public)
+	if err != nil || len(raw) != 32 || base64.StdEncoding.EncodeToString(raw) != public {
+		return fmt.Errorf("WireGuard public key must be canonical base64 encoding of 32 bytes")
+	}
+	key, err := ecdh.X25519().NewPublicKey(raw)
+	if err != nil {
+		return fmt.Errorf("parse WireGuard public key: %w", err)
+	}
+	// A fixed valid scalar suffices to detect low-order public points.
+	scalar := [32]byte{1}
+	probe, _ := ecdh.X25519().NewPrivateKey(scalar[:])
+	shared, err := probe.ECDH(key)
+	clear(shared)
+	if err != nil {
+		return fmt.Errorf("WireGuard public key cannot authenticate a peer")
+	}
+	return nil
 }
 
 // NewWireGuardManager creates a manager that loads named network configurations.

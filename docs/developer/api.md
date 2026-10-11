@@ -23,6 +23,16 @@ Heartbeat authorization first requires the path UUID to match the authenticated 
 
 The authenticated control-plane topology response also includes `wireguard_port_count`. Workers fetch it before initializing local networking: an omitted local count adopts the cluster value, while an explicitly different count is rejected.
 
+WireGuard registration keys must be canonical base64 encodings of 32-byte
+X25519 public keys and must not be low-order points that cannot authenticate a
+peer. Invalid keys return `400` before persistence or peer-plan propagation.
+The daemon derives its identity from local private material and durably
+publishes the matching public file before registration; a missing public file
+is recoverable without private rotation, but corrupt or inconsistent state
+stops startup. See [operator repair](../public/operations.md#wireguard-identity-recovery).
+Registration cannot prove possession of the advertised private key; the
+authenticated node remains responsible for its local key pair.
+
 Registration reports physical and allocatable resources, workload eligibility (`runs_workloads`, default true), capabilities, and the node's WireGuard public key, advertised endpoint, local port base, and range size. Heartbeats carry a complete current observation, including capabilities and `raft_applied_index`; optional host usage and task log usage fields may be absent when counters are unavailable or the runtime cannot measure its log directory. They return no desired state. A `200` with topology JSON means the leader validated the report and recorded liveness, not that allocation observations have been durably persisted: observations are queued asynchronously. An unregistered node's heartbeat fails, causing registration before the next heartbeat.
 
 Heartbeat bodies are limited to 32 MiB and 320,000 allocation-task reports (`413` on excess). A task `reason` is allowed only for phase `failed`, and currently only `restart_budget_exhausted` is accepted. A task in phase `starting` may carry `start_failure`: `attempt`, a message of at most 1024 bytes, and optional code `stale_generation`, `execution_conflict`, or `restart_budget_exhausted`. Other phases reject that field. The leader counts a failure for the allocation's current attempt once; a non-retryable code immediately fails it.

@@ -82,7 +82,7 @@ func TestMembersUseReplicatedClusterSettingsInsteadOfLocalConfiguration(t *testi
 	}
 
 	registration := func(count int) *NodeRegistration {
-		return &NodeRegistration{ID: nodeID, Host: "node-b", Port: 8127, CPUCapacity: 1000, MemoryCapacity: 1 << 30, CPUAllocatable: 1000, MemoryAllocatable: 1 << 30, WireGuardPublicKey: "key", WireGuardEndpoint: "node-b:51820", WireGuardPortBase: 51820, WireGuardPortCount: count}
+		return &NodeRegistration{ID: nodeID, Host: "node-b", Port: 8127, CPUCapacity: 1000, MemoryCapacity: 1 << 30, CPUAllocatable: 1000, MemoryAllocatable: 1 << 30, WireGuardPublicKey: "hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo=", WireGuardEndpoint: "node-b:51820", WireGuardPortBase: 51820, WireGuardPortCount: count}
 	}
 	if err := second.RegisterNode(ctx, registration(DefaultWireGuardPortCount)); err == nil {
 		t.Fatal("failover leader accepted a node whose port count differs from the replicated count")
