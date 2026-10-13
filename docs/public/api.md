@@ -41,6 +41,8 @@ Status codes separate what the client may fix from what it may retry. `4xx` resp
 | `GET` | `/v1/auth/whoami` | Return the current credential kind, access, and available provenance metadata. |
 | `GET` | `/v1/nodes` | List node capacity, discovered capabilities, status, and control-plane membership; requires read access. |
 | `GET` | `/v1/cluster/leader` | Identify the serving control-plane leader; requires read access. |
+| `GET` | `/v1/cluster/compatibility` | Inspect active semantics and live node binary probes; requires read access. |
+| `POST` | `/v1/cluster/compatibility/activate` | Activate an adjacent stable level with `{"release": N}`; administrator signature required. |
 | `POST` / `DELETE` | `/v1/nodes/{id}/drain` | Drain or undrain; requires cluster-wide `write` access. |
 | `POST` | `/v1/nodes/{id}/promote` | Authorize an enrolled worker for control-plane participation; administrator signature required. |
 | `POST` | `/v1/nodes/identities` | Bind an external node certificate and role; external signing mode and administrator signature required. |
@@ -83,6 +85,22 @@ A workload credential additionally reports `"subject": {"namespace": "payments",
 An administrator credential reports `kind: "administrator"` and `access: "write"`, but callers must still treat `administrator` as more privileged than ordinary cluster-wide write access: root-only endpoint checks use the credential kind/context, not merely access. No credential response includes a `scope` field.
 
 `GET /v1/namespaces` is discovery, not namespace lifecycle management. It returns the sorted union of namespace names that currently have a desired job or a stored secret. Credentials do not create discoverable namespaces. There is no namespace-creation call: storing a secret in or applying a job to a previously unseen namespace makes it discoverable.
+
+`GET /v1/cluster/compatibility` returns `active_release`, `binary_release` (the
+serving leader), and `nodes`, sorted by UUID. Each node has `id`, a numeric
+`release` or `null` when its running binary could not be verified, and an optional
+`error`. Probes are authenticated against each node's certificate identity, not
+inferred from cached heartbeat version strings. Sequence 0 is experimental; v1
+will begin the stable sequence at 1 without recognizing pre-v1 releases.
+
+Activation accepts `{"release": N}` and returns the same status shape. The target
+must be the active level's immediate successor and the serving binary's level;
+every registered worker and Raft member must be verified at that target. Unsafe,
+experimental-to-stable, skipped, or decreasing transitions return `409`;
+non-administrator writes return `403`. An already active target succeeds
+idempotently. Activation closes the predecessor's rollback window and never
+occurs automatically. Public Go clients expose `ClusterCompatibility` and
+`ActivateRelease`. See [upgrade compatibility](operations.md#compatibility-boundary).
 
 Node resource values use millicores for CPU and bytes for memory. In `GET /v1/nodes`, `cpu_capacity` and `memory_capacity` are whole-host capacity, while `cpu_allocatable` and `memory_allocatable` are the capacity available to the scheduler after the node's host reserve. The existing `cpu` and `memory` fields carry the same allocatable values. `last_heartbeat` is when the current leader last received a heartbeat from the node; heartbeat times are not replicated, so it is omitted until the node reports to a newly elected leader. `cpu_usage` is a whole-host ratio from 0 to 1; `memory_used`, `memory_available`, and `metrics_at` describe the same point-in-time host sample and are omitted until the agent can collect one. `task_log_bytes` is the total size of the task logs stored on the node, for running tasks and retained terminal allocations; `task_log_filesystem_available` and `task_log_filesystem_capacity` describe the filesystem that holds them, in bytes. They come from the node's latest heartbeat and are omitted when the node cannot measure them. Scheduling uses allocatable capacity, never live utilization. `control_plane` is `voter` or `nonvoter` for a Raft member and omitted for a registered node that is no longer one.
 
@@ -137,7 +155,7 @@ The job submitted to `POST /v1/namespaces/{ns}/jobs` or `.../jobs/plan` must nam
 
 Malformed preconditions (a negative version, or the combinations above) return `400`. The leader checks the preconditions and commits the change under the same serialized job-mutation lock, so of several concurrent applies against the same version exactly one succeeds; the others receive `409 Conflict` with a `message` naming the expected and current versions, or saying that the job was deleted and recreated. A successful submit returns `202` with `{"namespace", "name", "incarnation", "version", "revision"}` describing the committed job, so clients need not re-read it. `trellisctl jobs apply` always sends the plan's resolved `spec`, image pins, settings fingerprint, `base_incarnation`, and `base_version` (or `expected_version: 0` for a create). `job.registered` events on the event streams fire for every apply that changes a job and carry its new `version` and `revision`.
 
-`GET /v1/namespaces/{ns}/jobs/{name}/versions` returns the retained history in ascending version order; each entry has `version`, the `revision` that version ran, the full canonical `spec`, `resolved_images`, and `created_at`. To roll back to an exact historical deployment, submit that entry's `spec` and `resolved_images` together; submitting its tagged spec alone selects today's tag content instead. Trellis retains at most the 10 newest versions for each live job, and every changed apply compacts that job's history. Leadership activation advances the fencing epoch but does not compact job history. Deleting a job atomically deletes all of its history, so recreating the same name starts again at version 1 and revision 1. Backups use format version 7, which records the producing `trellis_version`, carries the replicated `cluster_settings`, and holds canonical job and history records with resolved image pins. Restore validates those pins without registry lookups. `POST /v1/backup/restore` accepts only the current format version; a backup in any other format is refused with an error that names its format and the Trellis release that created it. Formats are never migrated; see the [pre-v1 compatibility policy](operations.md#upgrade-a-node).
+`GET /v1/namespaces/{ns}/jobs/{name}/versions` returns the retained history in ascending version order; each entry has `version`, the `revision` that version ran, the full canonical `spec`, `resolved_images`, and `created_at`. To roll back to an exact historical deployment, submit that entry's `spec` and `resolved_images` together; submitting its tagged spec alone selects today's tag content instead. Trellis retains at most the 10 newest versions for each live job, and every changed apply compacts that job's history. Leadership activation advances the fencing epoch but does not compact job history. Deleting a job atomically deletes all of its history, so recreating the same name starts again at version 1 and revision 1. Backups use format version 8, which records the producing `trellis_version` and `active_release`, carries the replicated `cluster_settings`, and holds canonical job and history records with resolved image pins. Restore validates those pins without registry lookups and requires the target's active compatibility level to match the backup. `POST /v1/backup/restore` accepts only the current format version; a backup in any other format is refused with an error that names its format and the Trellis release that created it. Formats are never migrated; see the [compatibility policy](operations.md#upgrade-a-node).
 
 Restore requires an empty target's job/history, secret, volume registration, network port/subnet registration, allocation, and replacement-backoff prefixes. Replacement backoffs are not included in backups. A target retaining only backoffs is still nonfresh; freshness rejection leaves state unchanged. See [backup recovery](operations.md#backups).
 

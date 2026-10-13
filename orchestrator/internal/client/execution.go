@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/overfold/trellis/orchestrator/internal/compatibility"
 	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/tlsutil"
 	"github.com/overfold/trellis/orchestrator/internal/transport"
@@ -65,7 +66,7 @@ func (s *ServerClient) executionRequest(ctx context.Context, leader uuid.UUID, p
 // PullExecution long-polls the authenticated current leader for a complete view.
 func (s *ServerClient) PullExecution(ctx context.Context, node, leader uuid.UUID, epoch, version uint64) (*nodeapi.ExecutionIntent, error) {
 	var intent nodeapi.ExecutionIntent
-	err := s.executionRequest(ctx, leader, fmt.Sprintf("/v1/nodes/%s/execution?epoch=%d&version=%d", node, epoch, version), 35*time.Second, &intent)
+	err := s.executionRequest(ctx, leader, fmt.Sprintf("/v1/nodes/%s/execution?epoch=%d&version=%d&release=%d", node, epoch, version, compatibility.Current()), 35*time.Second, &intent)
 	if err != nil {
 		return nil, err
 	}
@@ -78,7 +79,7 @@ func (s *ServerClient) PullExecution(ctx context.Context, node, leader uuid.UUID
 // ExecutionCredentials retrieves credentials for one centrally authorized attempt.
 func (s *ServerClient) ExecutionCredentials(ctx context.Context, node, leader uuid.UUID, version uint64, r nodeapi.AllocationRequest) (*nodeapi.ExecutionCredentials, error) {
 	var credentials nodeapi.ExecutionCredentials
-	path := fmt.Sprintf("/v1/nodes/%s/execution/%s/credentials?version=%d&generation=%d&epoch=%d&attempt=%d", node, url.PathEscape(r.AllocationID), version, r.Generation, r.Epoch, r.Attempt)
+	path := fmt.Sprintf("/v1/nodes/%s/execution/%s/credentials?version=%d&generation=%d&epoch=%d&attempt=%d&release=%d", node, url.PathEscape(r.AllocationID), version, r.Generation, r.Epoch, r.Attempt, compatibility.Current())
 	if err := s.executionRequest(ctx, leader, path, 10*time.Second, &credentials); err != nil {
 		return nil, err
 	}

@@ -456,7 +456,7 @@ func TestRaftStoreCurrentSnapshotStartupAndRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := io.WriteString(sink, `[2,{"initial":"b2xkLXZhbHVl"}]`); err != nil {
+	if _, err := io.WriteString(sink, `[2,{"initial":"b2xkLXZhbHVl","\u0000compatibility-release":"AAAAAAAAAAA="}]`); err != nil {
 		t.Fatal(err)
 	}
 	if err := sink.Close(); err != nil {
@@ -511,32 +511,40 @@ func TestRaftStoreCurrentSnapshotStartupAndRestart(t *testing.T) {
 }
 
 func TestRaftStoreRejectsLegacySnapshotStartup(t *testing.T) {
-	dir := t.TempDir()
-	id := uuid.New()
-	bind := fmt.Sprintf("127.0.0.1:%d", freePort(t))
-	configuration := raft.Configuration{Servers: []raft.Server{{ID: raft.ServerID(id.String()), Address: raft.ServerAddress(bind), Suffrage: raft.Voter}}}
-	snapshots, err := raft.NewFileSnapshotStore(filepath.Join(dir, "raft"), 2, io.Discard)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, transport := raft.NewInmemTransport(raft.ServerAddress(bind))
-	defer func() { _ = transport.Close() }()
-	sink, err := snapshots.Create(raft.SnapshotVersionMax, 1, 1, configuration, 1, transport)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := io.WriteString(sink, `{"legacy":"b2xkLXZhbHVl"}`); err != nil {
-		t.Fatal(err)
-	}
-	if err := sink.Close(); err != nil {
-		t.Fatal(err)
-	}
-	store, err := NewRaftStore(RaftConfig{DataDir: dir, BindAddr: bind, ServerID: id.String(), TLS: testTLSConfig(t, id), AuthorizePeer: allowAnyRaftPeer})
-	if store != nil {
-		_ = store.Close()
-	}
-	if err == nil {
-		t.Fatal("startup accepted a legacy snapshot")
+	for name, payload := range map[string]string{
+		"legacy envelope":        `{"legacy":"b2xkLXZhbHVl"}`,
+		"unmarked state":         `[2,{"legacy":"b2xkLXZhbHVl"}]`,
+		"stable in experimental": `[2,{"legacy":"b2xkLXZhbHVl","\u0000compatibility-release":"AAAAAAAAAAE="}]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			id := uuid.New()
+			bind := fmt.Sprintf("127.0.0.1:%d", freePort(t))
+			configuration := raft.Configuration{Servers: []raft.Server{{ID: raft.ServerID(id.String()), Address: raft.ServerAddress(bind), Suffrage: raft.Voter}}}
+			snapshots, err := raft.NewFileSnapshotStore(filepath.Join(dir, "raft"), 2, io.Discard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, transport := raft.NewInmemTransport(raft.ServerAddress(bind))
+			defer func() { _ = transport.Close() }()
+			sink, err := snapshots.Create(raft.SnapshotVersionMax, 1, 1, configuration, 1, transport)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := io.WriteString(sink, payload); err != nil {
+				t.Fatal(err)
+			}
+			if err := sink.Close(); err != nil {
+				t.Fatal(err)
+			}
+			store, err := NewRaftStore(RaftConfig{DataDir: dir, BindAddr: bind, ServerID: id.String(), TLS: testTLSConfig(t, id), AuthorizePeer: allowAnyRaftPeer})
+			if store != nil {
+				_ = store.Close()
+			}
+			if err == nil {
+				t.Fatal("startup accepted an incompatible snapshot")
+			}
+		})
 	}
 }
 

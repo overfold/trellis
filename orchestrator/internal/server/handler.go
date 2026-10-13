@@ -223,6 +223,8 @@ func (h *Handler) Register(e *echo.Echo) {
 	v1.POST("/raft/leadership-transfer", h.handleRaftLeadershipTransfer)
 	v1.GET("/cluster/leader", h.handleClusterLeader)
 	v1.GET("/cluster/settings", h.handleGetClusterSettings)
+	v1.GET("/cluster/compatibility", h.handleCompatibility)
+	v1.POST("/cluster/compatibility/activate", h.handleActivateRelease)
 	v1.PUT("/cluster/settings/job-limits", h.handleUpdateJobLimits)
 	v1.PUT("/cluster/settings/reconciliation", h.handleUpdateReconciliationSettings)
 	v1.GET("/backup", h.handleBackupCreate)
@@ -358,6 +360,35 @@ func (h *Handler) handleGetClusterSettings(c *echo.Context) error {
 		return err
 	}
 	return c.JSON(http.StatusOK, h.server.ClusterSettings().API())
+}
+
+func (h *Handler) handleCompatibility(c *echo.Context) error {
+	if err := requireClusterRead(c, "compatibility status requires cluster/read authorization"); err != nil {
+		return err
+	}
+	status, err := h.server.Compatibility(c.Request().Context())
+	if err != nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "unable to inspect cluster compatibility")
+	}
+	return c.JSON(http.StatusOK, status)
+}
+
+func (h *Handler) handleActivateRelease(c *echo.Context) error {
+	if err := requireRoot(c, "compatibility activation requires the administrator credential"); err != nil {
+		return err
+	}
+	var request api.ActivateReleaseRequest
+	if err := decodeJSON(c, &request, maxSmallRequestBytes); err != nil {
+		return err
+	}
+	status, err := h.server.ActivateRelease(c.Request().Context(), request.Release)
+	if err != nil {
+		if isUnavailable(err) {
+			return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error())
+		}
+		return echo.NewHTTPError(http.StatusConflict, err.Error())
+	}
+	return c.JSON(http.StatusOK, status)
 }
 
 func (h *Handler) handleUpdateJobLimits(c *echo.Context) error {
@@ -656,7 +687,7 @@ func (h *Handler) handleRegisterNode(c *echo.Context) error {
 		runsWorkloads = *request.RunsWorkloads
 	}
 	if err := h.server.RegisterNode(c.Request().Context(), &NodeRegistration{
-		ID: request.ID, Host: request.Host, Port: request.Port,
+		ID: request.ID, Release: request.Release, Host: request.Host, Port: request.Port,
 		CPUCapacity: cpuCapacity, MemoryCapacity: memoryCapacity,
 		CPUAllocatable: cpuAllocatable, MemoryAllocatable: memoryAllocatable,
 		OS: request.OS, Arch: request.Arch, Labels: request.Labels, Volumes: request.Volumes, Capabilities: request.Capabilities,
@@ -736,6 +767,9 @@ func (h *Handler) handleHeartbeat(c *echo.Context) error {
 	}
 	if len(request.Allocations) > maxHeartbeatAllocationStatuses {
 		return echo.NewHTTPError(http.StatusRequestEntityTooLarge, "heartbeat contains too many allocation status reports")
+	}
+	if err := h.server.checkRelease(request.Release); err != nil {
+		return echo.NewHTTPError(http.StatusConflict, err.Error())
 	}
 	resources := nodeResourceObservation{
 		CPUCapacity: request.CPUCapacity, MemoryCapacity: request.MemoryCapacity,
@@ -970,6 +1004,9 @@ func (h *Handler) handleRaftJoin(c *echo.Context) error {
 	if request.RaftAddress == "" || request.ServerAddress == "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "raft_address and server_address are required")
 	}
+	if err := h.server.checkRelease(request.Release); err != nil {
+		return echo.NewHTTPError(http.StatusConflict, err.Error())
+	}
 	nodeID, ok := c.Request().Context().Value(NodeContextKey).(uuid.UUID)
 	if !ok || nodeID == uuid.Nil {
 		return echo.NewHTTPError(http.StatusForbidden, "Raft join requires an authenticated node")
@@ -1012,7 +1049,7 @@ func (h *Handler) handleRaftJoin(c *echo.Context) error {
 	if err := h.server.RecordNodeServerAddress(c.Request().Context(), nodeID, request.ServerAddress); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
-	members, err := h.server.JoinMember(c.Request().Context(), nodeID, request.RaftAddress)
+	members, err := h.server.JoinMember(c.Request().Context(), nodeID, request.RaftAddress, request.Release)
 	if errors.Is(err, ErrNodeRemoved) {
 		return echo.NewHTTPError(http.StatusForbidden, err.Error())
 	}
@@ -1038,6 +1075,9 @@ func (h *Handler) handleEnrollNode(c *echo.Context) error {
 	}
 	if request.CSR == "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "csr is required")
+	}
+	if err := h.server.checkRelease(request.Release); err != nil {
+		return echo.NewHTTPError(http.StatusConflict, err.Error())
 	}
 	response, err := h.server.EnrollNodeCSR(c.Request().Context(), joinToken, request.CSR, request.Role)
 	if errors.Is(err, ErrInvalidJoinToken) {

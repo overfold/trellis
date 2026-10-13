@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v5"
+	"github.com/overfold/trellis/orchestrator/internal/compatibility"
 	"github.com/overfold/trellis/orchestrator/internal/execstream"
 	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
@@ -29,6 +30,11 @@ func NewHandler(agent *Agent) *Handler {
 // Register adds agent routes to an Echo instance.
 func (h *Handler) Register(e *echo.Echo) {
 	v1 := e.Group("/v1")
+	v1.GET("/compatibility", func(c *echo.Context) error {
+		return c.JSON(http.StatusOK, struct {
+			Release uint64 `json:"release"`
+		}{Release: compatibility.Current()})
+	})
 	v1.GET("/allocations", h.handleList)
 	v1.GET("/allocations/:id/logs", h.handleLogs)
 	v1.GET("/allocations/:id/exec", h.handleExec)

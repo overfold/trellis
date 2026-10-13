@@ -20,6 +20,7 @@ const (
 // Agents order (Epoch, Version) lexicographically. Complete is required before
 // absence can authorize cleanup; failure to fetch is never an empty view.
 type ExecutionIntent struct {
+	Release       uint64                  `json:"release"`
 	NodeID        uuid.UUID               `json:"node_id"`
 	LeaderID      uuid.UUID               `json:"leader_id"`
 	Epoch         uint64                  `json:"epoch"`

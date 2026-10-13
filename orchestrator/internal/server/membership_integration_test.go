@@ -186,7 +186,7 @@ func TestRemovalPromotionLossAndRecovery(t *testing.T) {
 			if err := authorizers[0].Authorize(certificates[1]); !errors.Is(err, ErrNodeRemoved) {
 				t.Fatalf("failed promotion undid Raft TLS revocation: %v", err)
 			}
-			if _, err := s.JoinMember(t.Context(), ids[1], configs[1].Advertise); !errors.Is(err, ErrNodeRemoved) {
+			if _, err := s.JoinMember(t.Context(), ids[1], configs[1].Advertise, 0); !errors.Is(err, ErrNodeRemoved) {
 				t.Fatalf("tombstoned member rejoined: %v", err)
 			}
 			if lost != 1 {

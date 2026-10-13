@@ -68,14 +68,14 @@ func TestCommittedRestoreRestart(t *testing.T) {
 
 func TestFSMCheckpointRollsBackWithFailedCommand(t *testing.T) {
 	store := newTestRaftStore(t)
-	command, _ := json.Marshal(fsmCommand{Op: "batch", Mutations: []Mutation{
+	command, _ := store.encodeCommand(fsmCommand{Op: "batch", Mutations: []Mutation{
 		{Key: "first", Value: []byte("must roll back")},
 		{Key: strings.Repeat("x", bolt.MaxKeySize+1), Value: []byte("invalid")},
 	}})
 	if err := store.fsm.apply(&raft.Log{Index: 100, Data: command}); err == nil {
 		t.Fatal("invalid command succeeded")
 	}
-	command, _ = json.Marshal(fsmCommand{Op: "put", Key: "first", Value: []byte("retry")})
+	command, _ = store.encodeCommand(fsmCommand{Op: "put", Key: "first", Value: []byte("retry")})
 	if err := store.fsm.apply(&raft.Log{Index: 100, Data: command}); err != nil {
 		t.Fatal(err)
 	}

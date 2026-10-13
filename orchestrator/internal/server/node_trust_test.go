@@ -339,7 +339,7 @@ func TestRemovedNodeIdentityIsRevoked(t *testing.T) {
 	if err := f.server.BindNodeCertificate(ctx, removed, certificate); !errors.Is(err, ErrNodeRemoved) {
 		t.Fatalf("rebinding removed node error = %v, want ErrNodeRemoved", err)
 	}
-	if _, err := f.server.JoinMember(ctx, removed, "removed:8129"); !errors.Is(err, ErrNodeRemoved) {
+	if _, err := f.server.JoinMember(ctx, removed, "removed:8129", 0); !errors.Is(err, ErrNodeRemoved) {
 		t.Fatalf("rejoining removed node error = %v, want ErrNodeRemoved", err)
 	}
 	if members, _ := f.server.MemberVoters(); len(members) != 1 {

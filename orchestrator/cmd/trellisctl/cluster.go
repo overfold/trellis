@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strconv"
 	"text/tabwriter"
 	"time"
 
@@ -18,7 +19,7 @@ func NewClusterCmd() *cobra.Command {
 		Short: "Inspect and change cluster-wide settings",
 		Long:  "Cluster settings are replicated with the rest of the control-plane state, so every leader applies the same values. The node that creates the cluster supplies their initial values; later node configuration does not change them.",
 	}
-	cmd.AddCommand(newClusterSettingsCmd(), newClusterSetJobLimitsCmd(), newClusterSetReconciliationCmd())
+	cmd.AddCommand(newClusterSettingsCmd(), newClusterSetJobLimitsCmd(), newClusterSetReconciliationCmd(), newClusterCompatibilityCmd(), newClusterActivateReleaseCmd())
 	return cmd
 }
 
@@ -42,6 +43,64 @@ func newClusterSettingsCmd() *cobra.Command {
 			return writeClusterSettings(cmd.OutOrStdout(), settings)
 		},
 	}
+}
+
+func newClusterCompatibilityCmd() *cobra.Command {
+	return &cobra.Command{
+		Use: "compatibility", Short: "Inspect the active compatibility level and running node releases", Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			client, err := apiClient("")
+			if err != nil {
+				return err
+			}
+			status, err := client.ClusterCompatibility(cmd.Context())
+			if err != nil {
+				return err
+			}
+			return writeClusterCompatibility(cmd.OutOrStdout(), status)
+		},
+	}
+}
+
+func newClusterActivateReleaseCmd() *cobra.Command {
+	return &cobra.Command{
+		Use: "activate-release LEVEL", Short: "Finalize a rolling upgrade and close the previous release's rollback window", Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			release, err := strconv.ParseUint(args[0], 10, 64)
+			if err != nil || release == 0 {
+				return fmt.Errorf("LEVEL must be a positive stable release sequence number")
+			}
+			client, err := administratorServerClient()
+			if err != nil {
+				return err
+			}
+			status, err := client.ActivateRelease(cmd.Context(), release)
+			if err != nil {
+				return err
+			}
+			return writeClusterCompatibility(cmd.OutOrStdout(), status)
+		},
+	}
+}
+
+func writeClusterCompatibility(out io.Writer, status *api.ClusterCompatibility) error {
+	if config.Output == "json" {
+		return writeJSON(out, status)
+	}
+	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	if _, err := fmt.Fprintf(w, "Active release\t%d\nLeader binary release\t%d\nNODE\tRELEASE\tERROR\n", status.ActiveRelease, status.BinaryRelease); err != nil {
+		return err
+	}
+	for _, node := range status.Nodes {
+		release := "unknown"
+		if node.Release != nil {
+			release = strconv.FormatUint(*node.Release, 10)
+		}
+		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\n", node.ID, release, node.Error); err != nil {
+			return err
+		}
+	}
+	return w.Flush()
 }
 
 var jobLimitFlags = []string{"max-replicas-per-task-group", "max-task-groups-per-job", "max-tasks-per-task-group", "max-desired-allocations", "max-desired-allocations-per-namespace", "default-task-cpu", "default-task-memory", "max-task-cpu", "max-task-memory"}

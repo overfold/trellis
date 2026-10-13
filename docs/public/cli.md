@@ -316,6 +316,21 @@ trellisctl --administrator-key ./trellis-administrator.pem cluster set-reconcili
 
 The flags are `--allocation-loss-timeout` (30s–24h, default `45s`), `--replacement-backoff-base` (1s–24h, default `10s`), `--replacement-backoff-max` (at least the base, at most 24h, default `5m`), `--replacement-stable-after` (10s–24h, default `10m`), and `--terminal-allocation-retention` (0–100, default `5`). See [cluster settings](operations.md#cluster-settings) for what each controls. The WireGuard pool and port count are fixed when the cluster is created.
 
+## Inspect and finalize release compatibility
+
+`trellisctl cluster compatibility` reports the replicated active compatibility
+level, the serving leader's binary level, and live binary probes for registered
+nodes and Raft members. A node's `release` is unknown when its running binary
+cannot be verified. Read access is sufficient; `--output json` provides the same
+result for automation.
+
+`trellisctl --administrator-key ./trellis-administrator.pem cluster activate-release LEVEL`
+finalizes an adjacent stable upgrade only after all admitted nodes run the target
+release. It requires administrator authority and closes the previous release's
+rollback window. LEVEL is a positive release sequence number, not a version tag.
+There is no experimental → v1 activation: v1 is a fresh baseline. See the
+[upgrade policy and maintenance sequence](operations.md#upgrade-a-node).
+
 ## Structured output and automation
 
 `--output` / `-o` is deliberately **command-local**, not a global promise. Commands that can return one coherent structured result expose `--output table|json`; streaming or action-oriented commands do not expose the flag and therefore cannot silently ignore `--output json` while printing prose.
@@ -326,7 +341,7 @@ Current structured-output commands are:
 jobs list, status
 namespaces list
 nodes list, status, leader
-cluster settings
+cluster settings, compatibility, activate-release
 secrets set, list, describe
 credentials create, list
 nodes join-token create, list

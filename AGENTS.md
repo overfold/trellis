@@ -26,6 +26,7 @@ Apply the design principles through clear ownership boundaries:
 - **Keep wire contracts separate from domain and execution types.** Operator wire types belong in `orchestrator/api`; node-to-node wire types belong in `orchestrator/internal/nodeapi`. Public `api` and `client` exports must be usable by external Go modules without importing internal types, and must not depend on server-side packages. Shared internal transport helpers are permitted.
 - **Change behavior at its owner.** Reuse existing package APIs rather than duplicating semantics in handlers or the CLI. Add a helper, interface, or package only for a coherent responsibility or a real consumer need, not a speculative extension point.
 - **Prefer a clean current design.** Trellis is experimental and pre-1.0. Do not add aliases, migrations, fallbacks, or compatibility shims for hypothetical older clients or persisted state unless required by the task.
+- **Keep the compatibility baseline at v1.** Keep the compiled release sequence in `orchestrator/internal/compatibility/compatibility.go` at `0` throughout pre-v1; set it to `1` only for v1. Do not increment it for experimental releases or recognize any pre-v1 release as v1's predecessor. Implement and test the mixed-version mechanism without maintaining compatibility between pre-v1 releases. See [release compatibility and activation](docs/developer/architecture.md#release-compatibility-and-activation).
 
 Key ownership boundaries (paths relative to `orchestrator/`; see the architecture guide for the full package map):
 

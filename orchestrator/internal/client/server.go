@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/overfold/trellis/orchestrator/internal/compatibility"
 	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
 	"github.com/overfold/trellis/orchestrator/internal/transport"
@@ -104,6 +105,7 @@ func (s *ServerClient) Ready() bool {
 func (s *ServerClient) RegisterNode(ctx context.Context, nodeInfo *NodeInfo) (*nodeapi.NodeRegistrationResponse, error) {
 	requestData := &nodeapi.NodeRegistrationRequest{
 		ID:                 nodeInfo.ID,
+		Release:            compatibility.Current(),
 		Host:               nodeInfo.Host,
 		Port:               nodeInfo.Port,
 		CPU:                nodeInfo.CPUAllocatable,
@@ -147,6 +149,7 @@ func (s *ServerClient) ListDiscovery(ctx context.Context) (*nodeapi.ServiceListR
 func (s *ServerClient) SendHeartbeat(ctx context.Context, id uuid.UUID, heartbeat *Heartbeat) error {
 	requestData := &nodeapi.HeartbeatRequest{
 		NodeID:            heartbeat.NodeID,
+		Release:           compatibility.Current(),
 		Timestamp:         heartbeat.Timestamp,
 		Allocations:       heartbeat.Allocations,
 		Volumes:           heartbeat.Volumes,

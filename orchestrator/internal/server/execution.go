@@ -191,6 +191,10 @@ func (s *Server) ExecutionIntent(ctx context.Context, id uuid.UUID, version uint
 func (s *Server) publishReconcileIntent(ctx context.Context) error {
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
+	activeRelease, err := s.activeRelease()
+	if err != nil {
+		return err
+	}
 	// Durable cleanup decisions reserve a node even before fresh inventory.
 	s.mu.RLock()
 	ids := make([]uuid.UUID, 0, len(s.nodes))
@@ -226,7 +230,7 @@ func (s *Server) publishReconcileIntent(ctx context.Context) error {
 	for id, node := range s.nodes {
 		running[id] = make(map[allocationGeneration]bool)
 		blocked[id] = cleanupPending[id] || s.nodeHasUnownedExecutionLocked(node)
-		documents[id] = &nodeapi.ExecutionIntent{NodeID: id, LeaderID: leader, Epoch: epoch, Complete: true, CleanupAbsent: cleanupAbsent, Allocations: []nodeapi.AllocationIntent{}, NetworkPlans: map[string]network.Plan{}}
+		documents[id] = &nodeapi.ExecutionIntent{Release: activeRelease, NodeID: id, LeaderID: leader, Epoch: epoch, Complete: true, CleanupAbsent: cleanupAbsent, Allocations: []nodeapi.AllocationIntent{}, NetworkPlans: map[string]network.Plan{}}
 	}
 	for _, allocation := range s.allocations {
 		allocation.mu.Lock()
@@ -354,6 +358,9 @@ func (h *Handler) handleExecution(c *echo.Context) error {
 	if err := requireExactNode(c, id, "execution identity does not match certificate"); err != nil {
 		return err
 	}
+	if err := h.checkExecutionRelease(c); err != nil {
+		return err
+	}
 	version, err := strconv.ParseUint(c.QueryParam("version"), 10, 64)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid execution version")
@@ -369,6 +376,9 @@ func (h *Handler) handleExecution(c *echo.Context) error {
 	if err != nil || intent == nil {
 		return echo.NewHTTPError(http.StatusServiceUnavailable, "execution intent unavailable")
 	}
+	if err := h.checkExecutionRelease(c); err != nil {
+		return err
+	}
 	c.Response().Header().Set("Cache-Control", "no-store")
 	return c.JSON(http.StatusOK, intent)
 }
@@ -379,6 +389,9 @@ func (h *Handler) handleExecutionCredentials(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid node ID")
 	}
 	if err := requireExactNode(c, id, "execution identity does not match certificate"); err != nil {
+		return err
+	}
+	if err := h.checkExecutionRelease(c); err != nil {
 		return err
 	}
 	values := make(map[string]uint64, 4)
@@ -465,6 +478,9 @@ func (h *Handler) handleExecutionCredentials(c *echo.Context) error {
 	current := s.executionIntentLocked(id)
 	if s.checkTerm(ctx) != nil {
 		return echo.NewHTTPError(http.StatusServiceUnavailable, "execution authorization unavailable")
+	}
+	if err := h.checkExecutionRelease(c); err != nil {
+		return err
 	}
 	if current == nil || current.Version != doc.Version || current.Epoch != doc.Epoch {
 		return echo.NewHTTPError(http.StatusConflict, "execution authorization changed")

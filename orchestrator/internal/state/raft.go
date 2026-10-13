@@ -20,6 +20,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
+	"github.com/overfold/trellis/orchestrator/internal/compatibility"
 	"github.com/overfold/trellis/orchestrator/internal/tlsutil"
 	bolt "go.etcd.io/bbolt"
 )
@@ -49,6 +50,7 @@ type RaftStore struct {
 // state; a restore installs it in the same transaction, so settings and the
 // jobs they admit are never restored separately.
 type DesiredSnapshot struct {
+	ActiveRelease              uint64            `json:"active_release"`
 	ExpectedCluster            []byte            `json:"expected_cluster,omitempty"`
 	Cluster                    []byte            `json:"cluster,omitempty"`
 	Jobs                       map[string][]byte `json:"jobs"`
@@ -92,6 +94,13 @@ func (r *RaftStore) RestoreDesiredContext(ctx context.Context, cluster string, s
 	if err := r.fsm.store.checkRestoreFresh(cluster); err != nil {
 		return err
 	}
+	active, err := r.ActiveRelease()
+	if err != nil {
+		return err
+	}
+	if snapshot.ActiveRelease != active {
+		return ErrStateChanged
+	}
 	current, err := r.Get(ctx, "trellis/"+cluster+"/meta")
 	if err != nil {
 		return err
@@ -100,7 +109,10 @@ func (r *RaftStore) RestoreDesiredContext(ctx context.Context, cluster string, s
 		return ErrStateChanged
 	}
 	cmd := fsmCommand{Op: "restore_desired", Cluster: cluster, Snapshot: snapshot}
-	data, _ := json.Marshal(cmd)
+	data, err := r.encodeCommand(cmd)
+	if err != nil {
+		return err
+	}
 	fut := r.raft.ApplyInTerm(ctx, raftTerm(ctx), data, 10*time.Second)
 	if err := fut.Error(); err != nil {
 		return err
@@ -120,7 +132,10 @@ func (r *RaftStore) Batch(ctx context.Context, mutations []Mutation) error {
 	r.submitMu.RLock()
 	defer r.submitMu.RUnlock()
 	cmd := fsmCommand{Op: "batch", Mutations: mutations}
-	data, _ := json.Marshal(cmd)
+	data, err := r.encodeCommand(cmd)
+	if err != nil {
+		return err
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -175,7 +190,10 @@ func (r *RaftStore) Update(ctx context.Context, build func(Store) ([]Mutation, e
 	if err := validateMutations(mutations); err != nil {
 		return err
 	}
-	data, _ := json.Marshal(fsmCommand{Op: "batch", Mutations: mutations})
+	data, err := r.encodeCommand(fsmCommand{Op: "batch", Mutations: mutations})
+	if err != nil {
+		return err
+	}
 	future := r.raft.ApplyInTerm(ctx, raftTerm(ctx), data, 10*time.Second)
 	if err := future.Error(); err != nil {
 		return err
@@ -218,6 +236,7 @@ type tlsStreamLayer struct {
 	targetID          func(raft.ServerAddress) (uuid.UUID, error)
 	authorize         func(*x509.Certificate) error
 	verifyPeerAddress func(uuid.UUID, raft.ServerAddress) error
+	activeRelease     func() (uint64, error)
 }
 
 func (t *tlsStreamLayer) Addr() net.Addr {
@@ -274,6 +293,12 @@ func (t *tlsStreamLayer) Dial(address raft.ServerAddress, timeout time.Duration)
 		_ = conn.Close()
 		return nil, err
 	}
+	if t.activeRelease != nil {
+		if _, _, err := exchangeRelease(tlsConn, t.activeRelease, false); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+	}
 	if err := tlsConn.SetDeadline(time.Time{}); err != nil {
 		_ = conn.Close()
 		return nil, err
@@ -322,6 +347,33 @@ func NewRaftStore(cfg RaftConfig) (*RaftStore, error) {
 		return nil, fmt.Errorf("create FSM store: %w", err)
 	}
 	f := &fsm{store: fsmStore}
+	var checkpoint uint64
+	activeRelease := func() (uint64, error) {
+		return f.release.Load(), nil
+	}
+	if err := fsmStore.db.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketName)
+		if bucket.Stats().KeyN > 0 && bucket.Get([]byte(compatibilityKey)) == nil {
+			return fmt.Errorf("persisted state predates the compatibility baseline; recreate the cluster")
+		}
+		active, err := bucketRelease(bucket)
+		if err != nil {
+			return err
+		}
+		if saved := bucket.Get([]byte("\x00raft-applied-index")); len(saved) == 8 {
+			checkpoint = binary.BigEndian.Uint64(saved)
+		}
+		// An empty joining replica advertises its oldest supported level
+		// until the first replicated command or snapshot establishes authority.
+		if bucket.Get([]byte(compatibilityKey)) == nil && !cfg.Bootstrap && active > 1 {
+			active--
+		}
+		f.release.Store(active)
+		return compatibility.Check(compatibility.Current(), active)
+	}); err != nil {
+		_ = fsmStore.Close()
+		return nil, err
+	}
 
 	logStore, err := raftboltdb.NewBoltStore(filepath.Join(raftDir, "log.db"))
 	if err != nil {
@@ -405,7 +457,7 @@ func NewRaftStore(cfg RaftConfig) (*RaftStore, error) {
 			}
 			return fmt.Errorf("Raft RPC address is not bound to peer %s", id)
 		}
-		stream := &tlsStreamLayer{Listener: ln, advertise: advAddr, tlsCfg: cfg.TLS, targetID: resolveTargetID, authorize: cfg.AuthorizePeer, verifyPeerAddress: verifyPeerAddress}
+		stream := &tlsStreamLayer{Listener: ln, advertise: advAddr, tlsCfg: cfg.TLS, targetID: resolveTargetID, authorize: cfg.AuthorizePeer, verifyPeerAddress: verifyPeerAddress, activeRelease: activeRelease}
 		transport = raft.NewNetworkTransportWithConfig(&raft.NetworkTransportConfig{
 			Stream:  stream,
 			MaxPool: 3,
@@ -427,6 +479,19 @@ func NewRaftStore(cfg RaftConfig) (*RaftStore, error) {
 	raftCfg := raft.DefaultConfig()
 	raftCfg.LocalID = raft.ServerID(cfg.ServerID)
 	raftCfg.Logger = logger
+	// Fresh replicas must recover from a current snapshot rather than replay
+	// commands from releases older than the supported predecessor.
+	raftCfg.TrailingLogs = 0
+	snapshots, err := snapshotStore.List()
+	if err != nil {
+		return nil, fmt.Errorf("list startup snapshots: %w", err)
+	}
+	// The durable checkpoint and data commit together. Do not roll a current
+	// FSM back to an older release's snapshot on restart merely to replay the
+	// commands already covered by that checkpoint. Empty replicas still restore.
+	if len(snapshots) > 0 && checkpoint >= snapshots[0].Index {
+		raftCfg.NoSnapshotRestoreOnStart = true
+	}
 
 	r, err := raft.NewRaft(raftCfg, f, logStore, logStore, snapshotStore, transport)
 	if err != nil {
@@ -483,7 +548,10 @@ func (r *RaftStore) Put(ctx context.Context, key string, value []byte) error {
 	r.submitMu.RLock()
 	defer r.submitMu.RUnlock()
 	cmd := fsmCommand{Op: "put", Key: key, Value: value}
-	data, _ := json.Marshal(cmd)
+	data, err := r.encodeCommand(cmd)
+	if err != nil {
+		return err
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -503,7 +571,10 @@ func (r *RaftStore) Delete(ctx context.Context, key string) error {
 	r.submitMu.RLock()
 	defer r.submitMu.RUnlock()
 	cmd := fsmCommand{Op: "delete", Key: key}
-	data, _ := json.Marshal(cmd)
+	data, err := r.encodeCommand(cmd)
+	if err != nil {
+		return err
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -594,16 +665,20 @@ func (r *RaftStore) Close() error {
 }
 
 type fsm struct {
-	store *BoltStore
+	store   *BoltStore
+	release atomic.Uint64 // Updated only after the persisted boundary commits.
 }
 
 type fsmCommand struct {
-	Op        string           `json:"op"`
-	Key       string           `json:"key,omitempty"`
-	Value     []byte           `json:"value,omitempty"`
-	Cluster   string           `json:"cluster,omitempty"`
-	Snapshot  *DesiredSnapshot `json:"snapshot,omitempty"`
-	Mutations []Mutation       `json:"mutations,omitempty"`
+	Format        uint64           `json:"format"`
+	Release       uint64           `json:"release"`
+	TargetRelease uint64           `json:"target_release,omitempty"`
+	Op            string           `json:"op"`
+	Key           string           `json:"key,omitempty"`
+	Value         []byte           `json:"value,omitempty"`
+	Cluster       string           `json:"cluster,omitempty"`
+	Snapshot      *DesiredSnapshot `json:"snapshot,omitempty"`
+	Mutations     []Mutation       `json:"mutations,omitempty"`
 }
 
 func (f *fsm) Apply(log *raft.Log) any {
@@ -622,7 +697,8 @@ func (f *fsm) apply(log *raft.Log) error {
 	if err := json.Unmarshal(log.Data, &cmd); err != nil {
 		return err
 	}
-	return f.store.db.Update(func(tx *bolt.Tx) error {
+	nextRelease := f.release.Load()
+	err := f.store.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(bucketName)
 		// The checkpoint travels with FSM snapshots and is committed atomically
 		// with each command. Raft replays logs after restart; applying them twice
@@ -631,8 +707,32 @@ func (f *fsm) apply(log *raft.Log) error {
 		if saved := bucket.Get(checkpoint); len(saved) == 8 && log.Index <= binary.BigEndian.Uint64(saved) {
 			return nil
 		}
+		if cmd.Format != 1 {
+			return fmt.Errorf("unsupported Raft command format %d", cmd.Format)
+		}
+		if err := compatibility.Check(compatibility.Current(), cmd.Release); err != nil {
+			return err
+		}
+		if bucket.Get([]byte(compatibilityKey)) != nil {
+			active, err := bucketRelease(bucket)
+			if err != nil {
+				return err
+			}
+			if active != cmd.Release {
+				return fmt.Errorf("Raft command level %d differs from active level %d", cmd.Release, active)
+			}
+		}
+		nextRelease = cmd.Release
 		var err error
 		switch cmd.Op {
+		case "activate_release":
+			if cmd.Release == 0 || cmd.TargetRelease != cmd.Release+1 {
+				return fmt.Errorf("invalid compatibility activation")
+			}
+			if err := compatibility.Check(compatibility.Current(), cmd.TargetRelease); err != nil {
+				return err
+			}
+			nextRelease = cmd.TargetRelease
 		case "put":
 			err = bucket.Put([]byte(cmd.Key), cmd.Value)
 		case "delete":
@@ -643,6 +743,9 @@ func (f *fsm) apply(log *raft.Log) error {
 				err = applyMutations(tx, cmd.Mutations)
 			}
 		case "restore_desired":
+			if cmd.Snapshot == nil || cmd.Snapshot.ActiveRelease != cmd.Release {
+				return fmt.Errorf("restore compatibility level differs from command level")
+			}
 			err = ValidateDesiredSnapshot(cmd.Snapshot, nil)
 			if err == nil {
 				err = restoreDesired(tx, cmd.Cluster, cmd.Snapshot)
@@ -653,8 +756,15 @@ func (f *fsm) apply(log *raft.Log) error {
 		if err != nil {
 			return err
 		}
+		if err := bucket.Put([]byte(compatibilityKey), binary.BigEndian.AppendUint64(nil, nextRelease)); err != nil {
+			return err
+		}
 		return bucket.Put(checkpoint, binary.BigEndian.AppendUint64(nil, log.Index))
 	})
+	if err == nil {
+		f.release.Store(nextRelease)
+	}
+	return err
 }
 
 func (f *fsm) Snapshot() (raft.FSMSnapshot, error) {
@@ -667,7 +777,22 @@ func (f *fsm) Snapshot() (raft.FSMSnapshot, error) {
 
 func (f *fsm) Restore(rc io.ReadCloser) error {
 	defer func() { _ = rc.Close() }()
-	return f.store.RestoreReader(rc)
+	var active uint64
+	err := f.store.restoreReader(rc, func(bucket *bolt.Bucket) error {
+		if bucket.Get([]byte(compatibilityKey)) == nil {
+			return fmt.Errorf("snapshot predates the compatibility baseline")
+		}
+		var err error
+		active, err = bucketRelease(bucket)
+		if err != nil {
+			return err
+		}
+		return compatibility.Check(compatibility.Current(), active)
+	})
+	if err == nil {
+		f.release.Store(active)
+	}
+	return err
 }
 
 type fsmSnapshot struct {

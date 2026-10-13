@@ -18,10 +18,11 @@ import (
 )
 
 func TestRaftEstablishedTLSStreamReauthorizesBeforeDispatch(t *testing.T) {
-	for _, attack := range []string{"removed", "spoofed identity", "spoofed address"} {
+	for _, attack := range []string{"removed", "spoofed identity", "spoofed address", "incompatible release"} {
 		t.Run(attack, func(t *testing.T) {
 			peerID, serverID := uuid.New(), uuid.New()
 			var removed atomic.Bool
+			var active atomic.Uint64
 			authorize := func(*x509.Certificate) error {
 				if removed.Load() {
 					return errors.New("tombstoned")
@@ -36,7 +37,7 @@ func TestRaftEstablishedTLSStreamReauthorizesBeforeDispatch(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			transport := raft.NewNetworkTransport(&tlsStreamLayer{Listener: listener, authorize: authorize, verifyPeerAddress: func(id uuid.UUID, address raft.ServerAddress) error {
+			transport := raft.NewNetworkTransport(&tlsStreamLayer{Listener: listener, authorize: authorize, activeRelease: func() (uint64, error) { return active.Load(), nil }, verifyPeerAddress: func(id uuid.UUID, address raft.ServerAddress) error {
 				if id != peerID || address != "peer" {
 					return errors.New("address binding mismatch")
 				}
@@ -54,6 +55,9 @@ func TestRaftEstablishedTLSStreamReauthorizesBeforeDispatch(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = conn.Close() })
 			_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+			if _, _, err := exchangeRelease(conn, func() (uint64, error) { return 0, nil }, false); err != nil {
+				t.Fatal(err)
+			}
 			encoder := codec.NewEncoder(conn, &codec.MsgpackHandle{})
 			decoder := codec.NewDecoder(bufio.NewReader(conn), &codec.MsgpackHandle{})
 			send := func(id uuid.UUID, address string) {
@@ -86,6 +90,8 @@ func TestRaftEstablishedTLSStreamReauthorizesBeforeDispatch(t *testing.T) {
 				address = "other-member"
 			case "removed":
 				removed.Store(true)
+			case "incompatible release":
+				active.Store(1)
 			}
 			send(claimedID, address)
 			if err := decoder.Decode(&responseError); err == nil {

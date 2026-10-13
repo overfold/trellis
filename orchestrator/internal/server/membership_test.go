@@ -239,7 +239,7 @@ func TestJoinMemberAddsNonvoter(t *testing.T) {
 	if err := s.state.put(context.Background(), s.state.nodeRoleKey(joining.String()), api.NodeRoleControlPlane); err != nil {
 		t.Fatal(err)
 	}
-	members, err := s.JoinMember(context.Background(), joining, "joining:8129")
+	members, err := s.JoinMember(context.Background(), joining, "joining:8129", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,7 +259,7 @@ func TestWorkerCannotJoinRaft(t *testing.T) {
 	if err := s.state.put(context.Background(), s.state.nodeRoleKey(worker.String()), api.NodeRoleWorker); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.JoinMember(context.Background(), worker, "worker:8129"); err == nil {
+	if _, err := s.JoinMember(context.Background(), worker, "worker:8129", 0); err == nil {
 		t.Fatal("worker joined Raft")
 	}
 	if got := joiner.operations(); len(got) != 0 {
@@ -374,7 +374,7 @@ func TestRemoveMemberPromotionFailurePreservesRevocationAndRetries(t *testing.T)
 	if removed, err := s.state.NodeRemoved(t.Context(), b.String()); err != nil || !removed {
 		t.Fatalf("tombstone after failed promotion = %v, %v", removed, err)
 	}
-	if _, err := s.JoinMember(t.Context(), b, "b:8129"); !errors.Is(err, ErrNodeRemoved) {
+	if _, err := s.JoinMember(t.Context(), b, "b:8129", 0); !errors.Is(err, ErrNodeRemoved) {
 		t.Fatalf("revoked member rejoined: %v", err)
 	}
 	if got := joiner.operations(); len(got) != 0 {
@@ -653,7 +653,7 @@ func TestMembershipRejectsOriginatingTermCancellation(t *testing.T) {
 	defer release()
 	cancel()
 	ctx := context.WithoutCancel(origin)
-	if _, err := s.JoinMember(ctx, removed, "stale:8129"); !errors.Is(err, context.Canceled) {
+	if _, err := s.JoinMember(ctx, removed, "stale:8129", 0); !errors.Is(err, context.Canceled) {
 		t.Fatalf("old join = %v", err)
 	}
 	if err := s.ReconcileMembership(ctx); !errors.Is(err, context.Canceled) {

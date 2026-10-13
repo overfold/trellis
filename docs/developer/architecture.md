@@ -23,8 +23,9 @@ originating terms and cancellation inside Raft's leader loop, before appending
 commands or membership entries. This closes loss/reacquisition races that a
 caller-side leadership check cannot fence. Bolt prefix replacement re-seeks after
 each deletion, so different replica page layouts cannot leave different records.
-Raft wire and snapshot formats and operator backup formats are unchanged; no
-persisted-state migration or mixed-release safety guarantee is introduced.
+The patch itself does not negotiate compatibility. Release admission and
+activation are separate responsibilities, described below; no pre-v1
+persisted-state migration or mixed-release guarantee is introduced.
 
 An unexpected committed FSM apply failure is process-fatal on leaders and followers. Raft can discard follower response errors and advance its applied index despite failure, so continuing would permit a divergent replica to serve, vote, or snapshot. The fatal diagnostic identifies the log index and term without dumping command contents. Ordinary mutation validation and restore freshness rejection happen before replication; restore preflight uses a barrier and shares submission ordering with writes, then installation rechecks freshness atomically. A failed replica requires storage repair or replacement from healthy replicated state, not treating `AppliedIndex` as proof of successful mutation.
 
@@ -63,8 +64,44 @@ Values remain opaque at this layer, not revalidated as desired-state backups or
 interpreted using server record types. Domain validation on reload still applies.
 
 Only the current format is supported; there is no migration or mixed-release
-guarantee. See the [pre-v1 compatibility policy](../public/operations.md#upgrade-a-node).
-Snapshot versioning does not negotiate log-command or private API compatibility.
+guarantee for experimental releases. The FSM additionally validates the embedded
+active compatibility level inside the snapshot replacement transaction.
+Snapshot format versioning is separate from release admission and activation.
+
+### Release compatibility and activation
+
+`internal/compatibility` owns the explicit release sequence: experimental builds
+use 0; v1 will establish level 1, and each subsequent supported stable release
+increments it once. No pre-v1 version tag is parsed or recognized. A stable
+binary implements its own and its predecessor's level, except v1, which does not
+implement level 0. Sequence declarations are not proof of semantic compatibility:
+future changes must retain predecessor behavior and cross-binary tests.
+
+`internal/state` owns the replicated `\x00compatibility-release` record. Each
+command carries envelope format 1 and the active release level, and commits that
+boundary atomically with mutations and the applied-index checkpoint. A dedicated
+activation command advances exactly one stable level. Submission ordering keeps
+older-level writes from crossing activation. Startup rejects unmarked or
+unsupported state before constructing Raft; snapshot installation validates the
+boundary atomically. Transport uses an atomic mirror updated after commit, so
+its frame checks do not depend on a storage read succeeding.
+
+TLS Raft streams exchange a bounded compatibility preface before RPCs and
+recheck compatibility at each inbound frame. A successor's admission first
+checkpoints current state. Snapshots retain no trailing logs, so fresh replicas
+recover current semantics rather than replaying unsupported historical commands.
+On restart, a durable FSM checkpoint covering the latest snapshot avoids rolling
+the database back to older semantics merely to replay already-applied commands;
+Raft still restores membership/index metadata. Empty replicas restore normally.
+
+`internal/server` owns live node probes and administrator activation, serialized
+with membership changes and durable registration. Unknown, unreachable, or old
+workers and Raft members block activation. The leader projects execution intent
+at the replicated active level, not its binary level, and agents validate that
+level before accepting cached or fetched authority. New semantics and persisted
+formats must be gated at their owning package using this active boundary, not
+the build tag. See [operator upgrade policy](../public/operations.md#upgrade-a-node)
+and [private wire contracts](api.md).
 
 ## Package map
 

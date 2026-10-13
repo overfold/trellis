@@ -28,6 +28,7 @@ func TestExecutionRejectsWholeDocumentBeforePersistence(t *testing.T) {
 		mutate func(*nodeapi.ExecutionIntent)
 	}{
 		{"wrong node", func(d *nodeapi.ExecutionIntent) { d.NodeID = uuid.New() }},
+		{"unsupported compatibility level", func(d *nodeapi.ExecutionIntent) { d.Release = 1 }},
 		{"wrong leader", func(d *nodeapi.ExecutionIntent) { d.LeaderID = uuid.New() }},
 		{"partial", func(d *nodeapi.ExecutionIntent) { d.Complete = false }},
 		{"missing allocations", func(d *nodeapi.ExecutionIntent) { d.Allocations = nil; d.CleanupAbsent = true }},

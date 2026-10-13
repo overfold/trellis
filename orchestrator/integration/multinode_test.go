@@ -489,16 +489,27 @@ type harness struct {
 
 func newHarness(t *testing.T, count int) *harness {
 	t.Helper()
+	return newReleaseHarness(t, count, "0")
+}
+
+func buildReleaseBinary(t *testing.T, release string) string {
+	t.Helper()
 	root, err := filepath.Abs("..")
 	if err != nil {
 		t.Fatal(err)
 	}
 	bin := filepath.Join(t.TempDir(), "trellis")
-	c := exec.Command("go", "build", "-tags=integration", "-o", bin, "./cmd/trellis")
+	c := exec.Command("go", "build", "-tags=integration", "-ldflags", "-X github.com/overfold/trellis/orchestrator/internal/compatibility.release="+release, "-o", bin, "./cmd/trellis")
 	c.Dir = root
 	if out, err := c.CombinedOutput(); err != nil {
 		t.Fatalf("build node: %v\n%s", err, out)
 	}
+	return bin
+}
+
+func newReleaseHarness(t *testing.T, count int, release string) *harness {
+	t.Helper()
+	bin := buildReleaseBinary(t, release)
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)

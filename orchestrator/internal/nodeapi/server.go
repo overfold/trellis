@@ -12,6 +12,7 @@ import (
 // NodeRegistrationRequest contains the identity and capacity of a joining node.
 type NodeRegistrationRequest struct {
 	ID                 uuid.UUID             `json:"id"`
+	Release            uint64                `json:"release"`
 	Host               string                `json:"host"`
 	Port               int                   `json:"port"`
 	CPU                int                   `json:"cpu"`
@@ -58,6 +59,7 @@ type HeartbeatResponse struct{ ControlPlaneResponse }
 // HeartbeatRequest reports a node and its current allocations.
 type HeartbeatRequest struct {
 	NodeID            uuid.UUID             `json:"id"`
+	Release           uint64                `json:"release"`
 	Timestamp         time.Time             `json:"timestamp"`
 	Allocations       []AllocationStatus    `json:"allocations,omitempty"`
 	Volumes           []string              `json:"volumes,omitempty"`
@@ -135,6 +137,7 @@ type ServiceListResponse = []ServiceEntry
 
 // RaftJoinRequest identifies a server joining the Raft cluster.
 type RaftJoinRequest struct {
+	Release       uint64 `json:"release"`
 	RaftAddress   string `json:"raft_address"`
 	ServerAddress string `json:"server_address"`
 }
@@ -152,6 +155,7 @@ type RaftJoinResponse struct {
 // NodeEnrollmentRequest asks a managed cluster to issue one node identity. The
 // request authenticates with a join token as its bearer credential.
 type NodeEnrollmentRequest struct {
+	Release         uint64       `json:"release"`
 	ServerAdvertise string       `json:"server_advertise"`
 	AgentAdvertise  string       `json:"agent_advertise"`
 	RaftAdvertise   string       `json:"raft_advertise"`

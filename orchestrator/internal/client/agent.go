@@ -33,6 +33,20 @@ type AgentClient struct {
 
 const agentOperationTimeout = 30 * time.Second
 
+// Compatibility verifies the binary currently serving an authenticated agent.
+func (s *AgentClient) Compatibility(ctx context.Context, nodeID uuid.UUID, address string) (uint64, error) {
+	var response struct {
+		Release *uint64 `json:"release"`
+	}
+	if err := s.clientFor(nodeID, agentOperationTimeout).Request(ctx, http.MethodGet, transport.NormalizeBaseURL(address)+"/v1/compatibility", nil, &response); err != nil {
+		return 0, err
+	}
+	if response.Release == nil {
+		return 0, fmt.Errorf("agent did not report its compatibility release")
+	}
+	return *response.Release, nil
+}
+
 // AgentOperationError reports a rejected agent operation.
 type AgentOperationError struct {
 	Response nodeapi.OperationResponse

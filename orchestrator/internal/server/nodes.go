@@ -99,6 +99,9 @@ func (s *Server) RegisterNode(ctx context.Context, nodeRegistration *NodeRegistr
 	}
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
+	if err := s.checkRelease(nodeRegistration.Release); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidNodeRegistration, err)
+	}
 	removed, err := s.state.NodeRemoved(ctx, nodeRegistration.ID.String())
 	if err != nil {
 		return stateUnavailable(err)

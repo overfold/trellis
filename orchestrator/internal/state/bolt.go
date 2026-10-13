@@ -248,7 +248,12 @@ func (b *BoltStore) DesiredSnapshot(cluster string) (*DesiredSnapshot, error) {
 		if value := bucket.Get([]byte(prefix + "meta")); value != nil {
 			cluster = append([]byte(nil), value...)
 		}
+		active, err := bucketRelease(bucket)
+		if err != nil {
+			return err
+		}
 		result = &DesiredSnapshot{
+			ActiveRelease:              active,
 			Cluster:                    cluster,
 			Jobs:                       relativeEntries(listBucket(bucket, prefix+"jobs/"), prefix+"jobs/"),
 			JobRevisions:               relativeEntries(listBucket(bucket, prefix+"job-revisions/"), prefix+"job-revisions/"),
@@ -349,6 +354,12 @@ func (s *boltSnapshot) Close() error {
 
 // RestoreReader atomically replaces all state from the streamed snapshot JSON.
 func (b *BoltStore) RestoreReader(r io.Reader) error {
+	return b.restoreReader(r, nil)
+}
+
+// restoreReader lets the FSM validate its compatibility boundary inside the
+// replacement transaction, without changing generic opaque snapshot storage.
+func (b *BoltStore) restoreReader(r io.Reader, validate func(*bolt.Bucket) error) error {
 	decoder := json.NewDecoder(r)
 	token, err := decoder.Token()
 	if err != nil {
@@ -416,6 +427,9 @@ func (b *BoltStore) RestoreReader(r io.Reader) error {
 				return fmt.Errorf("snapshot contains trailing data")
 			}
 			return err
+		}
+		if validate != nil {
+			return validate(bucket)
 		}
 		return nil
 	})

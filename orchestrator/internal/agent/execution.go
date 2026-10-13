@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/overfold/trellis/orchestrator/internal/compatibility"
 	"github.com/overfold/trellis/orchestrator/internal/network"
 	"github.com/overfold/trellis/orchestrator/internal/nodeapi"
 	"github.com/overfold/trellis/orchestrator/internal/spec"
@@ -29,6 +30,9 @@ func (a *Agent) acceptExecution(doc *nodeapi.ExecutionIntent, cached bool) error
 	defer a.intentMu.Unlock()
 	if doc == nil || doc.NodeID != a.nodeID || doc.LeaderID == uuid.Nil || !doc.Complete || doc.Version == 0 || doc.Epoch == 0 || doc.Allocations == nil || doc.NetworkPlans == nil {
 		return fmt.Errorf("invalid complete execution intent")
+	}
+	if err := compatibility.Check(compatibility.Current(), doc.Release); err != nil {
+		return err
 	}
 	if !cached && (a.server == nil || a.server.ControlPlane().LeaderID != doc.LeaderID) {
 		return fmt.Errorf("untrusted execution leader")

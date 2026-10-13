@@ -40,6 +40,7 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/agent"
 	"github.com/overfold/trellis/orchestrator/internal/auth"
 	"github.com/overfold/trellis/orchestrator/internal/client"
+	"github.com/overfold/trellis/orchestrator/internal/compatibility"
 	trellisdns "github.com/overfold/trellis/orchestrator/internal/dns"
 	"github.com/overfold/trellis/orchestrator/internal/election"
 	"github.com/overfold/trellis/orchestrator/internal/health"
@@ -1104,7 +1105,7 @@ func secureJoinRedirect(req *http.Request, via []*http.Request) error {
 }
 
 func joinClusterTLS(ctx context.Context, log *slog.Logger, joinAddr, joinToken string, caCert []byte, serverAdvertise, agentAdvertise, raftAdvertise string, role api.NodeRole, csr []byte) (*nodeapi.NodeEnrollmentResponse, error) {
-	body, _ := json.Marshal(nodeapi.NodeEnrollmentRequest{ServerAdvertise: serverAdvertise, AgentAdvertise: agentAdvertise, RaftAdvertise: raftAdvertise, Role: role, CSR: string(csr)})
+	body, _ := json.Marshal(nodeapi.NodeEnrollmentRequest{Release: compatibility.Current(), ServerAdvertise: serverAdvertise, AgentAdvertise: agentAdvertise, RaftAdvertise: raftAdvertise, Role: role, CSR: string(csr)})
 	base, err := secureJoinAddress(joinAddr)
 	if err != nil {
 		return nil, err
@@ -1137,6 +1138,9 @@ func joinClusterTLS(ctx context.Context, log *slog.Logger, joinAddr, joinToken s
 			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 				return nil, fmt.Errorf("enrollment rejected with status %d: the join token is invalid, expired, revoked, or exhausted; mint a new one with 'trellisctl nodes join-token create'", resp.StatusCode)
 			}
+			if resp.StatusCode == http.StatusConflict {
+				return nil, fmt.Errorf("enrollment compatibility rejected: %s", strings.TrimSpace(string(respBody)))
+			}
 			err = fmt.Errorf("join returned status %d", resp.StatusCode)
 		}
 		if i >= 30 {
@@ -1152,7 +1156,7 @@ func joinClusterTLS(ctx context.Context, log *slog.Logger, joinAddr, joinToken s
 }
 
 func joinClusterRaft(ctx context.Context, log *slog.Logger, joinAddr, serverAddr, raftAddr string, tlsConfig *tls.Config) (*nodeapi.RaftJoinResponse, error) {
-	body, _ := json.Marshal(nodeapi.RaftJoinRequest{ServerAddress: serverAddr, RaftAddress: raftAddr})
+	body, _ := json.Marshal(nodeapi.RaftJoinRequest{Release: compatibility.Current(), ServerAddress: serverAddr, RaftAddress: raftAddr})
 	base, err := secureJoinAddress(joinAddr)
 	if err != nil {
 		return nil, err
@@ -1178,7 +1182,7 @@ func joinClusterRaft(ctx context.Context, log *slog.Logger, joinAddr, serverAddr
 				log.Info("joined cluster successfully")
 				return &joinResponse, nil
 			}
-			if resp.StatusCode == http.StatusForbidden {
+			if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusConflict {
 				return nil, fmt.Errorf("raft join rejected with status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 			}
 			err = fmt.Errorf("join returned status %d", resp.StatusCode)

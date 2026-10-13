@@ -343,12 +343,53 @@ revocation and registration removal remain committed: restore quorum and retry
 ## Upgrade a node
 
 Trellis is pre-v1 and supports only current specifications, protocols, and persisted
-formats. There are no migrations or mixed-release guarantees: run control-plane
+formats. There are no pre-v1 migrations or mixed-release guarantees: run control-plane
 nodes, agents, and CLI from the same release, and match API consumers to that
 release's contract. Recreate incompatible development clusters with current
 manifests and credentials, transferring volume
 data explicitly. Do not edit persisted state to bypass validation. Backups restore
 only into their current format; binary rollback is not a persisted-state downgrade.
+
+### Compatibility boundary
+
+The rolling-upgrade mechanism is implemented now, but **v1 will be the fresh
+compatibility baseline**. No pre-v1 release tag is recognized as a predecessor
+of v1. Experimental builds report compatibility level `0`; this is not a promise
+that different experimental releases can operate together. State predating the
+mechanism is rejected rather than migrated.
+
+Stable releases will have explicit consecutive compatibility sequence numbers,
+starting at `1` for v1. These are not semantic-version strings. A cluster at level
+N admits binaries N and N+1 only, temporarily during an upgrade. Skipping releases
+and running three releases together are unsupported. A new cluster starts at its
+creating binary's level. Upgraded binaries keep writing and executing level N
+semantics, including after leader failover, until the operator activates N+1.
+
+Inspect the active level and authenticated live binary probes with:
+
+```sh
+trellisctl cluster compatibility
+trellisctl cluster compatibility --output json
+```
+
+For a supported stable transition, upgrade nodes one at a time while preserving
+Raft quorum. Verify affected workloads after each replacement. Once every
+registered worker and every Raft member, including non-voters and draining nodes,
+runs the target release, finalize using its documented sequence number:
+
+```sh
+trellisctl --administrator-key ./trellis-administrator.pem cluster activate-release 2
+```
+
+The example means level 1 → 2, not a pre-v1 → v1 transition. Activation requires
+the target binary to serve the request. Unknown or unreachable nodes block it;
+upgrade/recover them, or explicitly remove them using the normal safe-removal
+procedure. Activation is replicated, monotonic, and idempotent for an already
+active target. **It closes the previous release's binary-rollback window.** Old
+control-plane binaries refuse finalized state; incompatible agents cannot obtain
+new execution authority. Established disconnected workloads still follow the
+normal disconnection policy. Do not downgrade binaries or edit state after
+activation. The per-node upgrade script does not activate the cluster level.
 
 The upgrade entrypoint performs the node-maintenance sequence instead of asking the operator to remember it:
 
@@ -585,7 +626,13 @@ Before restoring a backup containing secrets, configure the original 32-byte `se
 
 A nonfresh target or unusable secret returns HTTP `409` without installing the backup. Actual state-read, Raft barrier/commit, or reload failures return `503`; a commit or reload failure can occur after state was committed, so inspect the target before retrying rather than assuming it is still fresh. Successful restore validates secret decryption, not recovery of external images, volume bytes, or all workload dependencies.
 
-Each backup records its `format_version` and the `trellis_version` that created it. Current backups use format 7. Trellis restores only its current format and does not convert older backups. Restore older backups with a Trellis release that uses their format, such as the release named in the error. Keep a backup that matches the binaries used for recovery.
+Each backup records its `format_version`, the `trellis_version` that created it,
+and the active compatibility level (`active_release`) from the same consistent
+view as desired state. Current backups use format 8. Restore requires the current
+format and a fresh target cluster at that same compatibility level; it does not
+change the target's level or convert older backups. Restore older backups with a
+Trellis release that uses their format, such as the release named in the error.
+Keep a backup that matches the binaries and compatibility level used for recovery.
 
 ## Secrets
 

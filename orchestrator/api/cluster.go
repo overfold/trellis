@@ -12,6 +12,27 @@ type ClusterLeaderResponse struct {
 	LeaderID uuid.UUID `json:"leader_id"`
 }
 
+// ClusterCompatibility reports the replicated active semantics and live binary
+// probes. Release 0 is experimental; stable sequencing starts at v1 (level 1).
+type ClusterCompatibility struct {
+	ActiveRelease uint64              `json:"active_release"`
+	BinaryRelease uint64              `json:"binary_release"`
+	Nodes         []NodeCompatibility `json:"nodes"`
+}
+
+// NodeCompatibility reports a running binary, not a cached heartbeat version.
+type NodeCompatibility struct {
+	ID      uuid.UUID `json:"id"`
+	Release *uint64   `json:"release"`
+	Error   string    `json:"error,omitempty"`
+}
+
+// ActivateReleaseRequest names the exact level to activate; activation is
+// monotonic and requires administrator authority.
+type ActivateReleaseRequest struct {
+	Release uint64 `json:"release"`
+}
+
 // ClusterSettings are the replicated cluster-wide semantics every leader
 // applies. Memory values are canonical byte counts and durations are
 // nanoseconds.

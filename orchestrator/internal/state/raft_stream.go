@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/hashicorp/go-msgpack/v2/codec"
 	"github.com/hashicorp/raft"
+	"github.com/overfold/trellis/orchestrator/internal/compatibility"
 	"github.com/overfold/trellis/orchestrator/internal/tlsutil"
 )
 
@@ -27,6 +28,9 @@ type authorizedRaftConn struct {
 	certificate       *x509.Certificate
 	authorize         func(*x509.Certificate) error
 	verifyPeerAddress func(uuid.UUID, raft.ServerAddress) error
+	activeRelease     func() (uint64, error)
+	peerRelease       uint64
+	peerActive        uint64
 }
 
 func (t *tlsStreamLayer) Accept() (net.Conn, error) {
@@ -34,7 +38,7 @@ func (t *tlsStreamLayer) Accept() (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &authorizedRaftConn{Conn: conn, reader: bufio.NewReader(conn), authorize: t.authorize, verifyPeerAddress: t.verifyPeerAddress}, nil
+	return &authorizedRaftConn{Conn: conn, reader: bufio.NewReader(conn), authorize: t.authorize, verifyPeerAddress: t.verifyPeerAddress, activeRelease: t.activeRelease}, nil
 }
 
 func (c *authorizedRaftConn) Read(p []byte) (int, error) {
@@ -59,6 +63,18 @@ func (c *authorizedRaftConn) Read(p []byte) (int, error) {
 		cancel()
 		if err != nil {
 			return 0, err
+		}
+		if c.activeRelease != nil {
+			if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+				return 0, err
+			}
+			c.peerRelease, c.peerActive, err = exchangeRelease(conn, c.activeRelease, true)
+			if err != nil {
+				return 0, err
+			}
+			if err := conn.SetDeadline(time.Time{}); err != nil {
+				return 0, err
+			}
 		}
 		c.certificate = conn.ConnectionState().PeerCertificates[0]
 	}
@@ -96,6 +112,19 @@ func (c *authorizedRaftConn) Read(p []byte) (int, error) {
 	}
 	if err := c.authorize(c.certificate); err != nil {
 		return 0, fmt.Errorf("Raft RPC peer rejected: %w", err)
+	}
+	if c.activeRelease != nil {
+		active, err := c.activeRelease()
+		if err != nil {
+			return 0, err
+		}
+		boundary := max(active, c.peerActive)
+		if err := compatibility.Check(c.peerRelease, boundary); err != nil {
+			return 0, err
+		}
+		if err := compatibility.Check(compatibility.Current(), boundary); err != nil {
+			return 0, err
+		}
 	}
 	if c.verifyPeerAddress != nil {
 		if err := c.verifyPeerAddress(id, raft.ServerAddress(request.Addr)); err != nil {

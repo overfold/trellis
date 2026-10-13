@@ -30,6 +30,7 @@ type ClusterBootstrap struct {
 // NodeRegistration contains the identity and capacity of a node.
 type NodeRegistration struct {
 	ID                 uuid.UUID
+	Release            uint64
 	Host               string
 	Port               int
 	CPUCapacity        int

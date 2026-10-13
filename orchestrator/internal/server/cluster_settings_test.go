@@ -233,6 +233,15 @@ func TestClusterSettingsEndpointsAuthorization(t *testing.T) {
 		return req.WithContext(context.WithValue(req.Context(), AdminContextKey, true))
 	}
 
+	if rec := serve(authorizedRequest(t, http.MethodGet, "/v1/cluster/compatibility", "", auth.AccessRead)); rec.Code != http.StatusOK {
+		t.Fatalf("cluster/read compatibility status = %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := serve(authorizedRequest(t, http.MethodPost, "/v1/cluster/compatibility/activate", `{"release":1}`, auth.AccessWrite)); rec.Code != http.StatusForbidden {
+		t.Fatalf("non-administrator activation status = %d, want 403", rec.Code)
+	}
+	if rec := serve(admin(authorizedRequest(t, http.MethodPost, "/v1/cluster/compatibility/activate", `{"release":1}`, ""))); rec.Code != http.StatusConflict {
+		t.Fatalf("experimental-to-stable activation status = %d, want 409", rec.Code)
+	}
 	if rec := serve(authorizedRequest(t, http.MethodGet, "/v1/cluster/settings", "", auth.AccessRead)); rec.Code != http.StatusOK {
 		t.Fatalf("cluster/read settings status = %d: %s", rec.Code, rec.Body.String())
 	}

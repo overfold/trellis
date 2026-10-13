@@ -7,7 +7,7 @@ import (
 
 // BackupFormatVersion is the current desired-state backup format.
 // A backup is restored only by a release that uses the same format version.
-const BackupFormatVersion = 7
+const BackupFormatVersion = 8
 
 // BackupSnapshot contains desired state and the replicated cluster settings.
 // Secret values remain encrypted exactly as stored in Raft and still require
@@ -15,7 +15,8 @@ const BackupFormatVersion = 7
 // The record maps are opaque to clients; a backup is meant to be restored
 // unchanged.
 type BackupSnapshot struct {
-	FormatVersion int `json:"format_version"`
+	FormatVersion int    `json:"format_version"`
+	ActiveRelease uint64 `json:"active_release"`
 	// TrellisVersion is the version of the Trellis release that created the
 	// backup, so an operator can pick a release able to restore it.
 	TrellisVersion           string                     `json:"trellis_version"`

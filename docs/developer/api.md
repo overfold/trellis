@@ -15,6 +15,31 @@ Inbound TLS Raft streams reauthorize every MessagePack RPC frame against local r
 
 Managed-only `POST /v1/nodes/enroll` uses a role-bound join token over TLS authenticated with the pinned node CA. Enrollment takes `role` and a PEM `csr`, ignores requested names, and returns an identity certificate; the private key stays on the enrolling node. Only control-plane nodes join Raft and receive the CA key. `POST /v1/nodes/api-certificate` signs a CSR for the shared `trellis` API name only for a bound, non-removed current control-plane member. Its certificate is valid for 24 hours and renewed hourly; workers can never obtain that name. A worker's port 8128 relays TCP to a control-plane endpoint, preserving client-to-API TLS and client identity end to end. `GET /v1/internal/control-plane` and registration/heartbeat responses provide relay targets and the elected leader UUID; workers cache this public topology, not replicated state. `GET /v1/internal/node-role` reports the authenticated node's durable role for administrator-authorized promotion checks.
 
+## Release admission
+
+Enrollment, Raft join, registration, and heartbeats carry a numeric `release`
+sequence declared by the binary, separate from heartbeat `version` strings.
+Stable cluster level N admits N and N+1 only. Enrollment refuses incompatibility
+before consuming a join token (`409`); Raft admission rechecks under membership
+ordering before adding even a non-voter. Experimental level 0 does not represent
+recognized pre-v1 releases and cannot transition to the v1 baseline.
+
+After authenticated TLS, Raft streams exchange 24 bytes: ASCII `TRELLIS1`, the
+binary release as big-endian uint64, and the local active level as big-endian
+uint64. The handshake is deadline-bounded and precedes any Raft RPC. Both
+binaries must implement the higher of their active levels; this lets an upgraded
+but lagging replica receive a current snapshot without admitting an old binary
+after activation. Inbound frames recheck this boundary against the latest local
+committed level, including on already-established streams. Unmarked historical
+commands/state/snapshots are not migrated.
+
+The leader probes `GET /v1/compatibility` on each agent, through the usual
+certificate-bound, current-leader-authorized agent API. It returns `{"release":N}`
+from the serving binary. These live probes, not durable or heartbeat version
+claims, gate administrator activation. They are compatibility declarations by
+trusted nodes, not binary attestation. See [release ownership and snapshot
+recovery](architecture.md#release-compatibility-and-activation).
+
 ## Registration, heartbeats, and discovery
 
 Registration validates the agent endpoint before any state mutation: `host` must be a nonempty ASCII DNS hostname (labels of 1–63 alphanumeric/hyphen characters, no leading/trailing hyphen, at most 253 characters excluding an optional trailing dot) or an IPv4/unbracketed IPv6 literal, including scoped IPv6. Dotted numeric strings must be valid IPv4 literals. URLs, embedded ports, bracketed IPv6, whitespace, and empty labels are rejected. `port` must be 1–65535 inclusive. Invalid registration returns `400` and leaves existing node state unchanged; identity mismatch still returns `403`. Validation does not resolve DNS or test reachability.
@@ -45,15 +70,21 @@ Internal discovery exposes catalog entries only for namespaces with active alloc
 
 ## Durable node execution intent
 
-Nodes pull `GET /v1/nodes/{id}/execution?epoch=E&version=N` from the current leader on port 8128, using zeroes before the first accepted document. The path UUID must exactly match the authenticated node certificate. The client requires verified mTLS, sets TLS `ServerName` to `<leader-uuid>.node.trellis`, and also checks the peer certificate's node URI identity against the expected leader UUID obtained from trusted topology. It refuses redirects and rejects a fetch if the trusted leader ID or address changes during it. The shared operator identity `trellis` is not sufficient for execution authority.
+Nodes pull `GET /v1/nodes/{id}/execution?epoch=E&version=N&release=R` from the current leader on port 8128, using zeroes for epoch/version before the first accepted document. R is the binary's release sequence. The path UUID must exactly match the authenticated node certificate. The client requires verified mTLS, sets TLS `ServerName` to `<leader-uuid>.node.trellis`, and also checks the peer certificate's node URI identity against the expected leader UUID obtained from trusted topology. It refuses redirects and rejects a fetch if the trusted leader ID or address changes during it. The shared operator identity `trellis` is not sufficient for execution authority.
 
 The response is a complete `ExecutionIntent` projected from committed authority: `node_id`, `leader_id`, positive `epoch` and `version`, `complete`, `cleanup_absent`, `allocations`, and `network_plans`. Documents are cached only in leader memory, never written to Raft. Version advances when projected content changes within an epoch, including retry eligibility and recovery-grace changes; a new durable control epoch permits rebuilding with version 1. Agents compare `(epoch, version)` lexicographically and reject different content at the same pair. A current epoch/version long-polls for up to 25 seconds, then returns the same complete document; the client budget is 35 seconds. An older epoch returns the current document immediately. Missing authority returns `503`, never an empty cleanup-authorizing view. Responses are `Cache-Control: no-store`, although the agent explicitly persists accepted intent locally for recovery.
+
+The document also carries `release`, the replicated active semantics. The agent
+rejects unsupported document levels before persistence, cleanup, or admission,
+including during cached recovery. Pulls and credential requests carry the binary
+release; incompatibility returns `409`, and long polls recheck before delivery.
+Credential requests include `&release=R` and recheck before returning secrets.
 
 Allocation modes are `run` (RUN: authorize admission of this generation/attempt), `retain` (RETAIN: preserve established execution without admitting a start), and `cleanup` (CLEANUP: generation-fenced resource teardown, with `retain_logs` controlling history). Requests carry generation, revision, execution hash, attempt, epoch, and sequenced drain state. The agent rejects incomplete, stale, conflicting-version, mixed-identity, or invalid documents before persistence or cleanup. `complete` alone does not authorize omission-based deletion: `cleanup_absent` must also be true. During the leader's 30-second recovery grace it is false; explicit CLEANUP entries still apply. Fetch failure is never proof of absence.
 
 `GET /v1/nodes/{id}/execution/{allocation}/credentials?version=N&generation=G&epoch=E&attempt=A` separately returns delivered secret bytes and task-scoped environment overrides for a currently authorized RUN attempt. It uses the same exact node/leader mTLS identity checks and a ten-second client budget. The leader validates the current projected epoch/version, generation, and attempt before resolving credentials and revalidates authority before delivery (`409` when authorization changes, `403` when no matching RUN exists, `503` when unavailable). Secret plaintext and workload bearer tokens never enter the cached execution document. This is an internal endpoint, not operator secret read-back.
 
-`AllocationRequest` has no allocation-level `Runtime`: each `TaskSpec` carries its resolved runtime and optional API access grant. `EnvOverrides` is `map[string]map[string]string` (task name → environment name → value), not one allocation-wide environment map. Deliver overrides only to their named task; sibling tasks must not inherit API endpoint, token, namespace, or CA injection. Restart policy remains allocation/task-group level. Leaders and agents must use the same release; see the [pre-v1 compatibility policy](../public/operations.md#upgrade-a-node).
+`AllocationRequest` has no allocation-level `Runtime`: each `TaskSpec` carries its resolved runtime and optional API access grant. `EnvOverrides` is `map[string]map[string]string` (task name → environment name → value), not one allocation-wide environment map. Deliver overrides only to their named task; sibling tasks must not inherit API endpoint, token, namespace, or CA injection. Restart policy remains allocation/task-group level. Experimental leaders and agents must use the same release; stable rolling upgrades use the [compatibility boundary](../public/operations.md#compatibility-boundary).
 
 The agent converges locally with one worker per allocation and independent namespace-plan workers. Cleanup precedes admission for an allocation; stalled runtime or credential work does not hold unrelated allocation workers. Starts persist their admission identity before background work. Interrupted admissions recover as failures unless matching task records establish execution; the same attempt is not silently replayed after restart. Heartbeats report failures and exact `(allocation ID, generation)` cleanup receipts. Neither a stopped task nor an omitted inventory entry proves resource cleanup. See [agent convergence](node-internals.md#agent-convergence) and [leader retry policy](control-plane.md#reconciliation).
 

@@ -239,7 +239,7 @@ func (s *Server) memberStates(members []state.RaftMember) []memberState {
 // and caught up if the voter set needs it. A removed identity is refused
 // under membershipMu, which RemoveMember holds while recording removals, so a
 // join cannot race a removal back into the configuration.
-func (s *Server) JoinMember(ctx context.Context, id uuid.UUID, raftAddress string) ([]string, error) {
+func (s *Server) JoinMember(ctx context.Context, id uuid.UUID, raftAddress string, binaryRelease uint64) ([]string, error) {
 	ctx, release := s.bindTerm(ctx)
 	defer release()
 	if s.joiner == nil {
@@ -248,6 +248,9 @@ func (s *Server) JoinMember(ctx context.Context, id uuid.UUID, raftAddress strin
 	s.membershipMu.Lock()
 	defer s.membershipMu.Unlock()
 	if err := s.checkTerm(ctx); err != nil {
+		return nil, err
+	}
+	if err := s.checkRelease(binaryRelease); err != nil {
 		return nil, err
 	}
 	current, err := s.joiner.Membership()
@@ -266,6 +269,11 @@ func (s *Server) JoinMember(ctx context.Context, id uuid.UUID, raftAddress strin
 		return nil, err
 	} else if !found || role != api.NodeRoleControlPlane {
 		return nil, fmt.Errorf("node %s is not control-plane eligible", id)
+	}
+	if store, ok := s.state.store.(*state.RaftStore); ok {
+		if err := store.PrepareReleaseJoin(ctx, binaryRelease); err != nil {
+			return nil, err
+		}
 	}
 	if err := s.checkTerm(ctx); err != nil {
 		return nil, err

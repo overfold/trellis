@@ -164,6 +164,25 @@ func (c *Client) ClusterLeader(ctx context.Context) (*api.ClusterLeaderResponse,
 	return &response, nil
 }
 
+// ClusterCompatibility inspects the active level and probes running nodes.
+func (c *Client) ClusterCompatibility(ctx context.Context) (*api.ClusterCompatibility, error) {
+	var response api.ClusterCompatibility
+	if err := c.request(ctx, http.MethodGet, c.clusterPath("/v1/cluster/compatibility"), nil, &response); err != nil {
+		return nil, fmt.Errorf("inspect cluster compatibility: %w", err)
+	}
+	return &response, nil
+}
+
+// ActivateRelease closes the previous release's rollback window. It requires
+// administrator authority and every admitted node at the target release.
+func (c *Client) ActivateRelease(ctx context.Context, release uint64) (*api.ClusterCompatibility, error) {
+	var response api.ClusterCompatibility
+	if err := c.request(ctx, http.MethodPost, c.clusterPath("/v1/cluster/compatibility/activate"), api.ActivateReleaseRequest{Release: release}, &response); err != nil {
+		return nil, fmt.Errorf("activate cluster release: %w", err)
+	}
+	return &response, nil
+}
+
 // ClusterSettings returns the replicated cluster-wide settings.
 func (c *Client) ClusterSettings(ctx context.Context) (*api.ClusterSettings, error) {
 	var response api.ClusterSettings

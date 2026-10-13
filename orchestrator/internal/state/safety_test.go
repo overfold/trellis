@@ -74,7 +74,7 @@ func TestRaftLossReacquisitionRejectsOriginatingTerm(t *testing.T) {
 		t.Fatal("leadership was not reacquired in a new election term")
 	}
 	newer := []byte(`{"ControlEpoch":9,"authority":"new"}`)
-	data, _ := json.Marshal(fsmCommand{Op: "put", Key: meta, Value: newer})
+	data, _ := store.encodeCommand(fsmCommand{Op: "put", Key: meta, Value: newer})
 	if err := store.Raft().Apply(data, time.Second).Error(); err != nil {
 		close(release)
 		t.Fatal(err)

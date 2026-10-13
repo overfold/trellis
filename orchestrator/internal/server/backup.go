@@ -42,6 +42,7 @@ func (s *Server) Backup(_ context.Context) (*api.BackupSnapshot, error) {
 	}
 	result := &api.BackupSnapshot{
 		FormatVersion:              api.BackupFormatVersion,
+		ActiveRelease:              snapshot.ActiveRelease,
 		TrellisVersion:             version.Current(),
 		CreatedAt:                  s.now().UTC(),
 		ClusterSettings:            cluster.Settings.API(),
@@ -99,6 +100,13 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 	if err := checkBackupFormat(backup); err != nil {
 		return err
 	}
+	active, err := s.activeRelease()
+	if err != nil {
+		return stateUnavailable(err)
+	}
+	if backup.ActiveRelease != active {
+		return fmt.Errorf("backup compatibility level %d differs from target level %d; restore into a fresh cluster at the backup's level", backup.ActiveRelease, active)
+	}
 	if s.backupStore == nil {
 		return stateUnavailable(fmt.Errorf("restore is unavailable"))
 	}
@@ -113,6 +121,7 @@ func (s *Server) Restore(ctx context.Context, backup *api.BackupSnapshot) error 
 		return fmt.Errorf("backup network settings (wireguard_pool %s, wireguard_port_count %d) differ from this cluster's (wireguard_pool %s, wireguard_port_count %d); restore into a new cluster created with the backup's values", settings.WireGuardPool, settings.WireGuardPortCount, pool, portCount)
 	}
 	snapshot := &state.DesiredSnapshot{
+		ActiveRelease:              backup.ActiveRelease,
 		Jobs:                       make(map[string][]byte, len(backup.Jobs)),
 		JobRevisions:               make(map[string][]byte, len(backup.JobRevisions)),
 		Secrets:                    make(map[string][]byte, len(backup.Secrets)),
