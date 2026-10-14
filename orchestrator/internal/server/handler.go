@@ -488,6 +488,9 @@ func (h *Handler) handleSetSecret(c *echo.Context) error {
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "value_base64 is invalid")
 	}
+	if len(value) == 0 {
+		return echo.NewHTTPError(http.StatusBadRequest, "value_base64 must decode to at least 1 byte")
+	}
 	meta, err := h.server.SetSecret(c.Request().Context(), ns, c.Param("name"), value, request.ExpectedVersion)
 	if errors.Is(err, secretstore.ErrVersionConflict) {
 		return echo.NewHTTPError(http.StatusConflict, "secret version conflict")
@@ -745,6 +748,9 @@ func (h *Handler) handleEnrollExternalNode(c *echo.Context) error {
 	}
 	id, err := h.server.EnrollExternalNode(c.Request().Context(), request.Certificate, request.Role)
 	if err != nil {
+		if isUnavailable(err) {
+			return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error())
+		}
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
 	return c.JSON(http.StatusCreated, api.NodeIdentityCreateResponse{ID: id})
@@ -1107,6 +1113,9 @@ func (h *Handler) handleRaftMemberRemove(c *echo.Context) error {
 		}
 		if errors.Is(err, ErrMembershipUnsafe) {
 			return echo.NewHTTPError(http.StatusConflict, err.Error())
+		}
+		if isUnavailable(err) {
+			return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error())
 		}
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}

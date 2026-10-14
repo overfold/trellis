@@ -374,16 +374,16 @@ func (s *Server) RemoveMember(ctx context.Context, id string) error {
 		return ErrInvalidNodeID
 	}
 	if s.joiner == nil {
-		return fmt.Errorf("cluster membership changes not available")
+		return stateUnavailable(fmt.Errorf("cluster membership changes not available"))
 	}
 	s.membershipMu.Lock()
 	defer s.membershipMu.Unlock()
 	if err := s.checkTerm(ctx); err != nil {
-		return err
+		return stateUnavailable(err)
 	}
 	current, err := s.joiner.Membership()
 	if err != nil {
-		return fmt.Errorf("read Raft membership: %w", err)
+		return stateUnavailable(fmt.Errorf("read Raft membership: %w", err))
 	}
 	members := s.memberStates(current)
 	index := slices.IndexFunc(members, func(member memberState) bool { return member.ID == id })
@@ -408,12 +408,12 @@ func (s *Server) RemoveMember(ctx context.Context, id string) error {
 	// Revoke before changing Raft: if a later step fails, the node is already
 	// unable to authenticate or rejoin, and a retry completes the removal.
 	if err := s.checkTerm(ctx); err != nil {
-		return err
+		return stateUnavailable(err)
 	}
 	s.mutationMu.Lock()
 	if err := s.state.PutNodeTombstone(ctx, id, NodeTombstone{RemovedAt: s.now().UTC()}); err != nil {
 		s.mutationMu.Unlock()
-		return fmt.Errorf("record removal of node %s: %w", id, err)
+		return stateUnavailable(fmt.Errorf("record removal of node %s: %w", id, err))
 	}
 	s.mu.Lock()
 	delete(s.nodes, nodeID)
@@ -434,22 +434,22 @@ func (s *Server) RemoveMember(ctx context.Context, id string) error {
 	if members[index].Voter {
 		if promote {
 			if err := s.applyMembershipChange(ctx, current[0].ConfigurationIndex, replacement); err != nil {
-				return fmt.Errorf("node %s is tombstoned but removal is incomplete during replacement %s promotion; restore reachable quorum and retry removal: %w", id, replacement.ID, err)
+				return stateUnavailable(fmt.Errorf("node %s is tombstoned but removal is incomplete during replacement %s promotion; restore reachable quorum and retry removal: %w", id, replacement.ID, err))
 			}
 			current, err = s.joiner.Membership()
 			if err != nil {
-				return err
+				return stateUnavailable(fmt.Errorf("node %s is tombstoned but removal is incomplete reading membership after replacement promotion; retry removal: %w", id, err))
 			}
 			if err := checkRemovalQuorum(s.memberStates(current), id); err != nil {
-				return err
+				return fmt.Errorf("node %s is tombstoned but removal is incomplete after replacement promotion; restore reachable quorum and retry removal: %w", id, err)
 			}
 		}
 	}
 	if err := s.checkTerm(ctx); err != nil {
-		return err
+		return stateUnavailable(fmt.Errorf("node %s is tombstoned but Raft removal is incomplete; retry removal: %w", id, err))
 	}
 	if err := s.joiner.ChangeMembership(ctx, current[0].ConfigurationIndex, raft.RemoveServer, id, ""); err != nil {
-		return fmt.Errorf("node %s is tombstoned but Raft removal is incomplete; restore reachable quorum and retry removal: %w", id, err)
+		return stateUnavailable(fmt.Errorf("node %s is tombstoned but Raft removal is incomplete; restore reachable quorum and retry removal: %w", id, err))
 	}
 	s.wakeMembership()
 	return nil

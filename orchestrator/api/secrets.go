@@ -4,6 +4,7 @@ import "time"
 
 // SecretWriteRequest contains a secret value and optional version precondition.
 type SecretWriteRequest struct {
+	// ValueBase64 must decode to 1–65536 bytes.
 	ValueBase64     string  `json:"value_base64"`
 	ExpectedVersion *uint64 `json:"expected_version,omitempty"`
 }

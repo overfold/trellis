@@ -583,7 +583,7 @@ func (s *Server) BindNodeCertificateRole(ctx context.Context, id uuid.UUID, cert
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
 	if removed, err := s.state.NodeRemoved(ctx, id.String()); err != nil {
-		return err
+		return stateUnavailable(err)
 	} else if removed {
 		return fmt.Errorf("node %s: %w", id, ErrNodeRemoved)
 	}
@@ -594,21 +594,24 @@ func (s *Server) BindNodeCertificateRole(ctx context.Context, id uuid.UUID, cert
 	}
 	existing, found, err := s.state.GetNodeCertificateFingerprint(ctx, id.String())
 	if err != nil {
-		return err
+		return stateUnavailable(err)
 	}
 	if found {
 		if subtle.ConstantTimeCompare([]byte(existing), []byte(fingerprint)) != 1 {
 			return fmt.Errorf("node identity %s is already bound to another certificate", id)
 		}
 		boundRole, _, err := s.state.NodeRole(ctx, id.String())
-		if err != nil || boundRole != role {
+		if err != nil {
+			return stateUnavailable(err)
+		}
+		if boundRole != role {
 			return fmt.Errorf("node identity %s role does not match", id)
 		}
 		return nil
 	}
 	fp, _ := jsonMutation(s.state.nodeCertificateFingerprintKey(id.String()), fingerprint)
 	rm, _ := jsonMutation(s.state.nodeRoleKey(id.String()), role)
-	return s.state.batch(ctx, []state.Mutation{fp, rm})
+	return stateUnavailable(s.state.batch(ctx, []state.Mutation{fp, rm}))
 }
 
 // AuthorizeNodeCertificate checks the durable UUID-to-certificate binding and
@@ -665,7 +668,7 @@ func (s *Server) PromoteNode(ctx context.Context, id uuid.UUID) error {
 func (s *Server) EnrollExternalNode(ctx context.Context, certificatePEM string, role api.NodeRole) (uuid.UUID, error) {
 	ca, key, err := s.ClusterCA()
 	if err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, stateUnavailable(err)
 	}
 	if key != "" {
 		return uuid.Nil, fmt.Errorf("external identity enrollment requires external signing mode")

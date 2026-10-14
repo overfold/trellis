@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
+	"github.com/overfold/trellis/orchestrator/api"
 	"github.com/overfold/trellis/orchestrator/internal/auth"
 	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
 	secretstore "github.com/overfold/trellis/orchestrator/internal/secrets"
@@ -90,6 +91,54 @@ func TestSecretHandlerEnforcesExactDecodedSizeBoundary(t *testing.T) {
 	}
 	if rec := request("oversized", secretstore.MaxValueSize+1); rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversized status = %d, want 413: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestInvalidSecretWritesPreserveExistingValue(t *testing.T) {
+	e, store := secretHandler(t)
+	path := "/v1/namespaces/default/secrets/token"
+	write := func(body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, authorizedRequest(t, http.MethodPut, path, body, auth.AccessWrite))
+		return rec
+	}
+	initial := write(`{"value_base64":"eA=="}`)
+	if initial.Code != http.StatusOK {
+		t.Fatalf("one-byte write: %d %s", initial.Code, initial.Body.String())
+	}
+	var before api.SecretMetadata
+	if err := json.Unmarshal(initial.Body.Bytes(), &before); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		body   string
+		status int
+	}{
+		{`{}`, http.StatusBadRequest},
+		{`{"value_base64":""}`, http.StatusBadRequest},
+		{`{"value_base64":null}`, http.StatusBadRequest},
+		{`{"value_base64":"\r\n"}`, http.StatusBadRequest},
+		{`{"value_base64":"!"}`, http.StatusBadRequest},
+		{fmt.Sprintf(`{"value_base64":%q}`, base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{'z'}, secretstore.MaxValueSize+1))), http.StatusRequestEntityTooLarge},
+	} {
+		rec := write(tc.body)
+		if rec.Code != tc.status {
+			t.Fatalf("invalid write: %d %s, want %d", rec.Code, rec.Body.String(), tc.status)
+		}
+		if tc.status == http.StatusBadRequest && !strings.Contains(rec.Body.String(), "value_base64") {
+			t.Fatalf("missing validation context: %s", rec.Body.String())
+		}
+		meta := httptest.NewRecorder()
+		e.ServeHTTP(meta, authorizedRequest(t, http.MethodGet, path, "", auth.AccessRead))
+		var after api.SecretMetadata
+		if meta.Code != http.StatusOK || json.Unmarshal(meta.Body.Bytes(), &after) != nil || after != before {
+			t.Fatalf("invalid write changed metadata: %d %s; before %s", meta.Code, meta.Body.String(), initial.Body.String())
+		}
+		value, _, err := store.Resolve(t.Context(), "default", "token")
+		if err != nil || string(value) != "x" {
+			t.Fatalf("invalid write changed value: %v", err)
+		}
+		clear(value)
 	}
 }
 

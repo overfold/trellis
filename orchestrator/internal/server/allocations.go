@@ -4,7 +4,10 @@ package server
 import (
 	"context"
 	"errors"
-	"fmt"
+	"net"
+	"net/url"
+	"strconv"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/overfold/trellis/orchestrator/api"
@@ -240,6 +243,16 @@ func (s *Server) StopAllocationByID(ctx context.Context, namespace, id string) e
 // allocation with the requested ID in the caller's namespace.
 var ErrAllocationNotFound = errors.New("allocation not found")
 
+// agentURL serializes the authority, including IPv6 brackets and zone escaping.
+func (n *Node) agentURL() string {
+	scheme, host := "https", n.Host
+	// Internal test agents may use HTTP; registered hosts never carry a scheme.
+	if prefix, rest, ok := strings.Cut(host, "://"); ok {
+		scheme, host = prefix, rest
+	}
+	return (&url.URL{Scheme: scheme, Host: net.JoinHostPort(host, strconv.Itoa(n.Port))}).String()
+}
+
 func (s *Server) allocationAgentAddress(namespace, id string) (uuid.UUID, string, []spec.TaskSpec, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -248,7 +261,7 @@ func (s *Server) allocationAgentAddress(namespace, id string) (uuid.UUID, string
 			if alloc.Node == nil {
 				return uuid.Nil, "", nil, ErrAllocationNotFound
 			}
-			return alloc.Node.ID, fmt.Sprintf("%s:%d", alloc.Node.Host, alloc.Node.Port), append([]spec.TaskSpec(nil), alloc.Tasks...), nil
+			return alloc.Node.ID, alloc.Node.agentURL(), append([]spec.TaskSpec(nil), alloc.Tasks...), nil
 		}
 	}
 	return uuid.Nil, "", nil, ErrAllocationNotFound
@@ -269,7 +282,7 @@ func (s *Server) AllocationMetrics(ctx context.Context, namespace, id string) (a
 		return nil, ErrAllocationNotFound
 	}
 	nodeID := found.Node.ID
-	address := fmt.Sprintf("%s:%d", found.Node.Host, found.Node.Port)
+	address := found.Node.agentURL()
 	s.mu.RUnlock()
 	return s.client.AllocationMetrics(ctx, nodeID, address, id)
 }
