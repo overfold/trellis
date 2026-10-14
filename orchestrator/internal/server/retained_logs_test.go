@@ -31,13 +31,47 @@ func TestRetainedLogInventoryCleanupAfterPruning(t *testing.T) {
 		t.Fatal("log inventory changed terminal execution")
 	}
 	acknowledgeTestCleanup(t, s, allocation)
-	// Prune while offline, then publish absence: the old keep-logs cleanup must
-	// not keep historical logs forever, even if no fresh inventory was received.
+	// Pruning commits irreversible log removal, rather than treating resource
+	// release as acknowledgement that the retained history's logs are gone.
+	if err := s.state.CommitReconciliation(t.Context(), &ReconciliationCommit{DeleteAllocations: []string{allocation.ID}}); err != nil {
+		t.Fatal(err)
+	}
 	s.allocations = nil
+	s.rebuildAllocationNodeIndexLocked()
+	s.Reconcile(t.Context())
+	if committedAllocationIntent(t, s, node.ID, allocation.ID, 1).RetainLogs {
+		t.Fatal("pruning did not publish irreversible log removal")
+	}
+	receipt := nodeapi.AllocationStatus{ID: allocation.ID, Generation: 1, CleanupComplete: true, Phase: lifecycle.PhaseStopped, Health: lifecycle.HealthUnknown}
+	// Receipt and task-log entries aggregate in either arrival order.
+	for _, report := range [][]nodeapi.AllocationStatus{{status, receipt}, {receipt, status}} {
+		if err := heartbeatAndApply(t, s, node.ID, report, "test", nodeResourceObservation{}); err != nil {
+			t.Fatal(err)
+		}
+		s.Reconcile(t.Context())
+		if committedAllocationIntent(t, s, node.ID, allocation.ID, 1).RetainLogs {
+			t.Fatal("cleanup receipt hid retained logs")
+		}
+	}
+	if err := heartbeatAndApply(t, s, node.ID, []nodeapi.AllocationStatus{receipt}, "test", nodeResourceObservation{}); err != nil {
+		t.Fatal(err)
+	}
 	s.Reconcile(t.Context())
 	doc, err := s.ExecutionIntent(t.Context(), node.ID, 0)
 	if err != nil || !doc.CleanupAbsent || len(doc.Allocations) != 0 {
 		t.Fatalf("pruned log authority=%+v %v", doc, err)
+	}
+	decisions, err := s.state.executionDecisions(t.Context(), node.ID)
+	if err != nil || len(decisions) != 0 {
+		t.Fatalf("retired decisions = %+v, %v", decisions, err)
+	}
+	// A delayed duplicate receipt must not recreate the retired proof.
+	if err := heartbeatAndApply(t, s, node.ID, []nodeapi.AllocationStatus{receipt}, "test", nodeResourceObservation{}); err != nil {
+		t.Fatal(err)
+	}
+	complete, err := s.state.executionCleaned(t.Context(), node.ID, allocation.ID, 1)
+	if err != nil || complete {
+		t.Fatalf("retired proof recreated = %t, %v", complete, err)
 	}
 }
 

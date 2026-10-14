@@ -98,6 +98,48 @@ func (s *StateController) executionCleaned(ctx context.Context, node uuid.UUID, 
 	return complete, err
 }
 
+// ExecutionObservationMutations returns cleanup proofs and retirement in the
+// same transaction as the observation. The caller holds mutation ordering and
+// validates registration/leadership before committing. Resource release alone
+// does not discharge a log-removal obligation: the complete snapshot must also
+// report no retained logs. Unknown receipts never create durable history.
+func (s *StateController) ExecutionObservationMutations(ctx context.Context, observation *nodeObservation) ([]state.Mutation, error) {
+	var mutations []state.Mutation
+	for _, observed := range observation.observed {
+		if !observed.CleanupComplete {
+			continue
+		}
+		key := s.executionDecisionKey(observation.node, observed.ID, observed.Generation)
+		var decision executionCleanupDecision
+		found, err := s.get(ctx, key, &decision)
+		if err != nil {
+			return nil, err
+		}
+		var allocation Allocation
+		present, err := s.get(ctx, s.allocationKey(observed.ID), &allocation)
+		if err != nil {
+			return nil, err
+		}
+		present = present && allocation.Generation == observed.Generation && allocation.Node != nil && allocation.Node.ID == observation.node
+		proofKey := s.executionCleanupKey(observation.node, observed.ID, observed.Generation)
+		if !found && !present {
+			continue
+		}
+		if found && !present && !decision.RetainLogs && !observed.RetainedLogs {
+			mutations = append(mutations, state.Mutation{Key: key}, state.Mutation{Key: proofKey})
+			continue
+		}
+		complete, err := s.executionCleaned(ctx, observation.node, observed.ID, observed.Generation)
+		if err != nil {
+			return nil, err
+		}
+		if !complete {
+			mutations = append(mutations, state.Mutation{Key: proofKey, Value: []byte("true")})
+		}
+	}
+	return mutations, nil
+}
+
 // executionIntentLocked returns only a view belonging to the current epoch.
 // Missing projections fail closed until reconciliation rebuilds them.
 func (s *Server) executionIntentLocked(id uuid.UUID) *nodeapi.ExecutionIntent {
@@ -188,7 +230,7 @@ func (s *Server) ExecutionIntent(ctx context.Context, id uuid.UUID, version uint
 
 // publishReconcileIntent projects canonical authority without persisting the
 // response documents. All admission and cleanup decisions are already committed.
-func (s *Server) publishReconcileIntent(ctx context.Context) error {
+func (s *Server) publishReconcileIntent(ctx context.Context, affected ...map[uuid.UUID]bool) error {
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
 	activeRelease, err := s.activeRelease()
@@ -198,14 +240,38 @@ func (s *Server) publishReconcileIntent(ctx context.Context) error {
 	// Durable cleanup decisions reserve a node even before fresh inventory.
 	s.mu.RLock()
 	ids := make([]uuid.UUID, 0, len(s.nodes))
+	selected := make(map[uuid.UUID]bool, len(s.nodes))
+	epoch := s.controlEpoch
 	for id := range s.nodes {
 		ids = append(ids, id)
+		selected[id] = len(affected) == 0 || affected[0] == nil || affected[0][id] || s.executionDirty[id]
 	}
 	s.mu.RUnlock()
+	s.executionMu.Lock()
+	for _, id := range ids {
+		prior := s.executionIntents[id]
+		if prior == nil || prior.Epoch != epoch || prior.Release != activeRelease {
+			selected[id] = true
+		}
+	}
+	s.executionMu.Unlock()
+	s.mu.Lock()
+	if s.executionDirty == nil {
+		s.executionDirty = make(map[uuid.UUID]bool)
+	}
+	for _, id := range ids {
+		if selected[id] {
+			s.executionDirty[id] = true
+		}
+	}
+	s.mu.Unlock()
 	cleanupPending := make(map[uuid.UUID]bool)
 	cleaned := make(map[uuid.UUID]map[allocationGeneration]bool)
 	decisions := make(map[uuid.UUID][]executionCleanupDecision, len(ids))
 	for _, id := range ids {
+		if !selected[id] {
+			continue
+		}
 		entries, err := s.state.executionDecisions(ctx, id)
 		if err != nil {
 			return err
@@ -222,12 +288,15 @@ func (s *Server) publishReconcileIntent(ctx context.Context) error {
 		}
 	}
 	s.mu.RLock()
-	epoch, leader := s.controlEpoch, s.nodeID
+	leader := s.nodeID
 	cleanupAbsent := !s.leaderSince.IsZero() && s.now().Sub(s.leaderSince) >= leaderRecoveryGrace
 	documents := make(map[uuid.UUID]*nodeapi.ExecutionIntent, len(s.nodes))
 	blocked := make(map[uuid.UUID]bool)
 	running := make(map[uuid.UUID]map[allocationGeneration]bool)
 	for id, node := range s.nodes {
+		if !selected[id] {
+			continue
+		}
 		running[id] = make(map[allocationGeneration]bool)
 		blocked[id] = cleanupPending[id] || s.nodeHasUnownedExecutionLocked(node)
 		documents[id] = &nodeapi.ExecutionIntent{Release: activeRelease, NodeID: id, LeaderID: leader, Epoch: epoch, Complete: true, CleanupAbsent: cleanupAbsent, Allocations: []nodeapi.AllocationIntent{}, NetworkPlans: map[string]network.Plan{}}
@@ -288,34 +357,30 @@ func (s *Server) publishReconcileIntent(ctx context.Context) error {
 		if allocation.Phase == lifecycle.PhaseRunning {
 			running[allocation.Node.ID][allocationGeneration{id: allocation.ID, generation: allocation.Generation}] = true
 		}
-		hashInput := request
-		hashInput.Epoch, hashInput.Attempt = 0, 0
-		hashInput.Draining, hashInput.DrainSequence = false, 0
-		if request.NetworkPlan != nil {
-			hashInput.NetworkPlan = &network.Plan{CIDR: request.NetworkPlan.CIDR, Gateway: request.NetworkPlan.Gateway}
-		}
-		raw, _ := json.Marshal(hashInput)
-		hash := sha256.Sum256(raw)
-		request.ExecutionHash = hex.EncodeToString(hash[:])
 		doc.Allocations = append(doc.Allocations, nodeapi.AllocationIntent{Mode: mode, Request: request, RetainLogs: true})
 		allocation.mu.Unlock()
 	}
 	s.mu.RUnlock()
 	for id, doc := range documents {
-		for _, decision := range decisions[id] {
-			found := false
-			for i := range doc.Allocations {
-				entry := &doc.Allocations[i]
-				if entry.Request.AllocationID == decision.ID && entry.Request.Generation == decision.Generation {
-					entry.Mode, entry.RetainLogs = nodeapi.ExecutionCleanup, decision.RetainLogs
-					found = true
-				}
+		entries := make(map[allocationGeneration]int, len(doc.Allocations))
+		for i := range doc.Allocations {
+			entry := &doc.Allocations[i]
+			hashInput := entry.Request
+			hashInput.Epoch, hashInput.Attempt = 0, 0
+			hashInput.Draining, hashInput.DrainSequence = false, 0
+			if hashInput.NetworkPlan != nil {
+				hashInput.NetworkPlan = &network.Plan{CIDR: hashInput.NetworkPlan.CIDR, Gateway: hashInput.NetworkPlan.Gateway}
 			}
-			if !found {
-				complete := cleaned[id][allocationGeneration{id: decision.ID, generation: decision.Generation}]
-				if complete && cleanupAbsent {
-					continue
-				}
+			raw, _ := json.Marshal(hashInput)
+			hash := sha256.Sum256(raw)
+			entry.Request.ExecutionHash = hex.EncodeToString(hash[:])
+			entries[allocationGeneration{id: entry.Request.AllocationID, generation: entry.Request.Generation}] = i
+		}
+		for _, decision := range decisions[id] {
+			if index, found := entries[allocationGeneration{id: decision.ID, generation: decision.Generation}]; found {
+				entry := &doc.Allocations[index]
+				entry.Mode, entry.RetainLogs = nodeapi.ExecutionCleanup, decision.RetainLogs
+			} else {
 				doc.Allocations = append(doc.Allocations, nodeapi.AllocationIntent{Mode: nodeapi.ExecutionCleanup, Request: nodeapi.AllocationRequest{AllocationID: decision.ID, Generation: decision.Generation, Epoch: epoch}, RetainLogs: decision.RetainLogs})
 			}
 		}
@@ -346,6 +411,9 @@ func (s *Server) publishReconcileIntent(ctx context.Context) error {
 		if err := s.publishExecution(ctx, doc); err != nil {
 			return err
 		}
+		s.mu.Lock()
+		delete(s.executionDirty, id)
+		s.mu.Unlock()
 	}
 	return nil
 }

@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/overfold/trellis/orchestrator/internal/lifecycle"
@@ -168,5 +171,75 @@ func TestRestartJobReconcilesImmediately(t *testing.T) {
 	}
 	if !persisted["original"].Draining || persisted["original"].DrainReason != "restart" {
 		t.Fatalf("persisted restart intent = %#v", persisted["original"])
+	}
+}
+
+// A diagnostic is emitted after scheduling but before commit. Pausing its
+// evaluation exercises a real API mutation at that boundary, without a
+// production scheduling hook.
+type pausedPlanDiagnostic struct {
+	slog.Handler
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (p *pausedPlanDiagnostic) Handle(ctx context.Context, record slog.Record) error {
+	p.once.Do(func() {
+		close(p.started)
+		<-p.release
+	})
+	return p.Handler.Handle(ctx, record)
+}
+
+func TestReconcileReplansWhenNodeRegistrationChangesDuringPlanning(t *testing.T) {
+	s, _, _, node, _ := newAbortFixture(t)
+	invalid := planTestJob("invalid", 1, 1, spec.UpdateRecreate)
+	invalid.Spec.TaskGroups[0].Count = 0
+	s.jobs[jobKey("default", "invalid")] = invalid
+	pause := &pausedPlanDiagnostic{Handler: slog.NewTextHandler(io.Discard, nil), started: make(chan struct{}), release: make(chan struct{})}
+	s.log = slog.New(pause)
+	var release sync.Once
+	unblock := func() { release.Do(func() { close(pause.release) }) }
+	t.Cleanup(unblock)
+	done := make(chan struct{})
+	go func() {
+		s.Reconcile(t.Context())
+		close(done)
+	}()
+	select {
+	case <-pause.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reconciliation did not reach its planning diagnostic")
+	}
+	registered := make(chan error, 1)
+	go func() {
+		registered <- s.RegisterNode(t.Context(), &NodeRegistration{ID: node.ID, Host: "127.0.0.1", Port: 8127, RunsWorkloads: false})
+	}()
+	select {
+	case err := <-registered:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("node registration blocked on scheduling")
+	}
+	unblock()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reconciliation did not replan")
+	}
+	allocations, err := s.state.ListAllocations(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(allocations) != 1 || allocations["pending"] == nil {
+		t.Fatalf("replanned allocations = %+v, want the original pending allocation", allocations)
+	}
+	for _, allocation := range allocations {
+		if allocation.Node != nil || allocation.Phase != lifecycle.PhasePending {
+			t.Fatalf("stale placement committed after disabling workloads: %+v", allocation)
+		}
 	}
 }

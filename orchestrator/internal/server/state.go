@@ -358,6 +358,7 @@ func (s *StateController) CommitReconciliation(ctx context.Context, commit *Reco
 		return fmt.Errorf("state store does not support atomic reconciliation updates")
 	}
 	mutations := make([]state.Mutation, 0, len(commit.Allocations)+len(commit.DeleteAllocations)+len(commit.VolumeRegistrations)+len(commit.NetworkPortRegistrations)+len(commit.DeleteNetworkPortNamespaces)+len(commit.NetworkSubnetRegistrations)+len(commit.DeleteNetworkSubnetRegistrations)+len(commit.Backoffs)+len(commit.DeleteBackoffs))
+	decisions := append([]executionCleanupDecision(nil), commit.ExecutionCleanup...)
 	for _, allocation := range commit.Allocations {
 		raw, err := json.Marshal(allocation)
 		if err != nil {
@@ -367,6 +368,21 @@ func (s *StateController) CommitReconciliation(ctx context.Context, commit *Reco
 	}
 	for _, id := range commit.DeleteAllocations {
 		mutations = append(mutations, state.Mutation{Key: s.allocationKey(id)})
+		for i := range decisions {
+			if decisions[i].ID == id {
+				decisions[i].RetainLogs = false
+			}
+		}
+		// Pruning history also irrevocably releases its retained logs. Keep
+		// this obligation durable until an exact receipt discharges it.
+		var allocation Allocation
+		found, err := s.get(ctx, s.allocationKey(id), &allocation)
+		if err != nil {
+			return err
+		}
+		if found && allocation.Node != nil && allocation.Generation != 0 {
+			decisions = append(decisions, executionCleanupDecision{Node: allocation.Node.ID, ID: id, Generation: allocation.Generation})
+		}
 	}
 	for _, registration := range commit.VolumeRegistrations {
 		if registration == nil || registration.Namespace == "" || registration.Name == "" || registration.NodeID == uuid.Nil {
@@ -417,7 +433,7 @@ func (s *StateController) CommitReconciliation(ctx context.Context, commit *Reco
 	for _, backoff := range commit.DeleteBackoffs {
 		mutations = append(mutations, state.Mutation{Key: s.replacementBackoffKey(backoff)})
 	}
-	cleanup, err := s.executionCleanupMutations(ctx, commit.ExecutionCleanup)
+	cleanup, err := s.executionCleanupMutations(ctx, decisions)
 	if err != nil {
 		return err
 	}

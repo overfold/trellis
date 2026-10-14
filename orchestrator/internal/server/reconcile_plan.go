@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -16,11 +17,8 @@ import (
 )
 
 // reconcilePlanInput is the cluster view a reconciliation pass plans against.
-// planReconciliation reads it and never mutates it: jobs, nodes, backoffs,
-// volume owners and network ports are borrowed
-// read-only, and Allocations are detached snapshots the planner copies before
-// changing. The caller must keep the borrowed values stable for the duration
-// of the call.
+// planReconciliation reads it and never mutates it. Maps and node/allocation
+// records are detached; job revisions and backoff records are immutable.
 type reconcilePlanInput struct {
 	Now         time.Time
 	LeaderSince time.Time
@@ -43,6 +41,10 @@ type reconcilePlanInput struct {
 	NetworkReady map[string]bool
 	// NewAllocationSuffix returns the unique suffix of a new allocation ID.
 	NewAllocationSuffix func() string
+	// Nil selects a full pass. Incremental passes retain cluster-wide
+	// occupancy but only converge these jobs and their terminal history.
+	ReconcileJobs map[string]bool
+	JobValidation map[string]error
 }
 
 // reconcilePlan is the outcome of one reconciliation pass: the durable commit,
@@ -143,7 +145,11 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 	namespaceDesired := make(map[string]int64)
 	for _, key := range jobKeys {
 		stored := in.Jobs[key]
-		if err := spec.ValidateWithLimits(stored.Spec, limits); err != nil {
+		validation, cached := in.JobValidation[key]
+		if !cached {
+			validation = spec.ValidateWithLimits(stored.Spec, limits)
+		}
+		if err := validation; err != nil {
 			plan.Diagnostics = append(plan.Diagnostics, reconcileDiagnostic{Message: "skip invalid job during reconciliation", Args: []any{"job", key, "error", err}})
 			continue
 		}
@@ -420,7 +426,7 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 	plannedBackoffs := make(map[string]*ReplacementBackoff)
 	for _, key := range jobKeys {
 		job := admittedJobs[key]
-		if job == nil {
+		if job == nil || in.ReconcileJobs != nil && !in.ReconcileJobs[key] {
 			continue
 		}
 		jobName := job.Spec.Name
@@ -666,7 +672,8 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 		}
 	}
 	for _, original := range retained {
-		if !original.kept && !original.released {
+		key := jobKey(original.allocation.Namespace, original.allocation.JobName)
+		if !original.kept && !original.released && (in.ReconcileJobs == nil || in.ReconcileJobs[key]) {
 			retainedStops = append(retainedStops, original.release())
 		}
 	}
@@ -676,6 +683,11 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 	maps.Copy(pruneSkip, rolloutEvidence)
 	for allocation := range observedOccupancy {
 		pruneSkip[allocation] = true
+	}
+	for _, allocation := range allocations {
+		if in.ReconcileJobs != nil && !in.ReconcileJobs[jobKey(allocation.Namespace, allocation.JobName)] {
+			pruneSkip[allocation] = true
+		}
 	}
 	plan.Pruned = planTerminalPruning(policy.RetainTerminal, allocations, pruneSkip)
 	prunedSet := make(map[*Allocation]bool, len(plan.Pruned))
@@ -703,6 +715,9 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 			continue
 		}
 		owner := jobKey(previous.Namespace, previous.JobName)
+		if in.ReconcileJobs != nil && !in.ReconcileJobs[owner] {
+			continue
+		}
 		if in.Jobs[owner] != nil && admittedJobs[owner] == nil {
 			continue
 		}
@@ -776,4 +791,81 @@ func planReconciliation(in *reconcilePlanInput) (*reconcilePlan, error) {
 	}
 	plan.Commit = ReconciliationCommit{Allocations: updates, DeleteAllocations: prunedIDs, VolumeRegistrations: volumeRegistrations, Backoffs: backoffPuts, DeleteBackoffs: backoffDeletes}
 	return plan, nil
+}
+
+// prepareIncremental selects dependent jobs, not just the event's owner.
+// Placement still sees all occupied resources. Node eligibility, released
+// capacity, namespace limits and networking changes invalidate shared inputs.
+func (in *reconcilePlanInput) prepareIncremental(previous *reconcilePlanInput) {
+	in.JobValidation = make(map[string]error, len(in.Jobs))
+	for key, job := range in.Jobs {
+		if previous != nil && previous.Limits == in.Limits && previous.Jobs[key] == job {
+			in.JobValidation[key] = previous.JobValidation[key]
+		} else {
+			in.JobValidation[key] = spec.ValidateWithLimits(job.Spec, in.Limits)
+		}
+	}
+	if previous == nil || !previous.LeaderSince.Equal(in.LeaderSince) || previous.Limits != in.Limits || previous.Policy != in.Policy || previous.AllocationLossTimeout != in.AllocationLossTimeout ||
+		!maps.Equal(previous.VolumeOwners, in.VolumeOwners) || !maps.Equal(previous.NetworkReady, in.NetworkReady) || len(previous.Nodes) != len(in.Nodes) {
+		return
+	}
+	for id, node := range in.Nodes {
+		old := previous.Nodes[id]
+		if old == nil || old.Status != node.Status || !nodeSummary(old).equal(nodeSummary(node)) || !reflect.DeepEqual(old.observedAllocations, node.observedAllocations) {
+			return
+		}
+	}
+	dirty := make(map[string]bool)
+	changedNamespaces := make(map[string]bool)
+	for key, job := range in.Jobs {
+		if previous.Jobs[key] != job {
+			changedNamespaces[job.Spec.Namespace] = true
+		}
+	}
+	for key, job := range previous.Jobs {
+		if in.Jobs[key] == nil {
+			dirty[key] = true
+			changedNamespaces[job.Spec.Namespace] = true
+		}
+	}
+	for key, job := range in.Jobs {
+		if changedNamespaces[job.Spec.Namespace] {
+			dirty[key] = true
+		}
+	}
+	oldAllocations := make(map[string]*Allocation, len(previous.Allocations))
+	for _, allocation := range previous.Allocations {
+		oldAllocations[allocation.ID] = allocation
+	}
+	if len(in.Allocations) != len(previous.Allocations) {
+		return
+	}
+	for _, allocation := range in.Allocations {
+		key := jobKey(allocation.Namespace, allocation.JobName)
+		old := oldAllocations[allocation.ID]
+		if old == nil || old.CleanupComplete != allocation.CleanupComplete || old.Phase != allocation.Phase || (old.Node == nil) != (allocation.Node == nil) || old.Node != nil && allocation.Node != nil && old.Node.ID != allocation.Node.ID {
+			return
+		}
+		if !allocation.sameRecord(old) || allocation.Draining || activeAllocationPhase(allocation.Phase) && (allocation.Phase != lifecycle.PhaseRunning || allocation.Health != lifecycle.HealthHealthy) {
+			dirty[key] = true
+		}
+		if activeAllocationPhase(allocation.Phase) && allocation.Node != nil && in.Now.Sub(silentSince(in.Heartbeats[allocation.Node.ID], in.LeaderSince)) >= in.AllocationLossTimeout {
+			dirty[key] = true
+		}
+	}
+	for key, backoff := range in.Backoffs {
+		if backoff.Failures > 0 || previous.Backoffs[key] != backoff {
+			dirty[jobKey(backoff.Namespace, backoff.JobName)] = true
+		}
+	}
+	for key, backoff := range previous.Backoffs {
+		if in.Backoffs[key] == nil {
+			dirty[jobKey(backoff.Namespace, backoff.JobName)] = true
+		}
+	}
+	// Recovery-grace expiry enables orphan cleanup even without a new report.
+	if previous.Now.Sub(in.LeaderSince) < leaderRecoveryGrace && in.Now.Sub(in.LeaderSince) >= leaderRecoveryGrace {
+		return
+	}
+	in.ReconcileJobs = dirty
 }

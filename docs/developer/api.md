@@ -102,4 +102,23 @@ The [public exec WebSocket](../public/api.md#exec-streams) is authorized at the 
 
 The leader buffers one frame per direction; the agent queues at most four input frames. Queue delivery stalled for five seconds ends the session with an error and kills the process, bounding disconnect and resize delays behind saturated stdin. Output is unbuffered, applying backpressure to the process. A blocked output frame times out after 30 minutes. The runtime joins output copying before deleting the exec process (containerd deletion cancels IO), and reports delivery and deletion errors through the stream error path rather than returning a successful exit. Limits are 256 relays per leader, 64 sessions per node, and 8 per allocation; admission stays held until the process exits, including while failed kills are retried. Streams are ephemeral, not Raft state. An agent crash can leave an exec process running until it exits or its container stops; graceful shutdown kills it. Runtime process confinement is described in [node internals](node-internals.md#runtime-abstraction).
 
+### Cleanup receipt retirement
+
+Cleanup authority and exact-generation resource-release proofs are durable.
+Pruning an allocation atomically changes its cleanup obligation to
+`retain_logs: false`; publication continues to include that obligation even
+after resource release. A complete heartbeat snapshot with `cleanup_complete`
+and no retained logs for that exact generation discharges the obligation only
+when the durable allocation is absent. Decision and proof are deleted together.
+Receipts without either durable authority or an exact durable allocation are
+ignored, so delayed heartbeats cannot recreate retired history.
+
+The next persisted complete execution document omitting the generation with
+`cleanup_absent: true` acknowledges retirement to the agent. The agent removes
+its receipt only when no local execution, admission, or retained logs remain.
+Recovery grace withholds this acknowledgement; epoch/version fencing rejects
+older documents. Generation stop fences remain durable even after receipts are
+collected. Pending obligations are never expired by time: disconnected nodes
+retain cleanup authority until they report release and log removal.
+
 [Documentation index](../README.md) · [Public HTTP API](../public/api.md)

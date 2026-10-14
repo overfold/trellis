@@ -203,9 +203,7 @@ func (s *Server) DrainNode(ctx context.Context, id uuid.UUID) error {
 
 // UndrainNode makes a drained node schedulable.
 func (s *Server) UndrainNode(ctx context.Context, id uuid.UUID) error {
-	s.reconcileMu.Lock()
 	err := s.undrainNodeAllocations(ctx, id)
-	s.reconcileMu.Unlock()
 	if err != nil {
 		return err
 	}
@@ -214,7 +212,6 @@ func (s *Server) UndrainNode(ctx context.Context, id uuid.UUID) error {
 }
 
 // undrainNodeAllocations commits node and allocation control state atomically.
-// The caller holds reconcileMu.
 func (s *Server) undrainNodeAllocations(ctx context.Context, id uuid.UUID) error {
 	s.mutationMu.Lock()
 	mutationLocked := true

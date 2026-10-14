@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"reflect"
 	"slices"
 	"sort"
 	"sync"
@@ -166,9 +167,8 @@ func (s *Server) runObservationApplier(ctx context.Context) {
 	wake := s.observations.wakeChannel()
 	for {
 		// Reports may have arrived before the term's applier started.
-		pending := s.observations.len() > 0
-		s.applyObservations(ctx)
-		if pending && ctx.Err() == nil {
+		changed := s.applyObservations(ctx)
+		if changed && ctx.Err() == nil {
 			s.Reconcile(ctx)
 		}
 		select {
@@ -211,22 +211,23 @@ func (u *observationUpdate) records() int {
 // records in that order, so the written Raft entries do not depend on arrival
 // order. A report whose commit fails is dropped; the node's next heartbeat
 // carries its complete state again.
-func (s *Server) applyObservations(ctx context.Context) {
+func (s *Server) applyObservations(ctx context.Context) bool {
+	changed := false
 	for {
 		batch, term := s.observations.take()
 		if len(batch) == 0 {
-			return
+			return changed
 		}
-		s.applyObservationBatch(ctx, batch, term)
+		changed = s.applyObservationBatch(ctx, batch, term) || changed
 	}
 }
 
-func (s *Server) applyObservationBatch(ctx context.Context, batch []*nodeObservation, term uint64) {
+func (s *Server) applyObservationBatch(ctx context.Context, batch []*nodeObservation, term uint64) bool {
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
 	if s.observations.currentTerm() != term {
 		s.discardObservations("term_changed", len(batch))
-		return
+		return false
 	}
 	// Transitions are stamped when they are applied, not when the report was
 	// received: every change committed before this point carries an earlier
@@ -247,15 +248,17 @@ func (s *Server) applyObservationBatch(ctx context.Context, batch []*nodeObserva
 		}
 		updates = append(updates, update)
 	}
+	changed := false
 	for start := 0; start < len(updates); {
 		end, records := start, 0
 		for end < len(updates) && (end == start || records+updates[end].records() <= maxObservationCommitRecords) {
 			records += updates[end].records()
 			end++
 		}
-		s.commitObservations(ctx, updates[start:end])
+		changed = s.commitObservations(ctx, updates[start:end]) || changed
 		start = end
 	}
+	return changed
 }
 
 // planObservation computes a node's state after its report. It returns nil
@@ -426,24 +429,21 @@ func observeAllocation(a *Allocation, observation *nodeObservation, heartbeatAt 
 // metrics and observed allocations are leader observations: only durable node
 // facts and allocation changes reach Raft, so a steady-state heartbeat is not
 // a write.
-func (s *Server) commitObservations(ctx context.Context, updates []*observationUpdate) {
+func (s *Server) commitObservations(ctx context.Context, updates []*observationUpdate) bool {
 	var summaries []*NodeSummary
 	var allocations []*Allocation
 	var proofs []state.Mutation
+	changed := false
 	for _, update := range updates {
-		for _, observed := range update.observation.observed {
-			if !observed.CleanupComplete {
-				continue
-			}
-			complete, err := s.state.executionCleaned(ctx, update.observation.node, observed.ID, observed.Generation)
-			if err == nil && !complete {
-				proofs = append(proofs, state.Mutation{Key: s.state.executionCleanupKey(update.observation.node, observed.ID, observed.Generation), Value: []byte("true")})
-			}
-			if err != nil {
-				s.discardObservations("commit_failed", len(updates))
-				return
-			}
+		mutations, err := s.state.ExecutionObservationMutations(ctx, update.observation)
+		if err != nil {
+			s.discardObservations("commit_failed", len(updates))
+			return false
 		}
+		proofs = append(proofs, mutations...)
+		changed = changed || update.summary != nil || len(update.allocations) > 0 || len(mutations) > 0 ||
+			!reflect.DeepEqual(update.node.observedAllocations, update.next.observedAllocations) ||
+			livenessStatus(update.node.Status, update.observation.at, s.now()) != update.node.Status
 		if update.summary != nil {
 			summaries = append(summaries, update.summary)
 		}
@@ -467,24 +467,31 @@ func (s *Server) commitObservations(ctx context.Context, updates []*observationU
 				}
 			}
 			s.discardObservations("commit_failed", len(updates))
-			return
+			return false
 		}
 	}
-	var changed []*Allocation
+	var changedAllocations []*Allocation
 	s.mu.Lock()
 	for _, update := range updates {
+		if changed {
+			if s.executionDirty == nil {
+				s.executionDirty = make(map[uuid.UUID]bool)
+			}
+			s.executionDirty[update.node.ID] = true
+		}
 		applyNodeObservation(update.node, update.next)
 		for _, allocation := range update.allocations {
 			allocation.current.mu.Lock()
 			applyAllocationSnapshot(allocation.current, allocation.next)
 			allocation.current.mu.Unlock()
-			changed = append(changed, allocation.current)
+			changedAllocations = append(changedAllocations, allocation.current)
 		}
 	}
 	s.mu.Unlock()
-	if len(changed) > 0 {
-		s.refreshCatalogAllocations(changed)
+	if len(changedAllocations) > 0 {
+		s.refreshCatalogAllocations(changedAllocations)
 	}
+	return changed
 }
 
 // applyNodeObservation copies the fields a heartbeat reports onto the
@@ -527,6 +534,7 @@ func newNodeObservation(nodeID uuid.UUID, at time.Time, actual []nodeapi.Allocat
 		return nil, fmt.Errorf("node task log observations must be non-negative")
 	}
 	statuses := make(map[allocationGeneration]allocationObservation, len(actual))
+	logsRemain := make(map[allocationGeneration]bool)
 	for _, a := range actual {
 		if !a.Phase.Valid() || !a.Health.Valid() {
 			return nil, fmt.Errorf("invalid allocation state for %s: phase=%q health=%q", a.ID, a.Phase, a.Health)
@@ -545,6 +553,7 @@ func newNodeObservation(nodeID uuid.UUID, at time.Time, actual []nodeapi.Allocat
 		}
 		phase, health := a.Phase, a.Health
 		key := allocationGeneration{id: a.ID, generation: a.Generation}
+		logsRemain[key] = logsRemain[key] || a.RetainedLogs
 		info := statuses[key]
 		info.CleanupComplete = info.CleanupComplete || a.CleanupComplete
 		if len(info.ObservedTasks) == 0 {
@@ -588,7 +597,13 @@ func newNodeObservation(nodeID uuid.UUID, at time.Time, actual []nodeapi.Allocat
 		statuses[key] = info
 	}
 	observed := make([]observedAllocation, 0, len(statuses))
-	for _, info := range statuses {
+	for key, info := range statuses {
+		// Receipts and retained task logs are separate inventory entries.
+		// A receipt must not hide logs still awaiting irreversible removal.
+		if info.CleanupComplete {
+			info.RetainedLogs = logsRemain[key]
+			statuses[key] = info
+		}
 		observed = append(observed, observedAllocation{ID: info.ID, Generation: info.Generation, RetainedLogs: info.RetainedLogs, CleanupComplete: info.CleanupComplete, Phase: info.Phase, Health: info.Health, Tasks: info.ObservedTasks})
 	}
 	sort.Slice(observed, func(i, j int) bool {

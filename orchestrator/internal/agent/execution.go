@@ -258,6 +258,42 @@ func (a *Agent) dispatchExecution(ctx context.Context, doc *nodeapi.ExecutionInt
 		groups[id] = append(groups[id], entry)
 		present[completionKey(id, entry.Request.Generation)] = true
 	}
+	// A durably accepted complete document's absence acknowledges retirement.
+	// Keep generation stop fences: forgetting a receipt must not authorize a
+	// delayed launch. Do not collect receipts while recovery withholds absence.
+	if doc.CleanupAbsent {
+		release, err := a.fenceExecution(context.WithValue(ctx, executionFenceKey{}, [2]uint64{doc.Epoch, doc.Version}))
+		if err != nil {
+			return
+		}
+		a.mu.Lock()
+		for key, receipt := range a.cleanupComplete {
+			if present[key] {
+				continue
+			}
+			busy := false
+			for _, record := range a.retainedLogs {
+				busy = busy || record.AllocationID == receipt.ID && record.Generation == receipt.Generation
+			}
+			for _, record := range a.allocations {
+				busy = busy || record.AllocationID == receipt.ID && record.Generation == receipt.Generation
+			}
+			if start := a.starts[receipt.ID]; start != nil && start.generation == receipt.Generation {
+				busy = true
+			}
+			if busy {
+				continue
+			}
+			if a.local != nil {
+				if err := a.local.Delete("agent/cleanup-complete/" + allocationFileName(key)); err != nil {
+					continue
+				}
+			}
+			delete(a.cleanupComplete, key)
+		}
+		a.mu.Unlock()
+		release()
+	}
 	if doc.CleanupAbsent {
 		a.mu.RLock()
 		for id, start := range a.starts {

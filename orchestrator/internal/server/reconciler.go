@@ -143,14 +143,24 @@ func (s *Server) Reconcile(ctx context.Context) {
 	s.reconcile(ctx)
 }
 
-// reconcile runs one reconciliation pass. Planning and its durable commit are
-// serialized with intent publication under reconcileMu. No transport work is
-// dispatched.
+// reconcile converges through serialized passes, retrying superseded plans in
+// the originating term. No transport work is dispatched.
 func (s *Server) reconcile(ctx context.Context) {
 	ctx, release := s.bindTerm(ctx)
 	defer release()
+	for ctx.Err() == nil {
+		// A concurrent mutation invalidated the snapshot. Replan rather than
+		// committing stale placement, including for synchronous API callers.
+		if !s.reconcilePass(ctx) {
+			return
+		}
+	}
+}
+
+func (s *Server) reconcilePass(ctx context.Context) (retry bool) {
 	start := time.Now()
 	planned := false
+	var projectionNodes map[uuid.UUID]bool
 	s.reconcileMu.Lock()
 	s.mutationMu.Lock()
 	mutationLocked := true
@@ -159,7 +169,7 @@ func (s *Server) reconcile(ctx context.Context) {
 			s.mutationMu.Unlock()
 		}
 		if planned {
-			if err := s.publishReconcileIntent(ctx); err != nil {
+			if err := s.publishReconcileIntent(ctx, projectionNodes); err != nil {
 				s.log.Error("publish node execution intent", "error", err)
 			}
 			s.refreshCatalog()
@@ -233,9 +243,8 @@ func (s *Server) reconcile(ctx context.Context) {
 	for _, node := range s.nodes {
 		node.Status = livenessStatus(node.Status, heartbeats[node.ID], now)
 	}
-	// Subnets are planned under s.mu so every node the scheduler can place on
-	// is addressed. Only namespaces with a port slot and a subnet on every
-	// node accept new placements.
+	// Capture every node and protected subnet for off-lock planning. Only
+	// namespaces with a port slot and a subnet on every node accept placements.
 	nodeIDs := make([]uuid.UUID, 0, len(s.nodes))
 	for nodeID := range s.nodes {
 		nodeIDs = append(nodeIDs, nodeID)
@@ -248,11 +257,18 @@ func (s *Server) reconcile(ctx context.Context) {
 		}
 		allocation.mu.Unlock()
 	}
-	subnets, err := planNetworkSubnetRegistrations(s.networkPool, currentSubnets, networkNamespaces, nodeIDs, protectedSubnets)
+	pool := s.networkPool
+	input, originals := s.reconcilePlanInputLocked(now, heartbeats, volumeOwners, nil)
+	s.mu.Unlock()
+	// All inputs are stable snapshots. Only snapshot acquisition and commit
+	// need mutation ordering; scheduling does not block API mutations.
+	revision := s.mutationMu.revision + 1
+	s.mutationMu.Unlock()
+	mutationLocked = false
+	subnets, err := planNetworkSubnetRegistrations(pool, currentSubnets, networkNamespaces, nodeIDs, protectedSubnets)
 	if err != nil {
 		s.log.Error("prepare namespace network subnets", "error", err)
 		if !errors.Is(err, errNetworkSubnetExhausted) {
-			s.mu.Unlock()
 			return
 		}
 	}
@@ -262,10 +278,18 @@ func (s *Server) reconcile(ctx context.Context) {
 			networkReady[namespace] = true
 		}
 	}
-	input, originals := s.reconcilePlanInputLocked(now, heartbeats, volumeOwners, networkReady)
+	input.NetworkReady = networkReady
+	input.prepareIncremental(s.lastReconcile)
+	if input.ReconcileJobs != nil {
+		projectionNodes = make(map[uuid.UUID]bool)
+		for _, allocation := range input.Allocations {
+			if allocation.Node != nil && input.ReconcileJobs[jobKey(allocation.Namespace, allocation.JobName)] {
+				projectionNodes[allocation.Node.ID] = true
+			}
+		}
+	}
 	plan, err := planReconciliation(input)
 	if err != nil {
-		s.mu.Unlock()
 		s.log.Error("plan reconciliation", "error", err)
 		return
 	}
@@ -296,7 +320,6 @@ func (s *Server) reconcile(ctx context.Context) {
 				phase = lifecycle.PhaseStopping
 			}
 			if err := a.Transition(phase, now, "", ""); err != nil {
-				s.mu.Unlock()
 				s.log.Error("plan execution transition", "error", err)
 				return
 			}
@@ -324,6 +347,16 @@ func (s *Server) reconcile(ctx context.Context) {
 	originalOf := func(planned *Allocation) *Allocation {
 		return originals[plan.Source[planned]]
 	}
+	s.mutationMu.Lock()
+	mutationLocked = true
+	if s.checkTerm(ctx) != nil {
+		return
+	}
+	if s.mutationMu.revision != revision {
+		s.abortReconcile("state_changed", "abort reconciliation: snapshot superseded by a mutation")
+		return true
+	}
+	s.mu.Lock()
 	lockedUpdates, canonicalNodes, ok := s.lockReconcileTargetsLocked(plan, originals)
 	if !ok {
 		s.mu.Unlock()
@@ -346,6 +379,20 @@ func (s *Server) reconcile(ctx context.Context) {
 	}
 	unlockUpdates()
 	s.mu.Lock()
+	if !maps.Equal(s.networkPorts, networkPorts) || !maps.Equal(s.networkSubnets, subnets.Subnets) {
+		projectionNodes = nil
+	}
+	if s.executionDirty == nil {
+		s.executionDirty = make(map[uuid.UUID]bool)
+	}
+	for _, allocation := range slices.Concat(plan.Updated, plan.NewAllocations, plan.Pruned) {
+		if allocation.Node != nil {
+			s.executionDirty[allocation.Node.ID] = true
+		}
+	}
+	for _, decision := range plan.Commit.ExecutionCleanup {
+		s.executionDirty[decision.Node] = true
+	}
 	s.networkPorts = networkPorts
 	s.networkSubnets = subnets.Subnets
 	if !plan.empty() {
@@ -362,6 +409,11 @@ func (s *Server) reconcile(ctx context.Context) {
 			}
 			s.allocations = kept
 		}
+		for _, allocation := range plan.NewAllocations {
+			if allocation.Node != nil {
+				allocation.Node = s.nodes[allocation.Node.ID]
+			}
+		}
 		s.allocations = append(s.allocations, plan.NewAllocations...)
 		s.rebuildAllocationNodeIndexLocked()
 		if len(plan.Commit.Backoffs) > 0 || len(plan.Commit.DeleteBackoffs) > 0 {
@@ -376,6 +428,7 @@ func (s *Server) reconcile(ctx context.Context) {
 			s.replacementBackoffs = backoffs
 		}
 	}
+	s.lastReconcile = input
 	s.mu.Unlock()
 	s.mutationMu.Unlock()
 	mutationLocked = false
@@ -386,6 +439,7 @@ func (s *Server) reconcile(ctx context.Context) {
 	}
 
 	planned = true
+	return
 }
 
 // lockReconcileTargetsLocked locks every stored allocation the plan rewrites
@@ -454,8 +508,9 @@ func (s *Server) abortReconcile(reason, message string, args ...any) {
 
 // reconcilePlanInputLocked snapshots the state a reconciliation pass plans
 // from. It returns the input and a map from each allocation snapshot to the
-// stored allocation it copies. The caller must hold s.mu and keep holding it
-// while planning, because jobs, nodes, and backoffs are borrowed.
+// stored allocation it copies. The caller holds s.mu. Job revisions and
+// replacement backoff records are immutable; their maps are detached and
+// nodes and allocations are deep-copied before releasing the lock.
 func (s *Server) reconcilePlanInputLocked(now time.Time, heartbeats map[uuid.UUID]time.Time, volumeOwners map[string]uuid.UUID, networkReady map[string]bool) (*reconcilePlanInput, map[*Allocation]*Allocation) {
 	limits := s.jobLimits
 	if limits == (spec.Limits{}) {
@@ -467,6 +522,11 @@ func (s *Server) reconcilePlanInputLocked(now time.Time, heartbeats map[uuid.UUI
 	// Snapshots are detached from the canonical nodes, and the snapshots of
 	// one node's allocations share one copy of it.
 	nodeCopies := make(map[*Node]*Node, len(s.nodes))
+	nodes := make(map[uuid.UUID]*Node, len(s.nodes))
+	for id, node := range s.nodes {
+		nodeCopies[node] = node.Clone()
+		nodes[id] = nodeCopies[node]
+	}
 	for i, allocation := range s.allocations {
 		allocation.mu.Lock()
 		node := allocation.Node
@@ -485,10 +545,10 @@ func (s *Server) reconcilePlanInputLocked(now time.Time, heartbeats map[uuid.UUI
 		Limits:                limits,
 		Policy:                reconciliation.replacementPolicy(),
 		AllocationLossTimeout: reconciliation.AllocationLossTimeout,
-		Jobs:                  s.jobs,
-		Nodes:                 s.nodes,
+		Jobs:                  maps.Clone(s.jobs),
+		Nodes:                 nodes,
 		Allocations:           snapshots,
-		Backoffs:              s.replacementBackoffs,
+		Backoffs:              maps.Clone(s.replacementBackoffs),
 		VolumeOwners:          volumeOwners,
 		NetworkReady:          networkReady,
 	}, originals
@@ -553,8 +613,6 @@ func (s *Server) Execute(ctx context.Context, action *Action) error {
 	if err := s.checkTerm(ctx); err != nil {
 		return err
 	}
-	s.reconcileMu.Lock()
-	defer s.reconcileMu.Unlock()
 	if action.Allocation != nil && (action.Type == ActionStart || action.Type == ActionStop) {
 		if err := s.persistAllocationUpdate(ctx, action.Allocation, func(next *Allocation) (bool, error) {
 			if action.controlPlanned && next.DrainSequence != action.drainSequence {

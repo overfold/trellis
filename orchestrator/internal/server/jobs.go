@@ -489,9 +489,7 @@ func (s *Server) DeleteJob(ctx context.Context, namespace, name string) error {
 // RestartJob marks all running allocations for a job as draining and
 // reconciles so they are replaced with fresh instances.
 func (s *Server) RestartJob(ctx context.Context, namespace, name string) error {
-	s.reconcileMu.Lock()
 	err := s.persistJobRestart(ctx, namespace, name)
-	s.reconcileMu.Unlock()
 	if err != nil {
 		return err
 	}

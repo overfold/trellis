@@ -28,6 +28,19 @@ import (
 const reconcileInterval = 10 * time.Second
 const heartbeatInterval = 10 * time.Second
 
+// mutationMutex fences optimistic plans against every intervening mutation
+// scope, including renewable inventory updates. Its revision is read only
+// while locked; conservative invalidation also covers failed/no-op writes.
+type mutationMutex struct {
+	sync.Mutex
+	revision uint64
+}
+
+func (m *mutationMutex) Unlock() {
+	m.revision++
+	m.Mutex.Unlock()
+}
+
 // ClusterJoiner reads and changes Raft cluster membership.
 type ClusterJoiner interface {
 	Membership() ([]state.RaftMember, error)
@@ -70,8 +83,9 @@ type Server struct {
 	//
 	//	reconcileMu -> mutationMu -> termMu -> mu -> allocation.mu -> leaf locks
 	//
-	//   - reconcileMu serializes reconciliation planning and its durable
-	//     commit and intent publication; no agent transport is involved.
+	//   - reconcileMu serializes reconciliation passes, including their intent
+	//     publication. API mutations/publication use mutationMu and may
+	//     invalidate an off-lock plan. No agent transport is involved.
 	//   - mutationMu serializes durable state mutations: reconciliation
 	//     commits, API mutations, agent action outcomes, and the observation
 	//     applier. Each reads the committed state, commits through Raft, and
@@ -96,15 +110,22 @@ type Server struct {
 	executionMu      sync.Mutex
 	executionWatch   map[uuid.UUID]chan struct{}
 	executionIntents map[uuid.UUID]*nodeapi.ExecutionIntent
-	reconcileMu      sync.Mutex
-	mutationMu       sync.Mutex
-	controlEpoch     uint64
-	leaderSince      time.Time
-	now              func() time.Time
-	metrics          *Metrics
-	secrets          *secretstore.Store
-	events           *EventBus
-	logStreams       *transport.StreamLimiter
+	// executionDirty retains invalidations until successful publication.
+	// Protected by mu; observation retirement may change authority without
+	// changing an allocation record or the node's inventory.
+	executionDirty map[uuid.UUID]bool
+	reconcileMu    sync.Mutex
+	mutationMu     mutationMutex
+	// lastReconcile is the last successfully committed planning snapshot.
+	// Only the reconciler accesses it, under reconcileMu.
+	lastReconcile *reconcilePlanInput
+	controlEpoch  uint64
+	leaderSince   time.Time
+	now           func() time.Time
+	metrics       *Metrics
+	secrets       *secretstore.Store
+	events        *EventBus
+	logStreams    *transport.StreamLimiter
 
 	// termWork joins admitted requests and publication before reload.
 	termMu   sync.RWMutex
