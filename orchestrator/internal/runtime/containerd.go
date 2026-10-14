@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net/netip"
 	"os"
@@ -41,9 +42,10 @@ const healthProbeContainerPath = "/run/trellis/health-probe"
 
 // ContainerdRuntime implements container lifecycle operations with containerd.
 type ContainerdRuntime struct {
-	client    *containerd.Client
-	logDir    string
-	rotations logRotations
+	client      *containerd.Client
+	logDir      string
+	rotations   logRotations
+	execCleanup *execCleanup
 }
 
 // Port maps a host port to a container port.
@@ -132,13 +134,15 @@ func NewContainerdRuntime(socketPath string) (*ContainerdRuntime, error) {
 	}
 
 	return &ContainerdRuntime{
-		client: client,
-		logDir: "/var/lib/trellis/runtime",
+		client:      client,
+		logDir:      "/var/lib/trellis/runtime",
+		execCleanup: newExecCleanup(),
 	}, nil
 }
 
 // Close releases the containerd client.
 func (c *ContainerdRuntime) Close() error {
+	c.execCleanup.cancel()
 	return c.client.Close()
 }
 
@@ -664,6 +668,16 @@ func reclaimStaleMountFiles(ctx context.Context, paths []string, load func(conte
 // Exec runs a command in a container and returns its exit code.
 func (c *ContainerdRuntime) Exec(ctx context.Context, containerID string, command []string) (int, error) {
 	ctx = c.withNamespace(ctx)
+	if err := c.execCleanup.acquire(ctx); err != nil {
+		return 1, fmt.Errorf("admit health-check exec: %w", err)
+	}
+	// After creation the cleanup worker owns this slot until confirmed deletion.
+	created := false
+	defer func() {
+		if !created {
+			<-c.execCleanup.slots
+		}
+	}()
 
 	container, err := c.client.LoadContainer(ctx, containerID)
 	if err != nil {
@@ -685,11 +699,13 @@ func (c *ContainerdRuntime) Exec(ctx context.Context, containerID string, comman
 	if err != nil {
 		return 1, fmt.Errorf("constructing command %s: %w", command, err)
 	}
-	status, err := runExecProcess(ctx, taskExec)
+	created = true
+	status, err := runExecProcess(ctx, taskExec, func(kill bool) {
+		c.execCleanup.cleanup(ctx, taskExec, kill, containerID, execID)
+	})
 	if err != nil {
 		return 1, fmt.Errorf("executing command %s: %w", command, err)
 	}
-	_ = deleteExecProcess(ctx, taskExec)
 	code, _, err := status.Result()
 	if err != nil {
 		return 1, fmt.Errorf("extracting status %s: %w", command, err)
@@ -963,8 +979,7 @@ func writeRuntimeFile(path, content string) error {
 
 const execCleanupTimeout = 5 * time.Second
 
-// execKillRetryInterval is a variable so tests can shorten it.
-var execKillRetryInterval = time.Second
+const execKillRetryInterval = time.Second
 
 // execProcess is the part of a containerd exec process used to run it to completion.
 type execProcess interface {
@@ -974,89 +989,95 @@ type execProcess interface {
 	Delete(context.Context, ...containerd.ProcessDeleteOpts) (*containerd.ExitStatus, error)
 }
 
+// execCleanup bounds both live execs and unresolved cleanup. An outage
+// consumes slots instead of accumulating new processes or cleanup goroutines.
+// Obligations are process-local, not durable across daemon crashes.
+type execCleanup struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	slots  chan struct{}
+}
+
+func newExecCleanup() *execCleanup {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &execCleanup{ctx: ctx, cancel: cancel, slots: make(chan struct{}, 32)}
+}
+
+func (p *execCleanup) acquire(ctx context.Context) error {
+	select {
+	case p.slots <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-p.ctx.Done():
+		return p.ctx.Err()
+	}
+}
+
+func (p *execCleanup) cleanup(ctx context.Context, process execProcess, kill bool, containerID, execID string) <-chan error {
+	first := make(chan error, 1)
+	go func() {
+		defer func() { <-p.slots }()
+		reported := false
+		for {
+			attempt, cancel := context.WithTimeout(context.WithoutCancel(ctx), execCleanupTimeout)
+			stop := context.AfterFunc(p.ctx, cancel)
+			var killErr error
+			if kill {
+				killErr = process.Kill(attempt, syscall.SIGKILL)
+			}
+			// Do not spawn a goroutine per Delete: containerd's output wait
+			// can ignore cancellation. One blocked worker keeps one slot.
+			_, err := process.Delete(attempt)
+			stop()
+			cancel()
+			if errdefs.IsNotFound(err) {
+				err = nil
+			}
+			if !reported {
+				first <- err
+				reported = true
+			}
+			if err == nil {
+				return
+			}
+			slog.Warn("exec cleanup unresolved; retaining slot", "container", containerID, "exec", execID, "error", err, "kill_error", killErr)
+			select {
+			case <-p.ctx.Done():
+				return
+			case <-time.After(execKillRetryInterval):
+			}
+		}
+	}()
+	return first
+}
+
 // runExecProcess starts a created exec process and waits for it to exit. If
-// ctx ends first, the process is killed and deleted in the background so it
-// does not outlive the request, and ctx's error is returned. On any other
-// error the process has been cleaned up; after a successful exit the caller
-// deletes it.
-func runExecProcess(ctx context.Context, process execProcess) (containerd.ExitStatus, error) {
-	// Waiting must survive cancellation so cleanup can observe the kill.
+// ctx ends first, cleanup retains the kill/delete obligation independently of
+// the caller. Every path hands off exactly once, including successful exits.
+func runExecProcess(ctx context.Context, process execProcess, cleanup func(kill bool)) (containerd.ExitStatus, error) {
+	// The exit wait survives the request until cleanup takes ownership;
+	// deletion, not this wait, confirms cleanup completion.
 	waitCtx, cancelWait := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelWait()
 	exitCh, err := process.Wait(waitCtx)
 	if err != nil {
-		cancelWait()
-		_ = deleteExecProcess(ctx, process)
+		cleanup(true)
 		return containerd.ExitStatus{}, fmt.Errorf("waiting on exec: %w", err)
 	}
 	// A cancelled Start can still launch the process, so a failed Start is
 	// always followed by a kill.
 	if err := process.Start(ctx); err != nil {
-		killExecProcess(ctx, process, exitCh)
-		cancelWait()
+		cleanup(true)
 		return containerd.ExitStatus{}, fmt.Errorf("starting exec: %w", err)
 	}
 	select {
 	case status := <-exitCh:
-		cancelWait()
+		cleanup(false)
 		return status, nil
 	case <-ctx.Done():
-		go func() {
-			defer cancelWait()
-			killExecProcess(ctx, process, exitCh)
-		}()
+		cleanup(true)
 		return containerd.ExitStatus{}, ctx.Err()
-	}
-}
-
-// killExecProcess kills an exec process that may be running and deletes it
-// once it has exited, within a bounded time that survives ctx's cancellation.
-func killExecProcess(ctx context.Context, process execProcess, exitCh <-chan containerd.ExitStatus) {
-	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), execCleanupTimeout)
-	defer cancel()
-	// Kill fails when the process already exited or never started; Delete
-	// below reports whether it is still running.
-	_ = process.Kill(cleanupCtx, syscall.SIGKILL)
-	if err := deleteWithin(cleanupCtx, process); err == nil || !errdefs.IsFailedPrecondition(err) {
-		return
-	}
-	// Repeat the kill in case the first attempt failed transiently.
-	retry := time.NewTicker(execKillRetryInterval)
-	defer retry.Stop()
-	for {
-		select {
-		case <-exitCh:
-			_ = deleteWithin(cleanupCtx, process)
-			return
-		case <-retry.C:
-			_ = process.Kill(cleanupCtx, syscall.SIGKILL)
-		case <-cleanupCtx.Done():
-			return
-		}
-	}
-}
-
-// deleteExecProcess deletes an exited exec process, waiting for its output
-// copy to finish, within a bounded time that survives ctx's cancellation.
-func deleteExecProcess(ctx context.Context, process execProcess) error {
-	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), execCleanupTimeout)
-	defer cancel()
-	return deleteWithin(cleanupCtx, process)
-}
-
-// deleteWithin deletes an exec process, giving up when ctx ends. containerd's
-// Delete waits for the output copy without honouring its context, so the
-// delete runs in the background.
-func deleteWithin(ctx context.Context, process execProcess) error {
-	done := make(chan error, 1)
-	go func() {
-		_, err := process.Delete(ctx)
-		done <- err
-	}()
-	select {
-	case err := <-done:
-		return err
-	case <-ctx.Done():
-		return ctx.Err()
 	}
 }
 
@@ -1067,6 +1088,7 @@ type containerdExecProcess struct {
 	// namespaced scopes a caller's context to the Trellis namespace, which
 	// containerd requires on every process call.
 	namespaced func(context.Context) context.Context
+	cleanup    func(bool) <-chan error
 	done       chan struct{}
 	code       int
 	err        error
@@ -1088,7 +1110,15 @@ func (p *containerdExecProcess) complete(ctx context.Context, status containerd.
 		output.Wait()
 	}
 	code, _, statusErr := status.Result()
-	deleteErr := deleteExecProcess(ctx, p.process)
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), execCleanupTimeout)
+	defer cancel()
+	var deleteErr error
+	first := p.cleanup(false)
+	select {
+	case deleteErr = <-first:
+	case <-cleanupCtx.Done():
+		deleteErr = cleanupCtx.Err()
+	}
 	if deleteErr != nil {
 		deleteErr = fmt.Errorf("delete exec process: %w", deleteErr)
 	}
@@ -1167,6 +1197,15 @@ func (c *ContainerdRuntime) StartExec(ctx context.Context, containerID string, o
 		return nil, fmt.Errorf("exec command is required")
 	}
 	ctx = c.withNamespace(ctx)
+	if err := c.execCleanup.acquire(ctx); err != nil {
+		return nil, fmt.Errorf("admit exec: %w", err)
+	}
+	created := false
+	defer func() {
+		if !created {
+			<-c.execCleanup.slots
+		}
+	}()
 	container, err := c.client.LoadContainer(ctx, containerID)
 	if err != nil {
 		return nil, fmt.Errorf("loading container %s: %w", containerID, err)
@@ -1228,17 +1267,21 @@ func (c *ContainerdRuntime) StartExec(ctx context.Context, containerID string, o
 	if err != nil {
 		return nil, fmt.Errorf("constructing exec for %s: %w", containerID, err)
 	}
+	created = true
+	cleanup := func(kill bool) <-chan error {
+		return c.execCleanup.cleanup(ctx, process, kill, containerID, execID)
+	}
 	exitCh, err := process.Wait(lifetimeCtx)
 	if err != nil {
-		_ = deleteExecProcess(ctx, process)
+		cleanup(true)
 		return nil, fmt.Errorf("waiting on exec for %s: %w", containerID, err)
 	}
 	if err := process.Start(ctx); err != nil {
-		killExecProcess(ctx, process, exitCh)
+		cleanup(true)
 		return nil, fmt.Errorf("starting exec for %s: %w", containerID, err)
 	}
 
-	result := &containerdExecProcess{process: process, stdout: stdout, stderr: stderr, namespaced: c.withNamespace, done: make(chan struct{})}
+	result := &containerdExecProcess{process: process, stdout: stdout, stderr: stderr, namespaced: c.withNamespace, cleanup: cleanup, done: make(chan struct{})}
 	go func() {
 		result.complete(lifetimeCtx, <-exitCh)
 	}()

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -159,6 +161,60 @@ func assertUnobservedAllocation(t *testing.T, agent *Agent, id, status string, h
 	}
 	if !reported {
 		t.Fatal("unobserved allocation is not reported in heartbeats")
+	}
+}
+
+func TestDelayedRecoveryValidatesVolumeStaging(t *testing.T) {
+	for _, onDemand := range []bool{false, true} {
+		t.Run(fmt.Sprintf("on_demand=%t", onDemand), func(t *testing.T) {
+			rt := &listingRecoveryRuntime{reconcilerRuntime: &reconcilerRuntime{status: runtime.StatusStopped}, listErr: errors.New("containerd unavailable")}
+			record := recoveryTestAllocation(18080)
+			agent, _ := newRecoveryTestAgent(t, rt, record)
+			agent.volumes = NewVolumeManager(t.TempDir())
+			stale := agent.volumes.stagingPath(record.ID, "data")
+			starting := agent.volumes.stagingPath("concurrent-start", "data")
+			for _, path := range []string{stale, starting} {
+				if err := os.MkdirAll(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// A failed removal must leave restart suppression in place. This
+			// unexpected file makes the stale mount point nonempty, without
+			// depending on root permissions or a live kernel mount.
+			blocker := filepath.Join(stale, "unexpected")
+			if err := os.WriteFile(blocker, []byte("preserve"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := agent.recover(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			rt.listErr = nil
+			rt.containers = []runtime.ContainerInfo{{ID: record.ContainerID, Status: runtime.StatusStopped, Labels: recoveryTestLabels(record)}}
+			observe := func() {
+				if onDemand {
+					unlock := agent.lockAllocationOperation(record.AllocationID)
+					defer unlock()
+					_, _ = agent.observeRecovered(context.Background(), record.ID)
+				} else {
+					agent.retryRecovery(context.Background())
+				}
+			}
+			observe()
+			assertUnobservedAllocation(t, agent, record.ID, "running", 18080)
+			if err := os.Remove(blocker); err != nil {
+				t.Fatal(err)
+			}
+			observe()
+			if _, err := os.Stat(stale); !os.IsNotExist(err) {
+				t.Fatalf("recovered empty mount source = %v, want absent", err)
+			}
+			if _, err := os.Stat(starting); err != nil {
+				t.Fatalf("concurrent start's staging was touched: %v", err)
+			}
+			if allocation := agent.allocations[record.ID]; allocation == nil || allocation.unobserved {
+				t.Fatalf("recovery did not complete after safe removal: %+v", allocation)
+			}
+		})
 	}
 }
 

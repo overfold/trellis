@@ -100,6 +100,18 @@ Exec streams and allocation metrics address only task records that are running, 
 
 The agent's node port manager claims each task port's node port before the task starts: `host_port` for a namespace-networked task (which canonicalization always sets) and `port` for a host-networked one. It refuses a port another allocation on the node claims or that a node process already listens on over TCP. Claims are recorded with the allocation and adopted on recovery. Reported mappings (node port and listen port) feed status and service discovery. Health checks run on configured intervals/timeouts and require a threshold of failures/successes before state changes. Script probes execute the supplied command in the task context. HTTP and TCP checks execute the dedicated helper mounted read-only at `/run/trellis/health-probe`, so they probe task-local loopback in host, none, and namespace networking with either supported runtime. The helper shares the control plane's path validation (`internal/probepath`), builds the HTTP URL from a fixed loopback host and the validated origin-form path, bypasses proxies, never resolves names (`localhost` maps directly to `127.0.0.1`), dials only `127.0.0.1`, and follows redirects only while they stay on that address and the probed port. The probe's usage exit status (`probepath.UsageExit`, 64) is returned as a health-check error, so the agent logs it with the container ID; the check still counts as failed.
 
+Containerd exec admission shares a node-local limit of 32 live processes and
+unresolved cleanup obligations across probes and streamed execs. Cancellation
+and ambiguous starts hand off kill/delete work without waiting for runtime
+recovery; successful exits also retain deletion work. Cleanup retries all RPC
+errors until deletion succeeds or the process is confirmed absent, with a
+five-second RPC budget per attempt, and logs unresolved failures with container
+and exec IDs. A slot is not reusable merely because that budget expires. Delete
+may block in containerd's context-insensitive output wait; a single worker keeps
+the slot rather than spawning overlapping deletes. Runtime close cancels
+retries; this queue is in memory and cannot recover execs after a daemon crash.
+Such processes need inspection or controlled container restart.
+
 ## Volumes
 
 A volume is identified for scheduling by `(namespace, name)`. The control plane loads an authoritative Raft-backed registry before scheduling. When an identity is unseen, the scheduler reserves it to the node selected for first placement and persists that binding **before** starting the new allocation. Later allocations using the same identity may run only on that node, including after leader restart or while the owner is offline. The node also persists `namespace/name -> host path` locally and reports its known registrations for diagnostics, but heartbeat advertisements do not create or override control-plane ownership.
@@ -107,6 +119,14 @@ A volume is identified for scheduling by `(namespace, name)`. The control plane 
 `host_path` controls only the node-side backing path. `@/relative/path` resolves below `<data-dir>/volumes/namespaces/<namespace>/` and the volume manager creates the directory. A clean absolute path must already exist, and every component must be a directory the agent can open without following symlinks. Absolute paths deliberately bypass filesystem-level namespace separation, although the logical registration remains namespace-scoped. `container_path` is the absolute destination passed to the runtime. For `read_only`, the agent uses `mount_setattr(AT_RECURSIVE, MOUNT_ATTR_RDONLY)` on the recursive, private staging clone before returning it to the runtime. This includes writable nested source mounts without changing host-side attributes, and fails closed if the kernel or permissions do not support it. The OCI bind still carries `ro`, but is not the recursive enforcement boundary: runsc can ignore unknown `rro` options. Existing containers from older versions must be recreated to acquire read-only staging.
 
 The agent resolves both `@/` and absolute paths component by component through directory descriptors without following symlinks, rooted at the configured data directory for managed paths and at `/` for absolute paths. It then bind-mounts the resolved directory at a Trellis-owned staging path below `<data-dir>/volume-staging/`. That staging path, not the potentially replaceable backing path, becomes the OCI mount source, so replacing the backing pathname cannot redirect an existing container's mounts. containerd resolves mount sources again whenever it creates a task, including in-place restarts, so the staging mount lives as long as the container: it is released only after the container is removed or a failed start is cleaned up. On restart, the agent keeps staging mounts for containers that still exist and removes the rest. Staging mounts are created in the agent's mount namespace, so the agent must run in the host mount namespace. Running it in a private mount namespace is unsupported: for example, under a systemd unit with `PrivateMounts=`, `PrivateTmp=`, `ProtectSystem=`, `ProtectHome=`, `ReadOnlyPaths=`, or `InaccessiblePaths=`, inside a container without shared mount propagation, or under `unshare -m`. There the staging mounts are invisible to containerd, and they disappear when the agent exits, so tasks recreated later, including in-place restarts, cannot resolve their volume mount source. A start refuses staging still held by an existing container with the same ID, and releases staging left behind for a container that no longer exists.
+
+Before enabling local restarts, every observed recovery path validates that
+allocation's staging. Delayed listings and on-demand inspection hold its
+operation lock; initial recovery runs before starts are admitted. Live mounts
+are preserved; unmounted directories left by
+a reboot are removed so task creation fails instead of binding an empty
+substitute. A validation error keeps recovery and restarts suppressed for retry.
+Late validation touches no other allocation, so concurrent starts are protected.
 
 Volume registrations and their data outlive individual allocations. Changing `host_path` for an existing name changes its backing path on the already owning node; Trellis does not move bytes. Volume registration is locality metadata, not replication, snapshots, migration, or distributed storage. Desired-state backups preserve the registry metadata, but never the volume bytes.
 

@@ -204,6 +204,11 @@ func (a *Agent) recoverContainer(container runtime.ContainerInfo, allocation *Al
 		a.recoverUnobserved(allocation)
 		return
 	}
+	if err := a.volumes.ValidateRecoveredStaging(allocation.ID); err != nil {
+		a.log.Error("validate recovered volume staging; keeping restarts suppressed", "allocation", allocation.AllocationID, "error", err)
+		a.recoverUnobserved(allocation)
+		return
+	}
 	if allocation.unobserved {
 		// Replace the restart suppression applied while state was unknown.
 		_ = a.reconciler.Untrack(allocation.ID)

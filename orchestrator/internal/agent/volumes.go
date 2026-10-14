@@ -245,6 +245,35 @@ func (vm *VolumeManager) StagingInUse(allocationID string) (bool, error) {
 	return vm.hasMounts(vm.stagingAllocationDir(allocationID))
 }
 
+// ValidateRecoveredStaging removes unmounted mount sources before recovery can
+// enable restarts. The caller excludes starts/stops for this allocation; other
+// allocations' staging is untouched, including starts absent from a listing.
+func (vm *VolumeManager) ValidateRecoveredStaging(allocationID string) error {
+	dir, err := resolveMountPath(vm.stagingAllocationDir(allocationID))
+	if err != nil || dir == "" {
+		return err
+	}
+	mounts, err := stagingMounts(dir)
+	if err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, entry := range entries {
+		path := filepath.Join(dir, entry.Name())
+		if slices.Contains(mounts, path) {
+			continue
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("remove unmounted volume staging %s: %w", entry.Name(), err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 func (vm *VolumeManager) stagingPath(allocationID, volumeName string) string {
 	return filepath.Join(vm.stagingAllocationDir(allocationID), volumeName)
 }

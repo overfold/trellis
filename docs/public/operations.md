@@ -498,6 +498,23 @@ Leadership activation failures (Raft barrier, state reload, or epoch acquisition
 
 When the daemon starts, its allocation agent recovers from records below `data_dir`: `agent/control-epoch`, `agent/allocations/`, `agent/stopped-generations/`, `agent/execution-intent`, `agent/start-admissions/`, and `agent/cleanup-complete/`. With intact records, an unavailable containerd listing is retried while health is unknown; restore containerd rather than deleting agent state. Stop-generation watermarks prevent delayed starts from resurrecting stopped workloads and remain after retained logs are pruned. Start admissions prevent interrupted attempts from silently replaying, and exact-generation cleanup receipts prove resource teardown. Cached execution intent alone does not authorize fresh starts after restart; the node must fetch current leader authority. Established work and local task restarts can continue while disconnected.
 
+Recovery validates volume staging before allowing local restarts, even when
+containerd becomes available later. After a reboot, missing staging mounts must
+not become empty replacement volumes: their leftover mount-point directories
+are removed, making a restart fail safely. Inspect backing data before allowing
+controlled allocation replacement to prepare fresh staging. If an older daemon
+already ran against an empty substitute, preserve and inspect those writes as
+well; do not assume the original backing data was deleted or discard either copy.
+
+Runtime outages can also delay exec cleanup. The daemon logs `exec cleanup
+unresolved; retaining slot` with container and exec IDs and retries while it
+runs. Probes and streamed execs share 32 runtime slots; unresolved cleanup keeps
+a slot, so prolonged failures can block new execs and make health checks fail
+their admission deadline. Restore containerd connectivity first. Cleanup is not
+durable across daemon shutdown/crash: inspect remaining execs with containerd
+tools and, where necessary, use a controlled container restart. Restarting only
+Trellis does not guarantee that leaked exec processes have been terminated.
+
 The agent refuses to start, and the daemon exits, when that state is broken:
 
 - `agent/control-epoch`, an allocation record, or a stop-generation watermark is unreadable or malformed, or a record's file name does not match its allocation ID;

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"syscall"
@@ -77,12 +78,23 @@ func (p *fakeExecProcess) killSignals() []syscall.Signal {
 	return append([]syscall.Signal(nil), p.killed...)
 }
 
+func testExecCleanup(t *testing.T, process execProcess) func(bool) {
+	t.Helper()
+	cleanup := newExecCleanup()
+	t.Cleanup(cleanup.cancel)
+	if err := cleanup.acquire(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	return func(kill bool) { cleanup.cleanup(context.Background(), process, kill, "test", "test") }
+}
+
 func TestRunExecProcessKillsAndDeletesOnCancellation(t *testing.T) {
 	process := newFakeExecProcess()
+	cleanup := testExecCleanup(t, process)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := runExecProcess(ctx, process)
+		_, err := runExecProcess(ctx, process, cleanup)
 		done <- err
 	}()
 	cancel()
@@ -98,8 +110,8 @@ func TestRunExecProcessKillsAndDeletesOnCancellation(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("cancelled exec process was not deleted")
 	}
-	if signals := process.killSignals(); len(signals) != 1 || signals[0] != syscall.SIGKILL {
-		t.Fatalf("kill signals = %v, want [SIGKILL]", signals)
+	if signals := process.killSignals(); len(signals) == 0 || signals[0] != syscall.SIGKILL {
+		t.Fatalf("kill signals = %v, want SIGKILL", signals)
 	}
 }
 
@@ -107,7 +119,10 @@ func TestRunExecProcessReturnsExitWithoutKilling(t *testing.T) {
 	process := newFakeExecProcess()
 	process.exitCh <- *containerd.NewExitStatus(3, time.Now(), nil)
 
-	status, err := runExecProcess(context.Background(), process)
+	var cleanupRequested, killRequested bool
+	status, err := runExecProcess(context.Background(), process, func(kill bool) {
+		cleanupRequested, killRequested = true, kill
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,10 +132,8 @@ func TestRunExecProcessReturnsExitWithoutKilling(t *testing.T) {
 	if signals := process.killSignals(); len(signals) != 0 {
 		t.Fatalf("exited process was killed: %v", signals)
 	}
-	select {
-	case <-process.deleted:
-		t.Fatal("successful exit deleted the process before the caller collected output")
-	default:
+	if !cleanupRequested || killRequested {
+		t.Fatal("successful exit must request deletion without a kill")
 	}
 }
 
@@ -132,7 +145,7 @@ func TestRunExecProcessCleansUpAfterStartFailure(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 
-		if _, err := runExecProcess(ctx, process); !errors.Is(err, process.startErr) {
+		if _, err := runExecProcess(ctx, process, testExecCleanup(t, process)); !errors.Is(err, process.startErr) {
 			t.Fatalf("launched=%v: run error = %v, want start failure", launched, err)
 		}
 		select {
@@ -140,12 +153,12 @@ func TestRunExecProcessCleansUpAfterStartFailure(t *testing.T) {
 			if err != nil {
 				t.Fatalf("launched=%v: delete used an ended context: %v", launched, err)
 			}
-		default:
+		case <-time.After(5 * time.Second):
 			t.Fatalf("launched=%v: process was not deleted after start failure", launched)
 		}
 		if launched {
-			if signals := process.killSignals(); len(signals) != 1 || signals[0] != syscall.SIGKILL {
-				t.Fatalf("launched process kill signals = %v, want [SIGKILL]", signals)
+			if signals := process.killSignals(); len(signals) == 0 || signals[0] != syscall.SIGKILL {
+				t.Fatalf("launched process kill signals = %v, want SIGKILL", signals)
 			}
 		}
 	}
@@ -161,14 +174,21 @@ func (p *hangingDeleteProcess) Delete(context.Context, ...containerd.ProcessDele
 	return nil, nil
 }
 
-func TestDeleteWithinGivesUpWhenContextEnds(t *testing.T) {
+func TestExecCleanupRetainsSlotDuringBlockedDelete(t *testing.T) {
 	process := &hangingDeleteProcess{fakeExecProcess: newFakeExecProcess(), release: make(chan struct{})}
 	defer close(process.release)
+	cleanup := newExecCleanup()
+	defer cleanup.cancel()
+	cleanup.slots = make(chan struct{}, 1)
+	if err := cleanup.acquire(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	cleanup.cleanup(context.Background(), process, false, "test", "test")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
 
-	if err := deleteWithin(ctx, process); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("delete error = %v, want deadline exceeded", err)
+	if err := cleanup.acquire(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("admission error = %v, want deadline exceeded while deletion is unresolved", err)
 	}
 }
 
@@ -190,23 +210,116 @@ func (p *flakyKillProcess) Kill(ctx context.Context, signal syscall.Signal, opts
 }
 
 func TestKillExecProcessRetriesFailedKill(t *testing.T) {
-	previous := execKillRetryInterval
-	execKillRetryInterval = time.Millisecond
-	defer func() { execKillRetryInterval = previous }()
 	process := &flakyKillProcess{fakeExecProcess: newFakeExecProcess(), failures: 1}
 	process.running = true
 
-	killExecProcess(context.Background(), process, process.exitCh)
+	testExecCleanup(t, process)(true)
 	select {
 	case err := <-process.deleted:
 		if err != nil {
 			t.Fatal(err)
 		}
-	default:
+	case <-time.After(5 * time.Second):
 		t.Fatal("process was not deleted after a retried kill")
 	}
-	if signals := process.killSignals(); len(signals) != 2 {
-		t.Fatalf("kill attempts = %d, want 2", len(signals))
+	if signals := process.killSignals(); len(signals) < 2 {
+		t.Fatalf("kill attempts = %d, want a retry after failed kill", len(signals))
+	}
+}
+
+type outageExecProcess struct {
+	*fakeExecProcess
+	restored chan struct{}
+	exits    bool
+}
+
+func (p *outageExecProcess) Start(ctx context.Context) error {
+	if err := p.fakeExecProcess.Start(ctx); err != nil {
+		return err
+	}
+	if p.exits {
+		p.mu.Lock()
+		p.running = false
+		p.mu.Unlock()
+		p.exitCh <- *containerd.NewExitStatus(3, time.Now(), nil)
+	}
+	return nil
+}
+
+func (p *outageExecProcess) Kill(ctx context.Context, signal syscall.Signal, opts ...containerd.KillOpts) error {
+	select {
+	case <-p.restored:
+		return p.fakeExecProcess.Kill(ctx, signal, opts...)
+	default:
+		return errdefs.ErrUnavailable
+	}
+}
+
+func (p *outageExecProcess) Delete(ctx context.Context, opts ...containerd.ProcessDeleteOpts) (*containerd.ExitStatus, error) {
+	select {
+	case <-p.restored:
+		return p.fakeExecProcess.Delete(ctx, opts...)
+	default:
+		return nil, errdefs.ErrUnavailable
+	}
+}
+
+func TestExecCleanupSurvivesRuntimeOutage(t *testing.T) {
+	for _, exits := range []bool{false, true} {
+		t.Run(fmt.Sprintf("successful_exit=%t", exits), func(t *testing.T) {
+			process := &outageExecProcess{fakeExecProcess: newFakeExecProcess(), restored: make(chan struct{}), exits: exits}
+			cleanup := newExecCleanup()
+			defer cleanup.cancel()
+			cleanup.slots = make(chan struct{}, 1)
+			if err := cleanup.acquire(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			if !exits {
+				cancel()
+			}
+			defer cancel()
+			started := time.Now()
+			status, err := runExecProcess(ctx, process, func(kill bool) {
+				cleanup.cleanup(ctx, process, kill, "test", "test")
+			})
+			if exits {
+				code, _, statusErr := status.Result()
+				if err != nil || statusErr != nil || code != 3 {
+					t.Fatalf("exit = %d, %v, %v; want 3 without errors", code, err, statusErr)
+				}
+			} else if !errors.Is(err, context.Canceled) {
+				t.Fatalf("run error = %v, want cancellation", err)
+			}
+			if time.Since(started) > time.Second {
+				t.Fatal("caller waited for runtime recovery")
+			}
+			// The former cleanup budget expired at five seconds. Admission
+			// must remain blocked beyond that boundary, even for exited execs.
+			blocked, stop := context.WithTimeout(context.Background(), execCleanupTimeout+100*time.Millisecond)
+			defer stop()
+			if err := cleanup.acquire(blocked); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("admission during outage = %v, want deadline exceeded", err)
+			}
+			close(process.restored)
+			select {
+			case err := <-process.deleted:
+				if err != nil {
+					t.Fatalf("cleanup inherited cancelled context: %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("exec not deleted after runtime recovery")
+			}
+			retry, stopRetry := context.WithTimeout(context.Background(), time.Second)
+			defer stopRetry()
+			if err := cleanup.acquire(retry); err != nil {
+				t.Fatalf("confirmed deletion did not restore admission: %v", err)
+			}
+			<-cleanup.slots
+			if exits && len(process.killSignals()) != 0 {
+				t.Fatal("successfully exited exec was killed during deletion retry")
+			}
+		})
 	}
 }
 
@@ -244,7 +357,14 @@ func TestStreamedExecCompletionWaitsForOutputAndReportsErrors(t *testing.T) {
 			stdout := &execOutput{Writer: &output}
 			stderr := &execOutput{Writer: io.Discard}
 			process := &drainingExecProcess{output: &drainingExecIO{drained: make(chan struct{})}, deleteErr: test.deleteErr}
-			result := &containerdExecProcess{process: process, stdout: stdout, stderr: stderr, done: make(chan struct{})}
+			cleanup := newExecCleanup()
+			defer cleanup.cancel()
+			if err := cleanup.acquire(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			result := &containerdExecProcess{process: process, stdout: stdout, stderr: stderr, done: make(chan struct{}), cleanup: func(kill bool) <-chan error {
+				return cleanup.cleanup(context.Background(), process, kill, "test", "test")
+			}}
 			go result.complete(context.Background(), *containerd.NewExitStatus(0, time.Now(), nil))
 			stall := 10 * time.Millisecond
 			if test.name == "complete" {

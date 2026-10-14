@@ -206,6 +206,12 @@ func TestCleanupStagingKeepsMountsOfExistingContainers(t *testing.T) {
 	}
 
 	restarted := NewVolumeManager(root)
+	if err := restarted.ValidateRecoveredStaging("live"); err != nil {
+		t.Fatalf("validate recovered staging: %v", err)
+	}
+	if inUse, err := restarted.StagingInUse("live"); err != nil || !inUse {
+		t.Fatalf("validation removed live staging mount: %t, %v", inUse, err)
+	}
 	if err := restarted.CleanupStaging([]string{"live"}); err != nil {
 		t.Fatalf("cleanup staging: %v", err)
 	}
