@@ -1062,7 +1062,8 @@ func deleteWithin(ctx context.Context, process execProcess) error {
 
 // containerdExecProcess is a streamed exec process.
 type containerdExecProcess struct {
-	process containerd.Process
+	process        containerd.Process
+	stdout, stderr *execOutput
 	// namespaced scopes a caller's context to the Trellis namespace, which
 	// containerd requires on every process call.
 	namespaced func(context.Context) context.Context
@@ -1076,6 +1077,42 @@ func (p *containerdExecProcess) Done() <-chan struct{} { return p.done }
 func (p *containerdExecProcess) ExitCode() (int, error) {
 	<-p.done
 	return p.code, p.err
+}
+
+// complete joins output before Delete: containerd Delete cancels its FIFO
+// readers before waiting, which can discard output still buffered at exit.
+// Output keeps its normal backpressure; the caller must unblock its writers
+// on cancellation (the agent closes its deadline-bounded connection).
+func (p *containerdExecProcess) complete(ctx context.Context, status containerd.ExitStatus) {
+	if output := p.process.IO(); output != nil {
+		output.Wait()
+	}
+	code, _, statusErr := status.Result()
+	deleteErr := deleteExecProcess(ctx, p.process)
+	if deleteErr != nil {
+		deleteErr = fmt.Errorf("delete exec process: %w", deleteErr)
+	}
+	p.code = int(code)
+	p.err = errors.Join(statusErr, p.stdout.err, p.stderr.err, deleteErr)
+	close(p.done)
+}
+
+// execOutput retains delivery errors that containerd's IO copy discards.
+// Its error is read only after IO.Wait has joined the copy goroutines.
+type execOutput struct {
+	io.Writer
+	err error
+}
+
+func (w *execOutput) Write(data []byte) (int, error) {
+	n, err := w.Writer.Write(data)
+	if err == nil && n != len(data) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		w.err = fmt.Errorf("deliver exec output: %w", err)
+	}
+	return n, err
 }
 
 func (p *containerdExecProcess) Resize(ctx context.Context, cols, rows uint32) error {
@@ -1169,17 +1206,19 @@ func (c *ContainerdRuntime) StartExec(ctx context.Context, containerID string, o
 			}
 		}}
 	}
-	stdout := options.Stdout
-	if stdout == nil {
-		stdout = io.Discard
+	stdout := &execOutput{Writer: options.Stdout}
+	if stdout.Writer == nil {
+		stdout.Writer = io.Discard
 	}
-	stderr := options.Stderr
+	stderr := &execOutput{Writer: options.Stderr}
+	if stderr.Writer == nil {
+		stderr.Writer = io.Discard
+	}
+	var stderrStream io.Writer = stderr
 	if options.TTY {
-		stderr = nil
-	} else if stderr == nil {
-		stderr = io.Discard
+		stderrStream = nil
 	}
-	creatorOptions := []cio.Opt{cio.WithStreams(stdin, stdout, stderr)}
+	creatorOptions := []cio.Opt{cio.WithStreams(stdin, stdout, stderrStream)}
 	if options.TTY {
 		creatorOptions = append(creatorOptions, cio.WithTerminal)
 	}
@@ -1199,15 +1238,9 @@ func (c *ContainerdRuntime) StartExec(ctx context.Context, containerID string, o
 		return nil, fmt.Errorf("starting exec for %s: %w", containerID, err)
 	}
 
-	result := &containerdExecProcess{process: process, namespaced: c.withNamespace, done: make(chan struct{})}
+	result := &containerdExecProcess{process: process, stdout: stdout, stderr: stderr, namespaced: c.withNamespace, done: make(chan struct{})}
 	go func() {
-		status := <-exitCh
-		// Deleting waits, boundedly, for the output copy, so Done follows
-		// the final output.
-		_ = deleteExecProcess(lifetimeCtx, process)
-		code, _, err := status.Result()
-		result.code, result.err = int(code), err
-		close(result.done)
+		result.complete(lifetimeCtx, <-exitCh)
 	}()
 	return result, nil
 }

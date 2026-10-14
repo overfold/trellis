@@ -1,14 +1,17 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/errdefs"
 )
 
@@ -206,3 +209,71 @@ func TestKillExecProcessRetriesFailedKill(t *testing.T) {
 		t.Fatalf("kill attempts = %d, want 2", len(signals))
 	}
 }
+
+type drainingExecIO struct {
+	cio.IO
+	drained chan struct{}
+}
+
+func (d *drainingExecIO) Wait() { <-d.drained }
+
+type drainingExecProcess struct {
+	containerd.Process
+	output    *drainingExecIO
+	deleteErr error
+}
+
+func (p *drainingExecProcess) IO() cio.IO { return p.output }
+
+func (p *drainingExecProcess) Delete(context.Context, ...containerd.ProcessDeleteOpts) (*containerd.ExitStatus, error) {
+	return nil, p.deleteErr
+}
+
+func TestStreamedExecCompletionWaitsForOutputAndReportsErrors(t *testing.T) {
+	failure := errors.New("delivery failed")
+	for _, test := range []struct {
+		name                string
+		writeErr, deleteErr error
+	}{
+		{name: "complete"},
+		{name: "output failure", writeErr: failure},
+		{name: "delete failure", deleteErr: failure},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var output bytes.Buffer
+			stdout := &execOutput{Writer: &output}
+			stderr := &execOutput{Writer: io.Discard}
+			process := &drainingExecProcess{output: &drainingExecIO{drained: make(chan struct{})}, deleteErr: test.deleteErr}
+			result := &containerdExecProcess{process: process, stdout: stdout, stderr: stderr, done: make(chan struct{})}
+			go result.complete(context.Background(), *containerd.NewExitStatus(0, time.Now(), nil))
+			stall := 10 * time.Millisecond
+			if test.name == "complete" {
+				// A slow consumer must survive the old five-second drain
+				// timeout without premature successful completion.
+				stall = execCleanupTimeout + 100*time.Millisecond
+			}
+			select {
+			case <-result.Done():
+				t.Fatal("exec completed before output drained")
+			case <-time.After(stall):
+			}
+			_, _ = stdout.Write([]byte("last output"))
+			if test.writeErr != nil {
+				stderr.Writer = failingExecWriter{err: test.writeErr}
+				_, _ = stderr.Write([]byte("stderr"))
+			}
+			close(process.output.drained)
+			code, err := result.ExitCode()
+			if code != 0 || output.String() != "last output" {
+				t.Fatalf("completion lost output or exit code: %d, %q", code, output.String())
+			}
+			if wantError := test.writeErr != nil || test.deleteErr != nil; wantError != errors.Is(err, failure) {
+				t.Fatalf("completion error = %v, want failure=%t", err, wantError)
+			}
+		})
+	}
+}
+
+type failingExecWriter struct{ err error }
+
+func (w failingExecWriter) Write([]byte) (int, error) { return 0, w.err }

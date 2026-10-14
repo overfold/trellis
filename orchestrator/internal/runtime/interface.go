@@ -111,7 +111,8 @@ type ExecOptions struct {
 	Stdin io.Reader
 	// Stdout and Stderr receive process output. A write that blocks stalls
 	// the process's output rather than buffering it. Stderr is unused with
-	// TTY; a nil writer discards its stream.
+	// TTY; a nil writer discards its stream. The caller must unblock writers
+	// on cancellation so output copying can finish.
 	Stdout io.Writer
 	Stderr io.Writer
 }
@@ -120,8 +121,8 @@ type ExecOptions struct {
 type ExecProcess interface {
 	// Resize changes the terminal size of a TTY process.
 	Resize(ctx context.Context, cols, rows uint32) error
-	// Done is closed once the process has exited and its output has been
-	// delivered, or its delivery abandoned after a bounded wait.
+	// Done is closed once the process has exited and output copying has
+	// finished. ExitCode reports output-delivery and cleanup errors too.
 	Done() <-chan struct{}
 	// ExitCode returns the process's exit status after Done is closed.
 	ExitCode() (int, error)

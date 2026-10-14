@@ -100,12 +100,13 @@ func (p *execTestProcess) resized() []api.ExecResize {
 
 type execTestRuntime struct {
 	*failingStopRuntime
-	mu        sync.Mutex
-	metricIDs []string
-	processes map[string][]*execTestProcess
-	startErr  error
-	exitCode  int
-	onStart   func(containerID string)
+	mu         sync.Mutex
+	metricIDs  []string
+	processes  map[string][]*execTestProcess
+	startErr   error
+	exitCode   int
+	stallInput bool
+	onStart    func(containerID string)
 }
 
 func newExecTestRuntime() *execTestRuntime {
@@ -126,7 +127,9 @@ func (r *execTestRuntime) StartExec(_ context.Context, containerID string, optio
 	process := &execTestProcess{options: options, exitCode: r.exitCode, done: make(chan struct{})}
 	r.processes[containerID] = append(r.processes[containerID], process)
 	r.mu.Unlock()
-	go process.run()
+	if !r.stallInput {
+		go process.run()
+	}
 	return process, nil
 }
 
@@ -438,6 +441,71 @@ func TestExecClientDisconnectKillsProcess(t *testing.T) {
 	_ = stream.conn.Close()
 	waitForExec(t, "process kill", func() bool { return process.killCount() == 1 })
 	waitForExec(t, "session release", func() bool { return agent.execSlots() == 0 && agent.execSessionTotal() == 0 })
+}
+
+func TestExecStalledInputIsBounded(t *testing.T) {
+	for _, action := range []string{"stall", "disconnect", "resume"} {
+		t.Run(action, func(t *testing.T) {
+			rt := newExecTestRuntime()
+			rt.stallInput = true
+			agent := newOperationTestAgent(t, rt)
+			agent.execTiming.stdinStallTimeout = 100 * time.Millisecond
+			addExecTestTask(agent, "allocation-g1-web", "web", 1, "running")
+			request := execTestRequest("web", "sh")
+			request.Stdin, request.TTY = true, true
+			stream := openExecTestStream(t, serveExecTestAgent(t, agent), "allocation", request)
+			process := rt.process(t, "allocation-g1-web")
+			// A blocked process write must not stop a resize while queue
+			// capacity remains available.
+			if err := stream.writer.WriteData(execstream.FrameStdin, []byte("blocked")); err != nil {
+				t.Fatal(err)
+			}
+			if err := stream.writer.WriteJSON(execstream.FrameResize, api.ExecResize{Cols: 123, Rows: 47}); err != nil {
+				t.Fatal(err)
+			}
+			waitForExec(t, "resize with blocked stdin", func() bool { return len(process.resized()) == 1 })
+			for range execStdinQueue + 1 {
+				if err := stream.writer.WriteData(execstream.FrameStdin, []byte("fill queue")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if action == "resume" {
+				go process.run()
+				if err := stream.writer.WriteJSON(execstream.FrameResize, api.ExecResize{Cols: 91, Rows: 23}); err != nil {
+					t.Fatal(err)
+				}
+				if err := stream.writer.WriteFrame(execstream.FrameStdinClose, nil); err != nil {
+					t.Fatal(err)
+				}
+				var output strings.Builder
+				for {
+					frame := stream.next()
+					if frame.Type == execstream.FrameExit {
+						break
+					}
+					if frame.Type != execstream.FrameStdout {
+						t.Fatalf("resumed stream failed: %d %q", frame.Type, frame.Payload)
+					}
+					output.Write(frame.Payload)
+				}
+				if output.String() != "blocked"+strings.Repeat("fill queue", execStdinQueue+1) || len(process.resized()) != 2 || process.killCount() != 0 {
+					t.Fatalf("resumed input lost data or control: output=%q resizes=%v kills=%d", output.String(), process.resized(), process.killCount())
+				}
+				waitForExec(t, "resumed session release", func() bool { return agent.execSlots() == 0 })
+				return
+			}
+			if action == "disconnect" {
+				_ = stream.conn.Close()
+			} else {
+				frame := stream.next()
+				if frame.Type != execstream.FrameError || !strings.Contains(string(frame.Payload), "stdin stalled") {
+					t.Fatalf("expected explicit backpressure error, got %d %q", frame.Type, frame.Payload)
+				}
+			}
+			waitForExec(t, "stalled process termination", func() bool { return process.killCount() == 1 })
+			waitForExec(t, "stalled session release", func() bool { return agent.execSlots() == 0 && agent.execSessionTotal() == 0 })
+		})
+	}
 }
 
 func TestExecStreamRejectsInvalidClientFrames(t *testing.T) {

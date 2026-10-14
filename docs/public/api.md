@@ -204,7 +204,7 @@ In the Go client, `ExecStream.Wait` returns the process exit code on an exit fra
 
 Exec is an ephemeral diagnostic operation, not a durable job. Graceful disconnect and shutdown kill the command, but an agent crash can leave it running until it exits or the container stops. Do not use a disconnected exec session as a background-work scheduler. Relay authentication and fencing are described in [internal APIs](../developer/api.md#exec-relay).
 
-Clients must keep reading output: backpressure can stall the process, and a blocked frame times out after 30 minutes. A stream with no input, output, or resize for 30 minutes is closed, and a stream lasts at most eight hours even while active. Limits are 64 streams per node, 8 per allocation, and 256 per leader. A closing stream may retain its slot until the command actually exits.
+Clients must keep reading output: backpressure can stall the process, and a blocked output frame times out after 30 minutes. Output copying finishes before the exit frame; output-delivery or process-cleanup failures produce an error instead of a successful exit. Stdin has a bounded queue: if queue delivery cannot advance for five seconds, the agent ends the session with an error and kills the command. This bounds disconnect and resize delays behind saturated stdin rather than waiting for the session's idle timeout. A stream with no input, output, or resize for 30 minutes is closed, and a stream lasts at most eight hours even while active. Limits are 64 streams per node, 8 per allocation, and 256 per leader. A closing stream may retain its slot until the command actually exits.
 
 Exec and allocation-metrics requests that fail before the upgrade return a JSON `{"message":"..."}` body with these statuses:
 

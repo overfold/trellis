@@ -23,6 +23,8 @@ import (
 
 // execTiming bounds exec streams. Tests shorten it.
 type execTiming struct {
+	// stdinStallTimeout bounds queue delivery when the process stops reading.
+	stdinStallTimeout time.Duration
 	// idleTimeout ends a stream that carried no input, output, or resize for
 	// this long. It also bounds how long one output frame may wait for the
 	// peer to accept it.
@@ -41,6 +43,7 @@ type execTiming struct {
 }
 
 var defaultExecTiming = execTiming{
+	stdinStallTimeout: 5 * time.Second,
 	idleTimeout:       30 * time.Minute,
 	maxLifetime:       8 * time.Hour,
 	checkInterval:     5 * time.Second,
@@ -53,7 +56,7 @@ const (
 	// the process and delivering the final frame.
 	execSessionCloseTimeout = 5 * time.Second
 	// execStdinQueue bounds the stdin frames a stream accepts ahead of the
-	// process; beyond it the stream stops reading and TCP pushes back.
+	// process. Sustained overflow ends the session after stdinStallTimeout.
 	execStdinQueue = 4
 	// Each session holds a runtime process, two connections through the
 	// leader, and a bounded stdin queue, so admission is bounded both per
@@ -457,9 +460,15 @@ func (a *Agent) readExecInput(ctx context.Context, cancel context.CancelCauseFun
 				cancel(errors.New("exec stream sent input without an open stdin"))
 				return
 			}
+			timer := time.NewTimer(a.execTiming.stdinStallTimeout)
 			select {
 			case queue <- append([]byte(nil), frame.Payload...):
+				timer.Stop()
 			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+				cancel(errors.New("exec stdin stalled: process is not consuming input"))
 				return
 			}
 		case execstream.FrameStdinClose:

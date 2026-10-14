@@ -242,6 +242,8 @@ Exec starts the command in the selected task's container process context: it inh
 
 Interrupting `trellisctl` or losing its connection kills the remote command. A session with no input, output, or resize for 30 minutes is closed, and a session lasts at most eight hours even while active. A node permits up to 64 exec sessions, with at most 8 for one allocation; if either limit is full, `exec` reports the overload so you can end another session or retry later. If control-plane leadership changes during a session, the session ends with an error rather than hanging; run the command again once a leader is available.
 
+SIGINT and SIGTERM cancel exec and restore the local terminal before exit; SIGKILL cannot restore terminal state. Input buffering is bounded: if the process stops consuming stdin and the input queue cannot advance for five seconds, the session ends with an error and kills the command. Output drains before the exit status is reported; output delivery or process-cleanup failures are errors, not a successful remote exit. Local stdin is borrowed only for the duration of exec and is not closed when the remote command finishes. On platforms where stdin cannot be interrupted safely, `-i` fails before starting the remote command.
+
 ## Delete and wait for removal
 
 ```sh

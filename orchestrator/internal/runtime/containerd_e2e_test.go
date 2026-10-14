@@ -720,6 +720,16 @@ func (w *lockedWriter) String() string {
 	return w.buf.String()
 }
 
+type slowExecWriter struct {
+	lockedWriter
+	once sync.Once
+}
+
+func (w *slowExecWriter) Write(data []byte) (int, error) {
+	w.once.Do(func() { time.Sleep(6 * time.Second) })
+	return w.lockedWriter.Write(data)
+}
+
 // execOutput runs a streamed exec process to completion and returns its
 // captured stdout and stderr.
 func execOutput(ctx context.Context, r *runtime.ContainerdRuntime, id string, options runtime.ExecOptions) (string, string, int, error) {
@@ -765,6 +775,26 @@ func TestContainerdExecStream(t *testing.T) {
 	if err != nil || code != 0 || !strings.Contains(stdout, "screen") || !strings.Contains(stdout, "17 91") {
 		t.Fatalf("tty exec = stdout %q, code %d, err %v", stdout, code, err)
 	}
+
+	t.Run("slow output drains before completion", func(t *testing.T) {
+		var output slowExecWriter
+		process, err := r.StartExec(ctx, id, runtime.ExecOptions{
+			Command: []string{"sh", "-c", "i=0; while [ $i -lt 256 ]; do printf 0123456789abcdef; i=$((i+1)); done"},
+			Stdout:  &output,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-process.Done():
+		case <-ctx.Done():
+			t.Fatal("slow output did not complete")
+		}
+		code, err := process.ExitCode()
+		if err != nil || code != 0 || output.String() != strings.Repeat("0123456789abcdef", 256) {
+			t.Fatalf("slow output incomplete: bytes=%d code=%d err=%v", len(output.String()), code, err)
+		}
+	})
 
 	stdinReader, stdinWriter := io.Pipe()
 	defer func() { _ = stdinWriter.Close() }()

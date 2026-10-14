@@ -3,10 +3,13 @@ package main
 import (
 	"bytes"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/overfold/trellis/orchestrator/api"
 	"github.com/overfold/trellis/orchestrator/client"
@@ -187,5 +190,41 @@ func TestBoundTerminalSize(t *testing.T) {
 	cols, rows := boundTerminalSize(0, 2000)
 	if cols != 1 || rows != 1000 {
 		t.Fatalf("bounded size = %dx%d", cols, rows)
+	}
+}
+
+func TestExecReturnsSilentInputToCaller(t *testing.T) {
+	previousConfig := config
+	t.Cleanup(func() { config = previousConfig })
+	server := newExecTestServer(t, func(api.ExecRequest) {}, func(_ *execstream.Reader, writer *execstream.Writer) {
+		_ = writer.WriteJSON(execstream.FrameExit, api.ExecExit{})
+	})
+	config = CLIConfig{ServerAddr: server.URL, Namespace: "default"}
+	input, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = input.Close() }()
+	defer func() { _ = writer.Close() }()
+	for range 5 {
+		cmd := NewExecCmd()
+		cmd.SetArgs([]string{"-i", "alloc-1", "--", "true"})
+		cmd.SetIn(input)
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		if err := cmd.Execute(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// No old forwarding reader may steal this subsequent caller-owned input.
+	if _, err := writer.WriteString("later input"); err != nil {
+		t.Fatal(err)
+	}
+	if err := input.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	buffer := make([]byte, len("later input"))
+	if _, err := io.ReadFull(input, buffer); err != nil || string(buffer) != "later input" {
+		t.Fatalf("input was not returned to caller: %q, %v", buffer, err)
 	}
 }

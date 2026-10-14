@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/overfold/trellis/orchestrator/api"
@@ -97,8 +101,19 @@ func newExecTerminal(cmd *cobra.Command) (*execTerminal, error) {
 }
 
 func runExec(cmd *cobra.Command, serverClient *client.Client, allocationID string, request api.ExecRequest, terminal *execTerminal) error {
-	ctx, cancel := context.WithCancel(cmd.Context())
+	ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	input := cmd.InOrStdin()
+	var interruptInput func()
+	var resetInput func()
+	if request.Stdin {
+		var err error
+		input, interruptInput, resetInput, err = execInputLifecycle(input)
+		if err != nil {
+			return err
+		}
+		defer resetInput()
+	}
 	stream, err := serverClient.Exec(ctx, allocationID, request)
 	if err != nil {
 		return err
@@ -116,7 +131,17 @@ func runExec(cmd *cobra.Command, serverClient *client.Client, allocationID strin
 		go watchTerminalSize(ctx, stream, terminal)
 	}
 	if request.Stdin {
-		go forwardExecInput(stream, cmd.InOrStdin())
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			forwardExecInput(stream, input)
+		}()
+		defer func() {
+			// Unblock both a network write and a local read before joining.
+			_ = stream.Close()
+			interruptInput()
+			<-done
+		}()
 	}
 
 	code, err := stream.Wait(cmd.OutOrStdout(), cmd.ErrOrStderr())
@@ -127,6 +152,28 @@ func runExec(cmd *cobra.Command, serverClient *client.Client, allocationID strin
 		return &execExitError{code: code}
 	}
 	return nil
+}
+
+// execInputLifecycle borrows input exclusively until runExec returns.
+// Arbitrary Readers cannot be interrupted safely; accept only finite memory
+// readers or files. Reject unsupported readers before starting a remote process.
+func execInputLifecycle(input io.Reader) (io.Reader, func(), func(), error) {
+	noop := func() {}
+	switch input := input.(type) {
+	case *bytes.Buffer, *bytes.Reader, *strings.Reader:
+		return input, noop, noop, nil
+	case *os.File:
+		info, err := input.Stat()
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("inspect exec stdin: %w", err)
+		}
+		if info.Mode().IsRegular() {
+			return input, noop, noop, nil
+		}
+		return execFileInput(input)
+	default:
+		return nil, nil, nil, fmt.Errorf("exec stdin must be a file or a finite in-memory reader")
+	}
 }
 
 // forwardExecInput sends local input until it ends, then closes the remote
