@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -363,6 +364,65 @@ func TestWorkloadTokenReplacesUnrecoverableCredential(t *testing.T) {
 	}
 	if saved, _ := mgr.ValidateToken(ctx, first); saved != nil {
 		t.Fatalf("unrecoverable token remains valid")
+	}
+}
+
+func TestWorkloadTokenReplacesMalformedNonce(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		size int
+	}{{"empty", 0}, {"short", 11}, {"long", 13}} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			store := newMemStore()
+			mgr := NewTokenManager(store, "test")
+			sealer := testSealer(t, store)
+			first, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(AccessRead))
+			if err != nil {
+				t.Fatal(err)
+			}
+			key := mgr.workloadCredentialKey("alloc-1", "app")
+			credential, err := mgr.loadWorkloadCredential(ctx, key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var sealed map[string]any
+			if err := json.Unmarshal(credential.SealedToken, &sealed); err != nil {
+				t.Fatal(err)
+			}
+			sealed["nonce"] = base64.RawStdEncoding.EncodeToString(make([]byte, tc.size))
+			credential.SealedToken, err = json.Marshal(sealed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err := json.Marshal(credential)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Put(ctx, key, raw); err != nil {
+				t.Fatal(err)
+			}
+			// Recovery must also work after a manager reload.
+			mgr = NewTokenManager(store, "test")
+			second, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(AccessRead))
+			if err != nil || second == first {
+				t.Fatalf("unrecoverable credential was not replaced: %v", err)
+			}
+			if saved, err := mgr.ValidateToken(ctx, first); err != nil || saved != nil {
+				t.Fatalf("old credential validation = %#v, %v", saved, err)
+			}
+			if saved, err := mgr.ValidateToken(ctx, second); err != nil || saved == nil || saved.Access != AccessRead {
+				t.Fatalf("replacement credential validation = %#v, %v", saved, err)
+			}
+			if retry, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(AccessRead)); err != nil || retry != second {
+				t.Fatalf("replacement credential was not stable on retry: %v", err)
+			}
+			for _, value := range store.values {
+				if bytes.Contains(value, []byte(second)) {
+					t.Fatal("replacement token persisted as plaintext")
+				}
+			}
+		})
 	}
 }
 

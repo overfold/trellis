@@ -3,10 +3,12 @@ package secrets
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/overfold/trellis/orchestrator/internal/state"
@@ -152,5 +154,35 @@ func TestSealBindsAssociatedDataAndKey(t *testing.T) {
 	}
 	if _, err := other.Open(sealed, []byte("alloc-1")); err == nil {
 		t.Fatal("sealed value opened under a different key ID")
+	}
+}
+
+func TestOpenRejectsMalformedNonce(t *testing.T) {
+	store, err := NewStore(nil, "cluster", "key-1", bytes.Repeat([]byte{7}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := store.Seal([]byte("sentinel-plaintext-value"), []byte("alloc-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		size int
+	}{{"empty", 0}, {"short", 11}, {"long", 13}} {
+		t.Run(tc.name, func(t *testing.T) {
+			var value sealedValue
+			if err := json.Unmarshal(sealed, &value); err != nil {
+				t.Fatal(err)
+			}
+			value.Nonce = base64.RawStdEncoding.EncodeToString(make([]byte, tc.size))
+			malformed, err := json.Marshal(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if plaintext, err := store.Open(malformed, []byte("alloc-1")); plaintext != nil || err == nil || !strings.Contains(err.Error(), "invalid sealed nonce size") {
+				t.Fatalf("Open = %v, %v; want nonce size error and no plaintext", plaintext, err)
+			}
+		})
 	}
 }

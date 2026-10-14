@@ -262,6 +262,7 @@ func (m *TokenManager) prepareToken(principal Principal) (string, string, []byte
 	}
 
 	raw := make([]byte, 32)
+	defer clear(raw)
 	if _, err := rand.Read(raw); err != nil {
 		return "", "", nil, fmt.Errorf("generate token: %w", err)
 	}
@@ -421,7 +422,9 @@ func (m *TokenManager) WorkloadToken(ctx context.Context, sealer Sealer, allocat
 	}
 	hash := sha256.Sum256([]byte(token))
 	hashHex := hex.EncodeToString(hash[:])
-	sealed, err := sealer.Seal([]byte(token), m.workloadTokenAAD(allocationID, principal.Subject.Task, generation, hashHex))
+	raw := []byte(token)
+	defer clear(raw)
+	sealed, err := sealer.Seal(raw, m.workloadTokenAAD(allocationID, principal.Subject.Task, generation, hashHex))
 	if err != nil {
 		return "", fmt.Errorf("seal workload token: %w", err)
 	}

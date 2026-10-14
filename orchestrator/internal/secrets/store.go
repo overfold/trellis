@@ -325,6 +325,9 @@ func (s *Store) Open(sealed, associated []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decode sealed nonce: %w", err)
 	}
+	if len(nonce) != s.aead.NonceSize() {
+		return nil, fmt.Errorf("invalid sealed nonce size")
+	}
 	ciphertext, err := base64.RawStdEncoding.DecodeString(value.Ciphertext)
 	if err != nil {
 		return nil, fmt.Errorf("decode sealed ciphertext: %w", err)
