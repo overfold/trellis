@@ -148,16 +148,18 @@ func (s *Server) Reconcile(ctx context.Context) {
 func (s *Server) reconcile(ctx context.Context) {
 	ctx, release := s.bindTerm(ctx)
 	defer release()
-	for ctx.Err() == nil {
+	for aborts := 0; ctx.Err() == nil; aborts++ {
 		// A concurrent mutation invalidated the snapshot. Replan rather than
 		// committing stale placement, including for synchronous API callers.
-		if !s.reconcilePass(ctx) {
+		// After two aborts, hold mutation ordering through planning so a busy
+		// cluster cannot indefinitely starve reconciliation.
+		if !s.reconcilePass(ctx, aborts >= 2) {
 			return
 		}
 	}
 }
 
-func (s *Server) reconcilePass(ctx context.Context) (retry bool) {
+func (s *Server) reconcilePass(ctx context.Context, pessimistic bool) (retry bool) {
 	start := time.Now()
 	planned := false
 	var projectionNodes map[uuid.UUID]bool
@@ -260,11 +262,13 @@ func (s *Server) reconcilePass(ctx context.Context) (retry bool) {
 	pool := s.networkPool
 	input, originals := s.reconcilePlanInputLocked(now, heartbeats, volumeOwners, nil)
 	s.mu.Unlock()
-	// All inputs are stable snapshots. Only snapshot acquisition and commit
-	// need mutation ordering; scheduling does not block API mutations.
+	// Optimistic passes release mutation ordering for planning. The fallback
+	// keeps it through commit, but still releases the in-memory state lock.
 	revision := s.mutationMu.revision + 1
-	s.mutationMu.Unlock()
-	mutationLocked = false
+	if !pessimistic {
+		s.mutationMu.Unlock()
+		mutationLocked = false
+	}
 	subnets, err := planNetworkSubnetRegistrations(pool, currentSubnets, networkNamespaces, nodeIDs, protectedSubnets)
 	if err != nil {
 		s.log.Error("prepare namespace network subnets", "error", err)
@@ -347,12 +351,14 @@ func (s *Server) reconcilePass(ctx context.Context) (retry bool) {
 	originalOf := func(planned *Allocation) *Allocation {
 		return originals[plan.Source[planned]]
 	}
-	s.mutationMu.Lock()
-	mutationLocked = true
+	if !pessimistic {
+		s.mutationMu.Lock()
+		mutationLocked = true
+	}
 	if s.checkTerm(ctx) != nil {
 		return
 	}
-	if s.mutationMu.revision != revision {
+	if !pessimistic && s.mutationMu.revision != revision {
 		s.abortReconcile("state_changed", "abort reconciliation: snapshot superseded by a mutation")
 		return true
 	}

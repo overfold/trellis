@@ -222,9 +222,15 @@ func (s *Server) applyObservations(ctx context.Context) bool {
 	}
 }
 
-func (s *Server) applyObservationBatch(ctx context.Context, batch []*nodeObservation, term uint64) bool {
+func (s *Server) applyObservationBatch(ctx context.Context, batch []*nodeObservation, term uint64) (changed bool) {
 	s.mutationMu.Lock()
-	defer s.mutationMu.Unlock()
+	defer func() {
+		if changed {
+			s.mutationMu.Unlock()
+		} else {
+			s.mutationMu.unlockUnchanged()
+		}
+	}()
 	if s.observations.currentTerm() != term {
 		s.discardObservations("term_changed", len(batch))
 		return false
@@ -248,7 +254,6 @@ func (s *Server) applyObservationBatch(ctx context.Context, batch []*nodeObserva
 		}
 		updates = append(updates, update)
 	}
-	changed := false
 	for start := 0; start < len(updates); {
 		end, records := start, 0
 		for end < len(updates) && (end == start || records+updates[end].records() <= maxObservationCommitRecords) {
@@ -443,6 +448,10 @@ func (s *Server) commitObservations(ctx context.Context, updates []*observationU
 		proofs = append(proofs, mutations...)
 		changed = changed || update.summary != nil || len(update.allocations) > 0 || len(mutations) > 0 ||
 			!reflect.DeepEqual(update.node.observedAllocations, update.next.observedAllocations) ||
+			// The first inventory in this term enables absence-based cleanup,
+			// even when the inventory itself is unchanged (including empty).
+			((update.node.observedAt.IsZero() || update.node.observedAt.Before(s.leaderSince)) &&
+				!update.next.observedAt.IsZero() && !update.next.observedAt.Before(s.leaderSince)) ||
 			livenessStatus(update.node.Status, update.observation.at, s.now()) != update.node.Status
 		if update.summary != nil {
 			summaries = append(summaries, update.summary)
@@ -459,15 +468,17 @@ func (s *Server) commitObservations(ctx context.Context, updates []*observationU
 			// Failed persistence must not leave an old interval usable after
 			// a reported interruption. Invalidate proof, not durable health;
 			// the next successful running report persists a fresh interval.
+			invalidated := false
 			for _, update := range updates {
 				for _, allocation := range update.allocations {
 					allocation.current.mu.Lock()
+					invalidated = invalidated || !allocation.current.StableSince.IsZero()
 					allocation.current.StableSince = time.Time{}
 					allocation.current.mu.Unlock()
 				}
 			}
 			s.discardObservations("commit_failed", len(updates))
-			return false
+			return invalidated
 		}
 	}
 	var changedAllocations []*Allocation

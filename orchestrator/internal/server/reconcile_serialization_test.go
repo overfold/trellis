@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -190,6 +191,112 @@ func (p *pausedPlanDiagnostic) Handle(ctx context.Context, record slog.Record) e
 		<-p.release
 	})
 	return p.Handler.Handle(ctx, record)
+}
+
+func TestReconcileObservationInvalidation(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		missing  bool
+		observed time.Duration
+		aborts   float64
+	}{
+		{name: "no previous inventory", missing: true, aborts: 1},
+		{name: "previous term inventory", observed: -time.Second, aborts: 1},
+		{name: "inventory at term start"},
+		{name: "current term inventory", observed: time.Minute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _, registry, node, _ := newAbortFixture(t)
+			s.leaderSince = s.now().Add(-time.Hour)
+			// Settle durable facts and the empty inventory before the pass.
+			resources := nodeResourceObservation{CPUCapacity: node.CPUAllocatable, MemoryCapacity: node.MemoryAllocatable, CPUAllocatable: node.CPUAllocatable, MemoryAllocatable: node.MemoryAllocatable}
+			if err := heartbeatAndApply(t, s, node.ID, nil, "test", resources); err != nil {
+				t.Fatal(err)
+			}
+			node.observedAt = time.Time{}
+			if !tc.missing {
+				node.observedAt = s.leaderSince.Add(tc.observed)
+			}
+			invalid := planTestJob("invalid", 1, 1, spec.UpdateRecreate)
+			invalid.Spec.TaskGroups[0].Count = 0
+			s.jobs[jobKey("default", "invalid")] = invalid
+			pause := &pausedPlanDiagnostic{Handler: slog.NewTextHandler(io.Discard, nil), started: make(chan struct{}), release: make(chan struct{})}
+			s.log = slog.New(pause)
+			var once sync.Once
+			unblock := func() { once.Do(func() { close(pause.release) }) }
+			t.Cleanup(unblock)
+			done := make(chan struct{})
+			go func() {
+				s.Reconcile(t.Context())
+				close(done)
+			}()
+			waitSignal(t, pause.started, "off-lock planning")
+			// Usage metrics and receipt time change, but planning reads neither
+			// once inventory has already been observed in the current term.
+			resources.CPUUsage, resources.MemoryUsed, resources.MetricsAt = new(0.17), new(int64(1234)), new(s.now())
+			if err := heartbeatAndApply(t, s, node.ID, nil, "test", resources); err != nil {
+				t.Fatal(err)
+			}
+			unblock()
+			waitSignal(t, done, "reconciliation commit")
+			if got := abortedPasses(t, registry, "state_changed"); got != tc.aborts {
+				t.Fatalf("aborted passes = %v, want %v", got, tc.aborts)
+			}
+			allocations, err := s.state.ListAllocations(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if a := allocations["pending"]; a == nil || a.Phase != lifecycle.PhaseStarting {
+				t.Fatalf("pending allocation was not committed as starting: %+v", a)
+			}
+		})
+	}
+}
+
+type mutatingPlanDiagnostic struct {
+	slog.Handler
+	mutate func()
+}
+
+func (p *mutatingPlanDiagnostic) Handle(ctx context.Context, record slog.Record) error {
+	if record.Message == "skip invalid job during reconciliation" {
+		p.mutate()
+	}
+	return p.Handler.Handle(ctx, record)
+}
+
+func TestReconcileCommitsDespiteRepeatedMutations(t *testing.T) {
+	s, _, registry, node, _ := newAbortFixture(t)
+	invalid := planTestJob("invalid", 1, 1, spec.UpdateRecreate)
+	invalid.Spec.TaskGroups[0].Count = 0
+	s.jobs[jobKey("default", "invalid")] = invalid
+	mutations := 0
+	s.log = slog.New(&mutatingPlanDiagnostic{Handler: slog.NewTextHandler(io.Discard, nil), mutate: func() {
+		// Apply a real heartbeat change on every off-lock plan. A locked
+		// fallback excludes this writer instead of permitting stale commit.
+		if !s.mutationMu.TryLock() {
+			return
+		}
+		s.mutationMu.Mutex.Unlock()
+		mutations++
+		resources := nodeResourceObservation{CPUCapacity: node.CPUAllocatable, MemoryCapacity: node.MemoryAllocatable, CPUAllocatable: node.CPUAllocatable, MemoryAllocatable: node.MemoryAllocatable}
+		if err := heartbeatAndApply(t, s, node.ID, nil, fmt.Sprint(mutations), resources); err != nil {
+			t.Fatal(err)
+		}
+	}})
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	s.Reconcile(ctx)
+	allocations, err := s.state.ListAllocations(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := allocations["pending"]; a == nil || a.Phase != lifecycle.PhaseStarting {
+		t.Fatalf("reconciliation starved after %d mutations: %+v", mutations, a)
+	}
+	if got := abortedPasses(t, registry, "state_changed"); got != 2 || mutations != 2 {
+		t.Fatalf("aborts = %v, mutations = %d, want two optimistic aborts then a committed fallback", got, mutations)
+	}
 }
 
 func TestReconcileReplansWhenNodeRegistrationChangesDuringPlanning(t *testing.T) {

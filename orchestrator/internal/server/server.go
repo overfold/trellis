@@ -28,9 +28,9 @@ import (
 const reconcileInterval = 10 * time.Second
 const heartbeatInterval = 10 * time.Second
 
-// mutationMutex fences optimistic plans against every intervening mutation
-// scope, including renewable inventory updates. Its revision is read only
-// while locked; conservative invalidation also covers failed/no-op writes.
+// mutationMutex fences optimistic plans against intervening mutations,
+// including renewable inventory updates. Its revision is read only while
+// locked; scopes known to change no planning inputs may use unlockUnchanged.
 type mutationMutex struct {
 	sync.Mutex
 	revision uint64
@@ -38,6 +38,11 @@ type mutationMutex struct {
 
 func (m *mutationMutex) Unlock() {
 	m.revision++
+	m.Mutex.Unlock()
+}
+
+// unlockUnchanged releases a scope that changed nothing planning reads.
+func (m *mutationMutex) unlockUnchanged() {
 	m.Mutex.Unlock()
 }
 
