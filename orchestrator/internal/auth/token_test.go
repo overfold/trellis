@@ -18,14 +18,14 @@ import (
 )
 
 func TestAuthorizationAccessEncoding(t *testing.T) {
-	for _, access := range []AccessLevel{AccessRead, AccessWrite} {
-		got, ok := DecodeAccess(EncodeAccess(access))
+	for _, access := range []Role{RoleObserver, RoleOperator} {
+		got, ok := DecodeRole(EncodeRole(access))
 		if !ok || got != access {
 			t.Fatalf("access round trip = %q, %v; want %q", got, ok, access)
 		}
 	}
-	for _, value := range []string{"", "read", "@trellis-auth:cluster:read", EncodeAccess("invalid")} {
-		if _, ok := DecodeAccess(value); ok {
+	for _, value := range []string{"", "read", "@trellis-auth:cluster:read", EncodeRole("invalid")} {
+		if _, ok := DecodeRole(value); ok {
 			t.Fatalf("invalid authorization value %q accepted", value)
 		}
 	}
@@ -118,20 +118,20 @@ func (m *memStore) Batch(_ context.Context, mutations []state.Mutation) error {
 func TestTokenRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	mgr := NewTokenManager(newMemStore(), "test")
-	principal := Principal{Kind: CredentialOperator, Access: AccessRead}
+	principal := Principal{Role: RoleObserver}
 
 	token, err := mgr.CreateToken(ctx, principal)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(token, "trls_op_") {
-		t.Fatalf("operator token has unexpected prefix: %q", token)
+	if !strings.HasPrefix(token, "trls_ob_") {
+		t.Fatalf("observer token has unexpected prefix: %q", token)
 	}
 	saved, err := mgr.ValidateToken(ctx, token)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if saved == nil || saved.Kind != CredentialOperator || saved.Access != AccessRead || saved.CreatedAt.IsZero() {
+	if saved == nil || saved.Workload() || saved.Role != RoleObserver || saved.CreatedAt.IsZero() {
 		t.Fatalf("unexpected principal: %#v", saved)
 	}
 
@@ -153,8 +153,8 @@ func testSealer(t *testing.T, store state.Store) Sealer {
 	return sealer
 }
 
-func workloadPrincipal(access AccessLevel) Principal {
-	return Principal{Kind: CredentialWorkload, Access: access, Subject: &CredentialSubject{Namespace: "acme", Job: "api", TaskGroup: "web", Task: "app"}}
+func workloadPrincipal(access Role) Principal {
+	return Principal{Role: access, Subject: &CredentialSubject{Namespace: "acme", Job: "api", TaskGroup: "web", Task: "app"}}
 }
 
 func TestSiblingTaskCredentialsStableAndIsolated(t *testing.T) {
@@ -162,7 +162,7 @@ func TestSiblingTaskCredentialsStableAndIsolated(t *testing.T) {
 	store := newMemStore()
 	sealer := testSealer(t, store)
 	mgr := NewTokenManager(store, "test")
-	issue := func(task string, access AccessLevel) string {
+	issue := func(task string, access Role) string {
 		t.Helper()
 		principal := workloadPrincipal(access)
 		principal.Subject.Task = task
@@ -172,8 +172,8 @@ func TestSiblingTaskCredentialsStableAndIsolated(t *testing.T) {
 		}
 		return token
 	}
-	first := issue("app", AccessWrite)
-	sibling := issue("sidecar", AccessRead)
+	first := issue("app", RoleOperator)
+	sibling := issue("sidecar", RoleObserver)
 	if first == sibling {
 		t.Fatal("sibling tasks share a token")
 	}
@@ -181,7 +181,7 @@ func TestSiblingTaskCredentialsStableAndIsolated(t *testing.T) {
 	mgr.SetWorkloadAuthorizer(func(_ context.Context, credential WorkloadCredential) bool {
 		return credential.AllocationID == "allocation"
 	})
-	if issue("app", AccessWrite) != first || issue("sidecar", AccessRead) != sibling {
+	if issue("app", RoleOperator) != first || issue("sidecar", RoleObserver) != sibling {
 		t.Fatal("task tokens changed across retries or manager reload")
 	}
 	for task, token := range map[string]string{"app": first, "sidecar": sibling} {
@@ -191,14 +191,14 @@ func TestSiblingTaskCredentialsStableAndIsolated(t *testing.T) {
 		}
 	}
 	// Narrowing one task's grant revokes its old token, not its sibling's.
-	narrowed := issue("app", AccessRead)
+	narrowed := issue("app", RoleObserver)
 	if narrowed == first {
 		t.Fatal("narrowed grant reused write token")
 	}
 	if principal, err := mgr.ValidateToken(ctx, first); err != nil || principal != nil {
 		t.Fatalf("old write token remains valid: %#v, %v", principal, err)
 	}
-	if issue("sidecar", AccessRead) != sibling {
+	if issue("sidecar", RoleObserver) != sibling {
 		t.Fatal("narrowing rotated sibling token")
 	}
 	revoked, err := mgr.RevokeWorkloadCredentials(ctx, func() func(WorkloadCredential) bool {
@@ -221,11 +221,11 @@ func TestWorkloadTokenStableAndSealed(t *testing.T) {
 	mgr := NewTokenManager(store, "test")
 	sealer := testSealer(t, store)
 
-	token1, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(AccessRead))
+	token1, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(RoleObserver))
 	if err != nil {
 		t.Fatal(err)
 	}
-	token2, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(AccessRead))
+	token2, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(RoleObserver))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,14 +247,14 @@ func TestWorkloadTokenStableAndSealed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if saved == nil || saved.Kind != CredentialWorkload || saved.Access != AccessRead {
+	if saved == nil || !saved.Workload() || saved.Role != RoleObserver {
 		t.Fatalf("unexpected workload principal: %#v", saved)
 	}
 	if saved.Subject == nil || *saved.Subject != (CredentialSubject{Namespace: "acme", Job: "api", TaskGroup: "web", Task: "app"}) {
 		t.Fatalf("workload principal subject = %#v", saved.Subject)
 	}
 
-	other, err := mgr.WorkloadToken(ctx, sealer, "alloc-2", 1, workloadPrincipal(AccessRead))
+	other, err := mgr.WorkloadToken(ctx, sealer, "alloc-2", 1, workloadPrincipal(RoleObserver))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +269,7 @@ func TestWorkloadTokenRotatesAndRevokesPrevious(t *testing.T) {
 	mgr := NewTokenManager(store, "test")
 	sealer := testSealer(t, store)
 
-	first, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(AccessRead))
+	first, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(RoleObserver))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,8 +277,8 @@ func TestWorkloadTokenRotatesAndRevokesPrevious(t *testing.T) {
 		generation uint64
 		principal  Principal
 	}{
-		"generation": {generation: 2, principal: workloadPrincipal(AccessRead)},
-		"grant":      {generation: 2, principal: workloadPrincipal(AccessWrite)},
+		"generation": {generation: 2, principal: workloadPrincipal(RoleObserver)},
+		"grant":      {generation: 2, principal: workloadPrincipal(RoleOperator)},
 	} {
 		second, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", next.generation, next.principal)
 		if err != nil {
@@ -299,11 +299,11 @@ func TestWorkloadTokenRejectsSupersededGeneration(t *testing.T) {
 	store := newMemStore()
 	mgr := NewTokenManager(store, "test")
 	sealer := testSealer(t, store)
-	current, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 2, workloadPrincipal(AccessRead))
+	current, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 2, workloadPrincipal(RoleObserver))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(AccessRead)); err == nil {
+	if _, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(RoleObserver)); err == nil {
 		t.Fatal("stale generation minted a workload token")
 	}
 	if saved, _ := mgr.ValidateToken(ctx, current); saved == nil {
@@ -316,12 +316,12 @@ func TestWorkloadTokenLookupFailureDoesNotRotate(t *testing.T) {
 	store := &failingGetStore{memStore: newMemStore()}
 	mgr := NewTokenManager(store, "test")
 	sealer := testSealer(t, store.memStore)
-	first, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(AccessRead))
+	first, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(RoleObserver))
 	if err != nil {
 		t.Fatal(err)
 	}
 	store.failPrefix = "trellis/test/tokens/"
-	if _, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(AccessRead)); err == nil {
+	if _, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(RoleObserver)); err == nil {
 		t.Fatal("transient token lookup failure was not returned")
 	}
 	store.failPrefix = ""
@@ -347,7 +347,7 @@ func TestWorkloadTokenReplacesUnrecoverableCredential(t *testing.T) {
 	store := newMemStore()
 	mgr := NewTokenManager(store, "test")
 
-	first, err := mgr.WorkloadToken(ctx, testSealer(t, store), "alloc-1", 1, workloadPrincipal(AccessRead))
+	first, err := mgr.WorkloadToken(ctx, testSealer(t, store), "alloc-1", 1, workloadPrincipal(RoleObserver))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,7 +355,7 @@ func TestWorkloadTokenReplacesUnrecoverableCredential(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := mgr.WorkloadToken(ctx, rotated, "alloc-1", 1, workloadPrincipal(AccessRead))
+	second, err := mgr.WorkloadToken(ctx, rotated, "alloc-1", 1, workloadPrincipal(RoleObserver))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -377,7 +377,7 @@ func TestWorkloadTokenReplacesMalformedNonce(t *testing.T) {
 			store := newMemStore()
 			mgr := NewTokenManager(store, "test")
 			sealer := testSealer(t, store)
-			first, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(AccessRead))
+			first, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(RoleObserver))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -404,17 +404,17 @@ func TestWorkloadTokenReplacesMalformedNonce(t *testing.T) {
 			}
 			// Recovery must also work after a manager reload.
 			mgr = NewTokenManager(store, "test")
-			second, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(AccessRead))
+			second, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(RoleObserver))
 			if err != nil || second == first {
 				t.Fatalf("unrecoverable credential was not replaced: %v", err)
 			}
 			if saved, err := mgr.ValidateToken(ctx, first); err != nil || saved != nil {
 				t.Fatalf("old credential validation = %#v, %v", saved, err)
 			}
-			if saved, err := mgr.ValidateToken(ctx, second); err != nil || saved == nil || saved.Access != AccessRead {
+			if saved, err := mgr.ValidateToken(ctx, second); err != nil || saved == nil || saved.Role != RoleObserver {
 				t.Fatalf("replacement credential validation = %#v, %v", saved, err)
 			}
-			if retry, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(AccessRead)); err != nil || retry != second {
+			if retry, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(RoleObserver)); err != nil || retry != second {
 				t.Fatalf("replacement credential was not stable on retry: %v", err)
 			}
 			for _, value := range store.values {
@@ -430,15 +430,15 @@ func TestWorkloadTokenRequiresSealerAndSubject(t *testing.T) {
 	ctx := context.Background()
 	store := newMemStore()
 	mgr := NewTokenManager(store, "test")
-	if _, err := mgr.WorkloadToken(ctx, nil, "alloc-1", 1, workloadPrincipal(AccessRead)); err == nil {
+	if _, err := mgr.WorkloadToken(ctx, nil, "alloc-1", 1, workloadPrincipal(RoleObserver)); err == nil {
 		t.Fatalf("workload token issued without a sealer")
 	}
-	principal := workloadPrincipal(AccessRead)
+	principal := workloadPrincipal(RoleObserver)
 	principal.Subject = nil
 	if _, err := mgr.WorkloadToken(ctx, testSealer(t, store), "alloc-1", 1, principal); err == nil {
 		t.Fatalf("workload token issued without a subject")
 	}
-	if _, err := mgr.WorkloadToken(ctx, testSealer(t, store), "alloc-1", 0, workloadPrincipal(AccessRead)); err == nil {
+	if _, err := mgr.WorkloadToken(ctx, testSealer(t, store), "alloc-1", 0, workloadPrincipal(RoleObserver)); err == nil {
 		t.Fatalf("workload token issued without a generation")
 	}
 	if len(store.values) != 0 {
@@ -459,7 +459,7 @@ func TestWorkloadTokenConcurrent(t *testing.T) {
 	for range callers {
 		wg.Go(func() {
 			<-start
-			token, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(AccessWrite))
+			token, err := mgr.WorkloadToken(ctx, sealer, "alloc-1", 1, workloadPrincipal(RoleOperator))
 			tokens <- token
 			errs <- err
 		})
@@ -497,7 +497,7 @@ func TestWorkloadTokenBatchFailureLeavesNoCredential(t *testing.T) {
 	store.batchError = errors.New("injected batch failure")
 	mgr := NewTokenManager(store, "test")
 
-	if _, err := mgr.WorkloadToken(ctx, testSealer(t, store), "alloc-1", 1, workloadPrincipal(AccessRead)); err == nil || !strings.Contains(err.Error(), "injected batch failure") {
+	if _, err := mgr.WorkloadToken(ctx, testSealer(t, store), "alloc-1", 1, workloadPrincipal(RoleObserver)); err == nil || !strings.Contains(err.Error(), "injected batch failure") {
 		t.Fatalf("WorkloadToken error = %v, want injected failure", err)
 	}
 	store.mu.Lock()
@@ -515,11 +515,11 @@ func TestRevokeWorkloadCredentials(t *testing.T) {
 	store := newMemStore()
 	mgr := NewTokenManager(store, "test")
 	sealer := testSealer(t, store)
-	kept, err := mgr.WorkloadToken(ctx, sealer, "alloc-keep", 1, workloadPrincipal(AccessRead))
+	kept, err := mgr.WorkloadToken(ctx, sealer, "alloc-keep", 1, workloadPrincipal(RoleObserver))
 	if err != nil {
 		t.Fatal(err)
 	}
-	dropped, err := mgr.WorkloadToken(ctx, sealer, "alloc-drop", 1, workloadPrincipal(AccessWrite))
+	dropped, err := mgr.WorkloadToken(ctx, sealer, "alloc-drop", 1, workloadPrincipal(RoleOperator))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -538,7 +538,7 @@ func TestRevokeWorkloadCredentials(t *testing.T) {
 	if len(store.values) != 2 {
 		t.Fatalf("revocation left %d records, want 2", len(store.values))
 	}
-	reissued, err := mgr.WorkloadToken(ctx, sealer, "alloc-drop", 1, workloadPrincipal(AccessWrite))
+	reissued, err := mgr.WorkloadToken(ctx, sealer, "alloc-drop", 1, workloadPrincipal(RoleOperator))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -549,10 +549,10 @@ func TestRevokeWorkloadCredentials(t *testing.T) {
 
 func TestPrincipalValidation(t *testing.T) {
 	for _, principal := range []Principal{
-		{Kind: CredentialOperator, Access: "invalid"},
-		{Kind: CredentialOperator, Access: AccessRead, Subject: &CredentialSubject{Namespace: "acme", Job: "api", TaskGroup: "web", Task: "app"}},
-		{Kind: CredentialWorkload, Access: AccessRead},
-		{Kind: CredentialWorkload, Access: AccessRead, Subject: &CredentialSubject{Namespace: "acme", Job: "api", TaskGroup: "web"}},
+		{Role: "invalid"},
+		{Role: RoleAdministrator},
+		{Role: RoleObserver, Subject: &CredentialSubject{Namespace: "acme", Job: "api", TaskGroup: "web", Task: "app"}, ExpiresAt: time.Unix(1, 0)},
+		{Role: RoleObserver, Subject: &CredentialSubject{Namespace: "acme", Job: "api", TaskGroup: "web"}},
 	} {
 		if err := principal.Validate(); err == nil {
 			t.Fatalf("expected principal to be invalid: %#v", principal)
@@ -567,14 +567,14 @@ func TestStoredCredentialsRejectUnknownFields(t *testing.T) {
 	digest := sha256.Sum256([]byte(token))
 	key := mgr.tokenKey(hex.EncodeToString(digest[:]))
 	for _, data := range []string{
-		`{"kind":"operator","scope":"cluster","access":"read"}`,
-		`{"kind":"operator","scope":"namespace","access":"read"}`,
+		`{"role":"observer","scope":"cluster"}`,
+		`{"role":"observer","scope":"namespace"}`,
 	} {
 		store.values[key] = []byte(data)
 		if principal, err := mgr.ValidateToken(t.Context(), token); principal != nil || err == nil || !strings.Contains(err.Error(), `unknown field "scope"`) {
 			t.Fatalf("principal = %#v, %v; want unknown field error", principal, err)
 		}
-		if _, err := mgr.ListOperatorCredentials(t.Context()); err == nil || !strings.Contains(err.Error(), `unknown field "scope"`) {
+		if _, err := mgr.ListMintedCredentials(t.Context()); err == nil || !strings.Contains(err.Error(), `unknown field "scope"`) {
 			t.Fatalf("listing error = %v; want unknown field error", err)
 		}
 	}
@@ -585,7 +585,7 @@ func TestOperatorCredentialExpires(t *testing.T) {
 	now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
 	mgr := NewTokenManager(newMemStore(), "test")
 	mgr.SetClock(func() time.Time { return now })
-	token, credential, err := mgr.CreateOperatorToken(ctx, Principal{Access: AccessRead, ExpiresAt: now.Add(time.Hour)})
+	token, credential, err := mgr.CreateMintedToken(ctx, Principal{Role: RoleObserver, ExpiresAt: now.Add(time.Hour)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -602,30 +602,30 @@ func TestOperatorCredentialExpires(t *testing.T) {
 }
 
 func TestWorkloadCredentialCannotExpire(t *testing.T) {
-	principal := workloadPrincipal(AccessRead)
+	principal := workloadPrincipal(RoleObserver)
 	principal.ExpiresAt = time.Now()
 	if err := principal.Validate(); err == nil {
 		t.Fatal("workload credential with an expiry validated")
 	}
 }
 
-func TestListAndRevokeOperatorCredentials(t *testing.T) {
+func TestListAndRevokeMintedCredentials(t *testing.T) {
 	ctx := context.Background()
 	store := newMemStore()
 	mgr := NewTokenManager(store, "test")
-	first, firstCredential, err := mgr.CreateOperatorToken(ctx, Principal{Access: AccessWrite})
+	first, firstCredential, err := mgr.CreateMintedToken(ctx, Principal{Role: RoleOperator})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, secondCredential, err := mgr.CreateOperatorToken(ctx, Principal{Access: AccessRead})
+	second, secondCredential, err := mgr.CreateMintedToken(ctx, Principal{Role: RoleObserver})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mgr.WorkloadToken(ctx, testSealer(t, store), "alloc-1", 1, workloadPrincipal(AccessRead)); err != nil {
+	if _, err := mgr.WorkloadToken(ctx, testSealer(t, store), "alloc-1", 1, workloadPrincipal(RoleObserver)); err != nil {
 		t.Fatal(err)
 	}
 
-	listed, err := mgr.ListOperatorCredentials(ctx)
+	listed, err := mgr.ListMintedCredentials(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -642,7 +642,7 @@ func TestListAndRevokeOperatorCredentials(t *testing.T) {
 		}
 	}
 
-	if err := mgr.RevokeOperatorCredential(ctx, firstCredential.ID); err != nil {
+	if err := mgr.RevokeMintedCredential(ctx, firstCredential.ID); err != nil {
 		t.Fatal(err)
 	}
 	if principal, _ := mgr.ValidateToken(ctx, first); principal != nil {
@@ -651,24 +651,24 @@ func TestListAndRevokeOperatorCredentials(t *testing.T) {
 	if principal, _ := mgr.ValidateToken(ctx, second); principal == nil {
 		t.Fatal("revoking one credential revoked another")
 	}
-	if err := mgr.RevokeOperatorCredential(ctx, firstCredential.ID); !errors.Is(err, ErrCredentialNotFound) {
+	if err := mgr.RevokeMintedCredential(ctx, firstCredential.ID); !errors.Is(err, ErrCredentialNotFound) {
 		t.Fatalf("second revoke error = %v, want ErrCredentialNotFound", err)
 	}
-	if err := mgr.RevokeOperatorCredential(ctx, "not-an-id"); !errors.Is(err, ErrCredentialNotFound) {
+	if err := mgr.RevokeMintedCredential(ctx, "not-an-id"); !errors.Is(err, ErrCredentialNotFound) {
 		t.Fatalf("malformed ID error = %v, want ErrCredentialNotFound", err)
 	}
 }
 
-func TestRevokeOperatorCredentialIgnoresWorkloadCredentials(t *testing.T) {
+func TestRevokeMintedCredentialIgnoresWorkloadCredentials(t *testing.T) {
 	ctx := context.Background()
 	store := newMemStore()
 	mgr := NewTokenManager(store, "test")
-	token, err := mgr.WorkloadToken(ctx, testSealer(t, store), "alloc-1", 1, workloadPrincipal(AccessRead))
+	token, err := mgr.WorkloadToken(ctx, testSealer(t, store), "alloc-1", 1, workloadPrincipal(RoleObserver))
 	if err != nil {
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256([]byte(token))
-	if err := mgr.RevokeOperatorCredential(ctx, CredentialID(hex.EncodeToString(digest[:]))); !errors.Is(err, ErrCredentialNotFound) {
+	if err := mgr.RevokeMintedCredential(ctx, CredentialID(hex.EncodeToString(digest[:]))); !errors.Is(err, ErrCredentialNotFound) {
 		t.Fatalf("revoke workload credential error = %v, want ErrCredentialNotFound", err)
 	}
 	if principal, _ := mgr.ValidateToken(ctx, token); principal == nil {

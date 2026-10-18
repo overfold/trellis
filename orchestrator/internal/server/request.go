@@ -274,20 +274,19 @@ func namespaceParam(c *echo.Context) (string, error) {
 	if !spec.ValidDiscoveryIdentifier(namespace) {
 		return "", echo.NewHTTPError(http.StatusBadRequest, "invalid namespace: must be a single identifier without dots")
 	}
-	authz := authorization(c)
-	if authz.root || authz.access == auth.AccessRead || authz.access == auth.AccessWrite {
+	if authorization(c).role.Includes(auth.RoleObserver) {
 		return namespace, nil
 	}
 	return "", echo.NewHTTPError(http.StatusForbidden, "namespaced resources require an authenticated credential")
 }
 
-// namespaceWrite authorizes a mutation of the {namespace} path parameter.
-func namespaceWrite(c *echo.Context, message string) (string, error) {
+// namespaceOperator authorizes a mutation of the {namespace} path parameter.
+func namespaceOperator(c *echo.Context, message string) (string, error) {
 	namespace, err := namespaceParam(c)
 	if err != nil {
 		return "", err
 	}
-	if err := requireWrite(c, message); err != nil {
+	if err := requireOperator(c, message); err != nil {
 		return "", err
 	}
 	return namespace, nil

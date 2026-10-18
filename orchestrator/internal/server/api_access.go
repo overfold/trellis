@@ -26,13 +26,12 @@ func (s *Server) apiAccessToken(ctx context.Context, access *spec.APIAccessSpec,
 	}
 
 	principal := auth.Principal{
-		Kind:    auth.CredentialWorkload,
-		Access:  auth.AccessLevel(access.Access),
+		Role:    auth.Role(access.Role),
 		Subject: &auth.CredentialSubject{Namespace: request.Namespace, Job: request.JobName, TaskGroup: request.GroupName, Task: task},
 	}
 	token, err := s.tokenManager.WorkloadToken(ctx, s.secrets, request.AllocationID, request.Generation, principal)
 	if err != nil {
-		return "", fmt.Errorf("create %s workload API token for task %s: %w", access.Access, task, err)
+		return "", fmt.Errorf("create %s workload API token for task %s: %w", access.Role, task, err)
 	}
 	return token, nil
 }
@@ -98,10 +97,10 @@ func (s *Server) authorizeWorkloadCredential(ctx context.Context, credential aut
 	return err == nil && !removed
 }
 
-// grantWithin reports whether a credential's access is no broader
-// than the task's current api_access.
+// grantWithin reports whether a credential's role is no broader than the
+// task's current api_access role.
 func grantWithin(principal auth.Principal, access *spec.APIAccessSpec) bool {
-	return principal.Access == auth.AccessRead || principal.Access == auth.AccessWrite && access.Access == spec.APIAccessWrite
+	return principal.Role.Generated() && auth.Role(access.Role).Includes(principal.Role)
 }
 
 // revokeStaleWorkloadCredentials revokes workload credentials whose

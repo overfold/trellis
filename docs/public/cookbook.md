@@ -259,7 +259,7 @@ Request cluster-wide access on the controller task:
 
 ```yaml
 api_access:
-  access: read
+  role: observer
 ```
 
 Trellis creates a separate cluster-wide bearer token for each enabled task in each allocation. It injects into that task only:

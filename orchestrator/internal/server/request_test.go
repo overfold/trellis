@@ -39,7 +39,7 @@ func TestJobJSONRejectsSchemaProhibitedShapes(t *testing.T) {
 			e := echo.New()
 			NewHandler(&Server{jobs: map[string]*Job{}}).Register(e)
 			rec := httptest.NewRecorder()
-			e.ServeHTTP(rec, authorizedRequest(t, http.MethodPost, path, `{"spec":{`+field+`}}`, auth.AccessWrite))
+			e.ServeHTTP(rec, authorizedRequest(t, http.MethodPost, path, `{"spec":{`+field+`}}`, auth.RoleOperator))
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("POST %s accepted prohibited shape %s: %d %s", path, field, rec.Code, rec.Body.String())
 			}
@@ -84,7 +84,7 @@ func TestJobRoutesRejectDuplicateKeysRecursively(t *testing.T) {
 	} {
 		for _, path := range []string{"/v1/namespaces/team/jobs/plan", "/v1/namespaces/team/jobs"} {
 			rec := httptest.NewRecorder()
-			e.ServeHTTP(rec, authorizedRequest(t, http.MethodPost, path, raw, auth.AccessWrite))
+			e.ServeHTTP(rec, authorizedRequest(t, http.MethodPost, path, raw, auth.RoleOperator))
 			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "duplicate JSON object key") {
 				t.Fatalf("POST %s with %s = %d %s", path, raw, rec.Code, rec.Body.String())
 			}
@@ -124,7 +124,7 @@ func TestJobRoutesUnicodeLabelBoundary(t *testing.T) {
 			job.TaskGroups[0].Labels = map[string]string{"title": strings.Repeat("😀", count)}
 			raw, _ := json.Marshal(job)
 			rec := httptest.NewRecorder()
-			authenticatedHandler(s, auth.AccessWrite).ServeHTTP(rec, authorizedRequest(t, http.MethodPost, path, `{"spec":`+string(raw)+`}`, auth.AccessWrite))
+			authenticatedHandler(s, auth.RoleOperator).ServeHTTP(rec, authorizedRequest(t, http.MethodPost, path, `{"spec":`+string(raw)+`}`, auth.RoleOperator))
 			want := http.StatusOK
 			if path == "/v1/namespaces/default/jobs" {
 				want = http.StatusAccepted
@@ -148,14 +148,14 @@ func TestDecodeJSONRejectsLooseRequests(t *testing.T) {
 		want        int
 		message     string
 	}{
-		{name: "unknown field", body: `{"access":"read","acess":"write"}`, want: http.StatusBadRequest, message: `unknown field "acess"`},
-		{name: "removed scope", body: `{"scope":"cluster","access":"read"}`, want: http.StatusBadRequest, message: `unknown field "scope"`},
-		{name: "duplicate field", body: `{"access":"read","access":"write"}`, want: http.StatusBadRequest, message: "duplicate JSON object key"},
-		{name: "trailing value", body: `{"access":"read"}{}`, want: http.StatusBadRequest, message: "unexpected data after the JSON value"},
-		{name: "trailing garbage", body: `{"access":"read"} x`, want: http.StatusBadRequest, message: "malformed JSON"},
+		{name: "unknown field", body: `{"role":"observer","rol":"operator"}`, want: http.StatusBadRequest, message: `unknown field "rol"`},
+		{name: "removed scope", body: `{"scope":"cluster","role":"observer"}`, want: http.StatusBadRequest, message: `unknown field "scope"`},
+		{name: "duplicate field", body: `{"role":"observer","role":"operator"}`, want: http.StatusBadRequest, message: "duplicate JSON object key"},
+		{name: "trailing value", body: `{"role":"observer"}{}`, want: http.StatusBadRequest, message: "unexpected data after the JSON value"},
+		{name: "trailing garbage", body: `{"role":"observer"} x`, want: http.StatusBadRequest, message: "malformed JSON"},
 		{name: "empty body", body: ``, want: http.StatusBadRequest, message: "request body is empty"},
 		{name: "truncated", body: `{"scope":"cluster"`, want: http.StatusBadRequest, message: "truncated JSON"},
-		{name: "wrong type", body: `{"access":1}`, want: http.StatusBadRequest, message: "access must be a string"},
+		{name: "wrong type", body: `{"role":1}`, want: http.StatusBadRequest, message: "role must be a string"},
 		{name: "not JSON media type", contentType: "text/plain", body: `{}`, want: http.StatusUnsupportedMediaType},
 		{name: "missing media type", contentType: "-", body: `{}`, want: http.StatusUnsupportedMediaType},
 		{name: "too large", body: `{"namespace":"` + strings.Repeat("a", 64) + `"}`, limit: 32, want: http.StatusRequestEntityTooLarge},
@@ -189,17 +189,17 @@ func TestDecodeJSONRejectsLooseRequests(t *testing.T) {
 
 func TestDecodeJSONAcceptsOneValueWithWhitespace(t *testing.T) {
 	var request api.CredentialCreateRequest
-	if err := decodeRequest(t, "application/json; charset=utf-8", " {\"access\":\"read\"}\n\n", maxSmallRequestBytes, &request); err != nil {
+	if err := decodeRequest(t, "application/json; charset=utf-8", " {\"role\":\"observer\"}\n\n", maxSmallRequestBytes, &request); err != nil {
 		t.Fatal(err)
 	}
-	if request.Access != "read" {
+	if request.Role != "observer" {
 		t.Fatalf("request = %#v", request)
 	}
 }
 
 func TestCredentialRequestRejectsNamespaceMetadata(t *testing.T) {
 	var request api.CredentialCreateRequest
-	err := decodeRequest(t, "application/json", `{"access":"read","namespace":"team"}`, maxSmallRequestBytes, &request)
+	err := decodeRequest(t, "application/json", `{"role":"observer","namespace":"team"}`, maxSmallRequestBytes, &request)
 	if err == nil || !strings.Contains(err.Error(), `unknown field "namespace"`) {
 		t.Fatalf("error = %v, want unknown namespace field", err)
 	}
@@ -235,7 +235,7 @@ func TestJobRoutesRejectUnknownFields(t *testing.T) {
 	} {
 		for _, path := range []string{"/v1/namespaces/team/jobs/plan", "/v1/namespaces/team/jobs"} {
 			rec := httptest.NewRecorder()
-			e.ServeHTTP(rec, authorizedRequest(t, http.MethodPost, path, body, auth.AccessWrite))
+			e.ServeHTTP(rec, authorizedRequest(t, http.MethodPost, path, body, auth.RoleOperator))
 			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "unknown field") {
 				t.Fatalf("POST %s status = %d, want 400 unknown field; body: %s", path, rec.Code, rec.Body.String())
 			}
@@ -258,7 +258,7 @@ func TestFirstPartyRequestsDecodeStrictly(t *testing.T) {
 		{name: "registration", body: nodeapi.NodeRegistrationRequest{ID: uuid.New(), Host: "node", Port: 8127, Labels: map[string]string{"zone": "a"}}, dst: &nodeapi.NodeRegistrationRequest{}},
 		{name: "enrollment", body: nodeapi.NodeEnrollmentRequest{ServerAdvertise: "a:8128", AgentAdvertise: "a:8127", RaftAdvertise: "a:8129"}, dst: &nodeapi.NodeEnrollmentRequest{}},
 		{name: "raft join", body: nodeapi.RaftJoinRequest{ServerAddress: "a:8128", RaftAddress: "a:8129"}, dst: &nodeapi.RaftJoinRequest{}},
-		{name: "credential", body: api.CredentialCreateRequest{Access: "read"}, dst: &api.CredentialCreateRequest{}},
+		{name: "credential", body: api.CredentialCreateRequest{Role: "observer"}, dst: &api.CredentialCreateRequest{}},
 		{name: "job limits", body: JobLimitsAPI(spec.DefaultLimits()), dst: &api.JobLimits{}},
 		{name: "backup", body: api.BackupSnapshot{}, dst: &api.BackupSnapshot{}},
 	}

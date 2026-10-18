@@ -282,17 +282,17 @@ To grow the cluster beyond one node, see [Multi-node clusters](multi-node.md). I
 
 ## Manage operator credentials
 
-The installer creates one normal `write` credential for the installing user, but operators often need read-only or shorter-lived credentials for another human, an observer, or automation. All operator API credentials have cluster-wide authority. `trellisctl credentials create`, `list`, and `revoke` are the explicit administrative workflow for that.
+The installer creates one normal `operator` credential for the installing user, but operators often need observer or shorter-lived credentials for another human, a monitoring system, or automation. All minted API credentials have cluster-wide authority. `trellisctl credentials create`, `list`, and `revoke` are the explicit administrative workflow for that.
 
 Credential minting requires the **administrator private key** held by the operator. Supply a PKCS#8 PEM file, or place unpadded base64 PKCS#8 DER in `TRELLIS_ADMINISTRATOR_KEY`; Trellis nodes do not store it:
 
 ```sh
 # Read-only cluster observer
-trellisctl --administrator-key ./trellis-administrator.pem credentials create --access read
+trellisctl --administrator-key ./trellis-administrator.pem credentials create --role observer
 
-# Cluster writer expiring after 30 days
+# Cluster operator expiring after 30 days
 trellisctl --administrator-key ./trellis-administrator.pem credentials create \
-  --access write \
+  --role operator \
   --ttl 720h
 ```
 
@@ -301,13 +301,13 @@ Without `--ttl` a credential does not expire. Once it expires, requests using it
 The default output is the newly minted bearer token so it can be handed directly to a password manager or context setup. Use `--output json` when automation needs the response object instead:
 
 ```sh
-trellisctl --administrator-key ./trellis-administrator.pem credentials create --access read --output json
+trellisctl --administrator-key ./trellis-administrator.pem credentials create --role observer --output json
 ```
 
 To save a generated credential as an ordinary user context without leaving it in command history:
 
 ```sh
-TOKEN="$(trellisctl --administrator-key ./trellis-administrator.pem credentials create --access write)"
+TOKEN="$(trellisctl --administrator-key ./trellis-administrator.pem credentials create --role operator)"
 trellisctl --token "$TOKEN" --namespace staging context save staging --use
 unset TOKEN
 ```
@@ -319,9 +319,9 @@ trellisctl --administrator-key ./trellis-administrator.pem credentials list
 trellisctl --administrator-key ./trellis-administrator.pem credentials revoke 3f9c2a7d41b0e865
 ```
 
-`credentials create` accepts `--access read|write`, not `--scope` or `--namespace-scope`: all credentials have cluster-wide authority. `credentials list` shows each operator credential's ID, access, creation time, and expiry, including expired credentials, but never a token; there are no Scope or Namespace columns. `credentials revoke ID` rejects the credential on its next use. Workload credentials injected through task-level `api_access` are managed with their allocations and are neither listed nor revocable here.
+`credentials create` accepts `--role observer|operator`, not `--scope` or `--namespace-scope`: all credentials have cluster-wide authority. `credentials list` shows each minted credential's ID, role, creation time, and expiry, including expired credentials, but never a token; there are no Scope or Namespace columns. `credentials revoke ID` rejects the credential on its next use. Workload credentials injected through task-level `api_access` are managed with their allocations and are neither listed nor revocable here.
 
-`trellisctl` fetches the signing challenge and signs the request automatically. Join tokens and ordinary `write` bearer credentials cannot manage credentials, change Raft membership, or perform backup/restore.
+`trellisctl` fetches the signing challenge and signs the request automatically. Join tokens and observer or operator bearer credentials cannot manage credentials, change Raft membership, or perform backup/restore through the API. Treat the operator role as root-equivalent on every node that runs workloads anyway. Its jobs run code on those nodes and can mount any host directory, so on control-plane nodes that run workloads it reaches the cluster keys. Set `runs_workloads: false` on control-plane nodes when operators must not have administrator-equivalent reach; see [What the operator role reaches](multitenancy.md#what-the-operator-role-reaches).
 
 Administrator challenges expire after 30 seconds and are single-use, process-local, and leadership-epoch-bound. Issuance is stateless: unauthenticated challenge floods cannot exhaust storage slots or evict pending legitimate challenges. A bounded 4,096-entry replay cache records only successfully verified administrator signatures until expiry; verification fails closed at capacity rather than allowing replay. Invalid proofs do not consume challenges. Network-level connection/CPU flooding is still possible; keep the administrative API on a trusted network and rate-limit it at the network boundary.
 
@@ -349,6 +349,8 @@ release's contract. Recreate incompatible development clusters with current
 manifests and credentials, transferring volume
 data explicitly. Do not edit persisted state to bypass validation. Backups restore
 only into their current format; binary rollback is not a persisted-state downgrade.
+
+The release that replaced credential `read`/`write` access with the `observer`/`operator` roles changed the stored credential format. After upgrading to it, previously minted credentials no longer authenticate: mint replacements with the administrator key (see [Manage operator credentials](#manage-operator-credentials)) and save them into existing contexts. Workload credentials are reissued when their allocations are replaced, after jobs use `api_access: {role: ...}`.
 
 ### Compatibility boundary
 
@@ -426,9 +428,9 @@ The verified staged daemon decodes the installed node YAML with the same parser 
 
 Upgrade and graceful uninstall require `jq` for structural parsing of the CLI's node-list JSON (on Debian/Ubuntu, `sudo apt-get install jq`). Membership must be a single nonempty JSON array of node objects with nonempty IDs; malformed, empty, or unexpected output stops maintenance before draining, replacing binaries, or deleting local state. Labels and pretty/compact formatting do not affect the count. Only a validated one-node list selects the single-node flow. Uninstall's explicit `--force` bypasses cluster inspection, not local resource cleanup.
 
-Node checks, drain, and undrain use the invoking user's saved `local` context from `~/.config/trellis/config.yaml` (the user identified by `SUDO_USER` when run through `sudo`, or root's home when run directly as root). This context needs a valid `write` operator credential with cluster-wide authority. Maintenance connects to the node's local API and uses `/run/trellis/ca.crt`, regardless of the currently selected context. On a worker this local API is relayed to the control plane; the upgrade does not require local Raft state or keys. A missing context or rejected credential stops the upgrade before binaries are changed and reports the underlying CLI error.
+Node checks, drain, and undrain use the invoking user's saved `local` context from `~/.config/trellis/config.yaml` (the user identified by `SUDO_USER` when run through `sudo`, or root's home when run directly as root). This context needs a valid operator credential with cluster-wide authority. Maintenance connects to the node's local API and uses `/run/trellis/ca.crt`, regardless of the currently selected context. On a worker this local API is relayed to the control plane; the upgrade does not require local Raft state or keys. A missing context or rejected credential stops the upgrade before binaries are changed and reports the underlying CLI error.
 
-On a joining node without a saved `local` context, configure one with a cluster-wide `write` credential first. For a configuration stored elsewhere, download the script and pass its path explicitly:
+On a joining node without a saved `local` context, configure one with a cluster-wide operator credential first. For a configuration stored elsewhere, download the script and pass its path explicitly:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/upgrade.sh -o /tmp/trellis-upgrade.sh
@@ -574,7 +576,7 @@ curl -fsSL https://raw.githubusercontent.com/overfold/trellis/main/scripts/unins
 
 It removes only dependencies/repositories recorded as introduced by Trellis; older installations without ownership records are handled conservatively and shared host packages are left alone. The user's `trellisctl` contexts are also kept because they describe cluster connections, not ownership of this machine. On a live cluster with other registered nodes, the script first drains the node and removes its registration; see [Multi-node clusters](multi-node.md#maintain-a-multi-node-cluster). This path applies to workers as well as control-plane members: workers have no Raft membership to remove, and `nodes remove` records their tombstone so the old identity cannot register again.
 
-Graceful inspection and drain use the invoking user's saved `local` context with cluster-wide `write` access (selected using `SUDO_USER`, or an explicit `TRELLIS_CONFIG`), pinned to the local API and `/run/trellis/ca.crt`; ambient `TRELLIS_TOKEN` does not override it. Joining nodes need an operator-provisioned local context. Multi-node leadership transfer and removal additionally require explicit, transient `TRELLIS_ADMINISTRATOR_KEY`, as a private-key file path or base64 PKCS#8 key. For example, download the script, inspect it, and run `sudo env TRELLIS_CONFIG=/home/operator/.config/trellis/config.yaml TRELLIS_ADMINISTRATOR_KEY=/secure/trellis-administrator.pem bash uninstall.sh`. The script does not copy the administrator key into daemon state. Missing authority aborts before drain; rejected authority or unavailable quorum prevents deletion and leaves the node drained, so check its state and undrain it if abandoning removal. Single-node uninstall does not require administrator authority.
+Graceful inspection and drain use the invoking user's saved `local` context with a cluster-wide operator credential (selected using `SUDO_USER`, or an explicit `TRELLIS_CONFIG`), pinned to the local API and `/run/trellis/ca.crt`; ambient `TRELLIS_TOKEN` does not override it. Joining nodes need an operator-provisioned local context. Multi-node leadership transfer and removal additionally require explicit, transient `TRELLIS_ADMINISTRATOR_KEY`, as a private-key file path or base64 PKCS#8 key. For example, download the script, inspect it, and run `sudo env TRELLIS_CONFIG=/home/operator/.config/trellis/config.yaml TRELLIS_ADMINISTRATOR_KEY=/secure/trellis-administrator.pem bash uninstall.sh`. The script does not copy the administrator key into daemon state. Missing authority aborts before drain; rejected authority or unavailable quorum prevents deletion and leaves the node drained, so check its state and undrain it if abandoning removal. Single-node uninstall does not require administrator authority.
 
 On a running multi-node cluster, uninstall queries `nodes leader` before draining and refuses if this node is the leader. An unavailable or invalid leader result also aborts before draining. Uninstall never transfers leadership: use a healthy operator context to run `trellisctl --administrator-key ./trellis-administrator.pem nodes transfer-leadership`, verify the new UUID with `trellisctl nodes leader`, and rerun uninstall. A single-node cluster and explicit `--force` do not require this preflight; a cluster with one control-plane voter **and additional workers is not single-node**. Force still skips membership removal and may affect quorum.
 
@@ -659,17 +661,17 @@ trellisctl --namespace default secrets describe db-password
 trellisctl --namespace default secrets delete db-password
 ```
 
-Use `--expected-version N` for compare-and-swap (`0` means create only). Values are capped at 65,536 bytes. Secrets are namespace-scoped resources, but cluster-scoped credentials may address any namespace: `write` may set and delete secrets, while `read` may list and describe their metadata. No credential can read a stored value back. Rotation affects newly started allocations, so apply a workload revision or replace the consuming allocations afterward.
+Use `--expected-version N` for compare-and-swap (`0` means create only). Values are capped at 65,536 bytes. Secrets are namespace-scoped resources, but cluster-scoped credentials may address any namespace: operators may set and delete secrets, while observers may list and describe their metadata. No credential can read a stored value back. Rotation affects newly started allocations, so apply a workload revision or replace the consuming allocations afterward.
 
 Allocation secret files are held on a verified tmpfs rather than a durable node filesystem. Linux can swap tmpfs pages, so disable swap or configure encrypted swap when secrets must also be protected from offline swap inspection. Environment delivery does not persist plaintext in containerd's OCI metadata, but the running application necessarily receives the value in its process environment; use file delivery when the application supports it. Trellis sets mounted secret ownership to the numeric UID/GID resolved from the image configuration, preserving owner-only access for non-root images.
 
 ## Observability
 
-The control plane exposes Prometheus metrics at `/metrics` on its API port. Metrics name namespaces and jobs across the cluster, so a scrape needs a cluster-scoped credential; `read` access is enough. Mint one for Prometheus and scrape any control-plane node, which forwards the request to the leader:
+The control plane exposes Prometheus metrics at `/metrics` on its API port. Metrics name namespaces and jobs across the cluster, so a scrape needs a cluster-scoped credential; the observer role is enough. Mint one for Prometheus and scrape any control-plane node, which forwards the request to the leader:
 
 ```sh
 trellisctl --administrator-key ./trellis-administrator.pem \
-  credentials create --access read
+  credentials create --role observer
 ```
 
 Credential creation requires the administrator key (alternatively set `TRELLIS_ADMINISTRATOR_KEY`). Save the returned token securely in the scrape's `credentials_file`; it is shown only once.
@@ -687,7 +689,7 @@ scrape_configs:
       - targets: ["control.example:8128"]
 ```
 
-A scrape without a credential receives `401`. `GET /v1/auth/whoami` reports the kind and access of the bearer credential making the request; it has no scope or top-level namespace. Workload subjects include namespace, job, task group, and task. Job status and allocation events explain lifecycle transitions; logs proxy per-task allocation logs. Monitor leader availability, unhealthy/draining nodes, desired-versus-running/healthy counts, reconciliation latency, retries, task groups in replacement backoff (`trellis_replacement_backoff_failures`), free space on the task log filesystem (`trellis_node_task_log_filesystem_available_bytes`), and disk capacity for Raft, containerd, and volumes.
+A scrape without a credential receives `401`. `GET /v1/auth/whoami` reports the role of the bearer credential making the request; it has no scope or top-level namespace. Workload subjects include namespace, job, task group, and task. Job status and allocation events explain lifecycle transitions; logs proxy per-task allocation logs. Monitor leader availability, unhealthy/draining nodes, desired-versus-running/healthy counts, reconciliation latency, retries, task groups in replacement backoff (`trellis_replacement_backoff_failures`), free space on the task log filesystem (`trellis_node_task_log_filesystem_available_bytes`), and disk capacity for Raft, containerd, and volumes.
 
 For normal workload diagnosis, start and usually finish with `jobs status`. `ready`, `converging`, and `degraded` summarize desired-versus-observed state without collapsing allocation lifecycle and health, and non-ready status output includes the allocations that need attention with reason/message, retry timing, and attempt count. Use `jobs status NAME --history` when you need the recorded lifecycle transitions, and `jobs logs NAME` for task output.
 

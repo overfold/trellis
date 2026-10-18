@@ -38,7 +38,7 @@ func TestSecretIdentifierMethodParity(t *testing.T) {
 	e, _ := secretHandler(t)
 	for _, method := range []string{http.MethodPut, http.MethodGet, http.MethodDelete} {
 		for _, name := range []string{"bad%20name", "bad%2Bname", "%3F", "-bad"} {
-			req := authorizedRequest(t, method, "/v1/namespaces/default/secrets/"+name, `{"value_base64":"eA=="}`, auth.AccessWrite)
+			req := authorizedRequest(t, method, "/v1/namespaces/default/secrets/"+name, `{"value_base64":"eA=="}`, auth.RoleOperator)
 			rec := httptest.NewRecorder()
 			e.ServeHTTP(rec, req)
 			if rec.Code != http.StatusBadRequest || strings.TrimSpace(rec.Body.String()) != `{"message":"invalid secret name"}` {
@@ -47,7 +47,7 @@ func TestSecretIdentifierMethodParity(t *testing.T) {
 		}
 	}
 	for _, method := range []string{http.MethodGet, http.MethodDelete} {
-		req := authorizedRequest(t, method, "/v1/namespaces/default/secrets/valid-missing", "", auth.AccessWrite)
+		req := authorizedRequest(t, method, "/v1/namespaces/default/secrets/valid-missing", "", auth.RoleOperator)
 		rec := httptest.NewRecorder()
 		e.ServeHTTP(rec, req)
 		if rec.Code != http.StatusNotFound || strings.TrimSpace(rec.Body.String()) != `{"message":"secret not found"}` {
@@ -63,7 +63,7 @@ func TestSecretMetadataEndpointsNeverReturnPlaintext(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, path := range []string{"/v1/namespaces/default/secrets", "/v1/namespaces/default/secrets/token"} {
-		req := authorizedRequest(t, http.MethodGet, path, "", auth.AccessRead)
+		req := authorizedRequest(t, http.MethodGet, path, "", auth.RoleObserver)
 		rec := httptest.NewRecorder()
 		e.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
@@ -81,7 +81,7 @@ func TestSecretHandlerEnforcesExactDecodedSizeBoundary(t *testing.T) {
 		t.Helper()
 		encoded := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{'x'}, size))
 		body := fmt.Sprintf(`{"value_base64":%q}`, encoded)
-		req := authorizedRequest(t, http.MethodPut, "/v1/namespaces/default/secrets/"+name, body, auth.AccessWrite)
+		req := authorizedRequest(t, http.MethodPut, "/v1/namespaces/default/secrets/"+name, body, auth.RoleOperator)
 		rec := httptest.NewRecorder()
 		e.ServeHTTP(rec, req)
 		return rec
@@ -99,7 +99,7 @@ func TestInvalidSecretWritesPreserveExistingValue(t *testing.T) {
 	path := "/v1/namespaces/default/secrets/token"
 	write := func(body string) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
-		e.ServeHTTP(rec, authorizedRequest(t, http.MethodPut, path, body, auth.AccessWrite))
+		e.ServeHTTP(rec, authorizedRequest(t, http.MethodPut, path, body, auth.RoleOperator))
 		return rec
 	}
 	initial := write(`{"value_base64":"eA=="}`)
@@ -129,7 +129,7 @@ func TestInvalidSecretWritesPreserveExistingValue(t *testing.T) {
 			t.Fatalf("missing validation context: %s", rec.Body.String())
 		}
 		meta := httptest.NewRecorder()
-		e.ServeHTTP(meta, authorizedRequest(t, http.MethodGet, path, "", auth.AccessRead))
+		e.ServeHTTP(meta, authorizedRequest(t, http.MethodGet, path, "", auth.RoleObserver))
 		var after api.SecretMetadata
 		if meta.Code != http.StatusOK || json.Unmarshal(meta.Body.Bytes(), &after) != nil || after != before {
 			t.Fatalf("invalid write changed metadata: %d %s; before %s", meta.Code, meta.Body.String(), initial.Body.String())

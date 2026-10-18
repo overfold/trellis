@@ -20,27 +20,41 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/state"
 )
 
-// AccessLevel controls whether a generated API credential may mutate state.
-type AccessLevel string
+// Role is the authority a credential grants. Roles are ordered: each includes
+// the authority of the roles before it.
+type Role string
 
 const (
-	// AccessRead grants observation-only API access.
-	AccessRead AccessLevel = "read"
-	// AccessWrite grants ordinary mutation API access.
-	AccessWrite AccessLevel = "write"
+	// RoleObserver grants observation-only API access across the cluster.
+	RoleObserver Role = "observer"
+	// RoleOperator grants cluster-wide workload management. Submitting jobs
+	// runs code on nodes, so an operator is trusted with every node its
+	// workloads can be placed on.
+	RoleOperator Role = "operator"
+	// RoleAdministrator is the root-of-trust authority granted only by an
+	// administrator-signed request. Generated credentials never carry it.
+	RoleAdministrator Role = "administrator"
 )
 
-// CredentialKind identifies why a credential exists.
-type CredentialKind string
+// rank orders roles; an unknown role has no authority.
+func (r Role) rank() int {
+	switch r {
+	case RoleObserver:
+		return 1
+	case RoleOperator:
+		return 2
+	case RoleAdministrator:
+		return 3
+	default:
+		return 0
+	}
+}
 
-const (
-	// CredentialAdministrator is the root operator credential.
-	CredentialAdministrator CredentialKind = "administrator"
-	// CredentialOperator is an explicitly minted human or external-client credential.
-	CredentialOperator CredentialKind = "operator"
-	// CredentialWorkload is injected into a task through api_access.
-	CredentialWorkload CredentialKind = "workload"
-)
+// Includes reports whether r grants at least the authority of other.
+func (r Role) Includes(other Role) bool { return r.rank() > 0 && r.rank() >= other.rank() }
+
+// Generated reports whether r may be carried by a generated bearer credential.
+func (r Role) Generated() bool { return r == RoleObserver || r == RoleOperator }
 
 // CredentialSubject identifies the workload that owns an injected credential.
 type CredentialSubject struct {
@@ -50,45 +64,36 @@ type CredentialSubject struct {
 	Task      string `json:"task"`
 }
 
-// Principal is the authoritative identity and authorization attached to a credential.
+// Principal is the authoritative identity and authorization attached to a
+// generated credential. A principal with a Subject is a workload credential
+// injected through api_access; one without is a minted operator-held credential.
 type Principal struct {
-	Kind      CredentialKind     `json:"kind"`
-	Access    AccessLevel        `json:"access"`
+	Role      Role               `json:"role"`
 	Subject   *CredentialSubject `json:"subject,omitempty"`
 	CreatedAt time.Time          `json:"created_at"`
-	// ExpiresAt is when an operator credential stops authenticating. The zero
+	// ExpiresAt is when a minted credential stops authenticating. The zero
 	// time means the credential does not expire.
 	ExpiresAt time.Time `json:"expires_at,omitzero"`
 }
 
-// AdministratorPrincipal returns the effective principal for the administrator credential.
-func AdministratorPrincipal() Principal {
-	return Principal{Kind: CredentialAdministrator, Access: AccessWrite}
-}
+// AdministratorPrincipal returns the effective principal of an
+// administrator-signed request. It is never persisted.
+func AdministratorPrincipal() Principal { return Principal{Role: RoleAdministrator} }
+
+// Workload reports whether p belongs to a workload credential.
+func (p Principal) Workload() bool { return p.Subject != nil }
 
 // Validate checks that a persisted principal is internally consistent.
 func (p Principal) Validate() error {
-	if p.Kind != CredentialOperator && p.Kind != CredentialWorkload {
-		return fmt.Errorf("invalid credential kind %q", p.Kind)
-	}
-	if p.Access != AccessRead && p.Access != AccessWrite {
-		return fmt.Errorf("invalid credential access %q", p.Access)
-	}
-	if p.Kind == CredentialWorkload && !p.ExpiresAt.IsZero() {
-		return fmt.Errorf("workload credential must not include an expiry")
-	}
-	if p.Kind == CredentialOperator && p.Subject != nil {
-		return fmt.Errorf("operator credential must not include a workload subject")
-	}
-	if p.Kind == CredentialWorkload && p.Subject == nil {
-		return fmt.Errorf("workload credential requires a workload subject")
+	if !p.Role.Generated() {
+		return fmt.Errorf("invalid credential role %q", p.Role)
 	}
 	if p.Subject != nil {
+		if !p.ExpiresAt.IsZero() {
+			return fmt.Errorf("workload credential must not include an expiry")
+		}
 		if p.Subject.Namespace == "" || p.Subject.Job == "" || p.Subject.TaskGroup == "" || p.Subject.Task == "" {
 			return fmt.Errorf("workload subject requires namespace, job, task group, and task")
-		}
-		if p.Kind != CredentialWorkload {
-			return fmt.Errorf("only workload credentials may include a workload subject")
 		}
 	}
 	return nil
@@ -124,11 +129,11 @@ func (m *TokenManager) SetWorkloadAuthorizer(authorize func(context.Context, Wor
 	m.workloadAuthorize = authorize
 }
 
-// ErrCredentialNotFound reports that no operator credential has the given ID.
+// ErrCredentialNotFound reports that no minted credential has the given ID.
 var ErrCredentialNotFound = errors.New("credential not found")
 
 // credentialIDLength is the number of token-hash hex digits that identify an
-// operator credential in listings. The hash of a 256-bit random token reveals
+// minted credential in listings. The hash of a 256-bit random token reveals
 // nothing about the token, and 64 bits make collisions negligible.
 const credentialIDLength = 16
 
@@ -154,41 +159,43 @@ func ValidCredentialID(id string) bool {
 	return true
 }
 
-// OperatorCredential is the listable metadata of one operator credential. It
+// MintedCredential is the listable metadata of one minted credential. It
 // never contains the bearer token.
-type OperatorCredential struct {
+type MintedCredential struct {
 	ID        string
 	Principal Principal
 }
 
-// CreateOperatorToken mints an operator credential and returns the bearer
+// CreateMintedToken mints a minted credential and returns the bearer
 // token together with its listable metadata.
-func (m *TokenManager) CreateOperatorToken(ctx context.Context, principal Principal) (string, OperatorCredential, error) {
-	principal.Kind = CredentialOperator
+func (m *TokenManager) CreateMintedToken(ctx context.Context, principal Principal) (string, MintedCredential, error) {
+	if principal.Workload() {
+		return "", MintedCredential{}, fmt.Errorf("minted credential must not include a workload subject")
+	}
 	token, key, data, err := m.prepareToken(principal)
 	if err != nil {
-		return "", OperatorCredential{}, err
+		return "", MintedCredential{}, err
 	}
 	var stored Principal
 	if err := json.Unmarshal(data, &stored); err != nil {
-		return "", OperatorCredential{}, fmt.Errorf("decode operator principal: %w", err)
+		return "", MintedCredential{}, fmt.Errorf("decode operator principal: %w", err)
 	}
 	if err := m.store.Put(ctx, key, data); err != nil {
-		return "", OperatorCredential{}, fmt.Errorf("store token: %w", err)
+		return "", MintedCredential{}, fmt.Errorf("store token: %w", err)
 	}
-	return token, OperatorCredential{ID: CredentialID(strings.TrimPrefix(key, m.tokenKey(""))), Principal: stored}, nil
+	return token, MintedCredential{ID: CredentialID(strings.TrimPrefix(key, m.tokenKey(""))), Principal: stored}, nil
 }
 
-// ListOperatorCredentials returns the metadata of every stored operator
+// ListMintedCredentials returns the metadata of every stored operator
 // credential, including expired ones, ordered by creation time and ID.
 // Workload credentials are managed with their allocations and are omitted.
-func (m *TokenManager) ListOperatorCredentials(ctx context.Context) ([]OperatorCredential, error) {
+func (m *TokenManager) ListMintedCredentials(ctx context.Context) ([]MintedCredential, error) {
 	prefix := m.tokenKey("")
 	values, err := m.store.List(ctx, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("list credentials: %w", err)
 	}
-	result := make([]OperatorCredential, 0, len(values))
+	result := make([]MintedCredential, 0, len(values))
 	for key, data := range values {
 		var record tokenRecord
 		decoder := json.NewDecoder(bytes.NewReader(data))
@@ -197,10 +204,10 @@ func (m *TokenManager) ListOperatorCredentials(ctx context.Context) ([]OperatorC
 			return nil, fmt.Errorf("unmarshal principal: %w", err)
 		}
 		principal := record.Principal
-		if principal.Kind != CredentialOperator {
+		if principal.Workload() {
 			continue
 		}
-		result = append(result, OperatorCredential{ID: CredentialID(strings.TrimPrefix(key, prefix)), Principal: principal})
+		result = append(result, MintedCredential{ID: CredentialID(strings.TrimPrefix(key, prefix)), Principal: principal})
 	}
 	sort.Slice(result, func(i, j int) bool {
 		if !result[i].Principal.CreatedAt.Equal(result[j].Principal.CreatedAt) {
@@ -211,9 +218,9 @@ func (m *TokenManager) ListOperatorCredentials(ctx context.Context) ([]OperatorC
 	return result, nil
 }
 
-// RevokeOperatorCredential deletes the operator credential identified by id.
+// RevokeMintedCredential deletes the minted credential identified by id.
 // Workload credentials cannot be revoked this way.
-func (m *TokenManager) RevokeOperatorCredential(ctx context.Context, id string) error {
+func (m *TokenManager) RevokeMintedCredential(ctx context.Context, id string) error {
 	if !ValidCredentialID(id) {
 		return ErrCredentialNotFound
 	}
@@ -224,7 +231,7 @@ func (m *TokenManager) RevokeOperatorCredential(ctx context.Context, id string) 
 	var match string
 	for key, data := range values {
 		var principal Principal
-		if err := json.Unmarshal(data, &principal); err != nil || principal.Kind != CredentialOperator {
+		if err := json.Unmarshal(data, &principal); err != nil || principal.Workload() {
 			continue
 		}
 		if match != "" {
@@ -266,9 +273,13 @@ func (m *TokenManager) prepareToken(principal Principal) (string, string, []byte
 	if _, err := rand.Read(raw); err != nil {
 		return "", "", nil, fmt.Errorf("generate token: %w", err)
 	}
+	// Prefixes are descriptive only; authorization uses the stored principal.
 	prefix := "trls_op_"
-	if principal.Kind == CredentialWorkload {
+	switch {
+	case principal.Workload():
 		prefix = "trls_wl_"
+	case principal.Role == RoleObserver:
+		prefix = "trls_ob_"
 	}
 	token := prefix + base64.RawURLEncoding.EncodeToString(raw)
 	hash := sha256.Sum256([]byte(token))
@@ -302,7 +313,7 @@ func (m *TokenManager) ValidateToken(ctx context.Context, rawToken string) (*Pri
 	if !principal.ExpiresAt.IsZero() && !m.now().Before(principal.ExpiresAt) {
 		return nil, nil
 	}
-	if principal.Kind == CredentialWorkload && m.workloadAuthorize != nil {
+	if principal.Workload() && m.workloadAuthorize != nil {
 		if record.AllocationID == "" {
 			return nil, nil
 		}
@@ -352,7 +363,7 @@ func (m *TokenManager) workloadTokenAAD(allocationID, task string, generation ui
 }
 
 func samePrincipalGrant(a, b Principal) bool {
-	if a.Kind != b.Kind || a.Access != b.Access {
+	if a.Role != b.Role {
 		return false
 	}
 	if a.Subject == nil || b.Subject == nil {
@@ -373,7 +384,9 @@ func (m *TokenManager) WorkloadToken(ctx context.Context, sealer Sealer, allocat
 	if allocationID == "" || generation == 0 {
 		return "", fmt.Errorf("workload credential requires an allocation identity and generation")
 	}
-	principal.Kind = CredentialWorkload
+	if !principal.Workload() {
+		return "", fmt.Errorf("workload credential requires a workload subject")
+	}
 	principal.CreatedAt = time.Time{}
 	if err := principal.Validate(); err != nil {
 		return "", err

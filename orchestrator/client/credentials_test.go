@@ -34,7 +34,7 @@ func TestCredentialAndJoinTokenRoutes(t *testing.T) {
 
 	ctx := context.Background()
 	c := mustNew(t, Config{Address: server.URL})
-	if _, err := c.CreateCredential(ctx, &api.CredentialCreateRequest{Access: "read", TTLSeconds: 60}); err != nil {
+	if _, err := c.CreateCredential(ctx, &api.CredentialCreateRequest{Role: "observer", TTLSeconds: 60}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c.ListCredentials(ctx); err != nil {
@@ -54,7 +54,7 @@ func TestCredentialAndJoinTokenRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []call{
-		{http.MethodPost, "/v1/credentials", `{"access":"read","ttl_seconds":60}`},
+		{http.MethodPost, "/v1/credentials", `{"role":"observer","ttl_seconds":60}`},
 		{http.MethodGet, "/v1/credentials", "null"},
 		{http.MethodDelete, "/v1/credentials/0123456789abcdef", "null"},
 		{http.MethodPost, "/v1/nodes/join-tokens", `{"max_uses":2,"ttl_seconds":3600}`},

@@ -345,7 +345,7 @@ set -euo pipefail
 printf '%s\n' "$*" >>"$CALL_LOG"
 if [[ " $* " == *" credentials create "* ]]; then
     [[ " $* " != *" --scope "* ]]
-    [[ " $* " == *" --access write "* ]]
+    [[ " $* " == *" --role operator "* ]]
     printf 'new-operator-token\n'
 elif [[ " $* " == *" nodes status "* ]]; then
     [ -z "${TRELLIS_TOKEN:-}" ]

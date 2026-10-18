@@ -14,17 +14,17 @@ Job envelopes and specifications require the exact published JSON field names: `
 
 All JSON request objects require unique keys recursively, including nested specifications, maps, arrays of objects, and backup records. Escaped spellings of the same key are duplicates too (`name` and `\u006eame`). Duplicates return `400` before shape or typed decoding; formerly accepted last-value-wins inputs must be corrected. Distinct objects may reuse keys, and case-distinct literal map keys remain distinct. Duplicate diagnostics do not echo keys or values.
 
-Trellis distinguishes three credential kinds:
+Every credential has one of three roles, each including the authority of the roles before it:
 
-- `administrator` — the root request context granted after verification of an operator-held Ed25519 key;
-- `operator` — an explicitly minted API credential with cluster-wide `read` or `write` access;
-- `workload` — a cluster-wide credential injected through task-level `api_access`.
+- `observer` — cluster-wide observation;
+- `operator` — cluster-wide workload management, including submitting jobs; an operator is trusted with every node its workloads can be placed on;
+- `administrator` — the root request context granted only after verification of an operator-held Ed25519 key.
 
-Credential prefixes (`trls_op_`, `trls_wl_`) are descriptive only. The server authenticates the complete bearer value and uses its authoritative stored principal metadata for generated credentials. An operator credential may carry an expiry chosen at creation; from that instant it no longer authenticates. Node join tokens (`trls_join_<id>.<secret>`) are not API credentials: they are accepted only by managed enrollment.
+Generated bearer credentials carry `observer` or `operator`. They are either minted by the administrator or injected into a task through task-level `api_access` as a workload credential; a workload credential is identified by its `subject`. Credential prefixes (`trls_ob_` for minted observers, `trls_op_` for minted operators, `trls_wl_` for workload credentials) are descriptive only. The server authenticates the complete bearer value and uses its authoritative stored principal metadata for generated credentials. A minted credential may carry an expiry chosen at creation; from that instant it no longer authenticates. Node join tokens (`trls_join_<id>.<secret>`) are not API credentials: they are accepted only by managed enrollment.
 
-A task requests workload access with an object such as `{"access":"read"}`. Workload and operator credentials have cluster-wide `read` or `write` authority; there is no scope selector. This grants only ordinary API authority, never administrator authority. Trellis sets `TRELLIS_NAMESPACE` to the job namespace so clients can conveniently build `/v1/namespaces/{namespace}/...` request paths, but this value is not an authorization boundary.
+A task requests workload access with an object such as `{"role":"observer"}`. Minted and workload credentials have cluster-wide `observer` or `operator` authority; there is no scope selector. Administrator authority is never injected, so neither grants administrator endpoints. The operator role is still root-equivalent on nodes that run workloads, and on control-plane nodes that run workloads it amounts to full cluster control. See [What the operator role reaches](multitenancy.md#what-the-operator-role-reaches). Trellis sets `TRELLIS_NAMESPACE` to the job namespace so clients can conveniently build `/v1/namespaces/{namespace}/...` request paths, but this value is not an authorization boundary.
 
-Each enabled task receives a separate workload credential for one allocation generation, with a subject naming its namespace, job, task group, and task, which `GET /v1/auth/whoami` reports as `subject`. It remains stable across start retries and leadership changes; a new generation replaces it and revokes the previous token. API-enabled tasks require the secrets encryption key. Trellis revokes a credential when its allocation record is pruned, its job, task group, or task is deleted, the job is recreated under the same name, or the task's `api_access` is removed or narrowed below its grant. Widening access leaves existing credentials in place; replacement allocations receive the wider grant. Token persistence and delivery are described in [node internals](../developer/node-internals.md#secrets-and-api-access).
+Each enabled task receives a separate workload credential for one allocation generation, with a subject naming its namespace, job, task group, and task, which `GET /v1/auth/whoami` reports as `subject`. It remains stable across start retries and leadership changes; a new generation replaces it and revokes the previous token. API-enabled tasks require the secrets encryption key. Trellis revokes a credential when its allocation record is pruned, its job, task group, or task is deleted, the job is recreated under the same name, or the task's `api_access` is removed or narrowed below its grant. Widening the role leaves existing credentials in place; replacement allocations receive the wider grant. Token persistence and delivery are described in [node internals](../developer/node-internals.md#secrets-and-api-access).
 
 Retained `stopped`, `failed`, and `lost` allocations do not retain API authority; node-removal tombstones also revoke their workloads. Each authentication checks live allocation generation and grant, node presence, tombstones, and the leader's silence deadline independently of token-deletion commits. Invalidated credentials receive `401`. Temporary partitions and leadership recovery use the explicitly bounded [workload credential lifecycle](job-specification.md#api-access); this does not immediately stop offline containers or erase previously delivered secrets.
 
@@ -36,37 +36,37 @@ Status codes separate what the client may fix from what it may retry. `4xx` resp
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/metrics` | Prometheus metrics of the leader; requires read access. |
+| `GET` | `/metrics` | Prometheus metrics of the leader; requires the observer role. |
 | `POST` | `/v1/auth/administrator/challenge` | Issue a short-lived one-time administrator signing challenge. |
-| `GET` | `/v1/auth/whoami` | Return the current credential kind, access, and available provenance metadata. |
-| `GET` | `/v1/nodes` | List node capacity, discovered capabilities, status, and control-plane membership; requires read access. |
-| `GET` | `/v1/cluster/leader` | Identify the serving control-plane leader; requires read access. |
-| `GET` | `/v1/cluster/compatibility` | Inspect active semantics and live node binary probes; requires read access. |
+| `GET` | `/v1/auth/whoami` | Return the current credential role and available provenance metadata. |
+| `GET` | `/v1/nodes` | List node capacity, discovered capabilities, status, and control-plane membership; requires the observer role. |
+| `GET` | `/v1/cluster/leader` | Identify the serving control-plane leader; requires the observer role. |
+| `GET` | `/v1/cluster/compatibility` | Inspect active semantics and live node binary probes; requires the observer role. |
 | `POST` | `/v1/cluster/compatibility/activate` | Activate an adjacent stable level with `{"release": N}`; administrator signature required. |
-| `POST` / `DELETE` | `/v1/nodes/{id}/drain` | Drain or undrain; requires cluster-wide `write` access. |
+| `POST` / `DELETE` | `/v1/nodes/{id}/drain` | Drain or undrain; requires the operator role. |
 | `POST` | `/v1/nodes/{id}/promote` | Authorize an enrolled worker for control-plane participation; administrator signature required. |
 | `POST` | `/v1/nodes/identities` | Bind an external node certificate and role; external signing mode and administrator signature required. |
 | `GET` | `/v1/namespaces` | Discover namespace names visible to the caller. |
-| `GET` | `/v1/allocations?label=key:value` | List/filter allocations across all namespaces; requires read access. |
-| `GET` | `/v1/events` | Server-sent event stream across all namespaces; requires read access. |
-| `GET`, `POST` | `/v1/namespaces/{ns}/jobs` | List jobs or submit `{"spec": JobSpec, "expected_version": N, "expected_incarnation": ID}`; submitting requires write access. |
+| `GET` | `/v1/allocations?label=key:value` | List/filter allocations across all namespaces; requires the observer role. |
+| `GET` | `/v1/events` | Server-sent event stream across all namespaces; requires the observer role. |
+| `GET`, `POST` | `/v1/namespaces/{ns}/jobs` | List jobs or submit `{"spec": JobSpec, "expected_version": N, "expected_incarnation": ID}`; submitting requires the operator role. |
 | `POST` | `/v1/namespaces/{ns}/jobs/plan` | Validate and calculate the authoritative semantic plan for a `JobSpec`. |
-| `GET`, `DELETE` | `/v1/namespaces/{ns}/jobs/{name}` | Read job state/API representation or delete the job; deleting requires write access. |
-| `POST` | `/v1/namespaces/{ns}/jobs/{name}/restart` | Restart the job's allocations; requires write access. |
+| `GET`, `DELETE` | `/v1/namespaces/{ns}/jobs/{name}` | Read job state/API representation or delete the job; deleting requires the operator role. |
+| `POST` | `/v1/namespaces/{ns}/jobs/{name}/restart` | Restart the job's allocations; requires the operator role. |
 | `GET` | `/v1/namespaces/{ns}/jobs/{name}/versions` | List the job's retained version history. |
-| `POST` | `/v1/namespaces/{ns}/jobs/{name}/groups/{group}/replacement-backoff/reset` | Clear a task group's replacement backoff; requires write access. |
+| `POST` | `/v1/namespaces/{ns}/jobs/{name}/groups/{group}/replacement-backoff/reset` | Clear a task group's replacement backoff; requires the operator role. |
 | `GET` | `/v1/namespaces/{ns}/allocations?label=key:value` | List/filter the namespace's allocations. |
-| `DELETE` | `/v1/namespaces/{ns}/allocations/{id}` | Stop one allocation; requires write access. |
+| `DELETE` | `/v1/namespaces/{ns}/allocations/{id}` | Stop one allocation; requires the operator role. |
 | `GET` | `/v1/namespaces/{ns}/allocations/{id}/events` | Lifecycle event array. |
 | `GET` | `/v1/namespaces/{ns}/allocations/{id}/logs?task=NAME&tail=100&follow=true` | Plain-text logs for one task in an allocation. |
-| `GET` | `/v1/namespaces/{ns}/allocations/{id}/exec?command=...` | Upgrade to a bidirectional WebSocket (`trellis.exec.v1`) that runs one command; requires write access. See [Exec streams](#exec-streams). |
+| `GET` | `/v1/namespaces/{ns}/allocations/{id}/exec?command=...` | Upgrade to a bidirectional WebSocket (`trellis.exec.v1`) that runs one command; requires the operator role. See [Exec streams](#exec-streams). |
 | `GET` | `/v1/namespaces/{ns}/allocations/{id}/metrics` | Current per-task CPU and memory usage. |
 | `GET` | `/v1/namespaces/{ns}/events` | Server-sent event stream for one namespace. |
-| `PUT` | `/v1/namespaces/{ns}/secrets/{name}` | Set a secret; requires write access. |
+| `PUT` | `/v1/namespaces/{ns}/secrets/{name}` | Set a secret; requires the operator role. |
 | `GET` | `/v1/namespaces/{ns}/secrets[/{name}]` | List/get secret metadata only. |
-| `DELETE` | `/v1/namespaces/{ns}/secrets/{name}` | Delete a secret; requires write access. |
+| `DELETE` | `/v1/namespaces/{ns}/secrets/{name}` | Delete a secret; requires the operator role. |
 
-Authorization of `/v1/namespaces/{ns}/...` routes checks access (`read` or `write`), as noted per route. Operator and workload API credentials may address every namespace; the path selects the resource namespace rather than narrowing credential authority. A `{ns}` that is not a valid identifier returns `400`.
+Authorization of `/v1/namespaces/{ns}/...` routes checks the role (`observer` or `operator`), as noted per route. Minted and workload API credentials may address every namespace; the path selects the resource namespace rather than narrowing credential authority. A `{ns}` that is not a valid identifier returns `400`.
 
 Allocation listings accept a `label` filter: `key` requires that the label exists, while `key:value` requires both presence and an exact value match. `key:` matches only a present label whose value is empty, never an absent label. The first colon separates key and value; subsequent colons are part of the value.
 
@@ -74,15 +74,14 @@ Allocation listings accept a `label` filter: `key` requires that the label exist
 
 ```json
 {
-  "kind": "operator",
-  "access": "write",
+  "role": "operator",
   "created_at": "2026-09-02T20:00:00Z"
 }
 ```
 
 A workload credential additionally reports `"subject": {"namespace": "payments", "job": "router", "task_group": "sync", "task": "controller"}`.
 
-An administrator credential reports `kind: "administrator"` and `access: "write"`, but callers must still treat `administrator` as more privileged than ordinary cluster-wide write access: root-only endpoint checks use the credential kind/context, not merely access. No credential response includes a `scope` field.
+An administrator-signed request reports `"role": "administrator"`. Root-only endpoints require that role; the operator role does not satisfy them. No credential response includes a `kind`, `access`, or `scope` field.
 
 `GET /v1/namespaces` is discovery, not namespace lifecycle management. It returns the sorted union of namespace names that currently have a desired job or a stored secret. Credentials do not create discoverable namespaces. There is no namespace-creation call: storing a secret in or applying a job to a previously unseen namespace makes it discoverable.
 
@@ -104,7 +103,7 @@ occurs automatically. Public Go clients expose `ClusterCompatibility` and
 
 Node resource values use millicores for CPU and bytes for memory. In `GET /v1/nodes`, `cpu_capacity` and `memory_capacity` are whole-host capacity, while `cpu_allocatable` and `memory_allocatable` are the capacity available to the scheduler after the node's host reserve. The existing `cpu` and `memory` fields carry the same allocatable values. `last_heartbeat` is when the current leader last received a heartbeat from the node; heartbeat times are not replicated, so it is omitted until the node reports to a newly elected leader. `cpu_usage` is a whole-host ratio from 0 to 1; `memory_used`, `memory_available`, and `metrics_at` describe the same point-in-time host sample and are omitted until the agent can collect one. `task_log_bytes` is the total size of the task logs stored on the node, for running tasks and retained terminal allocations; `task_log_filesystem_available` and `task_log_filesystem_capacity` describe the filesystem that holds them, in bytes. They come from the node's latest heartbeat and are omitted when the node cannot measure them. Scheduling uses allocatable capacity, never live utilization. `control_plane` is `voter` or `nonvoter` for a Raft member and omitted for a registered node that is no longer one.
 
-`GET /v1/namespaces/{ns}/jobs` and `GET /v1/namespaces/{ns}/jobs/{name}` include `replacement_backoff` for task groups whose failed allocations are being replaced with a delay. Each entry has `group`, `job_revision`, `failures` (consecutive failed allocations counted since the last reset), `last_failure_at`, `last_allocation_id`, the failed allocation's `reason` and `message`, and `next_replacement_at`, the earliest time a new allocation may be placed for the group. The field is omitted when no group has counted failures. The backoff delays only replacements of failed allocations; allocations lost with their node and a higher `count` are placed immediately. `POST /v1/namespaces/{ns}/jobs/{name}/groups/{group}/replacement-backoff/reset` clears a group's backoff so its failed allocations are replaced at once; it returns `204` (also when the group has no counted failures), `404` when the job or task group does not exist in the namespace, and `403` without write access. The event streams emit `job.replacement_delayed` with `job`, `group`, `allocation_id`, `revision`, `failures`, and `next_replacement_at` whenever a failure is counted, and `job.replacement_backoff_reset` with `job`, `group`, and `revision` when a backoff is reset. `/metrics` exposes the same state as `trellis_replacement_backoff_failures` and `trellis_replacement_backoff_remaining_seconds`, labelled by `namespace`, `job`, and `group`. Terminal allocation history is bounded by `terminal_allocation_retention` (five per task group by default), so older `stopped`, `failed`, and `lost` allocations disappear from status and allocation queries. If a node later reports a container for a pruned allocation, Trellis stops it as an orphan.
+`GET /v1/namespaces/{ns}/jobs` and `GET /v1/namespaces/{ns}/jobs/{name}` include `replacement_backoff` for task groups whose failed allocations are being replaced with a delay. Each entry has `group`, `job_revision`, `failures` (consecutive failed allocations counted since the last reset), `last_failure_at`, `last_allocation_id`, the failed allocation's `reason` and `message`, and `next_replacement_at`, the earliest time a new allocation may be placed for the group. The field is omitted when no group has counted failures. The backoff delays only replacements of failed allocations; allocations lost with their node and a higher `count` are placed immediately. `POST /v1/namespaces/{ns}/jobs/{name}/groups/{group}/replacement-backoff/reset` clears a group's backoff so its failed allocations are replaced at once; it returns `204` (also when the group has no counted failures), `404` when the job or task group does not exist in the namespace, and `403` without the operator role. The event streams emit `job.replacement_delayed` with `job`, `group`, `allocation_id`, `revision`, `failures`, and `next_replacement_at` whenever a failure is counted, and `job.replacement_backoff_reset` with `job`, `group`, and `revision` when a backoff is reset. `/metrics` exposes the same state as `trellis_replacement_backoff_failures` and `trellis_replacement_backoff_remaining_seconds`, labelled by `namespace`, `job`, and `group`. Terminal allocation history is bounded by `terminal_allocation_retention` (five per task group by default), so older `stopped`, `failed`, and `lost` allocations disappear from status and allocation queries. If a node later reports a container for a pruned allocation, Trellis stops it as an orphan.
 
 Network-safety exception to terminal-history retention: namespace-networked `lost` allocations remain visible and keep reserving namespace network slots and subnets until cleanup is proven, even with retention set to zero or after deleting their desired job. An acknowledged stop of the lost generation includes network detach and changes its phase to `stopped`; unused reservations can then be reclaimed and its record pruned. A partition alone cannot free those reservations.
 
@@ -213,7 +212,7 @@ Exec and allocation-metrics requests that fail before the upgrade return a JSON 
 | Status | Meaning |
 |---|---|
 | `400` | The request is invalid, is not a WebSocket request for subprotocol `trellis.exec.v1`, or must name one task: the allocation has several tasks, or the named task is not in its task group. |
-| `403` | The credential lacks write access (exec only). |
+| `403` | The credential lacks the operator role (exec only). |
 | `404` | The allocation is not placed in the path namespace. |
 | `409` | The allocation exists but its node has no running target for the request, such as a task that has not started or has exited. It also covers conflicting execution records for the task on the node, and an agent already fenced by a newer leader. Retry after the allocation is running again. |
 | `429` | The node or allocation exec stream limit, or the leader's relay limit, has been reached. Close a stream or retry later. |
@@ -226,7 +225,7 @@ Secret write body: `{"value_base64":"...","expected_version":1}`; omit `expected
 
 Secret names use the same identifier validation for PUT, GET, and DELETE. Invalid names return `400` with `{"message":"invalid secret name"}` after authorization; GET and DELETE of a valid but missing name still return `404` with `{"message":"secret not found"}`.
 
-Secrets follow the same path-routing rule as jobs: a cluster credential with `write` access may set and delete secrets in any namespace, and one with read access may list and describe secret metadata. Secrets are write-only for every operator caller, including the administrator: no public endpoint returns a stored value. Values reach a task through a separate node-authenticated credential pull authorized for a committed RUN generation and attempt whose job references the secret. They are absent from cached execution intent; a public read-back API would add plaintext exposure without adding capability.
+Secrets follow the same path-routing rule as jobs: a cluster credential with the operator role may set and delete secrets in any namespace, and one with the observer role may list and describe secret metadata. Secrets are write-only for every API caller, including the administrator: no public endpoint returns a stored value. Values reach a task through a separate node-authenticated credential pull authorized for a committed RUN generation and attempt whose job references the secret. They are absent from cached execution intent; a public read-back API would add plaintext exposure without adding capability.
 
 ### Event streams
 
@@ -243,7 +242,7 @@ reconnect and refresh current resources to resume observation.
 
 ## Leader discovery
 
-`GET /v1/cluster/leader` requires cluster-scoped read access (or the administrator credential) and returns `200` with `{"leader_id":"<node UUID>"}`. Requests to followers are routed to the serving leader, so the ID is the leader's, not the contacted node's. An unavailable or not-yet-serving leader returns `503`; clients must not interpret failure or a missing/zero identity as a follower result. The public Go client exposes `ClusterLeader`, and `trellisctl nodes leader --output json` returns the same representation.
+`GET /v1/cluster/leader` requires the cluster-scoped observer role (or the administrator credential) and returns `200` with `{"leader_id":"<node UUID>"}`. Requests to followers are routed to the serving leader, so the ID is the leader's, not the contacted node's. An unavailable or not-yet-serving leader returns `503`; clients must not interpret failure or a missing/zero identity as a follower result. The public Go client exposes `ClusterLeader`, and `trellisctl nodes leader --output json` returns the same representation.
 
 This is a point-in-time observation, not a lock or removal precondition. Leadership can change immediately afterward. Node removal still checks current leadership and quorum at its owner and refuses removing the current leader with `409`. For graceful multi-node uninstall, the operator must transfer leadership away from the target and verify the new leader before rerunning; uninstall never transfers leadership automatically.
 
@@ -251,7 +250,7 @@ This is a point-in-time observation, not a lock or removal precondition. Leaders
 
 Job limits, reconciliation settings, and namespace-network settings are cluster-wide semantics, so they live in the replicated cluster record rather than in each node's configuration; every leader applies the same values. The node that creates the cluster supplies the initial job limits and network settings from its configuration; reconciliation settings start at their defaults.
 
-`GET /v1/cluster/settings` requires cluster-scoped read access (or the administrator credential) and returns:
+`GET /v1/cluster/settings` requires the cluster-scoped observer role (or the administrator credential) and returns:
 
 ```json
 {
@@ -281,9 +280,9 @@ Memory values are byte counts. `PUT /v1/cluster/settings/job-limits` requires an
 
 ## Administrator endpoints
 
-`POST /v1/credentials`, `GET /v1/credentials`, `DELETE /v1/credentials/{id}`, `POST /v1/nodes/join-tokens`, `GET /v1/nodes/join-tokens`, `DELETE /v1/nodes/join-tokens/{id}`, `PUT /v1/cluster/settings/job-limits`, `PUT /v1/cluster/settings/reconciliation`, `GET /v1/backup`, `POST /v1/backup/restore`, `DELETE /v1/raft/members/{id}`, and `POST /v1/raft/leadership-transfer` require an administrator-signed request. The operator keeps the Ed25519 private key; replicated cluster state contains only its PKIX public key.
+`POST /v1/credentials`, `GET /v1/credentials`, `DELETE /v1/credentials/{id}`, `POST /v1/nodes/join-tokens`, `GET /v1/nodes/join-tokens`, `DELETE /v1/nodes/join-tokens/{id}`, `PUT /v1/cluster/settings/job-limits`, `PUT /v1/cluster/settings/reconciliation`, `GET /v1/backup`, `POST /v1/backup/restore`, `DELETE /v1/raft/members/{id}`, and `POST /v1/raft/leadership-transfer` require an administrator-signed request. The operator keeps the Ed25519 private key; replicated cluster state contains only its PKIX public key. Signing gates these endpoints. It is a trust boundary above the operator role only when control-plane nodes do not run workloads; see [What the operator role reaches](multitenancy.md#what-the-operator-role-reaches).
 
-`POST /v1/credentials` takes `access` (`read` or `write`) and optional `ttl_seconds`; a positive value makes the credential expire that many seconds after creation, and zero or absence means no expiry. It returns `201` with the `token`, shown only in this response, and the credential's metadata: `id`, `access`, `created_at`, and `expires_at` when set. Neither request nor response has a `scope` or top-level namespace field. `GET /v1/credentials` lists metadata for every operator credential, expired ones included, ordered by creation time; it never returns a token. Use the returned `id` with `DELETE /v1/credentials/{id}` to revoke a credential (`204`, or `404` when no operator credential has that ID). Workload credentials are neither listed nor revocable through these endpoints. `GET /v1/auth/whoami` also reports `expires_at` for an expiring credential; a workload subject includes its job namespace, job, task group, and task.
+`POST /v1/credentials` takes `role` (`observer` or `operator`) and optional `ttl_seconds`; a positive value makes the credential expire that many seconds after creation, and zero or absence means no expiry. It returns `201` with the `token`, shown only in this response, and the credential's metadata: `id`, `role`, `created_at`, and `expires_at` when set. Neither request nor response has a `scope` or top-level namespace field. `GET /v1/credentials` lists metadata for every minted credential, expired ones included, ordered by creation time; it never returns a token. Use the returned `id` with `DELETE /v1/credentials/{id}` to revoke a credential (`204`, or `404` when no minted credential has that ID). Workload credentials are neither listed nor revocable through these endpoints. `GET /v1/auth/whoami` also reports `expires_at` for an expiring credential; a workload subject includes its job namespace, job, task group, and task.
 
 `POST /v1/nodes/join-tokens` takes `role` (`control-plane`, the default, or `worker`), optional `ttl_seconds`, and optional `max_uses`. Control-plane tokens are single-use and have a maximum/default lifetime of one hour. Worker tokens retain the 1–604800 second lifetime and 0 (unlimited)–10000 use bounds. The `201` response contains the token once plus `id`, `role`, `created_at`, `expires_at`, `max_uses`, and `uses`; listings include the same metadata but never the token.
 

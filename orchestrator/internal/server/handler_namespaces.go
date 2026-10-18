@@ -7,7 +7,7 @@ import (
 )
 
 func (h *Handler) handleListNamespaces(c *echo.Context) error {
-	if err := requireClusterRead(c, "namespace discovery requires an authenticated credential"); err != nil {
+	if err := requireObserver(c, "namespace discovery requires an authenticated credential"); err != nil {
 		return err
 	}
 	namespaces, err := h.server.ListNamespaces(c.Request().Context())

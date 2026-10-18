@@ -59,7 +59,7 @@ func newExecRelayTest(t *testing.T, serve func(*execstream.Reader, *execstream.W
 	test.cancel = cancel
 	e.Pre(func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c *echo.Context) error {
-			ctx := context.WithValue(c.Request().Context(), AuthorizationContextKey, auth.EncodeAccess(auth.AccessWrite))
+			ctx := context.WithValue(c.Request().Context(), AuthorizationContextKey, auth.EncodeRole(auth.RoleOperator))
 			c.SetRequest(c.Request().WithContext(ctx))
 			return next(c)
 		}
@@ -232,17 +232,17 @@ func TestExecRequestRejections(t *testing.T) {
 	tests := []struct {
 		name    string
 		path    string
-		access  auth.AccessLevel
+		access  auth.Role
 		upgrade bool
 		setup   func()
 		want    int
 	}{
-		{name: "read-only credential", path: "/v1/namespaces/team/allocations/alloc-1/exec?command=sh", access: auth.AccessRead, upgrade: true, want: http.StatusForbidden},
-		{name: "not an upgrade", path: "/v1/namespaces/team/allocations/alloc-1/exec?command=sh", access: auth.AccessWrite, want: http.StatusBadRequest},
-		{name: "missing command", path: "/v1/namespaces/team/allocations/alloc-1/exec", access: auth.AccessWrite, upgrade: true, want: http.StatusBadRequest},
-		{name: "invalid term", path: "/v1/namespaces/team/allocations/alloc-1/exec?command=sh&tty=true&term=x%3By", access: auth.AccessWrite, upgrade: true, want: http.StatusBadRequest},
-		{name: "relay limit", path: "/v1/namespaces/team/allocations/alloc-1/exec?command=sh", access: auth.AccessWrite, upgrade: true, setup: func() { s.exec.active = execRelayLimit }, want: http.StatusTooManyRequests},
-		{name: "no leadership term", path: "/v1/namespaces/team/allocations/alloc-1/exec?command=sh", access: auth.AccessWrite, upgrade: true, setup: func() { s.exec = execRelays{} }, want: http.StatusServiceUnavailable},
+		{name: "read-only credential", path: "/v1/namespaces/team/allocations/alloc-1/exec?command=sh", access: auth.RoleObserver, upgrade: true, want: http.StatusForbidden},
+		{name: "not an upgrade", path: "/v1/namespaces/team/allocations/alloc-1/exec?command=sh", access: auth.RoleOperator, want: http.StatusBadRequest},
+		{name: "missing command", path: "/v1/namespaces/team/allocations/alloc-1/exec", access: auth.RoleOperator, upgrade: true, want: http.StatusBadRequest},
+		{name: "invalid term", path: "/v1/namespaces/team/allocations/alloc-1/exec?command=sh&tty=true&term=x%3By", access: auth.RoleOperator, upgrade: true, want: http.StatusBadRequest},
+		{name: "relay limit", path: "/v1/namespaces/team/allocations/alloc-1/exec?command=sh", access: auth.RoleOperator, upgrade: true, setup: func() { s.exec.active = execRelayLimit }, want: http.StatusTooManyRequests},
+		{name: "no leadership term", path: "/v1/namespaces/team/allocations/alloc-1/exec?command=sh", access: auth.RoleOperator, upgrade: true, setup: func() { s.exec = execRelays{} }, want: http.StatusServiceUnavailable},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

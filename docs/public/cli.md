@@ -284,7 +284,7 @@ trellisctl --administrator-key ./trellis-administrator.pem nodes remove 9cf13a2b
 
 Ambiguous prefixes are rejected and the CLI shows the matching nodes rather than guessing.
 
-Use `trellisctl nodes leader` to show the serving control-plane leader's full UUID, or add `--output json` for `{"leader_id":"<node UUID>"}`. The query needs cluster-scoped read access and works through a follower's API. Before gracefully uninstalling a multi-node cluster's leader, transfer leadership explicitly with the administrator credential and verify that it moved:
+Use `trellisctl nodes leader` to show the serving control-plane leader's full UUID, or add `--output json` for `{"leader_id":"<node UUID>"}`. The query needs the cluster-scoped observer role and works through a follower's API. Before gracefully uninstalling a multi-node cluster's leader, transfer leadership explicitly with the administrator credential and verify that it moved:
 
 ```sh
 trellisctl --context local nodes leader
@@ -323,7 +323,7 @@ The flags are `--allocation-loss-timeout` (30s–24h, default `45s`), `--replace
 `trellisctl cluster compatibility` reports the replicated active compatibility
 level, the serving leader's binary level, and live binary probes for registered
 nodes and Raft members. A node's `release` is unknown when its running binary
-cannot be verified. Read access is sufficient; `--output json` provides the same
+cannot be verified. The observer role is sufficient; `--output json` provides the same
 result for automation.
 
 `trellisctl --administrator-key ./trellis-administrator.pem cluster activate-release LEVEL`

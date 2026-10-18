@@ -36,22 +36,23 @@ const (
 // Valid reports whether r is a supported runtime.
 func (r Runtime) Valid() bool { return r == RuntimeDefault || r == RuntimeRunc || r == RuntimeRunsc }
 
-// APIAccessLevel controls whether an injected control-plane credential may mutate state.
-type APIAccessLevel string
+// APIAccessRole is the credential role injected into a task. It uses the
+// same roles as minted credentials; administrator authority is never injected.
+type APIAccessRole string
 
 const (
-	// APIAccessRead grants observation-only API access.
-	APIAccessRead APIAccessLevel = "read"
-	// APIAccessWrite grants ordinary mutation API access across the cluster.
-	APIAccessWrite APIAccessLevel = "write"
+	// APIAccessObserver grants observation-only API access across the cluster.
+	APIAccessObserver APIAccessRole = "observer"
+	// APIAccessOperator grants cluster-wide workload management.
+	APIAccessOperator APIAccessRole = "operator"
 )
 
-// Valid reports whether a is a supported API access level.
-func (a APIAccessLevel) Valid() bool { return a == APIAccessRead || a == APIAccessWrite }
+// Valid reports whether a is a supported API access role.
+func (a APIAccessRole) Valid() bool { return a == APIAccessObserver || a == APIAccessOperator }
 
 // APIAccessSpec configures the cluster credential injected into a task.
 type APIAccessSpec struct {
-	Access APIAccessLevel `yaml:"access" json:"access"`
+	Role APIAccessRole `yaml:"role" json:"role"`
 }
 
 // TaskNetworkMode controls how a task container joins the network.

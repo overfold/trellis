@@ -16,7 +16,8 @@ const (
 // A positive TTLSeconds makes the credential expire that many seconds after
 // creation; zero or absent means it does not expire.
 type CredentialCreateRequest struct {
-	Access     string `json:"access"`
+	// Role is observer or operator.
+	Role       string `json:"role"`
 	TTLSeconds int64  `json:"ttl_seconds,omitempty"`
 }
 
@@ -27,16 +28,16 @@ type CredentialCreateResponse struct {
 	CredentialResponse
 }
 
-// CredentialResponse is the listable metadata of an operator credential. It
+// CredentialResponse is the listable metadata of a minted credential. It
 // never contains the bearer token.
 type CredentialResponse struct {
 	ID        string     `json:"id"`
-	Access    string     `json:"access"`
+	Role      string     `json:"role"`
 	CreatedAt time.Time  `json:"created_at"`
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
-// CredentialListResponse lists operator credentials, including expired ones,
+// CredentialListResponse lists minted credentials, including expired ones,
 // ordered by creation time.
 type CredentialListResponse []CredentialResponse
 
@@ -48,10 +49,11 @@ type CredentialSubjectResponse struct {
 	Task      string `json:"task"`
 }
 
-// CredentialInfoResponse describes the credential authenticating the current request.
+// CredentialInfoResponse describes the credential authenticating the current
+// request. Role is observer, operator, or administrator; Subject is present
+// only for a workload credential injected through api_access.
 type CredentialInfoResponse struct {
-	Kind      string                     `json:"kind"`
-	Access    string                     `json:"access"`
+	Role      string                     `json:"role"`
 	Subject   *CredentialSubjectResponse `json:"subject,omitempty"`
 	CreatedAt *time.Time                 `json:"created_at,omitempty"`
 	ExpiresAt *time.Time                 `json:"expires_at,omitempty"`

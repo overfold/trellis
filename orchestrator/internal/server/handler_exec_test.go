@@ -80,7 +80,7 @@ var execErrorRoutes = []execErrorRoute{
 func serveExecRequest(t *testing.T, e *echo.Echo, route execErrorRoute, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	request := authorizedRequest(t, route.method, path, route.body, auth.AccessWrite)
+	request := authorizedRequest(t, route.method, path, route.body, auth.RoleOperator)
 	execwebsocket.SetRequestHeaders(request)
 	e.ServeHTTP(rec, request)
 	return rec

@@ -53,27 +53,40 @@ const NodeContextKey contextKey = "trellis-node"
 // endpoint. The middleware does not validate it; enrollment consumes it.
 const JoinTokenContextKey contextKey = "trellis-join-token"
 
+// requestAuthorization is the role a request was authenticated with. The zero
+// value has no authority.
 type requestAuthorization struct {
-	root   bool
-	access auth.AccessLevel
+	role auth.Role
 }
 
 func authorization(c *echo.Context) requestAuthorization {
 	if admin, _ := c.Request().Context().Value(AdminContextKey).(bool); admin {
-		return requestAuthorization{root: true, access: auth.AccessWrite}
+		return requestAuthorization{role: auth.RoleAdministrator}
 	}
 	value, _ := c.Request().Context().Value(AuthorizationContextKey).(string)
-	if access, ok := auth.DecodeAccess(value); ok {
-		return requestAuthorization{access: access}
+	if role, ok := auth.DecodeRole(value); ok {
+		return requestAuthorization{role: role}
 	}
 	return requestAuthorization{}
 }
 
-func requireRoot(c *echo.Context, message string) error {
-	if !authorization(c).root {
+func requireRole(c *echo.Context, role auth.Role, message string) error {
+	if !authorization(c).role.Includes(role) {
 		return echo.NewHTTPError(http.StatusForbidden, message)
 	}
 	return nil
+}
+
+func requireAdministrator(c *echo.Context, message string) error {
+	return requireRole(c, auth.RoleAdministrator, message)
+}
+
+func requireObserver(c *echo.Context, message string) error {
+	return requireRole(c, auth.RoleObserver, message)
+}
+
+func requireOperator(c *echo.Context, message string) error {
+	return requireRole(c, auth.RoleOperator, message)
 }
 
 func authenticatedNodeID(c *echo.Context, message string) (uuid.UUID, error) {
@@ -92,43 +105,18 @@ func requireExactNode(c *echo.Context, expected uuid.UUID, message string) error
 	return nil
 }
 
-func requireClusterRead(c *echo.Context, message string) error {
-	authz := authorization(c)
-	if !authz.root && authz.access != auth.AccessRead && authz.access != auth.AccessWrite {
-		return echo.NewHTTPError(http.StatusForbidden, message)
-	}
-	return nil
-}
-
-func requireWrite(c *echo.Context, message string) error {
-	authz := authorization(c)
-	if !authz.root && authz.access != auth.AccessWrite {
-		return echo.NewHTTPError(http.StatusForbidden, message)
-	}
-	return nil
-}
-
-func requireClusterWrite(c *echo.Context, message string) error {
-	authz := authorization(c)
-	if !authz.root && authz.access != auth.AccessWrite {
-		return echo.NewHTTPError(http.StatusForbidden, message)
-	}
-	return nil
-}
-
+// requireAPIAccessDelegation rejects a job whose api_access would grant a
+// role the caller does not hold.
 func requireAPIAccessDelegation(c *echo.Context, job *spec.JobSpec) error {
-	authz := authorization(c)
-	if authz.root {
-		return nil
-	}
-	if authz.access != auth.AccessRead && authz.access != auth.AccessWrite {
+	caller := authorization(c).role
+	if !caller.Includes(auth.RoleObserver) {
 		return echo.NewHTTPError(http.StatusForbidden, "API access delegation requires an authenticated credential")
 	}
 	for i := range job.TaskGroups {
 		for j := range job.TaskGroups[i].Tasks {
 			requested := job.TaskGroups[i].Tasks[j].APIAccess
-			if requested != nil && authz.access == auth.AccessRead && auth.AccessLevel(requested.Access) == auth.AccessWrite {
-				return echo.NewHTTPError(http.StatusForbidden, "job api_access exceeds caller access")
+			if requested != nil && !caller.Includes(auth.Role(requested.Role)) {
+				return echo.NewHTTPError(http.StatusForbidden, "job api_access role exceeds the caller's role")
 			}
 		}
 	}
@@ -232,21 +220,21 @@ func (h *Handler) Register(e *echo.Echo) {
 }
 
 func (h *Handler) handleCreateCredential(c *echo.Context) error {
-	if err := requireRoot(c, "credential creation requires the administrator credential"); err != nil {
+	if err := requireAdministrator(c, "credential creation requires the administrator credential"); err != nil {
 		return err
 	}
 	var request api.CredentialCreateRequest
 	if err := decodeJSON(c, &request, maxSmallRequestBytes); err != nil {
 		return err
 	}
-	access := auth.AccessLevel(request.Access)
-	if access != auth.AccessRead && access != auth.AccessWrite {
-		return echo.NewHTTPError(http.StatusBadRequest, "access must be read or write")
+	role := auth.Role(request.Role)
+	if !role.Generated() {
+		return echo.NewHTTPError(http.StatusBadRequest, "role must be observer or operator")
 	}
 	if request.TTLSeconds < 0 || request.TTLSeconds > maxTTLSeconds {
 		return echo.NewHTTPError(http.StatusBadRequest, "ttl_seconds must be between 0 and "+strconv.FormatInt(maxTTLSeconds, 10))
 	}
-	token, credential, err := h.server.CreateCredential(c.Request().Context(), access, time.Duration(request.TTLSeconds)*time.Second)
+	token, credential, err := h.server.CreateCredential(c.Request().Context(), role, time.Duration(request.TTLSeconds)*time.Second)
 	if errors.Is(err, ErrInvalidCredentialRequest) {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
@@ -260,10 +248,10 @@ func (h *Handler) handleCreateCredential(c *echo.Context) error {
 // maxTTLSeconds bounds requested lifetimes so their durations cannot overflow.
 const maxTTLSeconds = int64(100 * 365 * 24 * 60 * 60)
 
-func credentialResponse(credential auth.OperatorCredential) api.CredentialResponse {
+func credentialResponse(credential auth.MintedCredential) api.CredentialResponse {
 	response := api.CredentialResponse{
 		ID:        credential.ID,
-		Access:    string(credential.Principal.Access),
+		Role:      string(credential.Principal.Role),
 		CreatedAt: credential.Principal.CreatedAt,
 	}
 	if !credential.Principal.ExpiresAt.IsZero() {
@@ -274,7 +262,7 @@ func credentialResponse(credential auth.OperatorCredential) api.CredentialRespon
 }
 
 func (h *Handler) handleListCredentials(c *echo.Context) error {
-	if err := requireRoot(c, "listing credentials requires the administrator credential"); err != nil {
+	if err := requireAdministrator(c, "listing credentials requires the administrator credential"); err != nil {
 		return err
 	}
 	credentials, err := h.server.ListCredentials(c.Request().Context())
@@ -290,7 +278,7 @@ func (h *Handler) handleListCredentials(c *echo.Context) error {
 }
 
 func (h *Handler) handleRevokeCredential(c *echo.Context) error {
-	if err := requireRoot(c, "revoking credentials requires the administrator credential"); err != nil {
+	if err := requireAdministrator(c, "revoking credentials requires the administrator credential"); err != nil {
 		return err
 	}
 	err := h.server.RevokeCredential(c.Request().Context(), c.Param("id"))
@@ -304,7 +292,7 @@ func (h *Handler) handleRevokeCredential(c *echo.Context) error {
 }
 
 func (h *Handler) handleCreateJoinToken(c *echo.Context) error {
-	if err := requireRoot(c, "creating join tokens requires the administrator credential"); err != nil {
+	if err := requireAdministrator(c, "creating join tokens requires the administrator credential"); err != nil {
 		return err
 	}
 	var request api.JoinTokenCreateRequest
@@ -326,7 +314,7 @@ func (h *Handler) handleCreateJoinToken(c *echo.Context) error {
 }
 
 func (h *Handler) handleListJoinTokens(c *echo.Context) error {
-	if err := requireRoot(c, "listing join tokens requires the administrator credential"); err != nil {
+	if err := requireAdministrator(c, "listing join tokens requires the administrator credential"); err != nil {
 		return err
 	}
 	tokens, err := h.server.ListJoinTokens(c.Request().Context())
@@ -342,7 +330,7 @@ func (h *Handler) handleListJoinTokens(c *echo.Context) error {
 }
 
 func (h *Handler) handleRevokeJoinToken(c *echo.Context) error {
-	if err := requireRoot(c, "revoking join tokens requires the administrator credential"); err != nil {
+	if err := requireAdministrator(c, "revoking join tokens requires the administrator credential"); err != nil {
 		return err
 	}
 	err := h.server.RevokeJoinToken(c.Request().Context(), c.Param("id"))
@@ -356,14 +344,14 @@ func (h *Handler) handleRevokeJoinToken(c *echo.Context) error {
 }
 
 func (h *Handler) handleGetClusterSettings(c *echo.Context) error {
-	if err := requireClusterRead(c, "cluster settings require cluster/read authorization"); err != nil {
+	if err := requireObserver(c, "cluster settings require the observer role"); err != nil {
 		return err
 	}
 	return c.JSON(http.StatusOK, h.server.ClusterSettings().API())
 }
 
 func (h *Handler) handleCompatibility(c *echo.Context) error {
-	if err := requireClusterRead(c, "compatibility status requires cluster/read authorization"); err != nil {
+	if err := requireObserver(c, "compatibility status requires the observer role"); err != nil {
 		return err
 	}
 	status, err := h.server.Compatibility(c.Request().Context())
@@ -374,7 +362,7 @@ func (h *Handler) handleCompatibility(c *echo.Context) error {
 }
 
 func (h *Handler) handleActivateRelease(c *echo.Context) error {
-	if err := requireRoot(c, "compatibility activation requires the administrator credential"); err != nil {
+	if err := requireAdministrator(c, "compatibility activation requires the administrator credential"); err != nil {
 		return err
 	}
 	var request api.ActivateReleaseRequest
@@ -392,7 +380,7 @@ func (h *Handler) handleActivateRelease(c *echo.Context) error {
 }
 
 func (h *Handler) handleUpdateJobLimits(c *echo.Context) error {
-	if err := requireRoot(c, "changing cluster settings requires the administrator credential"); err != nil {
+	if err := requireAdministrator(c, "changing cluster settings requires the administrator credential"); err != nil {
 		return err
 	}
 	var limits api.JobLimits
@@ -404,7 +392,7 @@ func (h *Handler) handleUpdateJobLimits(c *echo.Context) error {
 }
 
 func (h *Handler) handleUpdateReconciliationSettings(c *echo.Context) error {
-	if err := requireRoot(c, "changing cluster settings requires the administrator credential"); err != nil {
+	if err := requireAdministrator(c, "changing cluster settings requires the administrator credential"); err != nil {
 		return err
 	}
 	var reconciliation api.ReconciliationSettings
@@ -428,7 +416,7 @@ func clusterSettingsResponse(c *echo.Context, settings ClusterSettings, err erro
 }
 
 func (h *Handler) handleBackupCreate(c *echo.Context) error {
-	if err := requireRoot(c, "backup operations require the administrator credential"); err != nil {
+	if err := requireAdministrator(c, "backup operations require the administrator credential"); err != nil {
 		return err
 	}
 	backup, err := h.server.Backup(c.Request().Context())
@@ -440,7 +428,7 @@ func (h *Handler) handleBackupCreate(c *echo.Context) error {
 }
 
 func (h *Handler) handleBackupRestore(c *echo.Context) error {
-	if err := requireRoot(c, "backup operations require the administrator credential"); err != nil {
+	if err := requireAdministrator(c, "backup operations require the administrator credential"); err != nil {
 		return err
 	}
 	var backup api.BackupSnapshot
@@ -462,7 +450,7 @@ func (h *Handler) handleBackupRestore(c *echo.Context) error {
 
 func (h *Handler) handleSetSecret(c *echo.Context) error {
 	c.Response().Header().Set("Cache-Control", "no-store")
-	ns, err := namespaceWrite(c, "setting secrets requires write authorization")
+	ns, err := namespaceOperator(c, "setting secrets requires the operator role")
 	if err != nil {
 		return err
 	}
@@ -535,7 +523,7 @@ func (h *Handler) handleGetSecret(c *echo.Context) error {
 
 func (h *Handler) handleDeleteSecret(c *echo.Context) error {
 	c.Response().Header().Set("Cache-Control", "no-store")
-	ns, err := namespaceWrite(c, "deleting secrets requires write authorization")
+	ns, err := namespaceOperator(c, "deleting secrets requires the operator role")
 	if err != nil {
 		return err
 	}
@@ -602,7 +590,7 @@ func (h *Handler) handleAllocationLogs(c *echo.Context) error {
 }
 
 func (h *Handler) handleDrainNode(c *echo.Context) error {
-	if err := requireClusterWrite(c, "draining nodes requires cluster/write authorization"); err != nil {
+	if err := requireOperator(c, "draining nodes requires the operator role"); err != nil {
 		return err
 	}
 	id, err := uuid.Parse(c.Param("id"))
@@ -622,7 +610,7 @@ func (h *Handler) handleDrainNode(c *echo.Context) error {
 }
 
 func (h *Handler) handleUndrainNode(c *echo.Context) error {
-	if err := requireClusterWrite(c, "undraining nodes requires cluster/write authorization"); err != nil {
+	if err := requireOperator(c, "undraining nodes requires the operator role"); err != nil {
 		return err
 	}
 	id, err := uuid.Parse(c.Param("id"))
@@ -642,7 +630,7 @@ func (h *Handler) handleUndrainNode(c *echo.Context) error {
 }
 
 func (h *Handler) handleListNodes(c *echo.Context) error {
-	if err := requireClusterRead(c, "nodes are cluster-scoped"); err != nil {
+	if err := requireObserver(c, "nodes are cluster-scoped"); err != nil {
 		return err
 	}
 	nodes := h.server.ListNodes()
@@ -710,7 +698,7 @@ func (h *Handler) handleRegisterNode(c *echo.Context) error {
 }
 
 func (h *Handler) handlePromoteNode(c *echo.Context) error {
-	if err := requireRoot(c, "node promotion requires the administrator credential"); err != nil {
+	if err := requireAdministrator(c, "node promotion requires the administrator credential"); err != nil {
 		return err
 	}
 	id, err := uuid.Parse(c.Param("id"))
@@ -739,7 +727,7 @@ func (h *Handler) handleNodeRole(c *echo.Context) error {
 }
 
 func (h *Handler) handleEnrollExternalNode(c *echo.Context) error {
-	if err := requireRoot(c, "external node enrollment requires the administrator credential"); err != nil {
+	if err := requireAdministrator(c, "external node enrollment requires the administrator credential"); err != nil {
 		return err
 	}
 	var request api.NodeIdentityCreateRequest
@@ -847,7 +835,7 @@ func (h *Handler) handleGetJob(c *echo.Context) error {
 }
 
 func (h *Handler) handleDeleteJob(c *echo.Context) error {
-	ns, err := namespaceWrite(c, "deleting jobs requires write authorization")
+	ns, err := namespaceOperator(c, "deleting jobs requires the operator role")
 	if err != nil {
 		return err
 	}
@@ -929,7 +917,7 @@ func (h *Handler) handlePlanJob(c *echo.Context) error {
 }
 
 func (h *Handler) handleRegisterJob(c *echo.Context) error {
-	ns, err := namespaceWrite(c, "applying jobs requires write authorization")
+	ns, err := namespaceOperator(c, "applying jobs requires the operator role")
 	if err != nil {
 		return err
 	}
@@ -964,9 +952,9 @@ func (h *Handler) handleListAllocations(c *echo.Context) error {
 }
 
 // handleListClusterAllocations lists allocations across every namespace and
-// therefore requires authenticated read or write access.
+// therefore requires the observer role.
 func (h *Handler) handleListClusterAllocations(c *echo.Context) error {
-	if err := requireClusterRead(c, "listing allocations requires read or write access"); err != nil {
+	if err := requireObserver(c, "listing allocations requires the observer role"); err != nil {
 		return err
 	}
 	return h.listAllocations(c, "")
@@ -1097,7 +1085,7 @@ func (h *Handler) handleEnrollNode(c *echo.Context) error {
 }
 
 func (h *Handler) handleRaftMemberRemove(c *echo.Context) error {
-	if err := requireRoot(c, "Raft membership changes require the administrator credential"); err != nil {
+	if err := requireAdministrator(c, "Raft membership changes require the administrator credential"); err != nil {
 		return err
 	}
 	id := c.Param("id")
@@ -1123,7 +1111,7 @@ func (h *Handler) handleRaftMemberRemove(c *echo.Context) error {
 }
 
 func (h *Handler) handleRaftLeadershipTransfer(c *echo.Context) error {
-	if err := requireRoot(c, "leadership transfer requires the administrator credential"); err != nil {
+	if err := requireAdministrator(c, "leadership transfer requires the administrator credential"); err != nil {
 		return err
 	}
 	if h.server.joiner == nil {
@@ -1136,7 +1124,7 @@ func (h *Handler) handleRaftLeadershipTransfer(c *echo.Context) error {
 }
 
 func (h *Handler) handleClusterLeader(c *echo.Context) error {
-	if err := requireClusterRead(c, "leader discovery requires read or write access"); err != nil {
+	if err := requireObserver(c, "leader discovery requires the observer role"); err != nil {
 		return err
 	}
 	// Operator requests are routed to the serving leader and admitted through
@@ -1148,7 +1136,7 @@ func (h *Handler) handleClusterLeader(c *echo.Context) error {
 // and jobs across the cluster, so scraping requires an authenticated
 // credential.
 func (h *Handler) handleMetrics(c *echo.Context) error {
-	if err := requireClusterRead(c, "metrics require read or write access"); err != nil {
+	if err := requireObserver(c, "metrics require the observer role"); err != nil {
 		return err
 	}
 	promhttp.Handler().ServeHTTP(c.Response(), c.Request())
@@ -1178,7 +1166,7 @@ func (h *Handler) convertNode(node *NodeView) *api.NodeResponse {
 }
 
 func (h *Handler) handleRestartJob(c *echo.Context) error {
-	ns, err := namespaceWrite(c, "restarting jobs requires write authorization")
+	ns, err := namespaceOperator(c, "restarting jobs requires the operator role")
 	if err != nil {
 		return err
 	}
@@ -1189,7 +1177,7 @@ func (h *Handler) handleRestartJob(c *echo.Context) error {
 }
 
 func (h *Handler) handleResetReplacementBackoff(c *echo.Context) error {
-	ns, err := namespaceWrite(c, "resetting replacement backoff requires write authorization")
+	ns, err := namespaceOperator(c, "resetting replacement backoff requires the operator role")
 	if err != nil {
 		return err
 	}
@@ -1222,7 +1210,7 @@ func (h *Handler) handleListJobVersions(c *echo.Context) error {
 }
 
 func (h *Handler) handleStopAllocation(c *echo.Context) error {
-	ns, err := namespaceWrite(c, "stopping allocations requires write authorization")
+	ns, err := namespaceOperator(c, "stopping allocations requires the operator role")
 	if err != nil {
 		return err
 	}
@@ -1239,7 +1227,7 @@ func (h *Handler) handleStopAllocation(c *echo.Context) error {
 // admission errors are ordinary HTTP responses; once the connection is
 // upgraded the leader translates WebSocket messages to the agent stream.
 func (h *Handler) handleExec(c *echo.Context) error {
-	ns, err := namespaceWrite(c, "exec requires write authorization")
+	ns, err := namespaceOperator(c, "exec requires the operator role")
 	if err != nil {
 		return err
 	}
@@ -1332,9 +1320,9 @@ func (h *Handler) handleEvents(c *echo.Context) error {
 }
 
 // handleClusterEvents streams events from every namespace and therefore
-// requires authenticated read or write access.
+// requires the observer role.
 func (h *Handler) handleClusterEvents(c *echo.Context) error {
-	if err := requireClusterRead(c, "streaming events requires read or write access"); err != nil {
+	if err := requireObserver(c, "streaming events requires the observer role"); err != nil {
 		return err
 	}
 	return h.streamEvents(c, "")

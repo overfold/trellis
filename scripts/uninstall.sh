@@ -54,7 +54,7 @@ Options:
   -y, --yes     Skip the single confirmation prompt
   -h, --help    Show this help
 
-Graceful removal uses the invoking user's saved local cluster/write context
+Graceful removal uses the invoking user's saved local operator context
 (or TRELLIS_CONFIG). For multi-node removal, supply TRELLIS_ADMINISTRATOR_KEY
 transiently (a private-key file path or base64 PKCS#8 key); it is never saved.
 EOF_USAGE
@@ -146,7 +146,7 @@ elif [ "$was_running" = true ] && [ -x "${INSTALL_DIR}/trellisctl" ] && [ -n "$n
         [ -n "$operator_home" ] || ui_die "Could not determine the invoking user's home directory; provide TRELLIS_CONFIG."
         operator_config="${operator_home}/.config/trellis/config.yaml"
     fi
-    [ -f "$operator_config" ] || ui_die "Operator config missing at ${operator_config}; provide TRELLIS_CONFIG with a local cluster/write context. Nothing local has been deleted."
+    [ -f "$operator_config" ] || ui_die "Operator config missing at ${operator_config}; provide TRELLIS_CONFIG with a local operator context. Nothing local has been deleted."
     if ! node_json="$(uninstall_ctl nodes list --output json)"; then
         ui_die "Could not inspect cluster membership; check the local context's operator credential and pinned CA. Nothing local has been deleted. To uninstall without draining or changing membership, rerun with --force."
     fi
@@ -163,7 +163,7 @@ elif [ "$was_running" = true ] && [ -x "${INSTALL_DIR}/trellisctl" ] && [ -n "$n
         fi
         [ "$leader_id" != "$node_id" ] || ui_die "Node ${node_id} is the cluster leader. Transfer leadership with 'trellisctl nodes transfer-leadership' using the administrator credential, verify the new leader with 'trellisctl nodes leader', then rerun uninstall. Nothing has been drained or deleted."
         [ -n "${TRELLIS_ADMINISTRATOR_KEY:-}" ] || ui_die "Multi-node removal requires explicit TRELLIS_ADMINISTRATOR_KEY (private-key file path or base64 PKCS#8 key). Supply it transiently alongside the local operator context; nothing has been drained or deleted."
-        uninstall_ctl nodes drain "$node_id" >/dev/null || ui_die "Could not drain this node; check the local context has cluster/write authority. Nothing local has been deleted."
+        uninstall_ctl nodes drain "$node_id" >/dev/null || ui_die "Could not drain this node; check the local context has the operator role. Nothing local has been deleted."
         ui_step "Drain started"
         if ! wait_for_local_allocations_to_stop; then
             uninstall_ctl nodes undrain "$node_id" >/dev/null 2>&1 || true

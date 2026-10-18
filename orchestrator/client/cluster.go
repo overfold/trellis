@@ -32,7 +32,7 @@ func (c *Client) CreateCredential(ctx context.Context, request *api.CredentialCr
 	return &response, nil
 }
 
-// ListCredentials lists operator credential metadata with the administrator
+// ListCredentials lists minted credential metadata with the administrator
 // credential. Listings never include bearer tokens.
 func (c *Client) ListCredentials(ctx context.Context) (api.CredentialListResponse, error) {
 	var response api.CredentialListResponse
@@ -42,7 +42,7 @@ func (c *Client) ListCredentials(ctx context.Context) (api.CredentialListRespons
 	return response, nil
 }
 
-// RevokeCredential deletes an operator credential by its listed ID with the
+// RevokeCredential deletes a minted credential by its listed ID with the
 // administrator credential.
 func (c *Client) RevokeCredential(ctx context.Context, id string) error {
 	if err := c.request(ctx, http.MethodDelete, c.clusterPath("/v1/credentials/%s", url.PathEscape(id)), nil, nil); err != nil {
@@ -88,7 +88,7 @@ func (c *Client) ListNamespaces(ctx context.Context) (api.NamespaceListResponse,
 	return response, nil
 }
 
-// ListNodes returns every registered node. It requires read or write access.
+// ListNodes returns every registered node. It requires the observer role.
 func (c *Client) ListNodes(ctx context.Context) (api.NodeListResponse, error) {
 	var response api.NodeListResponse
 	if err := c.request(ctx, http.MethodGet, c.clusterPath("/v1/nodes"), nil, &response); err != nil {

@@ -198,7 +198,7 @@ func TestResetReplacementBackoffFailureStatusesThroughClient(t *testing.T) {
 	key := replacementBackoffKey("default", "web", "api")
 	previous := &ReplacementBackoff{Namespace: "default", JobName: "web", TaskGroupName: "api", JobIncarnation: s.jobs[jobKey("default", "web")].Incarnation, Failures: 3}
 	s.replacementBackoffs = map[string]*ReplacementBackoff{key: previous}
-	track := httptest.NewServer(authenticatedHandler(s, auth.AccessWrite))
+	track := httptest.NewServer(authenticatedHandler(s, auth.RoleOperator))
 	defer track.Close()
 	c, err := client.New(client.Config{Address: track.URL, Token: "token", Namespace: "default"})
 	if err != nil {

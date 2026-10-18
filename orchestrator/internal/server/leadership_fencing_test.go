@@ -180,7 +180,7 @@ func TestEventStreamEndsWithLeadershipTerm(t *testing.T) {
 			term, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			s.term = term
-			leader := httptest.NewServer(authenticatedHandler(s, auth.AccessRead))
+			leader := httptest.NewServer(authenticatedHandler(s, auth.RoleObserver))
 			t.Cleanup(leader.Close)
 			address := leader.URL
 			if proxied {
@@ -259,7 +259,7 @@ func TestTermLossUnblocksReadingAPIRequestBody(t *testing.T) {
 	defer cancel()
 	s.term = term
 	started := make(chan struct{})
-	handler := authenticatedHandler(s, auth.AccessWrite)
+	handler := authenticatedHandler(s, auth.RoleOperator)
 	leader := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.Body = &signaledRequestBody{ReadCloser: r.Body, started: started}
 		handler.ServeHTTP(w, r)

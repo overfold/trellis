@@ -93,7 +93,7 @@ func TestPublicClientAppliesResolvedPlanAndFencesSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.SetImageResolver(testImageResolver)
-	httpServer := httptest.NewServer(authenticatedHandler(s, auth.AccessWrite))
+	httpServer := httptest.NewServer(authenticatedHandler(s, auth.RoleOperator))
 	t.Cleanup(httpServer.Close)
 	operator, err := client.New(client.Config{Address: httpServer.URL, Token: "token", Namespace: "default"})
 	if err != nil {

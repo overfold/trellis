@@ -285,7 +285,7 @@ func TestCredentialsCreateRejectsRemovedScope(t *testing.T) {
 	if cmd.Flags().Lookup("scope") != nil || cmd.Flags().Lookup("namespace-scope") != nil {
 		t.Fatal("scope flags must not be available")
 	}
-	if err := cmd.ParseFlags([]string{"--scope", "cluster", "--access", "read"}); err == nil || !strings.Contains(err.Error(), "unknown flag: --scope") {
+	if err := cmd.ParseFlags([]string{"--scope", "cluster", "--role", "observer"}); err == nil || !strings.Contains(err.Error(), "unknown flag: --scope") {
 		t.Fatalf("error = %v, want rejection of removed scope", err)
 	}
 }

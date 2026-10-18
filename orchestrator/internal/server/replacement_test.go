@@ -1064,11 +1064,11 @@ func TestReconcileDropsDelayedReplacementsWithoutMissingCapacity(t *testing.T) {
 // authenticatedHandler serves the control-plane handler as a caller with the
 // cluster scope and the given access level, standing in for the
 // authentication middleware.
-func authenticatedHandler(s *Server, access auth.AccessLevel) http.Handler {
+func authenticatedHandler(s *Server, access auth.Role) http.Handler {
 	e := echo.New()
 	NewHandler(s).Register(e)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := context.WithValue(r.Context(), AuthorizationContextKey, auth.EncodeAccess(access))
+		ctx := context.WithValue(r.Context(), AuthorizationContextKey, auth.EncodeRole(access))
 		e.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -1096,7 +1096,7 @@ func TestResetReplacementBackoffThroughClientAndRaft(t *testing.T) {
 		t.Fatal("subscribe rejected")
 	}
 
-	httpServer := httptest.NewServer(authenticatedHandler(s, auth.AccessWrite))
+	httpServer := httptest.NewServer(authenticatedHandler(s, auth.RoleOperator))
 	defer httpServer.Close()
 	serverClient, err := client.New(client.Config{Address: httpServer.URL, Token: "token", Namespace: "default"})
 	if err != nil {
@@ -1157,10 +1157,10 @@ func TestResetReplacementBackoffRequiresWriteAccess(t *testing.T) {
 
 	for _, tt := range []struct {
 		name   string
-		access auth.AccessLevel
+		access auth.Role
 		want   int
 	}{
-		{name: "read credential", access: auth.AccessRead, want: http.StatusForbidden},
+		{name: "read credential", access: auth.RoleObserver, want: http.StatusForbidden},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()

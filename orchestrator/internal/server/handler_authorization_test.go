@@ -12,18 +12,18 @@ import (
 	"github.com/overfold/trellis/orchestrator/internal/auth"
 )
 
-func authorizedRequest(t *testing.T, method, target, body string, access auth.AccessLevel) *http.Request {
+func authorizedRequest(t *testing.T, method, target, body string, access auth.Role) *http.Request {
 	t.Helper()
 	req := httptest.NewRequest(method, target, bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
-	ctx := context.WithValue(req.Context(), AuthorizationContextKey, auth.EncodeAccess(access))
+	ctx := context.WithValue(req.Context(), AuthorizationContextKey, auth.EncodeRole(access))
 	return req.WithContext(ctx)
 }
 
 func TestCredentialCreationRejectsScope(t *testing.T) {
 	e := echo.New()
 	NewHandler(&Server{}).Register(e)
-	req := httptest.NewRequest(http.MethodPost, "/v1/credentials", strings.NewReader(`{"scope":"cluster","access":"read"}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/credentials", strings.NewReader(`{"scope":"cluster","role":"observer"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req = req.WithContext(context.WithValue(req.Context(), AdminContextKey, true))
 	rec := httptest.NewRecorder()
@@ -34,15 +34,15 @@ func TestCredentialCreationRejectsScope(t *testing.T) {
 }
 
 func TestPlanRejectsAPIAccessAboveCallerAuthority(t *testing.T) {
-	clusterWrite := `{"spec":{"name":"demo","namespace":"team","task_groups":[{"name":"web","count":1,"tasks":[{"name":"app","image":"example.invalid/app:1","api_access":{"access":"write"},"networking":{"mode":"host"}}]}]}}`
+	clusterWrite := `{"spec":{"name":"demo","namespace":"team","task_groups":[{"name":"web","count":1,"tasks":[{"name":"app","image":"example.invalid/app:1","api_access":{"role":"operator"},"networking":{"mode":"host"}}]}]}}`
 	tests := []struct {
 		name   string
-		access auth.AccessLevel
+		access auth.Role
 		body   string
 		want   int
 	}{
-		{name: "read cannot delegate write", access: auth.AccessRead, body: clusterWrite, want: http.StatusForbidden},
-		{name: "write may delegate write", access: auth.AccessWrite, body: clusterWrite, want: http.StatusOK},
+		{name: "read cannot delegate write", access: auth.RoleObserver, body: clusterWrite, want: http.StatusForbidden},
+		{name: "write may delegate write", access: auth.RoleOperator, body: clusterWrite, want: http.StatusOK},
 	}
 
 	for _, tt := range tests {
@@ -64,11 +64,11 @@ func TestPlanRejectsAPIAccessAboveCallerAuthority(t *testing.T) {
 
 func TestNamespacedRoutesAuthorizeThePathNamespace(t *testing.T) {
 	type principal struct {
-		access auth.AccessLevel
+		access auth.Role
 	}
 	var (
-		clusterRead  = principal{auth.AccessRead}
-		clusterWrite = principal{auth.AccessWrite}
+		clusterRead  = principal{auth.RoleObserver}
+		clusterWrite = principal{auth.RoleOperator}
 		anonymous    = principal{}
 	)
 	const secret = `{"value_base64":"dGVzdA=="}`
@@ -139,7 +139,7 @@ func TestJobSubmissionRejectsNamespaceMismatch(t *testing.T) {
 			e := echo.New()
 			NewHandler(&Server{jobs: make(map[string]*Job)}).Register(e)
 			rec := httptest.NewRecorder()
-			e.ServeHTTP(rec, authorizedRequest(t, http.MethodPost, path, body, auth.AccessWrite))
+			e.ServeHTTP(rec, authorizedRequest(t, http.MethodPost, path, body, auth.RoleOperator))
 			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `spec.namespace \"other\" does not match request namespace \"team\"`) {
 				t.Fatalf("status = %d, want 400 naming both namespaces; body: %s", rec.Code, rec.Body.String())
 			}

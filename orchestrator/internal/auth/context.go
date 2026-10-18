@@ -4,16 +4,17 @@ import "strings"
 
 const authorizationPrefix = "@trellis-auth:"
 
-// EncodeAccess returns the compact authorization value stored in request context.
-func EncodeAccess(access AccessLevel) string {
-	return authorizationPrefix + string(access)
+// EncodeRole returns the compact authorization value stored in request context.
+func EncodeRole(role Role) string {
+	return authorizationPrefix + string(role)
 }
 
-// DecodeAccess decodes an authorization request-context value.
-func DecodeAccess(value string) (AccessLevel, bool) {
+// DecodeRole decodes an authorization request-context value. Only generated
+// credential roles are accepted; administrator authority has its own context.
+func DecodeRole(value string) (Role, bool) {
 	if !strings.HasPrefix(value, authorizationPrefix) {
 		return "", false
 	}
-	access := AccessLevel(strings.TrimPrefix(value, authorizationPrefix))
-	return access, access == AccessRead || access == AccessWrite
+	role := Role(strings.TrimPrefix(value, authorizationPrefix))
+	return role, role.Generated()
 }

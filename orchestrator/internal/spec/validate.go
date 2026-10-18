@@ -170,8 +170,8 @@ func Validate(job *JobSpec) error {
 			if !task.Runtime.Valid() {
 				add(taskPath+".runtime", "unsupported", fmt.Sprintf("unsupported runtime %q", task.Runtime))
 			}
-			if task.APIAccess != nil && !task.APIAccess.Access.Valid() {
-				add(taskPath+".api_access.access", "unsupported", "must be read or write")
+			if task.APIAccess != nil && !task.APIAccess.Role.Valid() {
+				add(taskPath+".api_access.role", "unsupported", "must be observer or operator")
 			}
 			if strings.TrimSpace(task.Name) == "" {
 				add(taskPath+".name", "required", "name is required")

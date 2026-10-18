@@ -2,30 +2,30 @@
 
 **Level:** Advanced · **Prerequisites:** complete the intermediate examples and use a reviewed controller image
 
-This example shows a fully trusted task using cluster-wide read access while routing its sample request to the job's namespace. This is not tenant isolation: enabling `api_access` gives that task a cluster-wide credential.
+This example shows a fully trusted task using the cluster-wide observer role while routing its sample request to the job's namespace. This is not tenant isolation: enabling `api_access` gives that task a cluster-wide credential.
 
-## Choose access
+## Choose a role
 
-`api_access` is an explicit task-level privilege request:
+`api_access` is an explicit task-level privilege request. It uses the same roles as minted credentials:
 
-| Access | Credential | Intended use |
+| Role | Credential | Intended use |
 |---|---|---|
 | omitted | None | Ordinary application workloads |
-| `read` | Cluster-wide read-only token | Trusted cluster observers |
-| `write` | Cluster-wide read/write token | Trusted operator/control-plane workloads |
+| `observer` | Cluster-wide read-only token | Trusted cluster observers |
+| `operator` | Cluster-wide workload-management token | Trusted controllers; an operator can run code on every node its jobs can reach |
 
 This example requests:
 
 ```yaml
 api_access:
-  access: read
+  role: observer
 ```
 
 Place this object on the task, not the task group. There is no scope or namespace selector inside `api_access`.
 
-Use the narrowest access level that works. API access is for tasks that genuinely need cluster-wide visibility, and write access is only for controllers that deliberately mutate state. The injected `TRELLIS_NAMESPACE` defaults to the job's namespace; that default does not reduce the token's authority.
+Use the narrowest role that works. API access is for tasks that genuinely need cluster-wide visibility, and the operator role is only for controllers that deliberately mutate state. The injected `TRELLIS_NAMESPACE` defaults to the job's namespace; that default does not reduce the token's authority.
 
-A submitting credential cannot delegate write access when it has only read access.
+A submitting credential cannot delegate a role it does not hold: an observer cannot submit a job requesting `operator`. Administrator authority is never injected.
 
 ## What Trellis injects
 
@@ -34,7 +34,7 @@ With API access enabled, Trellis adds these variables only to the requesting tas
 | Variable | Meaning |
 |---|---|
 | `TRELLIS_ADDR` | Workload-reachable address of the Trellis control-plane API. |
-| `TRELLIS_TOKEN` | Workload bearer token with the requested cluster-wide access. |
+| `TRELLIS_TOKEN` | Workload bearer token with the requested cluster-wide role. |
 | `TRELLIS_NAMESPACE` | The job's namespace; use it as a routing default for namespaced request paths, never as authorization. |
 | `TRELLIS_CA_CERT` | Cluster CA certificate (inline PEM) for TLS verification when configured. |
 

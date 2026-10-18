@@ -22,8 +22,7 @@ func HandleWhoAmI(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusUnauthorized, "authenticated principal is unavailable")
 	}
 	response := api.CredentialInfoResponse{
-		Kind:   string(principal.Kind),
-		Access: string(principal.Access),
+		Role: string(principal.Role),
 	}
 	if !principal.CreatedAt.IsZero() {
 		createdAt := principal.CreatedAt

@@ -12,8 +12,8 @@ import (
 func NewCredentialsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "credentials",
-		Short: "Manage operator API credentials",
-		Long:  "Mint, list, and revoke operator API credentials. These commands require the administrator signing key; ordinary write operator credentials cannot manage credentials.",
+		Short: "Manage observer and operator API credentials",
+		Long:  "Mint, list, and revoke observer and operator API credentials. These commands require the administrator signing key; observer and operator credentials cannot manage credentials.",
 	}
 	cmd.AddCommand(newCredentialsCreateCmd())
 	cmd.AddCommand(newCredentialsListCmd())
@@ -22,15 +22,15 @@ func NewCredentialsCmd() *cobra.Command {
 }
 
 func newCredentialsCreateCmd() *cobra.Command {
-	var access string
+	var role string
 	var ttl time.Duration
 	cmd := &cobra.Command{
 		Use:   "create",
-		Short: "Create an operator API credential",
-		Long:  "Create an operator credential with read or write access, optionally expiring after --ttl. The token is printed once; the cluster stores only its hash. The caller must authenticate with the administrator signing key.",
+		Short: "Create an observer or operator API credential",
+		Long:  "Create a credential with the observer or operator role, optionally expiring after --ttl. Operators manage workloads, so they are trusted with every node their workloads can run on. The token is printed once; the cluster stores only its hash. The caller must authenticate with the administrator signing key.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if access != "read" && access != "write" {
-				return fmt.Errorf("--access must be read or write")
+			if role != "observer" && role != "operator" {
+				return fmt.Errorf("--role must be observer or operator")
 			}
 			ttlSeconds, err := ttlSeconds(ttl)
 			if err != nil {
@@ -41,7 +41,7 @@ func newCredentialsCreateCmd() *cobra.Command {
 				return err
 			}
 			response, err := serverClient.CreateCredential(cmd.Context(), &api.CredentialCreateRequest{
-				Access: access, TTLSeconds: ttlSeconds,
+				Role: role, TTLSeconds: ttlSeconds,
 			})
 			if err != nil {
 				return err
@@ -53,7 +53,7 @@ func newCredentialsCreateCmd() *cobra.Command {
 			return err
 		},
 	}
-	cmd.Flags().StringVar(&access, "access", "", "Credential access (read or write)")
+	cmd.Flags().StringVar(&role, "role", "", "Credential role (observer or operator)")
 	cmd.Flags().DurationVar(&ttl, "ttl", 0, "Expire the credential after this duration, such as 720h (default: no expiry)")
 	return cmd
 }
@@ -61,8 +61,8 @@ func newCredentialsCreateCmd() *cobra.Command {
 func newCredentialsListCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
-		Short: "List operator API credentials",
-		Long:  "List operator credential metadata, including expired credentials. Tokens are never shown; the cluster stores only their hashes.",
+		Short: "List observer and operator API credentials",
+		Long:  "List minted credential metadata, including expired credentials. Tokens are never shown; the cluster stores only their hashes.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			serverClient, err := administratorServerClient()
@@ -82,11 +82,11 @@ func newCredentialsListCmd() *cobra.Command {
 			}
 			now := time.Now()
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
-			if _, err := fmt.Fprintln(w, "ID\tAccess\tCreated\tExpires"); err != nil {
+			if _, err := fmt.Fprintln(w, "ID\tRole\tCreated\tExpires"); err != nil {
 				return err
 			}
 			for _, credential := range credentials {
-				if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", credential.ID, credential.Access, credential.CreatedAt.Format(time.RFC3339), formatExpiry(credential.ExpiresAt, now)); err != nil {
+				if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", credential.ID, credential.Role, credential.CreatedAt.Format(time.RFC3339), formatExpiry(credential.ExpiresAt, now)); err != nil {
 					return err
 				}
 			}
@@ -98,8 +98,8 @@ func newCredentialsListCmd() *cobra.Command {
 func newCredentialsRevokeCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "revoke ID",
-		Short: "Revoke an operator API credential",
-		Long:  "Revoke an operator credential by the ID shown by 'trellisctl credentials list'. Requests using it are rejected immediately.",
+		Short: "Revoke an observer or operator API credential",
+		Long:  "Revoke a minted credential by the ID shown by 'trellisctl credentials list'. Requests using it are rejected immediately.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			serverClient, err := administratorServerClient()

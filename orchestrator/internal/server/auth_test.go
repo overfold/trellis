@@ -16,8 +16,7 @@ import (
 func TestHandleWhoAmI(t *testing.T) {
 	created := time.Date(2026, 9, 2, 20, 0, 0, 0, time.UTC)
 	principal := auth.Principal{
-		Kind:   auth.CredentialWorkload,
-		Access: auth.AccessRead,
+		Role: auth.RoleObserver,
 		Subject: &auth.CredentialSubject{
 			Namespace: "team",
 			Job:       "controller",
@@ -46,7 +45,7 @@ func TestHandleWhoAmI(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Kind != "workload" || got.Access != "read" || got.Subject == nil || got.Subject.Namespace != "team" || got.Subject.Job != "controller" || got.Subject.Task != "app" || got.CreatedAt == nil || !got.CreatedAt.Equal(created) {
+	if got.Role != "observer" || got.Subject == nil || got.Subject.Namespace != "team" || got.Subject.Job != "controller" || got.Subject.Task != "app" || got.CreatedAt == nil || !got.CreatedAt.Equal(created) {
 		t.Fatalf("unexpected response: %#v", got)
 	}
 }

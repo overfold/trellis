@@ -54,7 +54,7 @@ If you instead use explicit absolute `host_path` values, prepare those directori
 
 The manifest gives each member a distinct static `PATRONI_NAME`, but it still omits the real DCS configuration required by Patroni. Configure Patroni for etcd, Consul, or another Patroni-supported DCS with quorum and TLS appropriate to your environment.
 
-`discover-members.sh` queries Trellis allocations labeled `service:patroni`; it can help a separate controller find endpoints, but the database tasks do not need or receive API credentials themselves. A controller using the helper must request `api_access: {access: read}` on its own task, not its task group. This credential can read every namespace even though the helper routes its query to `TRELLIS_NAMESPACE`. Use only a trusted controller and treat the injected namespace as convenience, not authorization. The Trellis catalog is eventually reconciled service discovery—not Patroni's consensus DCS. Never use the catalog alone to decide which PostgreSQL member may accept writes.
+`discover-members.sh` queries Trellis allocations labeled `service:patroni`; it can help a separate controller find endpoints, but the database tasks do not need or receive API credentials themselves. A controller using the helper must request `api_access: {role: observer}` on its own task, not its task group. This credential can read every namespace even though the helper routes its query to `TRELLIS_NAMESPACE`. Use only a trusted controller and treat the injected namespace as convenience, not authorization. The Trellis catalog is eventually reconciled service discovery—not Patroni's consensus DCS. Never use the catalog alone to decide which PostgreSQL member may accept writes.
 
 ### 3. Create credentials
 

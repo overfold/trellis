@@ -113,7 +113,7 @@ func TestTaskRuntimeAndAPIAccessAgreeWithHash(t *testing.T) {
 			if field == "runtime" {
 				after.TaskGroups[0].Tasks[1].Runtime = spec.RuntimeRunsc
 			} else {
-				after.TaskGroups[0].Tasks[1].APIAccess = &spec.APIAccessSpec{Access: spec.APIAccessRead}
+				after.TaskGroups[0].Tasks[1].APIAccess = &spec.APIAccessSpec{Role: spec.APIAccessObserver}
 			}
 			changes := Diff(before, &after)
 			if len(changes) != 1 || changes[0].Path != "task_groups[web].tasks[1]."+field {

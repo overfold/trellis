@@ -12,8 +12,23 @@ There are therefore two different access models:
 
 | Access model | Trust assumption |
 | --- | --- |
-| Direct `trellisctl` or API access that can submit job manifests | The submitter is an operator trusted with cluster-wide API access and every manifest capability their access level allows them to request. |
+| Direct `trellisctl` or API access that can submit job manifests | The submitter is an operator, trusted with every node its workloads can be placed on; see [What the operator role reaches](#what-the-operator-role-reaches). |
 | A product frontend for untrusted tenants | The trusted backend owns tenant authorization, the tenant-facing schema, and admission rules, emits only an approved subset of the canonical job model, and keeps cluster credentials out of browsers and tenant workloads. |
+
+### What the operator role reaches
+
+Operator authority is not confined to the API. An operator credential can submit any valid job manifest, and the manifest model includes features that run a task outside the isolation Trellis otherwise applies. Neither the role nor cluster settings restrict them:
+
+- **Absolute `host_path`** mounts any existing node directory, including `/`, writable unless `read_only` is set. Tasks run as their image's user, root by default, and the submitter chooses the image, so this is root access to the node's filesystem.
+- **`networking.mode: host`** grants node-level network access, including every namespace network on the node; see [Networking](#networking).
+
+An operator credential can also exec into any allocation in any namespace, reaching that allocation's mounts and delivered secrets.
+
+Even without these features, an operator's workloads run under `runc` on the shared host kernel, so treat every node its workloads can reach as within its reach; absolute `host_path` and host networking only make that trivial.
+
+An operator credential is therefore equivalent to root on every node where its jobs can be placed. This includes minted operator credentials and workload credentials injected through `api_access: {role: operator}`. A control-plane node holds the Raft state and the secrets-encryption key, and in managed mode the CA private key. Root on one is a full cluster compromise. The holder can decrypt every stored secret and act with the node's control-plane authority. That reaches everything the administrator-signed endpoints protect, without needing the administrator private key.
+
+Control-plane nodes run workloads by default, and every single-node cluster is a control-plane node. Administrator request signing separates the operator role from administrator authority only when every control-plane node sets `runs_workloads: false`. Then an operator's reach is bounded by the [worker compromise](#shared-surfaces-and-residual-risk) described below. In any other topology, mint operator credentials and grant `api_access: {role: operator}` only to principals you would trust with the administrator key. Administrator signing still keeps observer credentials, leaked join tokens, and routine automation away from credential minting, backup and restore, and Raft administration. It does not contain a determined operator.
 
 ## What namespaces isolate
 
@@ -36,7 +51,7 @@ The three networking modes grant very different reach:
 
 Namespace links are IPv4-only: their host-side IPv6 stack is disabled so automatic link-local addresses cannot bypass host-input isolation. Remote WireGuard peers may reply to connections opened by the node but cannot initiate host-service connections through the tunnel. This does not restrict host-networked tasks or revoke the intentional cross-namespace published-port reachability above.
 
-Host networking is available to any credential that can write jobs; Trellis applies no admission policy to it. Treat it as granting access to every namespace network on the nodes where it can run.
+Host networking is available to any operator credential; Trellis applies no admission policy to it. Treat it as granting access to every namespace network on the nodes where it can run.
 
 
 ## Building a tenant-safe frontend
@@ -49,7 +64,7 @@ At minimum, enforce the following rules:
 - **Reject absolute `host_path` values.** They mount an operator-prepared node directory and deliberately bypass filesystem-level namespace separation. Symlink rejection and pinning the resolved directory prevent path redirection, not access to an operator-selected host directory. Permit only `@/` paths, optionally with a frontend-assigned prefix or a smaller storage abstraction.
 - **Reject host networking.** `networking.mode: host` joins the node network namespace and exposes the node's network surface, including every other tenant's namespace network on that node; see [Networking](#networking). Permit `namespace` where connectivity is needed, and `none` where no network is needed. Constrain published node ports (`host_port`) to a range or assignment the frontend owns, since they are a shared node resource.
 - **Decide on egress.** Namespace-networked tasks can reach anything the node can, including cloud instance metadata endpoints and the node's private network. Block what tenants must not reach with host or network firewalling outside Trellis, or select `none` for workloads that need no network.
-- **Do not grant workload API access.** Reject task-level `api_access` for untrusted tenants because every injected credential has cluster-wide authority. A write credential lets its holder submit manifests directly and bypass the frontend's policy; even read access exposes resources across tenants. If a product deliberately runs an API-enabled controller, use reviewed images and treat each enabled task as holding cluster authority. Siblings do not receive its token, but colocation is not a security sandbox. Each enabled task in an allocation receives its own credential, bound to namespace, job, task group, and task; deleting the job or task or removing or narrowing the task's `api_access` revokes it.
+- **Do not grant workload API access.** Reject task-level `api_access` for untrusted tenants because every injected credential has cluster-wide authority. An operator credential lets its holder submit manifests directly and bypass the frontend's policy; even the observer role exposes resources across tenants. If a product deliberately runs an API-enabled controller, use reviewed images and treat each enabled task as holding cluster authority. Siblings do not receive its token, but colocation is not a security sandbox. Each enabled task in an allocation receives its own credential, bound to namespace, job, task group, and task; deleting the job or task or removing or narrowing the task's `api_access` revokes it.
 - **Constrain images and runtime.** Apply the product's registry, digest, provenance, and update rules. Prefer `runtime: runsc` on nodes that support it for additional syscall isolation; it is defense in depth, not a replacement for manifest admission.
 - **Enforce resources and scale.** Require CPU and memory values, bound replica counts and aggregate requests, and enforce per-tenant quotas and rate limits in the frontend. Trellis schedules declared resources but does not provide namespace quotas or protect against deliberate under-declaration.
 - **Constrain the remaining model.** Allowlist fields rather than trying to denylist future capabilities. Authorize secret references against the tenant's own secret inventory, and bound environment and label data, health-check commands, volume counts and sizes through the storage layer, and any exec or log operations the product exposes.
@@ -58,7 +73,7 @@ Run canonical Trellis validation and planning after frontend admission, but befo
 
 ### Credentials and secrets
 
-Keep Trellis operator credentials in a trusted frontend backend. Use separate read and write credentials for distinct backend responsibilities where practical, and never place one in tenant browser code or an untrusted workload.
+Keep Trellis operator credentials in a trusted frontend backend. Use separate observer and operator credentials for distinct backend responsibilities where practical, and never place one in tenant browser code or an untrusted workload.
 
 Workload history does not retain authority. Terminal allocations and allocations on removed nodes lose API access independently of log/history retention. A partitioned workload is subject to the leader's bounded silence window, not immediate container termination or a permanent wall-clock credential lease across leadership changes; see the [workload credential lifecycle](job-specification.md#api-access). Revocation cannot erase a workload's copied secrets or cluster-wide data it already read. In-flight admitted requests can complete.
 
@@ -85,7 +100,7 @@ Use separate clusters or dedicated nodes when tenants require stronger infrastru
 
 Use this as a conservative starting point for untrusted tenants:
 
-1. Give each tenant a frontend-owned namespace and no direct Trellis write credential.
+1. Give each tenant a frontend-owned namespace and no direct Trellis operator credential.
 2. Accept a small product-specific workload schema, then set namespace and defaults on the backend.
 3. Permit only `networking.mode: namespace` or `none`; reject host networking, and assign any published `host_port` on the backend.
 4. Permit only `@/` volumes through a quota-aware storage interface; reject absolute host paths.
@@ -94,6 +109,6 @@ Use this as a conservative starting point for untrusted tenants:
 7. Mediate secrets, logs, metrics, and any exec capability on the backend with tenant authorization on every request.
 8. Revalidate the complete canonical job against the allowlist whenever it is created or updated, then use Trellis plan and apply.
 
-This profile is an operator policy implemented outside the Trellis core. A frontend may deliberately broaden it for a trusted tenant or controller, but API access always grants cluster-wide read or write capability, not namespace access.
+This profile is an operator policy implemented outside the Trellis core. A frontend may deliberately broaden it for a trusted tenant or controller, but API access always grants cluster-wide observer or operator capability, not namespace access.
 
 [Documentation index](../README.md) · [User model](user-model.md) · [Job manifest reference](job-specification.md) · [Operations](operations.md)

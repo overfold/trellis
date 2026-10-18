@@ -64,7 +64,7 @@ func TestPublicClientSlowMultiImageResolution(t *testing.T) {
 						return testImageResolver(ctx, image)
 					}
 				})
-				httpServer := httptest.NewServer(authenticatedHandler(s, auth.AccessWrite))
+				httpServer := httptest.NewServer(authenticatedHandler(s, auth.RoleOperator))
 				t.Cleanup(httpServer.Close)
 				c, err := client.New(client.Config{Address: httpServer.URL, Token: "token", Namespace: "default"})
 				if err != nil {
@@ -326,7 +326,7 @@ func TestRegistryResolutionAndHTTPApply(t *testing.T) {
 		t.Fatal(err)
 	}
 	planResponse := httptest.NewRecorder()
-	handler.ServeHTTP(planResponse, authorizedRequest(t, http.MethodPost, "/v1/namespaces/default/jobs/plan", string(requestBody), auth.AccessWrite))
+	handler.ServeHTTP(planResponse, authorizedRequest(t, http.MethodPost, "/v1/namespaces/default/jobs/plan", string(requestBody), auth.RoleOperator))
 	var planned api.JobPlanResponse
 	if planResponse.Code != http.StatusOK || json.Unmarshal(planResponse.Body.Bytes(), &planned) != nil || planned.ResolvedImages[image] != pinned {
 		t.Fatalf("HTTP plan = %d %s", planResponse.Code, planResponse.Body.String())
@@ -338,7 +338,7 @@ func TestRegistryResolutionAndHTTPApply(t *testing.T) {
 		t.Fatal(err)
 	}
 	applyResponse := httptest.NewRecorder()
-	handler.ServeHTTP(applyResponse, authorizedRequest(t, http.MethodPost, "/v1/namespaces/default/jobs", string(requestBody), auth.AccessWrite))
+	handler.ServeHTTP(applyResponse, authorizedRequest(t, http.MethodPost, "/v1/namespaces/default/jobs", string(requestBody), auth.RoleOperator))
 	if applyResponse.Code != http.StatusAccepted {
 		t.Fatalf("planned apply contacted unavailable registry: %d %s", applyResponse.Code, applyResponse.Body.String())
 	}
@@ -363,7 +363,7 @@ func TestImageResolutionLeadershipCancellationThroughClient(t *testing.T) {
 			}))
 			t.Cleanup(registry.Close)
 			s.SetImageResolver(resolveRegistryImage)
-			httpServer := httptest.NewServer(authenticatedHandler(s, auth.AccessWrite))
+			httpServer := httptest.NewServer(authenticatedHandler(s, auth.RoleOperator))
 			t.Cleanup(httpServer.Close)
 			c, err := client.New(client.Config{Address: httpServer.URL, Token: "token", Namespace: "default"})
 			if err != nil {

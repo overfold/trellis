@@ -117,7 +117,7 @@ and [private wire contracts](api.md).
 - `internal/network` and `internal/dns`: namespace network plans, WireGuard realization, service DNS.
 - `internal/catalog`: healthy endpoint index.
 - `internal/health` and `internal/lifecycle`: health probes and state-machine vocabulary/events.
-- `internal/secrets` and `internal/auth`: envelope-style encrypted secret records and cluster-wide bearer token access levels.
+- `internal/secrets` and `internal/auth`: envelope-style encrypted secret records and cluster-wide bearer token roles.
 - `api` / `client`: public operator-API wire types and Go client, used by `trellisctl` and external integrations such as [`trellis-proxy-sync`](https://github.com/overfold/trellis-proxy-sync).
 - `internal/nodeapi` / `internal/client`: node-internal wire types and the agent and node clients; `internal/transport` is the HTTP transport shared with the public client.
 

@@ -123,7 +123,7 @@ if [ "$was_running" = true ] && [ -n "$node_id" ]; then
         [ -n "$operator_home" ] || ui_die "Could not determine the invoking user's home directory."
         operator_config="${operator_home}/.config/trellis/config.yaml"
     fi
-    [ -f "$operator_config" ] || ui_die "Operator config missing at ${operator_config}; provide TRELLIS_CONFIG with a local cluster/write context. No binaries were changed."
+    [ -f "$operator_config" ] || ui_die "Operator config missing at ${operator_config}; provide TRELLIS_CONFIG with a local operator context. No binaries were changed."
     if ! node_json="$(upgrade_ctl nodes list --output json)"; then
         ui_die "Could not inspect cluster membership; no binaries were changed."
     fi

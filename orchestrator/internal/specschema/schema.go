@@ -29,7 +29,7 @@ type schema = map[string]any
 var requiredFields = map[reflect.Type][]string{
 	reflect.TypeFor[spec.JobSpec]():           {"name", "namespace", "task_groups"},
 	reflect.TypeFor[spec.TaskGroupSpec]():     {"name", "count", "tasks"},
-	reflect.TypeFor[spec.APIAccessSpec]():     {"access"},
+	reflect.TypeFor[spec.APIAccessSpec]():     {"role"},
 	reflect.TypeFor[spec.ConstraintSpec]():    {"attribute", "value"},
 	reflect.TypeFor[spec.RestartPolicySpec](): {"window"},
 	reflect.TypeFor[spec.TaskSpec]():          {"name", "image"},
@@ -43,7 +43,7 @@ var requiredFields = map[reflect.Type][]string{
 var enumValues = map[reflect.Type][]string{
 	reflect.TypeFor[spec.UpdateStrategy]():  {"", "recreate", "rolling"},
 	reflect.TypeFor[spec.Runtime]():         {"", "runc", "runsc"},
-	reflect.TypeFor[spec.APIAccessLevel]():  {"read", "write"},
+	reflect.TypeFor[spec.APIAccessRole]():   {"observer", "operator"},
 	reflect.TypeFor[spec.TaskNetworkMode](): {"", "none", "namespace", "host"},
 	reflect.TypeFor[spec.HealthCheckType](): {"http", "tcp", "script"},
 	reflect.TypeFor[spec.SecretTarget]():    {"env", "file"},
@@ -312,7 +312,7 @@ func describeAuthoringFields(root schema) {
 	describeDef(root, "TaskGroupSpec", "restart", "Retry policy for task failures inside an allocation. Omit for 3 restarts within 10m; Trellis stores the resolved policy.")
 	describeDef(root, "TaskGroupSpec", "update", "How allocations from an older job revision are replaced. Omit for recreate; Trellis stores the resolved policy.")
 
-	describeDef(root, "APIAccessSpec", "access", "Cluster-wide read access or ordinary read/write access. Write includes read; neither grants administrator authority.")
+	describeDef(root, "APIAccessSpec", "role", "Cluster-wide credential role: observer reads the cluster; operator also manages workloads and includes observer. Administrator authority is never injected.")
 	describeDef(root, "ConstraintSpec", "attribute", "Node attribute or label key to match, such as arch, os, or a custom label.")
 	describeDef(root, "ConstraintSpec", "value", "Exact value the selected node must report for this attribute.")
 	describeDef(root, "RestartPolicySpec", "max_restarts", "Maximum failures allowed inside the restart window. Zero disables retries.")

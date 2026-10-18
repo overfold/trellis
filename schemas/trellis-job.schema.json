@@ -3,17 +3,17 @@
     "APIAccessSpec": {
       "additionalProperties": false,
       "properties": {
-        "access": {
-          "description": "Cluster-wide read access or ordinary read/write access. Write includes read; neither grants administrator authority.",
+        "role": {
+          "description": "Cluster-wide credential role: observer reads the cluster; operator also manages workloads and includes observer. Administrator authority is never injected.",
           "enum": [
-            "read",
-            "write"
+            "observer",
+            "operator"
           ],
           "type": "string"
         }
       },
       "required": [
-        "access"
+        "role"
       ],
       "type": "object"
     },

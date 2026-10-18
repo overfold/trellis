@@ -45,7 +45,7 @@ func (c *Client) ListAllocations(ctx context.Context, filter AllocationFilter) (
 }
 
 // ListClusterAllocations returns the allocations in every namespace. It
-// requires read or write access.
+// requires the observer role.
 func (c *Client) ListClusterAllocations(ctx context.Context, filter AllocationFilter) (api.AllocationListResponse, error) {
 	return c.listAllocations(ctx, c.clusterPath("/v1/allocations%s", filter.query()))
 }
@@ -129,7 +129,7 @@ func (c *Client) AllocationLogs(ctx context.Context, id string, options LogOptio
 }
 
 // Exec starts a process in an allocation task and returns its exec stream.
-// It requires write access. The stream is closed when ctx ends.
+// It requires the operator role. The stream is closed when ctx ends.
 func (c *Client) Exec(ctx context.Context, id string, request api.ExecRequest) (*ExecStream, error) {
 	path, err := c.namespacedPath("/allocations/%s/exec?%s", url.PathEscape(id), execstream.EncodeRequest(request).Encode())
 	if err != nil {

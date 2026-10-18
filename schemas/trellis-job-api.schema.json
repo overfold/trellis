@@ -3,16 +3,16 @@
     "APIAccessSpec": {
       "additionalProperties": false,
       "properties": {
-        "access": {
+        "role": {
           "enum": [
-            "read",
-            "write"
+            "observer",
+            "operator"
           ],
           "type": "string"
         }
       },
       "required": [
-        "access"
+        "role"
       ],
       "type": "object"
     },

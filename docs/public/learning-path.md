@@ -30,7 +30,7 @@ The stage numbers identify lessons, not a requirement to provision more machines
 | 6. Persistence | Namespace-scoped volume identities, `@/` paths, explicit host paths, locality, and backup responsibility | [`examples/volumes`](../../examples/volumes/) |
 | 7. Colocated tasks | Sidecars and the consequences of shared placement/scaling/lifecycle | [`examples/sidecar`](../../examples/sidecar/) |
 | 8. Namespace networking | Namespace, none, and host networking; service discovery | [`examples/namespace-networking`](../../examples/namespace-networking/) |
-| 9. In-cluster automation | Cluster-scoped read/write API access and its trust implications | [`examples/api-access`](../../examples/api-access/) |
+| 9. In-cluster automation | Cluster-scoped observer/operator API access and its trust implications | [`examples/api-access`](../../examples/api-access/) |
 | 10. Release architecture | Rolling, blue/green, and weighted canary composition | [`examples/deployment-strategies`](../../examples/deployment-strategies/) |
 | 11. Stateful compositions | Coupled development stacks, local-volume caveats, application-native HA | [`examples/wordpress`](../../examples/wordpress/), then [`examples/patroni`](../../examples/patroni/) |
 
@@ -163,22 +163,22 @@ Treat discovery as runtime endpoint information, not application consensus. Appl
 
 ## 9. In-cluster API access
 
-API access is requested per task with explicit **access** `read` or `write`, always cluster-wide. There is no scope field. Prefer read access and omit API access entirely when it is not required.
+API access is requested per task with an explicit **role**, `observer` or `operator`, always cluster-wide. There is no scope field. Prefer `observer` and omit API access entirely when it is not required.
 
 A typical observer uses:
 
 ```yaml
 api_access:
-  access: read
+  role: observer
 ```
 
 Place this object on the observer task. Trellis gives only that task a cluster-wide bearer credential, plus the API address, job namespace, and cluster CA when configured. The injected job namespace is a routing convenience, not authorization; the token can address every namespace.
 
-Use `read` only for a trusted cluster-wide observer. Use `write` only for an operator workload that needs ordinary cluster-wide mutations.
+Use `observer` only for a trusted cluster-wide observer. Use `operator` only for a controller that needs ordinary cluster-wide workload management.
 
 The administrator signing key is separate and more privileged. It is used for backup/restore, Raft administration, and minting cluster-wide credentials, and Trellis never injects it into workloads. Node registration and heartbeats instead use certificate-bound node identity; managed enrollment uses short-lived join tokens that the administrator mints.
 
-Sibling tasks do not receive the enabled task's token, but colocation is not a security sandbox: do not add untrusted sidecars. The [`api-access`](../../examples/api-access/) example intentionally uses read access and explains the resulting cluster-wide visibility, TLS verification, authenticated requests, last-known-good behavior, and token hygiene.
+Sibling tasks do not receive the enabled task's token, but colocation is not a security sandbox: do not add untrusted sidecars. The [`api-access`](../../examples/api-access/) example intentionally uses the observer role and explains the resulting cluster-wide visibility, TLS verification, authenticated requests, last-known-good behavior, and token hygiene.
 
 ## 10. Release patterns
 

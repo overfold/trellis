@@ -7,7 +7,7 @@ task_groups:
       - name: web
         image: docker.io/library/nginx:1.27-alpine
         api_access:
-          access: read
+          role: observer
         networking:
           mode: host
         resources:

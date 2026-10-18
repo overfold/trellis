@@ -115,14 +115,14 @@ func TestEventHandlerRejectsOverloadAndReleasesCanceledSubscriber(t *testing.T) 
 	handler := NewHandler(&Server{events: bus})
 
 	ctx, cancel := context.WithCancel(t.Context())
-	ctx = context.WithValue(ctx, AuthorizationContextKey, auth.EncodeAccess(auth.AccessRead))
+	ctx = context.WithValue(ctx, AuthorizationContextKey, auth.EncodeRole(auth.RoleObserver))
 	req := httptest.NewRequest(http.MethodGet, "/v1/events", nil).WithContext(ctx)
 	c := echo.New().NewContext(req, httptest.NewRecorder())
 	done := make(chan error, 1)
 	go func() { done <- handler.handleClusterEvents(c) }()
 	waitForSubscriberCount(t, bus, 1)
 
-	overload := echo.New().NewContext(authorizedRequest(t, http.MethodGet, "/v1/events", "", auth.AccessRead), httptest.NewRecorder())
+	overload := echo.New().NewContext(authorizedRequest(t, http.MethodGet, "/v1/events", "", auth.RoleObserver), httptest.NewRecorder())
 	err := handler.handleClusterEvents(overload)
 	var httpErr *echo.HTTPError
 	if !errors.As(err, &httpErr) || httpErr.Code != http.StatusServiceUnavailable {
@@ -172,7 +172,7 @@ func waitForSubscriberCount(t *testing.T, bus *EventBus, want int) {
 func TestEventStreamSendsHeadersBeforeTheFirstEvent(t *testing.T) {
 	s, _ := newTestServerWithAgent()
 	s.events = newEventBus()
-	server := httptest.NewServer(authenticatedHandler(s, auth.AccessRead))
+	server := httptest.NewServer(authenticatedHandler(s, auth.RoleObserver))
 	defer server.Close()
 	ctx := t.Context()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/v1/namespaces/default/events", nil)
@@ -199,7 +199,7 @@ func TestEventStreamWritesKeepalives(t *testing.T) {
 
 	s, _ := newTestServerWithAgent()
 	s.events = newEventBus()
-	server := httptest.NewServer(authenticatedHandler(s, auth.AccessRead))
+	server := httptest.NewServer(authenticatedHandler(s, auth.RoleObserver))
 	defer server.Close()
 	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL+"/v1/namespaces/default/events", nil)
 	if err != nil {

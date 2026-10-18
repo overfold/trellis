@@ -380,7 +380,7 @@ else
         for _ in $(seq 1 30); do
             operator_token="$(TRELLIS_ADMINISTRATOR_KEY="$administrator_private_key" local_ctl "$WORK_TMP" \
                 --context= --server-addr https://127.0.0.1:8128 --ca-cert "${RUN_DIR}/ca.crt" --cert= --key= \
-                credentials create --access write --output table 2>/dev/null || true)"
+                credentials create --role operator --output table 2>/dev/null || true)"
             [ -n "$operator_token" ] && break
             sleep 1
         done
@@ -393,7 +393,7 @@ else
             context save local --use >/dev/null
         if [ "$operator_user" != "root" ]; then chown -R "${operator_user}:${operator_group}" "${operator_config_home}/trellis"; fi
         unset operator_token
-        ui_step "Saved local write context for ${operator_user} (cluster-wide authority)"
+        ui_step "Saved local operator context for ${operator_user} (cluster-wide authority)"
     fi
 fi
 if [ -f "$operator_config" ]; then

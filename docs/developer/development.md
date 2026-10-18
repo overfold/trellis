@@ -142,7 +142,7 @@ The Vagrant environment provisions `control`, `worker-1`, and `worker-2` Debian 
 
 ## README terminal demo
 
-[`docs/images/demo.tape`](../images/demo.tape) records plan, apply, status, and delete using the [hello example](../../examples/hello/). Install [VHS](https://github.com/charmbracelet/vhs) (rendered with v0.10.0), `ttyd`, `ffmpeg`, and [JetBrains Mono](https://www.jetbrains.com/lp/mono/) (rendered with v2.304). Select a **disposable cluster** context with write access and no existing `default/hello` job. From the repository root:
+[`docs/images/demo.tape`](../images/demo.tape) records plan, apply, status, and delete using the [hello example](../../examples/hello/). Install [VHS](https://github.com/charmbracelet/vhs) (rendered with v0.10.0), `ttyd`, `ffmpeg`, and [JetBrains Mono](https://www.jetbrains.com/lp/mono/) (rendered with v2.304). Select a **disposable cluster** context with the operator role and no existing `default/hello` job. From the repository root:
 
 ```sh
 go build -o /tmp/trellisctl ./orchestrator/cmd/trellisctl

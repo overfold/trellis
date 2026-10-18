@@ -43,7 +43,7 @@ func serveAs(t *testing.T, e *echo.Echo, method, path string, body any, admin bo
 	if admin {
 		req = req.WithContext(context.WithValue(req.Context(), AdminContextKey, true))
 	} else {
-		req = req.WithContext(context.WithValue(req.Context(), AuthorizationContextKey, auth.EncodeAccess(auth.AccessWrite)))
+		req = req.WithContext(context.WithValue(req.Context(), AuthorizationContextKey, auth.EncodeRole(auth.RoleOperator)))
 	}
 	rec := httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
@@ -52,7 +52,7 @@ func serveAs(t *testing.T, e *echo.Echo, method, path string, body any, admin bo
 
 func TestCredentialLifecycleEndpoints(t *testing.T) {
 	f, e := nodeTrustHandler(t)
-	rec := serveAs(t, e, http.MethodPost, "/v1/credentials", api.CredentialCreateRequest{Access: "read", TTLSeconds: 3600}, true)
+	rec := serveAs(t, e, http.MethodPost, "/v1/credentials", api.CredentialCreateRequest{Role: "observer", TTLSeconds: 3600}, true)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create status = %d; body: %s", rec.Code, rec.Body.String())
 	}
@@ -63,7 +63,7 @@ func TestCredentialLifecycleEndpoints(t *testing.T) {
 	if created.Token == "" || created.ID == "" || created.ExpiresAt == nil || !created.ExpiresAt.Equal(f.now.Add(time.Hour)) {
 		t.Fatalf("created credential = %+v", created)
 	}
-	if rec := serveAs(t, e, http.MethodPost, "/v1/credentials", api.CredentialCreateRequest{Access: "read", TTLSeconds: -1}, true); rec.Code != http.StatusBadRequest {
+	if rec := serveAs(t, e, http.MethodPost, "/v1/credentials", api.CredentialCreateRequest{Role: "observer", TTLSeconds: -1}, true); rec.Code != http.StatusBadRequest {
 		t.Fatalf("negative ttl status = %d", rec.Code)
 	}
 

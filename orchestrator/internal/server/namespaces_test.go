@@ -58,11 +58,11 @@ func TestNamespaceDiscoveryRequiresAccess(t *testing.T) {
 
 	tests := []struct {
 		name   string
-		access auth.AccessLevel
+		access auth.Role
 		want   api.NamespaceListResponse
 	}{
-		{name: "read", access: auth.AccessRead, want: api.NamespaceListResponse{"alpha", "zeta"}},
-		{name: "write", access: auth.AccessWrite, want: api.NamespaceListResponse{"alpha", "zeta"}},
+		{name: "read", access: auth.RoleObserver, want: api.NamespaceListResponse{"alpha", "zeta"}},
+		{name: "write", access: auth.RoleOperator, want: api.NamespaceListResponse{"alpha", "zeta"}},
 	}
 
 	for _, tt := range tests {
